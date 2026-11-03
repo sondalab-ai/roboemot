@@ -794,7 +794,7 @@ class SoundShape(Strict):
         (3.0, 6.0), "Length range of the whole sound, [min, max] in seconds"
     )
     gain_db: float = param(
-        -12.0, "Peak level of the sound against full scale", unit="dB", ge=-60, le=0
+        -24.0, "Peak level of the sound against full scale", unit="dB", ge=-60, le=0
     )
 
     @field_validator("tempo_bpm", "pitch_hz", "length_s", mode="after")
@@ -873,7 +873,7 @@ class SootheConfig(Strict):
                     "tempo_bpm": (56.0, 76.0),
                     "pitch_hz": (200.0, 300.0),
                     "length_s": (4.0, 7.0),
-                    "gain_db": -12.0,
+                    "gain_db": -24.0,
                 },
             },
             {
@@ -884,7 +884,7 @@ class SootheConfig(Strict):
                     "tempo_bpm": (96.0, 128.0),
                     "pitch_hz": (300.0, 440.0),
                     "length_s": (2.5, 5.0),
-                    "gain_db": -12.0,
+                    "gain_db": -24.0,
                 },
             },
             {
@@ -895,7 +895,7 @@ class SootheConfig(Strict):
                     "tempo_bpm": (110.0, 160.0),
                     "pitch_hz": (500.0, 900.0),
                     "length_s": (1.0, 2.5),
-                    "gain_db": -14.0,
+                    "gain_db": -26.0,
                 },
             },
             {
@@ -906,7 +906,7 @@ class SootheConfig(Strict):
                     "tempo_bpm": (80.0, 120.0),
                     "pitch_hz": (400.0, 700.0),
                     "length_s": (1.0, 2.5),
-                    "gain_db": -14.0,
+                    "gain_db": -26.0,
                 },
             },
             {
@@ -918,7 +918,7 @@ class SootheConfig(Strict):
                     "tempo_bpm": (44.0, 60.0),
                     "pitch_hz": (160.0, 240.0),
                     "length_s": (4.0, 7.0),
-                    "gain_db": -15.0,
+                    "gain_db": -27.0,
                 },
             },
         ],
