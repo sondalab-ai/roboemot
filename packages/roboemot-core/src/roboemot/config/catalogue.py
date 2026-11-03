@@ -16,6 +16,11 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   ``dict_of_model``, ``keyed_list`` and ``string_list_dict`` are containers: ``value`` is the list
   of entry keys and each entry follows as descriptors under ``<path>.<key>`` (its fields, or for
   ``string_list_dict`` a ``string_list``). ``keyed_list`` names its identity field in ``key``.
+- ``choices``: for ``enum`` and ``enum_list`` the allowed values. A field whose value must come from
+  a list held in the config (``REFERENCES``: an affect label, an appraisal event, a route name) is
+  served as ``enum`` (or ``enum_list``) with ``choices`` resolved from the effective config each
+  time the catalogue is built, so a hot reload shows at once; a saved value outside them stays in
+  ``value``. On ``number_dict`` and ``dict_of_model`` rows ``choices`` lists the allowed keys.
 - ``entry``: for ``dict_of_model`` and ``keyed_list`` only: descriptors of a default-built entry
   with paths relative to the entry, to build an "add entry" form (required fields are null).
 - ``nullable``: the field accepts null (any kind but the containers).
@@ -45,19 +50,30 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from typing import Any, Literal, TypedDict, get_args, get_origin
+from typing import Any, Literal, TypedDict, cast, get_args, get_origin
 
 from pydantic import BaseModel
 
 from roboemot.diagnostics import jsonable
 from roboemot.redact import (
+    PATH_WILDCARD,
     REDACTED,
     is_private,
     is_secret_key,
     secret_shaped,
 )
 
-from .schema import RoboEmotConfig
+from .schema import (
+    APPRAISAL_EVENTS,
+    ATTENTION_CATEGORIES,
+    REALTIME_LINK,
+    ROUTE_LINK_PREFIX,
+    TONE_EVENT_PREFIX,
+    ConnectivityConfig,
+    LinkPolicy,
+    RoboEmotConfig,
+    link_event,
+)
 from .stack import (
     KEYED_LISTS,
     entry_identity,
@@ -91,6 +107,92 @@ STRUCTURED_KINDS = ("string_dict", "json")
 DEFAULT_LIST_KEY = "name"
 ENTRY_PLACEHOLDER = "_"
 BLANK_SOURCE = "schema"
+
+
+def _labels(cfg: RoboEmotConfig) -> list[str]:
+    return list(cfg.affect.labels)
+
+
+def _events(cfg: RoboEmotConfig) -> list[str]:
+    """The library's events, ``link.<name>.<state>`` of every link the health monitors run (the
+    ``connectivity`` policies, the realtime session, one per route), ``speech.tone.<label>`` of
+    every ``voice.realtime_route.tone_labels`` entry and the plugins' ``appraisal.extra_events``."""
+    names = [
+        name
+        for name, info in ConnectivityConfig.model_fields.items()
+        if strip_optional(info.annotation) is LinkPolicy
+    ]
+    names += [REALTIME_LINK, *(ROUTE_LINK_PREFIX + r.name for r in cfg.llm_routes)]
+    links = [link_event(name, online) for name in names for online in (False, True)]
+    tones = {TONE_EVENT_PREFIX + label for label in cfg.voice.realtime_route.tone_labels}
+    return sorted(APPRAISAL_EVENTS | set(links) | tones | set(cfg.appraisal.extra_events))
+
+
+def _routes(kind: str) -> Callable[[RoboEmotConfig], list[str]]:
+    """``""`` (unset) plus the names of the ``llm_routes`` of ``kind``."""
+    return lambda cfg: ["", *(r.name for r in cfg.llm_routes if r.kind == kind)]
+
+
+# Fields whose value must come from a list held in the config (SPEC 11A): path pattern (``*``
+# matches one segment, the entry placeholder too) to the kind served and the choices. A ``None``
+# kind keeps the row's kind and its ``choices`` are the allowed keys.
+REFERENCES: dict[str, tuple[str | None, Callable[[RoboEmotConfig], list[Any]]]] = {
+    "appraisal.rules.*.label": ("enum", _labels),
+    "appraisal.rules.*.event": ("enum", _events),
+    "soothe.variants.*.label": ("enum", _labels),
+    "voice.openai_speech.route": ("enum", _routes("chat")),
+    "voice.realtime_route.route": ("enum", _routes("realtime")),
+    "attention.priority_order": ("enum_list", lambda cfg: list(ATTENTION_CATEGORIES)),
+    "expression_map": (None, _labels),
+    "speech_motion.mood_gain": (None, _labels),
+}
+
+
+# The kind the schema gives a reference field before ``REFERENCES`` makes it a choice.
+SCHEMA_KINDS = {"enum": "text", "enum_list": "string_list"}
+
+
+def _pattern(path: str) -> str | None:
+    """The ``REFERENCES`` pattern that matches ``path``, if any."""
+    parts = path.split(".")
+    for pattern in REFERENCES:
+        want = pattern.split(".")
+        if len(want) == len(parts) and all(
+            w in (PATH_WILDCARD, p) for w, p in zip(want, parts, strict=True)
+        ):
+            return pattern
+    return None
+
+
+Resolved = dict[str, tuple[str | None, list[Any]]]
+
+
+def resolve_references(cfg: RoboEmotConfig) -> Resolved:
+    """``(kind, choices)`` of every ``REFERENCES`` pattern, resolved from ``cfg`` once per
+    catalogue build."""
+    return {pattern: (kind, resolve(cfg)) for pattern, (kind, resolve) in REFERENCES.items()}
+
+
+def without_choices(rows: dict[str, FieldDescriptor]) -> dict[str, FieldDescriptor]:
+    """``rows`` with every reference field (entry forms too) back to its schema kind and no
+    choices: the startup replay of stored web edits lets the stack's validation decide, so a value
+    saved before its choice list existed, or one that names an entry added in the same batch, is
+    never dropped by the choice check."""
+
+    def plain(row: FieldDescriptor, path: str) -> FieldDescriptor:
+        if _pattern(path) is None:
+            return row
+        kind = SCHEMA_KINDS.get(row["kind"], row["kind"])
+        return cast(FieldDescriptor, {**row, "kind": kind, "choices": None})
+
+    out: dict[str, FieldDescriptor] = {}
+    for path, row in rows.items():
+        row = plain(row, path)
+        if row["entry"]:
+            entry = [plain(e, f"{path}.{ENTRY_PLACEHOLDER}.{e['path']}") for e in row["entry"]]
+            row = cast(FieldDescriptor, {**row, "entry": entry})
+        out[path] = row
+    return out
 
 
 class FieldDescriptor(TypedDict):
@@ -291,8 +393,9 @@ class _Walker:
         source_of: Callable[[str], str],
         writable: Callable[[str], bool],
         reveal_private: bool = False,
+        refs: Resolved | None = None,
     ) -> None:
-        self.reveal = reveal_private
+        self.reveal, self.refs = reveal_private, refs or {}
         self.values, self.base = values, base
         self.source_of, self.writable = source_of, writable
         self.out: list[FieldDescriptor] = []
@@ -388,12 +491,23 @@ class _Walker:
         row["value"] = list(keys)
         if kind in ENTRY_KINDS and model is not None:
             row["entry"] = self.entry(path, model)
+        self.refer(row)
         self.out.append(row)
+
+    def refer(self, row: FieldDescriptor) -> None:
+        """Give a reference field (``REFERENCES``) its kind and its choices from the config."""
+        pattern = _pattern(row["path"])
+        if pattern is not None and pattern in self.refs:
+            kind, choices = self.refs[pattern]
+            row["kind"] = kind or row["kind"]
+            row["choices"] = list(choices)
 
     def entry(self, path: str, model: type[BaseModel]) -> list[FieldDescriptor]:
         """Descriptors of a default-built entry, paths relative to the entry."""
         prefix = f"{path}.{ENTRY_PLACEHOLDER}."
-        walker = _Walker(_blank(model), None, lambda p: BLANK_SOURCE, lambda p: False, self.reveal)
+        walker = _Walker(
+            _blank(model), None, lambda p: BLANK_SOURCE, lambda p: False, self.reveal, self.refs
+        )
         walker.model(model, prefix, walker.values)
         rows = walker.out
         for row in rows:
@@ -420,6 +534,7 @@ class _Walker:
         row["nullable"] = nullable
         row["value"], row["default"] = value, default
         row["writable"] = self.writable(path)
+        self.refer(row)
         seal(row, name, self.reveal)
         self.out.append(row)
 
@@ -433,7 +548,8 @@ def build_catalogue(
     in schema order. ``writable(path)`` says which paths the web UI may write; secrets never are.
     ``reveal_private`` shows private values (the caller has checked the PIN). Needs ``effective()``,
     ``merged_tree(include_runtime=False)`` and ``source_of(path, tree)``."""
-    values = stack.effective().model_dump(mode="json")
+    cfg = stack.effective()
+    values = cfg.model_dump(mode="json")
     layered = RoboEmotConfig.model_validate(stack.merged_tree(include_runtime=False))
     walker = _Walker(
         values,
@@ -441,6 +557,7 @@ def build_catalogue(
         lambda path: stack.source_of(path, values),
         writable,
         reveal_private,
+        resolve_references(cfg),
     )
     walker.model(RoboEmotConfig, "", values)
     return walker.out
@@ -450,10 +567,13 @@ __all__ = [
     "CONTAINERS",
     "DESCRIPTOR_KEYS",
     "KINDS",
+    "REFERENCES",
     "FieldDescriptor",
     "build_catalogue",
     "classify",
     "write_only",
     "descriptor",
+    "resolve_references",
     "seal",
+    "without_choices",
 ]

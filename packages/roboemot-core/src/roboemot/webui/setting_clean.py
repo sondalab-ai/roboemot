@@ -228,23 +228,31 @@ def _tuple_list(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> list[A
     return [_tuple(row, v, cfg) for v in _counted(value, cfg)]
 
 
-def _mapping(value: Any, cfg: RoboEmotConfig) -> dict[str, Any]:
+def key_choice(row: FieldDescriptor, key: str) -> None:
+    """A dict or container whose keys reference a config list (``choices``, SPEC 11A) refuses
+    any other key with ``value_choice``."""
+    if row["choices"] is not None and key not in row["choices"]:
+        raise ValidationError("value_choice", "key")
+
+
+def _mapping(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
         raise _fail("value_type")
     if len(value) > cfg.webui.settings_list_max_items:
         raise _fail("list_too_long")
     for key in value:
         _line_item(key, cfg)
+        key_choice(row, key)
     return value
 
 
 def _string_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, str]:
-    return {k: free_text(v, cfg) for k, v in _mapping(value, cfg).items()}
+    return {k: free_text(v, cfg) for k, v in _mapping(row, value, cfg).items()}
 
 
 def _number_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, float]:
     plain = replace(row, gt=None, ge=None, le=None)
-    return {k: _number(plain, v, cfg) for k, v in _mapping(value, cfg).items()}
+    return {k: _number(plain, v, cfg) for k, v in _mapping(row, value, cfg).items()}
 
 
 def _json(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> Any:

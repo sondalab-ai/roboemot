@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
+from roboemot.config import catalogue
 from roboemot.config.catalogue import (
     CONTAINERS,
     DESCRIPTOR_KEYS,
     KINDS,
+    REFERENCES,
     build_catalogue,
     descriptor,
+    without_choices,
 )
+from roboemot.config.schema import ATTENTION_CATEGORIES
 from roboemot.config.stack import ConfigStack, flatten, get_path
 from roboemot.diagnostics import jsonable
 from roboemot.redact import PRIVATE_PATHS, REDACTED, is_private, secret_shaped
@@ -474,3 +479,137 @@ def test_no_private_path_is_a_container():
     without the PIN, so there must be none (review ZM N6)."""
     private = [r for r in rows(ConfigStack()).values() if r["private"]]
     assert private and not [r["path"] for r in private if r["kind"] in CONTAINERS]
+
+
+# ------------------------------------------------------------------ reference choices (SPEC 11A)
+
+LABELS = ["calm", "joy", "curiosity", "surprise", "sadness", "fear", "annoyance", "sleepy"]
+
+
+def _reload(stack: ConfigStack, path, text: str) -> None:
+    """Rewrite the app file and let the stack's hot reload pick it up."""
+    path.write_text(text)
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+    assert stack.poll() is not None
+
+
+def test_label_references_are_enums_of_the_affect_labels():
+    r = rows(ConfigStack())
+    label = r["appraisal.rules.0.label"]
+    assert (label["kind"], label["choices"], label["nullable"]) == ("enum", LABELS, True)
+    soothe = r["soothe.variants.0.label"]
+    assert (soothe["kind"], soothe["choices"], soothe["nullable"]) == ("enum", LABELS, False)
+    assert r["expression_map"]["kind"] == "dict_of_model"
+    assert r["expression_map"]["choices"] == LABELS, "the allowed entry keys"
+    assert r["speech_motion.mood_gain"]["kind"] == "number_dict"
+    assert r["speech_motion.mood_gain"]["choices"] == LABELS, "the allowed keys"
+    entry = {e["path"]: e for e in r["appraisal.rules"]["entry"]}
+    assert (entry["label"]["kind"], entry["label"]["choices"]) == ("enum", LABELS)
+    entry = {e["path"]: e for e in r["soothe.variants"]["entry"]}
+    assert (entry["label"]["kind"], entry["label"]["choices"]) == ("enum", LABELS)
+
+
+def test_event_choices_are_the_library_events_the_links_and_the_extra_events():
+    stack = ConfigStack(
+        app={"appraisal": {"extra_events": ["plugin.waved"]}, "llm_routes": [ROUTE]}
+    )
+    r = rows(stack)
+    event = r["appraisal.rules.0.event"]
+    assert event["kind"] == "enum" and event["nullable"] is False
+    choices = set(event["choices"])
+    assert choices >= {"person.known", "self.soothe", "plugin.waved"}
+    assert choices >= {"link.network.lost", "link.robot.restored", "link.realtime.lost"}
+    assert choices >= {"link.route.cloud.lost", "link.route.cloud.restored"}
+    tones = stack.effective().voice.realtime_route.tone_labels
+    assert choices >= {f"speech.tone.{label}" for label in tones}, "one event per tone label"
+    shipped = [row["value"] for p, row in r.items() if p.endswith(".event")]
+    assert set(shipped) <= choices, "every shipped rule names a choice"
+    entry = {e["path"]: e for e in r["appraisal.rules"]["entry"]}
+    assert entry["event"]["choices"] == event["choices"]
+
+
+def test_route_references_offer_unset_and_the_routes_of_the_right_kind():
+    realtime = {"name": "rt", "base_url": "https://rt.example/v1", "model": "m", "kind": "realtime"}
+    chat = {"name": "lan", "base_url": "https://lan.example/v1", "model": "m"}
+    r = rows(ConfigStack(app={"llm_routes": [chat, realtime]}))
+    assert r["voice.openai_speech.route"]["kind"] == "enum"
+    assert r["voice.openai_speech.route"]["choices"] == ["", "lan"]
+    assert r["voice.realtime_route.route"]["choices"] == ["", "rt"]
+
+
+def test_attention_order_is_an_enum_list_of_the_categories():
+    row = rows(ConfigStack())["attention.priority_order"]
+    assert row["kind"] == "enum_list"
+    assert row["choices"] == list(ATTENTION_CATEGORIES)
+
+
+def test_a_hot_reloaded_label_is_a_choice_at_once(tmp_path):
+    path = tmp_path / "app.yaml"
+    path.write_text("schema_version: 1\n")
+    stack = ConfigStack.from_files(app=path)
+    assert "pride" not in rows(stack)["appraisal.rules.0.label"]["choices"]
+    _reload(stack, path, "affect:\n  labels:\n    pride: {valence: 0.6, arousal: 0.2}\n")
+    r = rows(stack)
+    for p in ("appraisal.rules.0.label", "soothe.variants.0.label", "expression_map"):
+        assert r[p]["choices"] == [*LABELS, "pride"], p
+    assert r["speech_motion.mood_gain"]["choices"] == [*LABELS, "pride"]
+    assert {e["path"]: e for e in r["appraisal.rules"]["entry"]}["label"]["choices"][-1] == "pride"
+
+
+def test_a_saved_value_outside_the_choices_is_kept_as_it_is():
+    """A route name that names no route, or a link event of no link (both pass the schema), stay
+    in ``value``: the page shows them marked invalid instead of dropping them."""
+    rule = {"event": "link.mystery.lost", "valence": 0.1}
+    stack = ConfigStack(
+        app={"voice": {"openai_speech": {"route": "ghost"}}, "appraisal": {"rules": [rule]}}
+    )
+    r = rows(stack)
+    route = r["voice.openai_speech.route"]
+    assert route["value"] == "ghost" and "ghost" not in route["choices"]
+    event = next(
+        row for p, row in r.items() if p.endswith(".event") and row["value"] == rule["event"]
+    )
+    assert event["kind"] == "enum" and rule["event"] not in event["choices"]
+
+
+def _entries(r: dict) -> dict:
+    """Every row of ``r`` plus its entry rows, under ``<container>._.<field>``."""
+    out = dict(r)
+    for path, row in r.items():
+        for e in row["entry"] or []:
+            out[f"{path}._.{e['path']}"] = e
+    return out
+
+
+def test_without_choices_gives_back_the_schema_kind_of_every_reference(monkeypatch):
+    """The replay rows of every ``REFERENCES`` field (entry forms too) match what the schema walk
+    gives without the references."""
+    stack = ConfigStack(app={"llm_routes": [ROUTE]})
+    served = _entries(without_choices(rows(stack)))
+    monkeypatch.setattr(catalogue, "resolve_references", lambda cfg: {})
+    raw = _entries(rows(stack))
+    for pattern in REFERENCES:
+        want = pattern.split(".")
+        paths = [
+            p
+            for p in raw
+            if len(p.split(".")) == len(want)
+            and all(w in ("*", s) for w, s in zip(want, p.split("."), strict=True))
+        ]
+        assert paths, pattern
+        for p in paths:
+            assert (served[p]["kind"], served[p]["choices"]) == (
+                raw[p]["kind"],
+                raw[p]["choices"],
+            ), p
+
+
+def test_entry_rows_of_rules_and_variants_lose_their_choices_for_the_replay():
+    plain = without_choices(rows(ConfigStack()))
+    for container, names in (
+        ("appraisal.rules", ("event", "label")),
+        ("soothe.variants", ("label",)),
+    ):
+        entry = {e["path"]: e for e in plain[container]["entry"]}
+        for name in names:
+            assert (entry[name]["kind"], entry[name]["choices"]) == ("text", None), name
