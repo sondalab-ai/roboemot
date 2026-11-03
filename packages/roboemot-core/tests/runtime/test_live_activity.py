@@ -126,3 +126,81 @@ def test_the_cloud_route_down_is_a_note_with_its_reason_while_the_robot_listens(
 def test_a_host_without_voice_still_has_a_status():
     state = live(config=cfg())
     assert state.state()["activity"] == {"status": "idle", "notes": [], "events": []}
+
+
+class _Client:
+    """A realtime client that connects at once; ``drop`` loses the session (no turn)."""
+
+    def __init__(self, route, settings, provider, **kw):
+        self.route, self.state, self.reason, self.on_close = route, "idle", None, kw["on_close"]
+
+    def connect(self, update):
+        self.state = "connected"
+        return True
+
+    def drop(self):
+        self.state, self.reason = "closed", "connection_lost"
+        self.on_close("connection_lost")
+
+    def snapshot(self):
+        return {"local": True}
+
+    def send(self, event):
+        return None
+
+    def close(self):
+        self.state = "closed"
+
+
+def test_the_cloud_down_note_clears_by_itself_after_a_background_reconnect():
+    """CV-12 (robot QA 2026-11-03): after a lost session the Live tab shows cloud_down, and the
+    note and the status clear once the route reconnects in the background, with no turn."""
+    from roboemot.config import ConfigStack
+    from roboemot.config.schema import LinkPolicy
+    from roboemot.health.network import NetworkMonitor
+    from roboemot.realtime.route import RealtimeRoute
+    from roboemot.realtime.session import DirectSession
+
+    policy = LinkPolicy(failures_to_offline=1, successes_to_online=1, probe_jitter=0.0)
+    rt = {"name": "rt", "base_url": "http://s2s.local:8765/v1", "model": "s2s", "kind": "realtime"}
+    stack = ConfigStack(
+        app={"llm_routes": [rt], "voice": {"realtime_route": {"enabled": True, "route": "rt"}}}
+    )
+    now = [100.0]
+    monitor = NetworkMonitor(
+        stack.effective().llm_routes, policy, probe=lambda *a: True, clock=lambda: now[0]
+    )
+    router = SimpleNamespace(realtime_route=lambda name: object(), used=lambda name: 0)
+    made = []
+
+    def factory(*a, **kw):
+        made.append(_Client(*a, **kw))
+        return made[-1]
+
+    route = RealtimeRoute(
+        stack,
+        lambda: router,
+        monitor,
+        DirectSession(),
+        extra=lambda: True,
+        client_factory=factory,
+        clock=lambda: now[0],
+    )
+    route._keep_connecting = lambda: None  # driven step by step below
+    r = rig()
+    realtime_on(r)
+    r.host.realtime_route = route
+    try:
+        assert route.ready()
+        assert activity(r)["status"] == "idle"
+        made[0].drop()
+        a = activity(r)
+        assert a["status"] == "cloud_down"
+        assert a["notes"] == [{"code": "cloud_down", "reason": "connection_lost"}]
+        assert route._reconnect_step() > 0  # the backoff holds it: still down
+        assert activity(r)["status"] == "cloud_down"
+        now[0] += stack.effective().connectivity.network.probe_initial_s
+        assert route._reconnect_step() == 0.0 and route.connected
+        assert activity(r)["status"] == "idle" and activity(r)["notes"] == []
+    finally:
+        route.close()
