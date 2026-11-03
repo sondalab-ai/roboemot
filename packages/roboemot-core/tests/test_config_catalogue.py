@@ -520,6 +520,8 @@ def test_event_choices_are_the_library_events_the_links_and_the_extra_events():
     assert choices >= {"person.known", "self.soothe", "plugin.waved"}
     assert choices >= {"link.network.lost", "link.robot.restored", "link.realtime.lost"}
     assert choices >= {"link.route.cloud.lost", "link.route.cloud.restored"}
+    tones = stack.effective().voice.realtime_route.tone_labels
+    assert choices >= {f"speech.tone.{label}" for label in tones}, "one event per tone label"
     shipped = [row["value"] for p, row in r.items() if p.endswith(".event")]
     assert set(shipped) <= choices, "every shipped rule names a choice"
     entry = {e["path"]: e for e in r["appraisal.rules"]["entry"]}

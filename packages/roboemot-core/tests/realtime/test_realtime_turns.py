@@ -74,6 +74,24 @@ def test_a_whole_turn_text_in_and_the_server_voice_out(rigs):
         assert rig.events[-1]["route"] == "rt"
 
 
+def test_the_turn_count_goes_up_only_after_the_turn_record_is_published(rigs):
+    """``rig.turn`` waits on the ``turns`` count and tests then read ``rig.events[-1]``: the
+    count must not include a turn before its ``conversation.turn`` record is out (CI flake,
+    2026-11-03). The bus calls subscribers on the publishing thread, so the count read inside
+    the subscriber is the count at publish time."""
+    with TurnServer(transcript="Come stai oggi?") as server:
+        rig = rigs(server)
+        seen: list[tuple[int, int]] = []
+        rig.bus.subscribe(
+            "conversation.turn",
+            lambda m: seen.append((m.payload["turn"], rig.worker.snapshot().get("turns", 0))),
+        )
+        rig.turn("ciao robot")
+        rig.turn("e tu?")
+        assert seen == [(1, 0), (2, 1)]
+        assert [e["turn"] for e in rig.events] == [1, 2]
+
+
 def test_the_reply_volume_is_applied_as_gain(rigs):
     with TurnServer() as server:
         rig = rigs(server)

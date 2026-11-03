@@ -68,6 +68,7 @@ from .schema import (
     ATTENTION_CATEGORIES,
     REALTIME_LINK,
     ROUTE_LINK_PREFIX,
+    TONE_EVENT_PREFIX,
     ConnectivityConfig,
     LinkPolicy,
     RoboEmotConfig,
@@ -114,8 +115,8 @@ def _labels(cfg: RoboEmotConfig) -> list[str]:
 
 def _events(cfg: RoboEmotConfig) -> list[str]:
     """The library's events, ``link.<name>.<state>`` of every link the health monitors run (the
-    ``connectivity`` policies, the realtime session, one per route) and the plugins'
-    ``appraisal.extra_events``."""
+    ``connectivity`` policies, the realtime session, one per route), ``speech.tone.<label>`` of
+    every ``voice.realtime_route.tone_labels`` entry and the plugins' ``appraisal.extra_events``."""
     names = [
         name
         for name, info in ConnectivityConfig.model_fields.items()
@@ -123,7 +124,8 @@ def _events(cfg: RoboEmotConfig) -> list[str]:
     ]
     names += [REALTIME_LINK, *(ROUTE_LINK_PREFIX + r.name for r in cfg.llm_routes)]
     links = [link_event(name, online) for name in names for online in (False, True)]
-    return sorted(APPRAISAL_EVENTS | set(links) | set(cfg.appraisal.extra_events))
+    tones = {TONE_EVENT_PREFIX + label for label in cfg.voice.realtime_route.tone_labels}
+    return sorted(APPRAISAL_EVENTS | set(links) | tones | set(cfg.appraisal.extra_events))
 
 
 def _routes(kind: str) -> Callable[[RoboEmotConfig], list[str]]:

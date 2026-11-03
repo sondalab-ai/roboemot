@@ -323,9 +323,10 @@ def owned_app_config(
 def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
     """The keys the cloud-voice profile sets in ``app.yaml`` (SPEC 4A, Installer; SPEC 8, 12):
     the platform's route entry; the realtime route through it, with the utterance's audio as its
-    input (``privacy.realtime_audio``, the admin opt-in) and the skip tool; no local voice; wake
-    policy ``never`` with the voice-at-face and facing checks (facing needs direction). The
-    transcript timeout is the platform's (``CloudVoiceRoute.transcript_timeout_s``)."""
+    input (``privacy.realtime_audio``, the admin opt-in), the skip tool and the tone tool; no local
+    voice; wake policy ``never`` with the voice-at-face and facing checks (facing needs
+    direction). The transcript timeout is the platform's
+    (``CloudVoiceRoute.transcript_timeout_s``)."""
     rt = ("voice", "realtime_route")
     return {
         (ROUTES_KEY, route.name): route.entry(),
@@ -334,6 +335,7 @@ def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
         (*rt, "mode"): route.mode,
         (*rt, "input"): "audio",
         (*rt, "skip_tool"): True,
+        (*rt, "tone_tool"): True,
         (*rt, "transcript_timeout_s"): route.transcript_timeout_s,
         ("privacy", "realtime_audio"): True,
         ("voice", "backend"): "none",
