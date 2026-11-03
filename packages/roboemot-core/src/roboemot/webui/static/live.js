@@ -71,7 +71,9 @@ function liveMoodCard(d) {
     liveRow(t("live_intensity"), liveNumber(m.intensity)),
   ];
   if (m.circadian) {
-    const name = state.strings["live_circ_" + m.circadian.state] || m.circadian.state;
+    let name = state.strings["live_circ_" + m.circadian.state] || m.circadian.state;
+    const why = m.circadian.reason ? state.strings["live_circ_reason_" + m.circadian.reason] : null;
+    if (why) name += " (" + why + ")";
     parts.push(liveRow(t("live_energy"), name));
     if (m.circadian.sleepiness !== null) {
       parts.push(progress(t("live_energy"), Math.round((1 - m.circadian.sleepiness) * LIVE_PERCENT), LIVE_PERCENT));
@@ -151,7 +153,8 @@ function liveRender(box, data) {
 
 const LIVE_STATUS_TONE = {
   asleep: "warning", answering: "success", cut: "warning", waiting: "info", sending: "info",
-  listening: "info", offline: "danger", cloud_down: "danger", alone: "info", idle: "info",
+  listening: "info", offline: "danger", cloud_down: "danger", napping: "info",
+  resting: "info", alone: "info", idle: "info",
 };
 
 function liveActivityBox() {

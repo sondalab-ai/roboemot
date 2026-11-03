@@ -8,6 +8,7 @@ import threading
 import time
 
 import numpy as np
+import yaml
 from roboemot.affect.clips import load_clip_library
 from roboemot.circadian.motion import FX_SOURCE, REST_SOURCE
 from roboemot.circadian.replay import replay, synthetic_day
@@ -104,6 +105,10 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
     """The rest posture is held and the idle motion stopped for as long as the robot rests;
     waking plays the stretch and lets go of the posture."""
     monkeypatch.setattr(FakeDetector, "empty", True)  # nobody around: light and clock decide
+    app_yaml = data / "app.yaml"
+    layer = yaml.safe_load(app_yaml.read_text()) or {}
+    layer.setdefault("circadian", {})["nap_after_s"] = None  # the day naps (SPEC 7A, Day nap)
+    app_yaml.write_text(yaml.safe_dump(layer))
     commanded: dict[str, float] = {}
     real_write = ReachyMiniDriver.write_pose_targets
 
@@ -114,7 +119,7 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
     monkeypatch.setattr(ReachyMiniDriver, "write_pose_targets", write)
     manifest = load_manifest(app_module.DATA / "reachy-mini-wireless.yaml",
                              allow_unmeasured_dynamics=True)  # fmt: skip
-    stack = ConfigStack()
+    stack = ConfigStack(app={"circadian": {"nap_after_s": None}})
     stack.set_manifest_behaviour(
         manifest.model.behaviour,
         manifest.channels,

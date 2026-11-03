@@ -64,6 +64,7 @@ REASONS: dict[str, tuple[str, ...]] = {
     "audio": ("transcript_timeout",),  # the server's transcript of sent audio never came
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw
     "alone": ("start", "face", "sound"),  # the robot holds still, or what ended it (SPEC 5A)
+    "nap": ("start", "face", "speech"),  # a day nap began, or what woke it (SPEC 7A)
     "turn": (  # a turn ended (its outcome), or the model's skip was refused
         "ok",
         "skip_refused",

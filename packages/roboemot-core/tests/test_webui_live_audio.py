@@ -35,7 +35,8 @@ def served(tmp_path, stack):
     levels.noise_floor = lambda: 0.01
     ring = TranscriptRing(live_cfg)
     host = SimpleNamespace(
-        circadian=object(), phase=ConversationPhase(), activity=None, realtime_route=None,
+        circadian=SimpleNamespace(state="awake", reason=None), phase=ConversationPhase(),
+        activity=None, realtime_route=None,
         voice_listener=None, levels=levels, transcript=ring,
     )  # fmt: skip
     parts = pipeline()

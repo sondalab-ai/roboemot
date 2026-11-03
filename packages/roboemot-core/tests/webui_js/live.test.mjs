@@ -91,6 +91,15 @@ test("no audio warning in text mode", async (t) => {
   assert.ok(!page.document.querySelector("#live-cards").textContent.includes("AUDIO OUT"));
 });
 
+test("the mood card says why the robot rests", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, mood: { ...STATE.mood, circadian: { state: "resting", reason: "nap", sleepiness: 0.4 } } },
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_circ_resting: "resting", live_circ_reason_nap: "A NAP" } },
+  });
+  await openLive(page);
+  assert.ok(page.document.querySelector("#live-cards").textContent.includes("resting (A NAP)"));
+});
+
 test("the modes card says when the robot is alone and holding still", async (t) => {
   const strings = { ...STRINGS, live_alone: "ALONE STILL" };
   const alone = await livePage(t, {

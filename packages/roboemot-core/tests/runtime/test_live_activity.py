@@ -87,6 +87,14 @@ def test_the_panel_switch_off_sends_no_block_and_the_live_tab_off_sends_nothing(
         ),  # fmt: skip
         (lambda r: r.events("bargein", "cut"), "cut"),
         (lambda r: setattr(r.p.alone, "alone", True), "alone"),
+        (
+            lambda r: setattr(r.host, "circadian", SimpleNamespace(state="resting", reason="nap")),
+            "napping",
+        ),
+        (
+            lambda r: setattr(r.host, "circadian", SimpleNamespace(state="resting", reason="hold")),
+            "resting",
+        ),
     ],
 )
 def test_each_status_comes_from_the_parts_state(setup, status):
@@ -205,3 +213,12 @@ def test_the_cloud_down_note_clears_by_itself_after_a_background_reconnect():
         assert activity(r)["status"] == "idle" and activity(r)["notes"] == []
     finally:
         route.close()
+
+
+def test_resting_shows_before_alone():
+    r = rig()
+    r.p.alone.alone = True
+    r.host.circadian = SimpleNamespace(state="resting", reason="quiet_hours")
+    assert activity(r)["status"] == "resting"
+    r.host.circadian = SimpleNamespace(state="awake", reason=None)
+    assert activity(r)["status"] == "alone"

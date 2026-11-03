@@ -601,6 +601,15 @@ class CircadianConfig(Strict):
     wake_hold_s: float = param(
         300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
     )
+    nap_after_s: float | None = param(
+        1800.0,
+        "Day nap: with no face in view and no speech for this long, outside quiet hours, the "
+        "robot rests until a face or speech wakes it (for wake_hold_s). Only time outside quiet "
+        "hours counts. null: no naps",
+        unit="s",
+        ge=300,
+        le=86400,
+    )
     update_period_s: float = param(
         10.0,
         "Seconds between two model updates (process S, entrainment, state)",

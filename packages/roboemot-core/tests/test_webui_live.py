@@ -58,7 +58,7 @@ def stack(tmp_path):
 @pytest.fixture
 def served(tmp_path, stack):
     host = SimpleNamespace(
-        circadian=object(),
+        circadian=SimpleNamespace(state="awake", reason=None),
         phase=ConversationPhase(),
         activity=None,
         realtime_route=None,

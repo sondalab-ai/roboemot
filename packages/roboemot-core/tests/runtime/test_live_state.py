@@ -69,7 +69,7 @@ def parts(entries=(), target=None, registry=None, **over):
 
 def live(p=None, config=None, host=None, **kw):
     host = host or SimpleNamespace(
-        circadian=object(),
+        circadian=SimpleNamespace(state="awake", reason=None),
         phase=ConversationPhase(),
         activity=None,
         realtime_route=None,
@@ -119,7 +119,7 @@ def test_the_payload_shape():
     assert s["poll_ms"] == 750
     assert s["mood"] == {
         "label": "calm", "valence": 0.25, "arousal": -0.1, "intensity": 0.4,
-        "circadian": {"state": "awake", "sleepiness": 0.2},
+        "circadian": {"state": "awake", "reason": None, "sleepiness": 0.2},
     }  # fmt: skip
     assert s["modes"] == {
         "asleep": False, "alone": False, "paused": [], "online": True,
@@ -154,6 +154,12 @@ def test_modes_follow_the_parts():
         "people": 0, "persona": "default",
     }  # fmt: skip
     assert s["mood"]["circadian"] is None and s["reflexes"] == {"last": None}
+
+
+def test_the_mood_card_says_why_the_robot_rests():
+    p = parts(circ=SimpleNamespace(snapshot=lambda: {"state": "resting", "reason": "nap"}))
+    circadian = live(p).state()["mood"]["circadian"]
+    assert circadian == {"state": "resting", "reason": "nap", "sleepiness": None}
 
 
 def test_the_conversation_card_is_the_phase():

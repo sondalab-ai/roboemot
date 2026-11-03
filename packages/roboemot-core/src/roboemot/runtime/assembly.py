@@ -63,6 +63,7 @@ from .host import RuntimeHost
 from .levels import AudioLevels
 from .reports import register_overrides
 from .sleep import SleepGate
+from .ticks import in_conversation
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -271,7 +272,9 @@ def assemble(
         clips=clips,
         detection_period=host.detection_period,
         engaged=lambda: selector.engaged,
+        conversing=lambda: in_conversation(phase, host.conversation),
     )
+    circ.events = host.events
     expression.circadian_factor = circ.amplitude_factor
     # Speaking motion (SPEC 7): reads the speech timeline of the speech output, which is built
     # after assembly (startup), so lazily; ducks the channels of a playing expression.
