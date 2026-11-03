@@ -43,6 +43,7 @@ from roboemot.config.catalogue import (
     ENTRY_KINDS,
     FieldDescriptor,
     build_catalogue,
+    without_choices,
     write_only,
 )
 from roboemot.config.schema import RoboEmotConfig
@@ -755,7 +756,7 @@ class SettingsEditor:
             return
         migrated, stripped = _migrated(stored, str(self._file.path))
         with self._lock:
-            tree, rows = self.stack.merged_tree(), self._rows()
+            tree, rows = self.stack.merged_tree(), without_choices(self._rows())
             planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
             for key, value in migrated.items():
                 found = self._plan(key, value, tree, rows)

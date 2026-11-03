@@ -153,13 +153,30 @@ def test_the_identity_of_an_entry_with_a_dotted_event_cannot_be_renamed(editor, 
     editor.add_entry(
         "appraisal.rules",
         None,
-        {"event": "link.up", "valence": 0.1, "arousal": 0.1, "label": "joy"},
+        {"event": "link.realtime.lost", "valence": 0.1, "arousal": 0.1, "label": "joy"},
     )
-    index = rule_index(stack, "link.up")
+    index = rule_index(stack, "link.realtime.lost")
     for leaf in ("event", "when"):
         with pytest.raises(SettingNotAllowed):
-            editor.change(f"appraisal.rules.{index}.{leaf}", "link.down" if leaf == "event" else {})
-    assert rule(stack, "link.up").event == "link.up"
+            editor.change(
+                f"appraisal.rules.{index}.{leaf}",
+                "link.realtime.restored" if leaf == "event" else {},
+            )
+    assert rule(stack, "link.realtime.lost").event == "link.realtime.lost"
+
+
+def test_a_label_reference_takes_only_a_label_of_the_current_config(editor, stack):
+    """``appraisal.rules[].label`` is an enum of ``affect.labels`` (SPEC 11A): a word that is not a
+    label is refused before the stack, a label added later is accepted at once."""
+    path = f"appraisal.rules.{rule_index(stack, 'zz.first')}.label"
+    with pytest.raises(ValidationError) as err:
+        editor.change(path, "pride")
+    assert err.value.code == "value_choice"
+    stack.set("affect.labels.pride", {"valence": 0.6, "arousal": 0.2})
+    editor.change(path, "pride")
+    assert rule(stack, "zz.first").label == "pride"
+    editor.change(path, None)
+    assert rule(stack, "zz.first").label is None
 
 
 # ------------------------------------------------------------------ private fields
@@ -572,6 +589,31 @@ def test_restore_applies_the_whole_file_with_one_notification(tmp_path):
     stack.subscribe(events.append)
     SettingsEditor(stack, store=path).restore()
     assert len(events) == 1 and set(events[0].changed_keys) == {"affect.update_hz", "personality"}
+
+
+def test_restore_keeps_a_label_reference_to_a_label_added_in_the_same_file(editor, tmp_path):
+    """The replay cleans a reference field without its choice list (rows built before the batch
+    would not hold the new label yet); the stack's validation decides, as before (SPEC 11A)."""
+    editor.add_entry("affect.labels", "pride", {"valence": 0.6, "arousal": 0.2})
+    fresh_stack = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    path = f"appraisal.rules.{rule_index(fresh_stack, 'zz.first')}.label"
+    editor.change(path, "pride")
+    SettingsEditor(fresh_stack, store=tmp_path / FILE).restore()
+    assert rule(fresh_stack, "zz.first").label == "pride"
+
+
+def test_restore_keeps_a_stored_reference_outside_the_choices(tmp_path):
+    """A route name stored before it was a choice still passes the schema: it is kept, and the
+    catalogue shows it outside the choices, never dropped."""
+    path = tmp_path / FILE
+    path.write_text(json.dumps({"v": 1, "overrides": {"voice.openai_speech.route": "ghost"}}))
+    path.chmod(0o600)
+    stack = ConfigStack()
+    editor = SettingsEditor(stack, store=path)
+    editor.restore()
+    assert stack.effective().voice.openai_speech.route == "ghost"
+    row = next(r for r in editor._catalogue() if r["path"] == "voice.openai_speech.route")
+    assert row["value"] == "ghost" and "ghost" not in row["choices"]
 
 
 def test_restore_skips_a_bad_entry_and_keeps_the_rest(tmp_path, caplog):

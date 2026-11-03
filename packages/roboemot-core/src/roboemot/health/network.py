@@ -29,6 +29,7 @@ from . import Link, OnChange
 
 DEFAULT_PORTS = {"https": 443, "http": 80}
 REALTIME_LINK = "realtime"  # the realtime speech route's session (SPEC 12A, Links)
+ROUTE_LINK_PREFIX = "route."  # a chat route's link: route.<name> (SPEC 12A, Links)
 
 Probe = Callable[[str, int, float], bool]  # (host, port, timeout_s) -> reachable
 
@@ -64,7 +65,8 @@ class NetworkMonitor:
 
     def __post_init__(self) -> None:
         self.links = {
-            r.name: Link(f"route.{r.name}", self.policy, self._route_changed) for r in self.routes
+            r.name: Link(ROUTE_LINK_PREFIX + r.name, self.policy, self._route_changed)
+            for r in self.routes
         }
         self.network = Link("network", self.policy, self.on_change)
         self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
@@ -131,7 +133,9 @@ class NetworkMonitor:
                 if prev is not None and route_endpoint(prev) == route_endpoint(r):
                     links[r.name] = old[r.name]
                 else:
-                    links[r.name] = Link(f"route.{r.name}", self.policy, self._route_changed)
+                    links[r.name] = Link(
+                        ROUTE_LINK_PREFIX + r.name, self.policy, self._route_changed
+                    )
                     fresh.add(r.name)
             self._unconfirmed = (self._unconfirmed & set(links)) | fresh
             self.links = links  # replaced wholesale, never mutated (see _links_map)

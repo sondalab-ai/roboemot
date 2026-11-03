@@ -312,6 +312,12 @@ EN: dict[str, str] = {
     "settings_readonly": "Read-only",
     "settings_json_readonly": "Structured value: edit it in the configuration file.",
     "settings_null": "No value (null)",
+    "settings_null_only": "Only without a value (null)",
+    "settings_choice_none": "(none)",
+    "settings_choice_invalid": "{value} (not valid)",
+    "settings_choice_invalid_hint": (
+        "The saved value is not one of the current choices: pick one to replace it."
+    ),
     "settings_route_move_message": (
         "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
     ),
@@ -1221,6 +1227,12 @@ IT: dict[str, str] = {
     "settings_readonly": "Sola lettura",
     "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
     "settings_null": "Nessun valore (null)",
+    "settings_null_only": "Solo senza valore (null)",
+    "settings_choice_none": "(nessuno)",
+    "settings_choice_invalid": "{value} (non valido)",
+    "settings_choice_invalid_hint": (
+        "Il valore salvato non è tra le scelte attuali: scegline uno per sostituirlo."
+    ),
     "settings_route_move_message": (
         "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
         "Inserisci il PIN per consentirlo."

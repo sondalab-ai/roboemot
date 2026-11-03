@@ -15,7 +15,7 @@ const SETTING_AUTO_OPEN_MAX = 50;
 const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 
 const settingsState = {
-  query: "", changedOnly: false, open: new Set(), collapsed: new Set(),
+  query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
 };
@@ -26,7 +26,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(),
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(),
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -81,13 +81,17 @@ function settingsSections(top, scope, robot) {
 }
 
 const nodeText = (node) => (node.row.path + " " + (node.row.description || "")).toLowerCase();
-const isChanged = (node) => (SETTING_CONTAINERS.includes(node.row.kind)
-  ? node.kids.some(isChanged)
-  : node.row.source === "runtime" || JSON.stringify(node.row.value) !== JSON.stringify(node.row.default));
+const leafChanged = (row) => row.source === "runtime" || JSON.stringify(row.value) !== JSON.stringify(row.default);
 
-function nodeMatches(node, words, changedOnly) {
+// The search words hit the node or one of its kids; the filters ("changed only", "only null") hold
+// together on one leaf: a container passes when one of its leaves does.
+function nodeMatches(node, words, changedOnly, nullOnly) {
   const hit = (n) => words.every((w) => nodeText(n).includes(w)) || n.kids.some(hit);
-  return hit(node) && (!changedOnly || isChanged(node));
+  if (!changedOnly && !nullOnly) return hit(node);
+  const kept = (n) => (SETTING_CONTAINERS.includes(n.row.kind)
+    ? n.kids.some(kept)
+    : (!changedOnly || leafChanged(n.row)) && (!nullOnly || n.row.value === null));
+  return hit(node) && kept(node);
 }
 
 // ---------------------------------------------------------------- small helpers
@@ -178,17 +182,30 @@ function boolControl(desc, id, opts) {
   return { node, main: input, ownsLabel: true, read: () => ({ value: input.checked }) };
 }
 
+const choiceText = (c) => (c === "" ? t("settings_choice_none") : String(c));
+const blankValue = (v) => v === null || v === undefined || v === "";
+
+// A select of `desc.choices`. A nullable field offers "(none)" for null. A blank value outside the
+// choices shows "—" (nothing chosen yet); a saved value outside them stays shown, marked not valid,
+// and reads as `value_choice` until another choice replaces it (SPEC 11A).
 function enumControl(desc, id) {
   const choices = desc.choices || [];
   const known = choices.some((c) => c === desc.value);
+  const empty = desc.nullable ? desc.value === null : !known && blankValue(desc.value);
+  const stale = !known && !empty;
   const select = el("select", { id, class: "sl-field__input" },
-    known ? [] : el("option", { value: "", selected: true }, "—"),
-    choices.map((c, n) => el("option", { value: String(n), selected: c === desc.value }, String(c))));
-  return {
-    node: el("span", { class: FIELD_FX }, el("span", { class: "sl-select" }, select)),
-    labelFor: id, main: select,
-    read: () => (select.value === "" ? { code: "value_choice" } : { value: choices[Number(select.value)] }),
+    desc.nullable ? el("option", { value: "null", selected: desc.value === null }, t("settings_choice_none")) : [],
+    !known && !desc.nullable && empty ? el("option", { value: "", selected: true }, "—") : [],
+    stale ? el("option", { value: "", selected: true, "data-invalid": "1" }, t("settings_choice_invalid", { value: formatValue(desc.value) })) : [],
+    choices.map((c, n) => el("option", { value: String(n), selected: c === desc.value }, choiceText(c))));
+  const hint = stale ? el("p", { class: "sl-field__error", "data-stale": "1" }, t("settings_choice_invalid_hint")) : [];
+  if (stale) select.setAttribute("aria-invalid", "true");
+  const read = () => {
+    if (select.value === "null") return { value: null };
+    return select.value === "" ? { code: "value_choice" } : { value: choices[Number(select.value)] };
   };
+  const field = el("span", { class: FIELD_FX }, el("span", { class: "sl-select" }, select));
+  return { node: stale ? el("div", { class: "stack" }, field, hint) : field, labelFor: id, main: select, read };
 }
 
 function textControl(desc, id) {
@@ -265,11 +282,12 @@ function chipsControl(desc, id, opts) {
   const items = [...(desc.value || [])];
   const chips = el("div", { class: "sl-chips", role: "group", "aria-label": opts.label });
   const paint = () => {
+    const stale = (item) => desc.kind === "enum_list" && !(desc.choices || []).includes(item);
     chips.replaceChildren(...items.map((item) => el("button", {
-      type: "button", class: "sl-chip" + PRESS,
+      type: "button", class: "sl-chip" + PRESS, ...(stale(item) ? { "data-invalid": "1" } : {}),
       "aria-label": t("settings_remove_item", { item: String(item) }),
       onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
-    }, String(item))));
+    }, stale(item) ? t("settings_choice_invalid", { value: String(item) }) : String(item))));
   };
   let entry;
   let adder;
@@ -300,17 +318,31 @@ function chipsControl(desc, id, opts) {
   return { node: el("div", { class: "stack" }, chips, adding), labelFor: id, main: entry, read: () => ({ value: [...items] }) };
 }
 
+// A select for a key that must be one of `choices` (a dict whose keys reference a config list):
+// "—" while none is chosen, a saved key outside them kept and marked not valid. Its value is the key.
+function keySelect(choices, key, attrs) {
+  const stale = key !== "" && !choices.includes(key);
+  const select = el("select", { class: "sl-field__input", ...attrs },
+    key === "" ? el("option", { value: "", selected: true }, "—") : [],
+    stale ? el("option", { value: key, selected: true, "data-invalid": "1" }, t("settings_choice_invalid", { value: key })) : [],
+    choices.map((c) => el("option", { value: c, selected: c === key }, c)));
+  if (stale) select.setAttribute("aria-invalid", "true");
+  return select;
+}
+
 function dictControl(desc, id, opts) {
   const numeric = desc.kind === "number_dict";
   const entries = Object.entries(desc.value || {});
   const made = rowsControl(desc, id, opts, ([key, value], rid) => {
-    const name = el("input", { type: "text", class: "sl-field__input", id: rid + "-k", value: key, "aria-label": t("settings_dict_key") });
+    const name = desc.choices
+      ? keySelect(desc.choices, key, { id: rid + "-k", "aria-label": t("settings_dict_key") })
+      : el("input", { type: "text", class: "sl-field__input", id: rid + "-k", value: key, "aria-label": t("settings_dict_key") });
     const valueDesc = { kind: numeric ? "number" : "text", ge: null, le: null, nullable: false, value };
     const control = numeric
       ? numberControl(valueDesc, rid + "-v", { label: t("settings_dict_value"), plain: true })
       : (() => { const c = textControl(valueDesc, rid + "-v"); c.main.setAttribute("aria-label", t("settings_dict_value")); return c; })();
     return {
-      node: el("div", { class: "entry" }, fieldControl(name), control.node),
+      node: el("div", { class: "entry" }, fieldControl(desc.choices ? el("span", { class: "sl-select" }, name) : name), control.node),
       key: () => name.value.trim(), read: control.read,
     };
   }, () => ["", numeric ? null : ""], entries, false);
@@ -351,7 +383,7 @@ function buildControl(desc, id, opts) {
     tuple: (d, i, o) => tupleControl(d, i, o, d.value),
   };
   const ctl = kinds[desc.kind](desc, id, opts);
-  return desc.nullable ? nullable(desc, ctl, id) : ctl;
+  return desc.nullable && desc.kind !== "enum" ? nullable(desc, ctl, id) : ctl;
 }
 
 // ---------------------------------------------------------------- rows
@@ -611,7 +643,10 @@ function addEntryForm(node) {
   const keyed = row.kind === "keyed_list";
   const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true, id: nextSettingId() + "-err" });
   const id = nextSettingId();
-  const name = keyed ? null : el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
+  const free = row.choices ? row.choices.filter((c) => !entryKeys(node).includes(c)) : null;
+  const name = keyed ? null : free
+    ? keySelect(free, "", { id: id + "-name", required: true })
+    : el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
   const fixed = (row.entry || []).filter((e) => e.kind === "json" && !e.secret);
   const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !SETTING_CONTAINERS.includes(e.kind))
     .map((e) => ({ desc: e, ctl: buildControl(e, id + "-" + settingsState.serial++, { label: e.path }) }));
@@ -726,14 +761,15 @@ function cachedRow(g, node) {
 
 function refreshGroup(g) {
   const words = settingsState.query.toLowerCase().split(/\s+/).filter(Boolean);
-  const filtering = words.length > 0 || settingsState.changedOnly;
-  const hits = g.nodes.filter((n) => nodeMatches(n, words, settingsState.changedOnly));
+  const flagged = settingsState.changedOnly || settingsState.nullOnly;
+  const filtering = words.length > 0 || flagged;
+  const hits = g.nodes.filter((n) => nodeMatches(n, words, settingsState.changedOnly, settingsState.nullOnly));
   g.count.textContent = String(hits.length);
   g.navCount.textContent = String(hits.length);
   const gone = filtering && hits.length === 0;
   g.section.hidden = gone;
   g.navItem.hidden = gone;
-  const auto = filtering && hits.length > 0 && (settingsState.changedOnly || settingsState.query.trim().length >= SETTING_SEARCH_MIN_CHARS);
+  const auto = filtering && hits.length > 0 && (flagged || settingsState.query.trim().length >= SETTING_SEARCH_MIN_CHARS);
   const manual = settingsState.open.has(g.id);
   const open = !gone && !settingsState.collapsed.has(g.id) && (manual || auto);
   g.toggle.setAttribute("aria-expanded", String(open));
@@ -802,15 +838,19 @@ function settingsToolbar() {
       refreshSettings();
     }, SETTING_SEARCH_DEBOUNCE_MS);
   });
-  const only = el("input", { type: "checkbox", id: "settings-changed", checked: settingsState.changedOnly });
-  only.addEventListener("change", () => {
-    settingsState.changedOnly = only.checked;
-    settingsState.collapsed.clear();
-    refreshSettings();
-  });
+  const filter = (id, flag) => {
+    const box = el("input", { type: "checkbox", id, checked: settingsState[flag] });
+    box.addEventListener("change", () => {
+      settingsState[flag] = box.checked;
+      settingsState.collapsed.clear();
+      refreshSettings();
+    });
+    return box;
+  };
   return el("div", { class: "stack" },
     field("settings-search", t("settings_search"), query, t("settings_search_hint")),
-    el("div", { class: "row" }, check(t("settings_changed_only"), only),
+    el("div", { class: "row" }, check(t("settings_changed_only"), filter("settings-changed", "changedOnly")),
+      check(t("settings_null_only"), filter("settings-null", "nullOnly")),
       el("p", { class: "hint", id: "settings-count", role: "status", "aria-live": "polite" })));
 }
 
