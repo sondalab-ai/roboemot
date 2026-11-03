@@ -77,6 +77,12 @@ def test_the_payload_is_a_scalar_share():
     assert ScenePercept(share).share == share
 
 
+def test_confirm_samples_1_reports_the_first_changed_sample():
+    watch = SceneMotionWatch(MOTION.model_copy(update={"confirm_samples": 1}), GATE)
+    t = settled(watch)
+    assert feed(watch, still(t, 3 * MOTION.interval_s, scene(block_x=100))) == [t]
+
+
 def test_one_odd_frame_is_not_motion():
     watch = SceneMotionWatch(MOTION, GATE)
     t = settled(watch)
@@ -208,3 +214,31 @@ def test_a_hot_reload_reaches_the_watch(tmp_path):
     for f in frames(0.0, span) + frames(span, DT, block_x=100):
         pipe.process(f)
     assert len(got) == 1
+
+
+def test_a_frame_the_governor_drops_still_reaches_the_watch(tmp_path):
+    pipe, got = watched(tmp_path, lambda: True)
+    pipe.governor.set_scale(CIRCADIAN, 0.0)  # every stage off: process returns early
+    span = GATE.settle_s + 2 * MOTION.interval_s
+    for f in frames(0.0, span) + frames(span, 3 * MOTION.interval_s, block_x=100):
+        assert not pipe.process(f).faces_detected
+    assert len(got) == 1
+
+
+class Boom(Exception):
+    pass
+
+
+def boom(*_args, **_kw):
+    raise Boom
+
+
+@pytest.mark.parametrize("where", ["wanted", "watch"])
+def test_a_failing_watch_never_costs_the_face_stage(tmp_path, caplog, where):
+    pipe, _ = watched(tmp_path, boom if where == "wanted" else lambda: True)
+    if where == "watch":
+        pipe.scene_motion.offer = boom
+    pipe.governor.set_scale(CIRCADIAN, 1.0)
+    report = pipe.process(Frame(scene(), 0.0, joint()))
+    assert report.faces_detected and pipe.face_detector.calls == 1
+    assert "motion watch failed: Boom" in caplog.text

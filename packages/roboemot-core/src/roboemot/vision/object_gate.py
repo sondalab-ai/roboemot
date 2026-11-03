@@ -50,7 +50,6 @@ from .tracker import HOLD_REASONS
 
 SKIP_REASONS = ("still_scene", "head_moving")
 RUN_REASONS = ("motion", "settled", "floor", "live_track", "no_pose", "episode")
-__all__ = ["RUN_REASONS", "SKIP_REASONS", "ObjectGate", "thumbnail"]
 
 
 class ObjectGate:
@@ -129,7 +128,7 @@ class ObjectGate:
                     self._reference = None
                 else:
                     self._reference = self._thumbnail(image) if small is None else small
-                    self._head.anchor = pose
+                    self._head.anchor_to(pose)
             return run
 
     def _thumbnail(self, image: np.ndarray) -> np.ndarray | None:

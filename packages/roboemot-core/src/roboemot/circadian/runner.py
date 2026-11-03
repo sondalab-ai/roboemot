@@ -32,20 +32,24 @@ Three stimuli also end a day nap (owner decision 2026-11-03), each behind its sw
 
 - ``nap_wake_on_light``: a confirmed light level that rises (dark to dim or bright, dim to
   bright), unless it was confirmed within ``nap_light_grace_s`` of the nap's start (the rest
-  posture moved the camera to a brighter view);
+  posture moved the camera to a brighter view); a rise inside the grace is not looked at again
+  when it ends;
 - ``nap_wake_on_motion``: ``percept.scene_motion`` from the vision pipeline's motion watch,
-  which runs only while :meth:`wants_scene_motion` (a nap with the switch on) and handles the
-  head and its settle time itself;
+  which runs only while :meth:`wants_scene_motion` (a nap with the switch on, the robot not
+  asleep) and handles the head and its settle time itself; a report within
+  ``nap_motion_grace_s`` of the nap's start is ignored (auto-exposure still settling on the
+  rest posture's view);
 - ``nap_wake_on_loud``: ``sound.loud``, the reflex engine's loud onset, which is already
   silent while the robot's own speech or sound plays (``SpeechActivity.sounding``). So a loud
   television now wakes a nap, though its speech still does not.
 
-They wake only a day nap, never the night rest of the quiet hours or a rest of the rhythm's own
-or a hold. Sound and frames arrive on their own threads between updates, so the handler checks
-the quiet hours itself (the nap flag clears only at the next update after they begin). While the
-robot is awake they do not restart the idle clock (see :mod:`.nap`). Each start and wake is a
-decision event (``nap``: ``start``, ``face``, ``speech``, ``light``, ``motion``, ``loud``) and the
-debug report counts the wakes by reason.
+They wake only a day nap, never the night rest of the quiet hours, a rest of the rhythm's own,
+a hold, or a nap while the platform sleeps (``robot.asleep``: the motors are off). Sound and
+frames arrive on their own threads between updates, so the handler checks the quiet hours itself
+(the nap flag clears only at the next update after they begin). While the robot is awake they do
+not restart the idle clock (see :mod:`.nap`). Each start and wake is a decision event (``nap``:
+``start``, ``face``, ``speech``, ``light``, ``motion``, ``loud``) and the debug report counts the
+wakes by reason.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ..affect.clips import ClipLibrary
 from ..bus import Bus, Message
@@ -80,6 +84,7 @@ from .sampler import LightSampler
 
 TOPIC = "circadian.state"
 STATES = ("awake", "drowsy", "resting")
+Stimulus = Literal["light", "motion", "loud"]
 REPORT_DIGITS = 3
 
 
@@ -209,7 +214,7 @@ class CircadianRunner:
         """Motion in front of the still camera (the pipeline's motion watch): wakes a day nap."""
         self._on_stimulus("motion")
 
-    def _on_stimulus(self, reason: str) -> None:
+    def _on_stimulus(self, reason: Stimulus) -> None:
         """A stimulus from another thread: wake a day nap and publish its decision event."""
         with self._lock:
             woke = self._stimulus(self.clock.monotonic(), reason)
@@ -268,13 +273,22 @@ class CircadianRunner:
         self._woken(lag_s)
         return True
 
-    def _stimulus(self, t: float, reason: str, lag_s: float | None = None) -> bool:
+    def _stimulus(self, t: float, reason: Stimulus, lag_s: float | None = None) -> bool:
         """The light rising, motion or a loud sound at ``t`` (``reason``): ends a day nap with a
-        wake when its switch (``nap_wake_on_<reason>``) is on and the quiet hours have not begun;
-        never touches the idle clock while awake (caller holds the lock). Returns whether a nap
+        wake when its switch (``nap_wake_on_<reason>``) is on, the platform is not asleep, the
+        stimulus' grace after the nap's start is over and the quiet hours have not begun; never
+        touches the idle clock while awake (caller holds the lock). Returns whether a nap
         ended."""
         c = self.cfg.circadian
-        if not (c.enabled and getattr(c, f"nap_wake_on_{reason}")):
+        switch, grace_s = {
+            "light": (c.nap_wake_on_light, c.nap_light_grace_s),
+            "motion": (c.nap_wake_on_motion, c.nap_motion_grace_s),
+            "loud": (c.nap_wake_on_loud, 0.0),
+        }[reason]
+        if not (c.enabled and switch) or self._asleep:
+            return False
+        started = self.nap.started
+        if started is not None and t - started < grace_s:
             return False
         if in_window(self.clock.hour(), c.quiet_hours) or not self.nap.stimulus(t, reason):
             return False
@@ -288,11 +302,11 @@ class CircadianRunner:
         self._cause = "wake"
 
     def wants_scene_motion(self) -> bool:
-        """Whether the vision pipeline's motion watch should run: a day nap is in progress with
-        ``nap_wake_on_motion`` on. Read on the vision thread for every frame: three flags, no
-        lock."""
+        """Whether the vision pipeline's motion watch should run: a day nap is in progress,
+        ``nap_wake_on_motion`` is on and the platform is not asleep. Called on the vision thread
+        for every frame, so it reads plain attributes without the lock."""
         c = self.cfg.circadian
-        return c.enabled and c.nap_wake_on_motion and self.nap.napping
+        return c.enabled and c.nap_wake_on_motion and self.nap.napping and not self._asleep
 
     def _nap_blocked(self, dt: float, engaged: bool) -> bool:
         """Whether no nap is possible now (caller holds the lock): the robot asleep, a hold, a
@@ -301,13 +315,6 @@ class CircadianRunner:
         resting = self.model.state == "resting" and self.model.reason != "quiet_hours"
         held = self.model.hold_remaining(dt) is not None
         return self._asleep or held or resting or engaged
-
-    def _light_wakes(self, t: float) -> bool:
-        """Whether a light rise at ``t`` may wake the nap: not within ``nap_light_grace_s`` of
-        its start, when the rest posture's new view may read brighter (caller holds the
-        lock)."""
-        started = self.nap.started
-        return started is None or t - started >= self.cfg.circadian.nap_light_grace_s
 
     def _lag(self) -> float:
         """Seconds since the last model update: the model's clock stands that far behind, and a
@@ -428,7 +435,7 @@ class CircadianRunner:
                     elif level == "dark":
                         events.append(("light.off", {}))
                 self._level = level
-            if rose and self._light_wakes(t) and self._stimulus(t, "light", dt):
+            if rose and self._stimulus(t, "light", dt):
                 decisions.append("light")
             if talking and self._activity(t, "speech", dt):
                 decisions.append("speech")

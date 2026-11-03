@@ -91,6 +91,10 @@ class HeadStill:
             return True
         return False
 
+    def anchor_to(self, pose: Pose) -> None:
+        """Take ``pose`` as the still head (a fresh reference view was taken there)."""
+        self.anchor = pose
+
     def moving(self, stamp: float, settle_s: float) -> bool:
         """Whether the last move is less than ``settle_s`` before ``stamp`` (capture time)."""
         return self.last_move is not None and stamp - self.last_move < settle_s - EPSILON_S

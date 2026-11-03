@@ -279,10 +279,15 @@ class VisionPipeline:
 
     def _watch_motion(self, frame: Frame) -> None:
         """Hand the frame to the nap's motion watch (SPEC 7A) and publish a confirmed change.
-        Inactive, the watch only disarms: no pose is read and no copy is made."""
-        active = self.motion_wanted()
-        pose = head_pose(frame.joint_state, self.frame_spec) if active else None
-        share = self.scene_motion.offer(frame.stamp, frame.image, pose, active)
+        Inactive, the watch returns at once: no pose is read and no copy is made. A failure
+        (the watch or ``motion_wanted``) is logged by type and never costs the frame."""
+        try:
+            active = self.motion_wanted()
+            pose = head_pose(frame.joint_state, self.frame_spec) if active else None
+            share = self.scene_motion.offer(frame.stamp, frame.image, pose, active)
+        except Exception as exc:
+            log.warning("motion watch failed: %s", type(exc).__name__)
+            return
         if share is not None:
             self._publish("percept.scene_motion", ScenePercept(share), frame.stamp)
 

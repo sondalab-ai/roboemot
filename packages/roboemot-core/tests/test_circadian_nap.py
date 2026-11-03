@@ -510,3 +510,69 @@ def test_wakes_are_counted_per_reason():
     run(x, STEP)
     wakes = x.r.snapshot()["nap"]["wakes"]
     assert wakes == {"face": 1, "speech": 0, "light": 0, "motion": 0, "loud": 0}
+
+
+def test_none_of_them_wakes_a_nap_while_the_platform_sleeps():
+    x = napping_lit(rig())
+    past_grace(x)
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    assert x.r.wants_scene_motion() is False
+    loud(x)
+    motion(x)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)
+    assert x.r.model.state == "resting"
+    assert x.r.model.hold_remaining() is None
+    assert sum(x.r.snapshot()["nap"]["wakes"].values()) == 0
+    assert x.events == [("nap", "start")]
+
+
+def test_motion_within_the_grace_after_the_nap_start_is_ignored():
+    x = rig()
+    grace = x.cfg.circadian.nap_motion_grace_s
+    assert grace == 10.0
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    start = x.r.nap.started
+    assert x.clock.t == start
+    x.clock.advance(grace - 1.0)  # inside the grace, between ticks
+    motion(x)
+    run(x, STEP)
+    assert x.r.model.reason == "nap"
+    motion(x)  # past it
+    woke(x, "motion")
+
+
+@pytest.mark.parametrize(("offset", "wakes"), [(-STEP, False), (0.0, True)])
+def test_the_light_grace_boundary(offset, wakes):
+    """A rise first seen at an update exactly nap_light_grace_s after the start wakes the nap;
+    one an update earlier does not, and is not looked at again (the level stays bright)."""
+    x = rig()
+    level = {"now": "dim"}
+    x.r.sampler.level = lambda: level["now"]
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    rise_at = x.r.nap.started + x.cfg.circadian.nap_light_grace_s + offset
+    run(x, rise_at - STEP - x.clock.t)
+    assert x.clock.t == rise_at - STEP and x.r.model.reason == "nap"
+    level["now"] = "bright"
+    run(x, STEP)
+    assert (x.r.model.reason is None) is wakes
+    run(x, 3 * STEP)
+    assert (x.r.model.reason is None) is wakes  # the earlier rise is not re-evaluated
+
+
+def test_scene_motion_from_the_pipeline_ends_a_nap_end_to_end(tmp_path):
+    from roboemot.vision import Frame
+    from test_vision import rig as vision_rig
+    from test_vision_scene_motion import DT, GATE, MOTION, SPEC, joint, scene
+
+    x = napping(rig())
+    _, vbus, pipe, _, _ = vision_rig(tmp_path, lambda i: [], frame_spec=SPEC)
+    vbus.subscribe("percept.scene_motion", lambda m: x.bus.publish(m.topic, m.payload, m.stamp))
+    pipe.motion_wanted = x.r.wants_scene_motion
+    span = GATE.settle_s + 2 * MOTION.interval_s
+    n, m = round(span / DT), round(3 * MOTION.interval_s / DT)
+    for i in range(n + m):
+        pipe.process(Frame(scene(100 if i >= n else None), i * DT, joint()))
+    woke(x, "motion")
+    assert x.r.wants_scene_motion() is False

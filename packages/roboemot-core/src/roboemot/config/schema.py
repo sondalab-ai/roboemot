@@ -661,6 +661,14 @@ class CircadianConfig(Strict):
         ge=0,
         le=1800,
     )
+    nap_motion_grace_s: float = param(
+        10.0,
+        "Motion reported this soon after a day nap starts does not wake it: the camera's "
+        "auto-exposure may still be settling on the rest posture's view after the head stopped",
+        unit="s",
+        ge=0,
+        le=300,
+    )
     update_period_s: float = param(
         10.0,
         "Seconds between two model updates (process S, entrainment, state)",

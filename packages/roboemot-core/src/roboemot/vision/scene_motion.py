@@ -75,6 +75,8 @@ class SceneMotionWatch:
     ) -> float | None:
         """One captured frame at ``stamp`` with the head ``pose``; ``active``: a nap waits for
         motion. Returns the moved share when motion is confirmed now, else None."""
+        if not active and not self._armed:  # no nap: one flag read, no lock (a stale read only
+            return None  # delays the disarm by one frame)
         with self._lock:
             if not active:
                 if self._armed:
