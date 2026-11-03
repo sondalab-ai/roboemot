@@ -1055,6 +1055,7 @@ class ConversationWorker:
             # the turn's first round (turn.rounds 0): nothing acted yet, so a skip there stands
             if retry:
                 turn.tone_retry = True
+                self._counts["tone_retry"] += 1  # how often the model spoke only after the tone
                 turn.rt_round = None
                 update = route.session_update(
                     turn.cfg, self._base_instructions(tone_rule=False), functions
