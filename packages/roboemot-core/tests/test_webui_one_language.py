@@ -7,6 +7,8 @@ translation fails here, before the page shows it in the other language (or as a 
 
 from __future__ import annotations
 
+import ast
+import logging
 import re
 import typing
 from pathlib import Path
@@ -17,15 +19,19 @@ from roboemot import diag
 from roboemot.config.catalogue import BLANK_SOURCE
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import LAYER_ORDER
+from roboemot.llm import conformance
+from roboemot.realtime import check as realtime_check
 from roboemot.registry import enrollment
 from roboemot.registry.xmp import CATEGORIES
 from roboemot.runtime.live import STATUSES
 from roboemot.webui import descriptions
+from roboemot.webui.api import CATALOGUE_STATUS, EMOTIONS_STATUS
 from roboemot.webui.robot_section import RESTART_EFFECTS
 from roboemot.webui.strings import DEFAULT_LANGUAGE, STRINGS
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "roboemot"
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+CODE = re.compile(r"[a-z][a-z_]*")
 OTHER_LANGUAGES = sorted(set(STRINGS) - {DEFAULT_LANGUAGE})
 
 
@@ -91,18 +97,21 @@ def test_every_setting_description_is_translated(lang):
     assert all(isinstance(v, str) and v for v in table.values())
 
 
-def test_localize_swaps_descriptions_and_keeps_a_plugins_own_rows():
+def test_localize_swaps_descriptions_and_keeps_a_plugins_own_rows(caplog):
     text = next(iter(schema_descriptions()))
     rows = [
         {"path": "a.b", "description": text, "entry": [{"path": "x", "description": text}]},
         {"path": "robot.r.c", "description": "Already worded."},
         {"path": "a.d", "description": "Not in the table."},
     ]
+    caplog.set_level(logging.DEBUG, logger="roboemot.webui.descriptions")
     out = descriptions.localize(rows, "it", frozenset({"robot.r.c"}))
     it = descriptions.table("it")[text]
     assert out[0]["description"] == it and out[0]["entry"][0]["description"] == it
     assert out[1]["description"] == "Already worded."
     assert out[2]["description"] == ""  # never shown in English on an Italian page
+    assert "no it description for a.d" in caplog.text  # the path, never the text
+    assert "Not in the table" not in caplog.text
     assert rows[0]["description"] == text  # the input is not changed
     assert descriptions.localize(rows, DEFAULT_LANGUAGE) is rows
 
@@ -157,28 +166,81 @@ def test_enrollment_states_and_route_errors_are_worded():
     assert must_have("route_error_", errors) == []
 
 
-def source(*parts: str) -> str:
-    return (SRC.joinpath(*parts)).read_text(encoding="utf-8")
+def tree(module) -> ast.Module:
+    return ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
 
 
-def test_every_check_reason_code_is_worded():
-    text = source("llm", "conformance.py") + source("realtime", "check.py")
-    codes = set(re.findall(r'CheckResult\([^()]*?,\s*"([a-z_]+)"(?:,|\))', text, re.S))
-    codes |= set(re.findall(r'_no_text\([^()]*?"([a-z_]+)"\s*\)', text, re.S))
-    codes |= {
-        "out_of_tokens",
-        "latency",
-        *(f"item_delete_{v}" for v in ("accepted", "refused", "unconfirmed")),
+def name_of(func: ast.expr) -> str:
+    return func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+
+
+def given_codes(module) -> list[ast.expr]:
+    """Every expression the module gives as a check's code: the fourth argument of each
+    ``CheckResult(...)``, the last of each ``_no_text(...)`` and each value assigned to ``code``."""
+    out: list[ast.expr] = []
+    for node in ast.walk(tree(module)):
+        if (
+            isinstance(node, ast.Call)
+            and name_of(node.func) == "CheckResult"
+            and len(node.args) > 3
+        ):
+            out.append(node.args[3])
+        elif isinstance(node, ast.Call) and name_of(node.func) == "_no_text":
+            out.append(node.args[-1])
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Tuple):
+            names = [getattr(t, "id", None) for t in node.targets[0].elts]
+            if "code" in names and isinstance(node.value, ast.Tuple):
+                out.append(node.value.elts[names.index("code")])
+    return out
+
+
+@pytest.mark.parametrize("module", [conformance, realtime_check])
+def test_every_check_reason_code_is_declared_and_worded(module):
+    """The module's ``REASON_CODES`` holds every code its calls give (a literal, a parameter
+    of ``_no_text`` passed through, or ``"item_delete_" + verdict``), and each is worded."""
+    given = given_codes(module)
+    assert given, "the syntax walk found the calls"
+    for expr in given:
+        if isinstance(expr, ast.Constant):
+            assert expr.value in module.REASON_CODES, expr.value
+        elif isinstance(expr, ast.BinOp):  # "item_delete_" + verdict
+            assert isinstance(expr.left, ast.Constant) and expr.left.value == "item_delete_"
+        else:
+            assert isinstance(expr, ast.Name) and expr.id == "code", ast.dump(expr)
+    assert must_have("check_reason_", module.REASON_CODES) == []
+
+
+def test_every_why_code_is_declared_and_worded():
+    whys = {
+        v.value
+        for node in ast.walk(tree(conformance))
+        if isinstance(node, ast.Dict)
+        for k, v in zip(node.keys, node.values, strict=True)
+        if isinstance(k, ast.Constant) and k.value == "why" and isinstance(v, ast.Constant)
     }
-    assert {"chunks", "latency", "round_trip_ok", "connected", "no_text_after"} <= codes
-    assert must_have("check_reason_", codes) == []
-    assert must_have("check_why_", ["http", "timeout", "unreachable", "error"]) == []
+    assert whys == set(conformance.WHY_CODES)
+    assert must_have("check_why_", conformance.WHY_CODES) == []
+
+
+def error_codes(path: Path) -> set[str]:
+    """The string codes of every ``...Error(...)`` raised or built in ``path``: the first
+    string argument, after an ``HTTPStatus`` when there is one."""
+    codes = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and name_of(node.func).endswith("Error"):
+            args = node.args
+            if args and isinstance(args[0], ast.Attribute):  # HTTPStatus.X, then the code
+                args = args[1:]
+            first = args[0] if args and isinstance(args[0], ast.Constant) else None
+            if first is not None and isinstance(first.value, str) and CODE.fullmatch(first.value):
+                codes.add(first.value)
+    return codes
 
 
 def test_every_api_error_code_is_worded():
-    codes: set[str] = set()
-    for path in [*SRC.glob("webui/*.py"), *SRC.glob("config/*.py")]:
-        text = path.read_text(encoding="utf-8")
-        codes |= set(re.findall(r'Error\(\s*(?:HTTPStatus\.\w+,\s*)?"([a-z_]+)"', text))
-    assert len(codes) > 20
+    codes = set().union(
+        *(error_codes(p) for p in [*SRC.glob("webui/*.py"), *SRC.glob("config/*.py")])
+    )
+    codes |= {*CATALOGUE_STATUS, *EMOTIONS_STATUS}  # codes mapped from other modules' errors
+    assert {"bad_pin", "csrf", "unknown_field", "live_disabled"} <= codes
     assert must_have("err_", codes) == []

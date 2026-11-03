@@ -66,6 +66,13 @@ RESPONSE_EVENT = f"{EVENT_PREFIX}check_1"
 DELETE_EVENT = "ev_check_delete"
 STALL = "stall"  # as the client's own watchdog names a response that stopped
 SEND_FAILED = "send_failed"
+ITEM_VERDICTS = ("accepted", "refused", "unconfirmed")  # the delete's verdict when it ran
+# Every ``CheckResult.code`` this module gives (the page words each; a test walks the module's
+# syntax tree and holds the calls to this list).
+REASON_CODES = (
+    "connected", "session_failed", "first_audio", "no_audio", "item_create_refused",
+    *(f"item_delete_{v}" for v in ITEM_VERDICTS),
+)  # fmt: skip
 # client failures that stop the connect before the handshake: no key left the robot then
 BEFORE_HANDSHAKE = ("pseudonyms", "reconfigured")
 SEND_WAITS = 2  # a send's write waits at most this many send_timeout_s (the client's own bound)

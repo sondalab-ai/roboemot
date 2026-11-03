@@ -60,6 +60,10 @@ class EmotionsState:
         self._cfg = change.config
         self._keep(change.config)
 
+    def close(self) -> None:
+        """The web UI stopped (or never started): the engine keeps no history any more."""
+        self._p.runner.engine.keep_history(0)
+
     def _keep(self, cfg: RoboEmotConfig) -> None:
         """The engine keeps a history only while the tab is on."""
         page = cfg.webui.emotions

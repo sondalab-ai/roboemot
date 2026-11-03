@@ -85,6 +85,16 @@ ECHO_MIN_WORDS = 4
 ECHO_WORD = re.compile(r"[^\W_]+")
 ECHO_WITHHELD = "[server message withheld: it quoted the request]"
 PERCENT = 100  # a ratio as the page's percent param
+# Every ``CheckResult.code`` this module gives (the page has a ``check_reason_<code>`` for each;
+# a test walks the module's syntax tree and holds the calls to this list).
+REASON_CODES = (
+    "chunks", "chunks_cut", "no_stream", "stream_broke", "no_text_stream", "single_chunk",
+    "out_of_tokens", "no_content_within", "no_answer", "latency", "no_reply", "too_short",
+    "italian_ratio", "unreachable", "budget_spent", "tool_failed", "no_tool_call", "unknown_tool",
+    "bad_arguments", "no_call_id", "budget_before_answer", "tool_result_rejected",
+    "no_text_after", "round_trip_ok",
+)  # fmt: skip
+WHY_CODES = ("http", "timeout", "unreachable", "error")  # ``params["why"]`` of a failed request
 # The ``[mood=x]`` tags of ``voice.mood_source: llm_tagged`` (as ``voice.prosody.TAG``).
 MOOD_TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 

@@ -187,18 +187,21 @@ class AffectEngine:
         self._moved(now, LLM_EVENT, None, None, dv, da)
         return dv, da
 
+    @_locked
     def _moved(
         self, now: float, event: str, rule: int | None, label: str | None, dv: float, da: float
     ) -> None:
-        """Apply an impulse and, while a history is kept, record the change it made."""
+        """Apply an impulse and, while a history is kept, record the change it made. The
+        ``update(now)`` first is the one ``impulse`` makes anyway (a second update at the same
+        time decays nothing), so the state evolves the same with or without a history."""
         if not self._history.maxlen:
             self.impulse(now, dv, da, label)
             return
         self.update(now)
         v0, a0 = self.valence, self.arousal
         self.impulse(now, dv, da, label)
-        moved = Moved(self._last or now, event, rule, label, self.valence - v0, self.arousal - a0)
-        self._history.append(moved)
+        at = self._last if self._last is not None else now
+        self._history.append(Moved(at, event, rule, label, self.valence - v0, self.arousal - a0))
 
     @_locked
     def keep_history(self, cap: int) -> None:

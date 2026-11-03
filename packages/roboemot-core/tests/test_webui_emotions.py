@@ -6,14 +6,18 @@ the PIN, refused while the robot is asleep, its motors are off or something else
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from roboemot.affect import AffectEngine
-from roboemot.affect.register import ActiveRegister
+from roboemot.affect import AffectEngine, AffectState
+from roboemot.affect.clips import load_clip_library
+from roboemot.affect.expression import ExpressionRenderer
+from roboemot.affect.register import ActiveRegister, Person, resolve_register
 from roboemot.config.schema import RegisterParams, RoboEmotConfig
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Diagnostics
+from roboemot.manifest import load_manifest
 from roboemot.runtime.emotions import REFUSALS, EmotionsError, EmotionsState
 from roboemot.webui import make_server
 from roboemot.webui.api import EMOTIONS_STATUS, PASSIVE_POLLS
@@ -254,3 +258,104 @@ def test_every_refusal_has_a_sentence_in_both_languages():
     codes = {*EMOTIONS_STATUS, *REFUSALS, "emotions_unavailable"}
     for lang, strings in STRINGS.items():
         assert sorted(c for c in codes if f"err_{c}" not in strings) == [], lang
+
+
+@pytest.mark.parametrize(
+    ("label", "status", "code"),
+    [("x" * 65, 422, "unknown_expression"), ("", 422, "unknown_expression"), (5, 400, None)],
+)
+def test_play_refuses_a_label_the_robot_lacks_or_one_that_is_not_text(served, label, status, code):
+    c = served.client
+    c.login()
+    resp = c.request("POST", "/api/emotions/play", {"label": label, "pin": PIN})
+    assert resp.status == status
+    if code:
+        assert resp.json == {"error": code}
+    assert served.p.expression.asked == []
+
+
+def test_inject_refuses_a_negative_index_and_a_second_inject_waits_for_the_cooldown(served):
+    c = served.client
+    c.login()
+    negative = c.request("POST", "/api/emotions/inject", {"rule": -1, "pin": PIN})
+    assert negative.status == 422 and negative.json == {"error": "unknown_rule"}
+    index = rule_index(served.cfg, "sound.loud")
+    first = c.request("POST", "/api/emotions/inject", {"rule": index, "pin": PIN})
+    second = c.request("POST", "/api/emotions/inject", {"rule": index, "pin": PIN})
+    assert first.json == {"fired": True} and second.json == {"fired": False}
+    assert len(served.p.runner.engine.history()) == 1
+
+
+@pytest.mark.parametrize(
+    ("part", "code"), [("motors_off", "motors_off"), ("external", "external_control")]
+)
+def test_motors_off_and_external_control_are_refused_over_http(served, part, code):
+    c = served.client
+    c.login()
+    setattr(served.p.loop, part, True)
+    for path, body in (("play", {"label": "joy"}), ("inject", {"rule": 0})):
+        resp = c.request("POST", f"/api/emotions/{path}", {**body, "pin": PIN})
+        assert resp.status == 409 and resp.json == {"error": code}
+    assert served.p.expression.asked == [] and served.p.runner.engine.history() == []
+
+
+# ---------------------------------------------------------------- the engine with a history
+
+
+EVENTS = [("sound.loud", 1.0), ("person.known", 2.5), ("idle.long", 9.0), ("sound.loud", 9.0)]
+
+
+def replay(history: bool) -> list[tuple]:
+    """The same events and LLM impulses at the same times, with or without a history."""
+    cfg = RoboEmotConfig()
+    engine = AffectEngine(cfg.affect, cfg.appraisal)
+    engine.keep_history(cfg.webui.emotions.events if history else 0)
+    states = []
+    for event, at in EVENTS:
+        engine.update(at - 0.5)
+        engine.on_event(event, at)
+        engine.llm_impulse(at, 0.05, -0.02)
+        s = engine.update(at + 0.25)
+        states.append((s.valence, s.arousal, s.label, s.intensity, s.impulse))
+    return states
+
+
+def test_the_affect_evolves_the_same_with_and_without_the_history():
+    assert replay(history=True) == replay(history=False)
+
+
+# ---------------------------------------------------------------- contract with the renderer
+
+
+MANIFEST = (
+    Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
+)
+
+
+def test_with_a_real_renderer_play_queues_what_the_play_skill_would():
+    """The real ``ExpressionRenderer``: the offer leaves the cue gestures out, a played name
+    starts at the next update, an unknown one is refused, and resting plays nothing."""
+    manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
+    )
+    cfg = stack.effective()
+    renderer = ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map,
+        body_yaw="body_yaw", clips=load_clip_library(manifest),
+    )  # fmt: skip
+    p = pipeline(cfg)
+    p.expression = renderer
+    emo = EmotionsState(SimpleNamespace(circadian=object()), p, cfg, clock=lambda: NOW)
+    offer = emo.state()["playable"]
+    assert "nod" in offer["gestures"] and "joy" in offer["labels"]
+    assert not any(n.startswith("cue_") for n in offer["labels"] + offer["gestures"])
+    assert emo.play("nod") is True
+    register = resolve_register([Person({})], cfg.register, cfg.persona)
+    assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), register, NOW) is True
+    assert renderer.last_label == "nod" and renderer.started == 1
+    with pytest.raises(EmotionsError):
+        emo.play("cue_listening")
+    renderer.circadian_factor = lambda: 0.0
+    assert emo.play("joy") is False

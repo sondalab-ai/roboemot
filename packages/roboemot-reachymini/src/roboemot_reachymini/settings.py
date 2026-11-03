@@ -31,6 +31,7 @@ from roboemot.manifest import Manifest
 from roboemot.realtime.session import route_origin
 from roboemot.webui.robot_section import PATH_ROOT, RobotSection
 from roboemot.webui.settings import StackPort
+from roboemot.webui.strings import DEFAULT_LANGUAGE, language_for
 
 from .daemon import STOP_TIMEOUT_S, DaemonClient, DaemonError
 
@@ -49,7 +50,6 @@ RESTART_EFFECTS = (
     ("remote_session_drop", {}),
     ("kill_on_timeout", {"timeout_s": STOP_TIMEOUT_S}),
 )
-DEFAULT_LANGUAGE = "en"
 # The rows' descriptions in each page language (``conversation.language``, SPEC 11A, 12): the
 # page shows one language only, so the plugin words its own rows.
 TEXTS: dict[str, dict[str, str]] = {
@@ -90,9 +90,9 @@ TEXTS: dict[str, dict[str, str]] = {
 
 def texts(language: str) -> dict[str, str]:
     """The row descriptions for a ``conversation.language`` value (``it``, ``it-IT``...);
-    English when the plugin has no wording for it."""
-    short = language.lower().replace("_", "-").split("-")[0]
-    return TEXTS.get(short, TEXTS[DEFAULT_LANGUAGE])
+    English when the plugin has no wording for it. The language is the page's (core's
+    ``language_for``), so the rows always match the rest of the page."""
+    return TEXTS.get(language_for(language), TEXTS[DEFAULT_LANGUAGE])
 
 
 def _row(path: str, kind: str, value: Any, description: str, **fields: Any) -> FieldDescriptor:

@@ -84,7 +84,13 @@ def start_webui(
         if admin is None:
             return None
     secrets, settings = admin.secrets, admin.settings
-    unsubscribe = unsubscribe_emotions = None
+    undo: list[Callable[[], None]] = []  # run once the page stops, or at once if it never starts
+
+    def stop() -> None:
+        while undo:
+            undo.pop()()
+
+    cleanup.callback(stop)
     try:
         live = LiveState(
             host,
@@ -93,7 +99,7 @@ def start_webui(
             clock=p.loop.clock,
             audio_egress=lambda: (r := host.realtime_route) is not None and r.audio_egress,
         )
-        unsubscribe = stack.subscribe(live.apply_config)
+        undo.append(stack.subscribe(live.apply_config))
         live.apply_config(
             SimpleNamespace(config=stack.effective())
         )  # catches a change since the read
@@ -102,7 +108,8 @@ def start_webui(
         cleanup.callback(live.video.drop)
         host.live_video = live.video
         emotions = EmotionsState(host, p, stack.effective(), clock=p.loop.clock)
-        unsubscribe_emotions = stack.subscribe(emotions.apply_config)
+        undo.append(emotions.close)  # the engine stops keeping the tab's history
+        undo.append(stack.subscribe(emotions.apply_config))
         emotions.apply_config(SimpleNamespace(config=stack.effective()))
         server = make_server(
             host.perception.enrollment,
@@ -125,9 +132,7 @@ def start_webui(
             emotions=emotions,
         )
     except Exception as exc:
-        for undo in (unsubscribe, unsubscribe_emotions):
-            if undo is not None:
-                undo()
+        stop()
         log.error("web UI not started: %s", type(exc).__name__)
         return None
     cleanup.callback(server.stop)

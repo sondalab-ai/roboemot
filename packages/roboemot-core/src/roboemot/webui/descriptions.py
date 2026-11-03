@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from .strings import DEFAULT_LANGUAGE
 
+log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 
 
@@ -43,6 +45,8 @@ def localize(rows: list[Any], language: str, own: frozenset[str] = frozenset()) 
             out.append(row)
             continue
         text = row.get("description") or ""
+        if text and text not in words:  # the path only, never the text
+            log.debug("no %s description for %s", language, row["path"])
         copy = {**row, "description": words.get(text, "") if text else ""}
         if isinstance(row.get("entry"), list):
             copy["entry"] = localize(row["entry"], language)

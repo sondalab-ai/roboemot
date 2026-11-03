@@ -4,37 +4,52 @@
 // (a name the owner gave, a host, a server error code). Hard-coded English in the script or a
 // server code shown raw leaves text outside the markers and fails here. Run with `npm test`.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadPage, settle } from "./harness.mjs";
 
-// The default-language block of strings.py: each key with the placeholders its text uses.
-function pseudoStrings() {
-  const src = readFileSync(new URL("../../src/roboemot/webui/strings.py", import.meta.url), "utf8");
-  const block = src.slice(src.indexOf("EN: dict[str, str] = {"), src.indexOf("IT: dict[str, str] = {"));
-  const out = {};
-  const parts = block.split(/\n    "([a-z0-9_]+)": /);
-  for (let i = 1; i < parts.length; i += 2) {
-    const vars = [...new Set([...parts[i + 1].matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]))];
-    out[parts[i]] = "⟦" + parts[i] + vars.map((v) => "{" + v + "}").join("") + "⟧";
-  }
+// The page strings as Python holds them: strings.py is run on its own (it imports nothing), so
+// the dicts are read exactly, never parsed from the source. PYTHON overrides the interpreter.
+function pageStrings() {
+  const path = fileURLToPath(new URL("../../src/roboemot/webui/strings.py", import.meta.url));
+  const dump = "import json, runpy, sys; d = runpy.run_path(sys.argv[1]); print(json.dumps(d['STRINGS']))";
+  const out = JSON.parse(execFileSync(process.env.PYTHON || "python3", ["-c", dump, path], { encoding: "utf8" }));
+  assert.ok(Object.keys(out.en).length > 100 && Object.keys(out.it).length > 100, "strings.py read");
   return out;
 }
 
-const STRINGS = pseudoStrings();
-const SYMBOLS = /^[\s\d.,:;()\-–—#%/+×←→✓·…$*@[\]=_]*$/;
+// Each key as a marker with the placeholders its text uses, so the page still fills them.
+function pseudoStrings(strings) {
+  return Object.fromEntries(Object.entries(strings).map(([key, text]) => {
+    const vars = [...new Set([...text.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]))];
+    return [key, "⟦" + key + vars.map((v) => "{" + v + "}").join("") + "⟧"];
+  }));
+}
 
-// The text nodes of `root` with the markers taken out, minus the allowed fixture values.
+const STRINGS = pseudoStrings(pageStrings().en);
+const SYMBOLS = /^[\s\d.,:;()\-–—#%/+×←→✓·…$*@[\]=_]*$/;
+const ATTRIBUTES = ["title", "aria-label", "placeholder", "alt"]; // text a person reads or hears
+
+function leftover(text, allowed) {
+  let rest = text;
+  for (let prev = null; prev !== rest;) { prev = rest; rest = rest.replace(/⟦[^⟦⟧]*⟧/g, " "); }
+  for (const value of allowed) rest = rest.split(value).join(" ");
+  return SYMBOLS.test(rest) ? null : JSON.stringify(text);
+}
+
+// The texts of `root` (text nodes and the readable attributes) with the markers taken out, minus
+// the allowed fixture values, that are still not numbers or symbols.
 function leftovers(root, allowed) {
   const out = [];
   const walker = root.ownerDocument.createTreeWalker(root, 4 /* SHOW_TEXT */);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    let rest = node.nodeValue;
-    for (let prev = null; prev !== rest;) { prev = rest; rest = rest.replace(/⟦[^⟦⟧]*⟧/g, " "); }
-    for (const value of allowed) rest = rest.split(value).join(" ");
-    if (!SYMBOLS.test(rest)) out.push(JSON.stringify(node.nodeValue));
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) out.push(leftover(node.nodeValue, allowed));
+  for (const node of [root, ...root.querySelectorAll("*")]) {
+    for (const name of ATTRIBUTES) {
+      if (node.hasAttribute(name)) out.push(leftover(node.getAttribute(name), allowed));
+    }
   }
-  return out;
+  return out.filter(Boolean);
 }
 
 const T0 = Date.UTC(2026, 10, 2, 9, 30, 0) / 1000;
@@ -190,8 +205,10 @@ test("the Settings tab words sources, tags and the robot section; values stay as
   await settle();
   assert.ok(view.querySelector('[data-path="robot.bot.limits.head.max_deg"]'), "the robot rows are drawn");
   // config names (code, the group nav), values and units stay as they are
-  for (const node of view.querySelectorAll("code, .setting-value, pre, option, .sl-chip, .sl-nav__item, .row > span.hint")) node.remove();
-  assert.deepEqual(leftovers(view, ["⟦a description⟧", "Bot One"]), []);
+  for (const node of view.querySelectorAll("code, .setting-value, pre, .sl-nav__item, .row > span.hint")) node.remove();
+  // an input is labelled by its config path (an identifier) for screen readers
+  const paths = ["affect.half_life_s", "affect.update_hz"];
+  assert.deepEqual(leftovers(view, ["⟦a description⟧", "Bot One", ...paths]), []);
 });
 
 test("the Registry tab words kinds and statuses", async (t) => {

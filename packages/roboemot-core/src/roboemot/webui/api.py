@@ -71,7 +71,6 @@ EMOTIONS_STATUS = {
     "unknown_expression": HTTPStatus.UNPROCESSABLE_ENTITY,
     "unknown_rule": HTTPStatus.UNPROCESSABLE_ENTITY,
 }
-EMOTIONS_LABEL_MAX_CHARS = 64  # longest expression or gesture name a request may carry
 ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
@@ -834,7 +833,7 @@ class WebApi:
         body = self._json_body(req)
         v.only_keys(body, {"label", "pin"})
         label = body.get("label")
-        if not isinstance(label, str) or not 0 < len(label) <= EMOTIONS_LABEL_MAX_CHARS:
+        if not isinstance(label, str):  # any name the robot lacks is unknown_expression
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
         return Response(HTTPStatus.OK, {"queued": self._emotions_call(source.play, label)})
