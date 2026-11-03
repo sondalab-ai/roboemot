@@ -79,6 +79,7 @@ def test_a_tone_beside_the_spoken_reply_starts_no_new_round(rigs):
         snap = rig.route.snapshot()
         assert snap["tool_calls"] == 0  # never a skill call
         assert rig.worker.snapshot()["tones"] == 1
+        assert rig.worker.snapshot().get("tone_retry", 0) == 0  # spoke: no extra response
         assert rig.events[-1]["rounds"] == 0 and rig.events[-1]["outcome"] == "ok"
         assert "note_tone" not in json.dumps(rig.history())  # not in the chat history
         rig.turn()  # the call has its output: the next response is not refused
@@ -117,6 +118,7 @@ def test_the_extra_response_runs_once(rigs):
         assert wait_for(lambda: len(outputs(srv)) == 2)
         assert srv.pending_refusals == 0
         assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+        assert rig.worker.snapshot()["tone_retry"] == 1
 
 
 def test_a_tone_beside_a_skill_runs_the_normal_next_round(rigs):
