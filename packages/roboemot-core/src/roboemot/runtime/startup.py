@@ -19,7 +19,7 @@ from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
-from roboemot.conversation.sources import profile_source, registry_names, scene_source
+from roboemot.conversation.sources import profile_source, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
 from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
@@ -162,7 +162,7 @@ def start_voice_output(
         ),
         speaker=p.conv_speaker,
         names=p.names,
-        known_names=registry_names(registry, p.value_cap),
+        name_source=host.name_source,  # one alias per name with traits and route checks
         skills=default_skills(
             SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
                 p.runner.engine
