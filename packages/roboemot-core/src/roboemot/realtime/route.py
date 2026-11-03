@@ -49,8 +49,10 @@ here logs or reports a key, a URL's path or query, text, audio or an identifier 
 A session lost on its own (not one the robot closed) and a connect that failed are retried in the
 background by one reconnect worker (``_keep_connecting``), paced by the same backoff a turn's
 ``ready`` honours (the ``realtime`` link of ``connectivity.network``, and ``_reopen_at``), until a
-session is up, the route is blocked or the robot closes it (a close of its own, sleep, shutdown):
-the status clears without waiting for the next turn, and that turn does not pay the connect.
+session is up, the route is blocked or the robot closes it (sleep, shutdown, the budget; the
+conversation's end after a loss keeps it): the status clears without waiting for the next turn,
+and that turn does not pay the connect. A loss counts in the reset streak, so a server that keeps
+dropping its sessions is reconnected ever more slowly.
 
 Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
 12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
@@ -92,7 +94,7 @@ STATES = ("off", "blocked", "connecting", "connected", "closed", "fallback_local
 # Reasons a route is blocked; the first ones hold until a restart or a config change.
 BLOCKS = ("off", "no_route", "no_opt_in", "no_extra", "provider", "pseudonyms", "budget",
           "unavailable")  # fmt: skip
-UNREACHABLE = ("blocked", "unavailable")  # waited for in the background (its link's checks)
+UNREACHABLE_STATE = ("blocked", "unavailable")  # waited for in the background (its link's checks)
 OWN_CLOSES = (
     "conversation_end",
     "asleep",
@@ -195,6 +197,15 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
     )
 
 
+def streak_delay(n: int, policy: Any) -> float:
+    """The wait before the next connect after the ``n``-th reset or loss in a row (the
+    ``connectivity.network`` backoff): none after the first, then ``probe_initial_s`` growing by
+    ``probe_backoff`` up to ``probe_max_s``."""
+    if n <= 1:
+        return 0.0
+    return min(policy.probe_max_s, policy.probe_initial_s * policy.probe_backoff ** (n - 2))
+
+
 def realtime_extra() -> bool:
     """Whether the ``realtime`` extra (``websockets``) is installed."""
     return importlib.util.find_spec("websockets") is not None
@@ -253,7 +264,10 @@ class RealtimeRoute:
         self.reason: str | None = None
         self._closed = False
         self._lost = False
-        self._resets_in_row = 0  # resets since the server last answered (a response, a transcript)
+        # resets and losses since the server last answered (a response, a transcript): each one
+        # after the first waits the connectivity.network backoff before the next connect
+        self._resets_in_row = 0
+        self._opened_at = 0.0  # when the current session was stored (clock)
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
         self._outputs: set[str] = set()  # event ids of the settling tool results on this session
         self._reopens = 0  # reconnects a reset started that have not returned yet
@@ -262,7 +276,7 @@ class RealtimeRoute:
         self._retrying = False  # the background reconnect worker runs (one at a time)
         self._retry_closes = 0  # the close count it follows: any later close ends it
         self._retry_wake = threading.Event()  # cuts its wait short (a close, a new start)
-        self._retry_thread: threading.Thread | None = None
+        self._retry_thread: threading.Thread | None = None  # the last worker (tests join it)
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.base_instructions: Callable[[], str] = lambda: ""
         self._counts: collections.Counter[str] = collections.Counter()
@@ -305,6 +319,14 @@ class RealtimeRoute:
         self._settle(orphans, "reconfigured")
         if client is not None:
             self._close_client(client, "reconfigured")
+        # the reconnect worker re-reads the backoff (a new endpoint's fresh link is due now) and
+        # the block: a reload that blocks the route ends it, one that unblocks a lost route
+        # starts it
+        self._retry_wake.set()
+        with self._lock:
+            lost, closes = self.state == "fallback_local", self._closes
+        if reason is None and lost:
+            self._reconnect_soon(closes)
 
     def _fits(self, cfg: RoboEmotConfig, client: Any) -> bool:
         """Whether ``cfg`` would open ``client``'s session (``_lock`` held): the route is not
@@ -461,12 +483,23 @@ class RealtimeRoute:
     def close_soon(self, reason: str) -> None:
         """``close`` without waiting: the session is detached now (no later turn uses it: a new
         person never inherits the server's history), its socket closes on a thread of its own
-        (the caller is an event loop)."""
+        (the caller is an event loop). The conversation's end after a lost session keeps the
+        reconnect worker (it follows the new close count): the next session is a new one anyway;
+        any other close ends it."""
         with self._lock:
             self._closes += 1
             self._close_reason = reason
             client, orphans = self._detach()
-        self._retry_wake.set()  # the reconnect worker sees the close now and ends
+            lost = (
+                reason == "conversation_end"
+                and self._retrying
+                and not self._closed
+                and self.state == "fallback_local"
+                and (client is None or client.state != "connected")
+            )
+            if lost:
+                self._retry_closes = self._closes
+        self._retry_wake.set()  # the reconnect worker sees the close now (and ends, or not)
         self._settle(orphans, reason)
         if client is not None:
             self._close_client(client, reason)
@@ -579,6 +612,7 @@ class RealtimeRoute:
                     self.state, self.reason = "closed", "reconfigured"
                     return False
                 self._client, self._token = client, token
+                self._opened_at = self.clock()
                 self.generation += 1
                 self._counts["opened"] += 1
                 if self._lost:  # the last session was lost, not closed by the robot
@@ -721,10 +755,7 @@ class RealtimeRoute:
             self._counts[counter] += 1
             self._resets_in_row += 1
             n = self._resets_in_row
-            delay = 0.0
-            if n > 1:
-                grown = policy.probe_initial_s * policy.probe_backoff ** (n - 2)
-                delay = min(policy.probe_max_s, grown)
+            delay = streak_delay(n, policy)
             self._reopen_at = now + delay
             self._closes += 1
             self._close_reason = reason
@@ -757,6 +788,16 @@ class RealtimeRoute:
         """A reset's reconnect, or any connect, is in flight: a session may come soon."""
         with self._lock:
             return self._reopens > 0 or self._connecting is not None
+
+    def _streak_loss(self) -> None:
+        """A stored session was lost: one more step of the reset streak (``_reopen_at``)."""
+        policy = self.stack.effective().connectivity.network  # never under _lock
+        now = self.clock()
+        with self._lock:
+            if now - self._opened_at >= policy.probe_max_s:
+                self._resets_in_row = 0  # it held long enough: not a flapping server
+            self._resets_in_row += 1
+            self._reopen_at = max(self._reopen_at, now + streak_delay(self._resets_in_row, policy))
 
     def _held_back(self) -> bool:
         """The backoff holds the next connect (``_lock`` held): a reset streak's ``_reopen_at``,
@@ -801,19 +842,24 @@ class RealtimeRoute:
                 self._retrying = False
 
     def _reconnect_step(self) -> float | None:
-        """One step of the reconnect worker: None when it is over (the worker is then marked
-        gone in the same critical section that decided it), else the seconds to wait before
-        the next step. Over: a session is up, a close came since the worker's close count, or
-        an attempt left the route neither ``fallback_local`` nor ``unavailable`` while its own
-        link is offline (that block lifts when the link's check succeeds: waited for, never
-        connected through). An attempt is ``ready`` with the worker's close count, so the
-        connect lock, the stale-connect checks and the backoff are those of a turn."""
+        """One step of the reconnect worker: the seconds to wait before the next one, or None
+        when it is over (marked in the same critical section that decides it). An attempt is
+        ``ready`` with the worker's close count (a turn's locks, checks and backoff). Over when:
+
+        - a session is up;
+        - a close came since the worker's close count;
+        - there is no router or no session provider;
+        - an attempt left the route blocked (except ``unavailable`` while the route's own link
+          is offline: waited for, never connected through).
+        """
+        absent = self._router() is None or self.provider is None
         with self._lock:
             closes = self._retry_closes
-            if self._retry_over(closes):
+            if absent or self._retry_over(closes):
                 self._retrying = False
                 return None
-        wait = self._retry_wait()
+        blocked = self.blocked(self.stack.effective()) is not None
+        wait = 0.0 if blocked else self._retry_wait()  # a block is recorded (ready) at once
         if wait > 0:
             return wait
         if self.ready(closes=closes):
@@ -824,7 +870,7 @@ class RealtimeRoute:
             if self._retry_closes != closes or self._retry_over(closes):
                 return 0.0  # a new start, a close or a session meanwhile: the next step decides
             down = self.state == "fallback_local"
-            if not (down or (offline and (self.state, self.reason) == UNREACHABLE)):
+            if not (down or (offline and (self.state, self.reason) == UNREACHABLE_STATE)):
                 self._retrying = False
                 return None
         # an attempt that scheduled no backoff (it changed nothing) waits its first step
@@ -849,7 +895,7 @@ class RealtimeRoute:
         if state == "fallback_local":
             due_in = self.network.realtime_due_in()
         elif (
-            (state, reason) == UNREACHABLE
+            (state, reason) == UNREACHABLE_STATE
             and route is not None
             and not self.network.is_online(route.name)  # back online: try now
         ):
@@ -1066,7 +1112,10 @@ class RealtimeRoute:
     def _on_close(self, reason: str, token: _Token | None = None) -> None:
         """A client's socket closed. A session that was up and is lost on its own (not a close
         of the robot's) is reconnected in the background (``_reconnect_soon``); a connect that
-        failed is handled by ``_connect``, which knows the close count it began with."""
+        failed is handled by ``_connect``, which knows the close count it began with. A loss
+        counts in the reset streak (``streak_delay``): a server that accepts sessions and drops
+        them, never answering, is reconnected ever more slowly. A session that lived
+        ``probe_max_s`` or more starts a new streak."""
         with self._lock:
             current = self._current(token)
             tok = token or self._token
@@ -1091,6 +1140,7 @@ class RealtimeRoute:
             self._set_state("fallback_local", reason)
             self.events("session", "lost", why=reason)
             if stored:
+                self._streak_loss()
                 self._reconnect_soon(closes)
         for r in reqs:
             if r.run is not None:
