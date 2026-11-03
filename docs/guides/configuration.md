@@ -533,7 +533,7 @@ The status line shows one status: the first that holds, in this order (`_status`
 
 | Order | Status line (English / Italian) |
 | --- | --- |
-| 1 | "Asleep" / "Dorme" |
+| 1 | "Motors off" / "Motori spenti" |
 | 2 | "Answering" / "Sta rispondendo" |
 | 3 | "Cut off by a barge-in" / "Interrotto da chi parlava" |
 | 4 | "Waiting for the answer" / "Aspetta la risposta" |
@@ -541,7 +541,10 @@ The status line shows one status: the first that holds, in this order (`_status`
 | 6 | "Listening" / "In ascolto" |
 | 7 | "Offline: the network is down" / "Offline: la rete non c'è" |
 | 8 | "Cloud voice down" / "Voce cloud non disponibile" |
-| 9 | "Idle" / "A riposo" |
+| 9 | "Napping: nobody seen or heard for a while" / "Fa un pisolino: nessuno visto o sentito da un po'" |
+| 10 | "Resting (circadian rhythm)" / "Riposa (ritmo circadiano)" |
+| 11 | "Alone: nobody seen or heard, holding still" / "Da solo: nessuno visto o sentito, sta fermo" |
+| 12 | "Idle" / "In attesa" |
 
 So "Offline" hides "Cloud voice down", and so does a conversation in progress. The reason code is
 not in the status line. It is in a separate note: "The cloud voice is down ({reason})." /
@@ -574,7 +577,7 @@ one of these codes:
 | It answers the TV. | "Answered (…)" | Check that `voice.direction.enabled` and `voice.facing.enabled` are on, and turn on `voice.realtime_route.skip_tool`. Known limits (SPEC 8, Stages): a face on the screen that looks into the camera passes, and a sound from behind the robot can be mirrored onto a face in front. Its audio still reaches the server. |
 | No sound at all when the cloud voice fails. | "Fallback sound: the cloud voice could not answer and there is no local voice" | With `voice.backend: none`, the cues are the only feedback. If `voice.cues.enabled` is off, the robot stays silent. Turn it on. Cues are also muted while the robot sleeps. |
 | The cloud does not return what you said. | "No transcript from the cloud within … s" | The server's delay. Raise `voice.realtime_route.transcript_timeout_s` (at most 15 s). |
-| The robot is still. | "Asleep" / "Dorme" | The platform holds the motors off. Wake the robot from the platform's app. |
+| The robot is still. | "Motors off" / "Motori spenti" | The platform holds the motors off. Wake the robot from the platform's app. |
 
 When the web UI and `app.yaml` disagree, the web UI wins. Look at the field's source layer on the
 Settings tab, and reset it there.

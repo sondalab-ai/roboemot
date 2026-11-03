@@ -651,17 +651,32 @@ test("dict rows reject prototype keys, blank keys and duplicates", async () => {
   assert.equal(page.document.querySelector("dialog"), null);
 });
 
-test("an enum outside its choices shows a blank and never sends choice 0", async () => {
+test("a saved enum value outside its choices stays shown, marked not valid, and never sends choice 0", async () => {
   const flat = [d("voice.mode", "enum", { value: "zzz", choices: ["a", "b"] })];
   const page = await settingsPage({}, { fields: flat, pin_required: true });
   await open(page, "core-voice");
   const box = row(page, "voice.mode");
   const select = box.querySelector("select");
   assert.equal(select.value, "");
+  const shown = select.options[select.selectedIndex];
+  assert.equal(shown.dataset.invalid, "1");
+  assert.equal(shown.textContent, "settings_choice_invalid", "the stale value, worded by the page");
+  assert.equal(select.getAttribute("aria-invalid"), "true");
+  assert.ok(box.querySelector('[data-stale="1"]'), "a hint says the value is not valid");
   button(box, "settings_save").click();
   await settle();
-  assert.equal(box.querySelector(".sl-field__error").textContent, "err_value_choice");
+  assert.equal(box.querySelector('.sl-field__error[role="alert"]').textContent, "err_value_choice");
   assert.equal(page.document.querySelector("dialog"), null);
+});
+
+test("a blank enum outside its choices shows a dash and asks for a choice", async () => {
+  const flat = [d("voice.mode", "enum", { value: "", choices: ["a", "b"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  const select = row(page, "voice.mode").querySelector("select");
+  assert.deepEqual([...select.options].map((o) => o.textContent), ["—", "a", "b"]);
+  assert.equal(select.getAttribute("aria-invalid"), null);
+  assert.equal(row(page, "voice.mode").querySelector('[data-stale="1"]'), null);
 });
 
 test("no slider when the limits are equal; chips are not toggles; the description is linked", async () => {
@@ -970,4 +985,168 @@ test("save: a change the robot's parts did not take is announced as an error (R3
   const notice = page.document.querySelector("#notice");
   assert.ok(notice.textContent.includes("settings_not_applied"));
   assert.ok(notice.className.includes("sl-callout--danger"), notice.className);
+});
+
+// ---------------------------------------------------------------- reference choices and the null filter (SPEC 11A)
+
+const LABELS = ["calm", "joy"];
+
+function referenceFields() {
+  return [
+    d("appraisal.rules", "keyed_list", { value: ["0"], key: "event", writable: false, entry: [
+      d("event", "enum", { value: "", choices: ["person.known", "idle.long"] }),
+      d("label", "enum", { value: null, nullable: true, choices: LABELS }),
+    ] }),
+    d("appraisal.rules.0.event", "enum", { value: "person.known", choices: ["person.known", "idle.long"] }),
+    d("appraisal.rules.0.label", "enum", { value: "joy", default: "joy", nullable: true, choices: LABELS }),
+    d("voice.openai_speech.route", "enum", { value: "", default: "", choices: ["", "lan"] }),
+    d("voice.opt", "number", { value: null, default: null, nullable: true, ge: 0, le: 5, description: "Optional gain" }),
+    d("voice.opt_runtime", "number", { value: null, default: 2, nullable: true, ge: 0, le: 5, source: "runtime" }),
+    d("voice.volume_db", "number", { value: 3.5, default: 0, ge: -12, le: 12, source: "runtime", description: "Speech volume" }),
+    d("speech_motion.mood_gain", "number_dict", { value: { calm: 0.6 }, default: { calm: 0.6 }, choices: LABELS }),
+    d("expression_map", "dict_of_model", { value: ["calm"], choices: LABELS, writable: true, entry: ENTRY }),
+    d("expression_map.calm.rate", "number", { value: 1, default: 1, ge: 0, le: 2 }),
+    d("expression_map.calm.speed", "number", { value: null, default: null, nullable: true, ge: 0, le: 2 }),
+  ];
+}
+
+test("a reference field renders as a select of its choices, with (none) for an optional one", async () => {
+  const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } },
+    { fields: referenceFields(), pin_required: true });
+  await open(page, "core-appraisal");
+  page.document.querySelector('[data-entry="appraisal.rules.0"] .sl-disclosure').click();
+  await settle();
+  const label = row(page, "appraisal.rules.0.label").querySelector("select");
+  assert.deepEqual([...label.options].map((o) => o.textContent), ["settings_choice_none", "calm", "joy"]);
+  assert.equal(label.options[label.selectedIndex].textContent, "joy");
+  assert.equal(row(page, "appraisal.rules.0.label").querySelector('input[type="checkbox"]'), null, "no null checkbox");
+  label.value = "null";
+  button(row(page, "appraisal.rules.0.label"), "settings_save").click();
+  await settle();
+  await answerPin(page);
+  const sent = posts(page, "/api/settings");
+  assert.deepEqual(sent[sent.length - 1].body, { path: "appraisal.rules.0.label", value: null, pin: PIN });
+
+  await open(page, "core-voice");
+  const route = row(page, "voice.openai_speech.route").querySelector("select");
+  assert.deepEqual([...route.options].map((o) => o.textContent), ["settings_choice_none", "lan"], "the unset route is worded");
+});
+
+test("an add form and dict keys pick their key from the choices", async () => {
+  const page = await settingsPage({}, { fields: referenceFields(), pin_required: true });
+  await open(page, "core-appraisal");
+  page.document.querySelector('[data-path="appraisal.rules"] .stack > .sl-disclosure').click();
+  await settle();
+  const form = row(page, "appraisal.rules");
+  const [event, label] = form.querySelectorAll("select");
+  assert.deepEqual([...event.options].map((o) => o.textContent), ["—", "person.known", "idle.long"]);
+  assert.equal(label.options[label.selectedIndex].textContent, "settings_choice_none");
+
+  await open(page, "core-expression_map");
+  page.document.querySelector('[data-path="expression_map"] .stack > .sl-disclosure').click();
+  await settle();
+  const name = row(page, "expression_map").querySelector('select[id$="-name"]');
+  assert.deepEqual([...name.options].map((o) => o.value), ["", "joy"], "only the labels without an entry");
+
+  await open(page, "core-speech_motion");
+  const key = row(page, "speech_motion.mood_gain").querySelector("select");
+  assert.deepEqual([...key.options].map((o) => o.value), ["calm", "joy"]);
+  assert.equal(key.value, "calm");
+});
+
+test("a saved key outside the choices stays shown and marked not valid", async () => {
+  const flat = [d("speech_motion.mood_gain", "number_dict", { value: { pride: 1 }, choices: LABELS })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-speech_motion");
+  const key = row(page, "speech_motion.mood_gain").querySelector("select");
+  assert.equal(key.value, "pride");
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(key.options[key.selectedIndex].dataset.invalid, "1");
+});
+
+const shownPaths = (page) => [...page.document.querySelectorAll(".setting")]
+  .filter((r) => !r.closest("[hidden]")).map((r) => r.dataset.path);
+const tick = async (page, id, on) => {
+  const box = page.document.querySelector(id);
+  box.checked = on;
+  box.dispatchEvent(new page.window.Event("change"));
+  await settle();
+};
+
+test("the only-null filter keeps the fields without a value, alone and with search and changed only", async () => {
+  const page = await settingsPage({}, { fields: referenceFields(), pin_required: true });
+  assert.ok(page.document.querySelector("#settings-null"), "the checkbox sits in the toolbar");
+  await tick(page, "#settings-null", true);
+  let shown = shownPaths(page);
+  assert.ok(shown.includes("voice.opt") && shown.includes("voice.opt_runtime"));
+  assert.ok(!shown.includes("voice.volume_db") && !shown.includes("voice.openai_speech.route"), "an empty string is a value");
+  assert.ok(shown.includes("expression_map"), "a container with a null leaf");
+  assert.ok(!shown.includes("appraisal.rules"), "a container without one");
+  assert.equal(page.document.querySelector("#grp-core-speech_motion").closest("section").hidden, true);
+
+  await typeQuery(page, "optional");
+  assert.deepEqual(shownPaths(page), ["voice.opt"], "search and null together");
+
+  await typeQuery(page, "");
+  await tick(page, "#settings-changed", true);
+  assert.deepEqual(shownPaths(page).filter((p) => p.startsWith("voice.")), ["voice.opt_runtime"], "changed and null together");
+
+  await tick(page, "#settings-null", false);
+  shown = shownPaths(page);
+  assert.ok(shown.includes("voice.volume_db") && !shown.includes("voice.opt"), "back to changed only");
+});
+
+test("search and the null filter must hold on the same leaf of a container", async () => {
+  const page = await settingsPage({}, { fields: referenceFields(), pin_required: true });
+  await tick(page, "#settings-null", true);
+  await typeQuery(page, "expression_map.calm.rate");
+  assert.ok(!shownPaths(page).includes("expression_map"), "search hits rate, null holds on speed: not the same leaf");
+  await typeQuery(page, "expression_map.calm.speed");
+  assert.ok(shownPaths(page).includes("expression_map"), "both hold on speed");
+});
+
+test("a dict key select offers only the keys no other row holds", async () => {
+  const flat = [d("speech_motion.mood_gain", "number_dict", { value: { calm: 0.6 }, choices: ["calm", "joy", "fear"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-speech_motion");
+  const box = row(page, "speech_motion.mood_gain");
+  button(box, "settings_add").click();
+  await settle();
+  const [first, added] = box.querySelectorAll("select");
+  assert.deepEqual([...added.options].map((o) => o.value), ["", "joy", "fear"], "calm is held by the first row");
+  added.value = "joy";
+  added.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  assert.deepEqual([...first.options].map((o) => o.value), ["calm", "fear"]);
+  buttons(box, "settings_remove")[1].click(); // the added row; a saved key is not removable here
+  await settle();
+  assert.equal(box.querySelectorAll("select").length, 1);
+  assert.deepEqual([...first.options].map((o) => o.value), ["calm", "joy", "fear"], "joy is free again");
+});
+
+test("a stale item of an enum list stays as a chip marked not valid", async () => {
+  const flat = [d("attention.priority_order", "enum_list", { value: ["nearest_face", "gone"], choices: ["nearest_face", "active_speaker"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-attention");
+  const chips = [...row(page, "attention.priority_order").querySelectorAll(".sl-chip")];
+  assert.deepEqual(chips.map((c) => c.dataset.invalid || ""), ["", "1"]);
+  assert.equal(chips[1].textContent, "settings_choice_invalid");
+});
+
+test("a nullable enum stored as an empty string or outside its choices is marked not valid", async () => {
+  const flat = [
+    d("voice.a", "enum", { value: "", nullable: true, choices: ["x"] }),
+    d("voice.b", "enum", { value: "zzz", nullable: true, choices: ["x"] }),
+    d("voice.c", "enum", { value: "", nullable: true, choices: ["", "x"] }),
+  ];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  for (const path of ["voice.a", "voice.b"]) {
+    const select = row(page, path).querySelector("select");
+    assert.equal(select.getAttribute("aria-invalid"), "true", path);
+    assert.equal(select.options[select.selectedIndex].dataset.invalid, "1", path);
+    assert.equal(select.options[0].value, "null", "(none) stays offered");
+  }
+  const c = row(page, "voice.c").querySelector("select");
+  assert.equal(c.getAttribute("aria-invalid"), null, "an empty string that is a choice is valid");
+  assert.equal(c.options[c.selectedIndex].textContent, "settings_choice_none");
 });
