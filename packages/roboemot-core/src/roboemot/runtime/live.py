@@ -98,17 +98,18 @@ class LiveState:
         if not cfg.webui.live.enabled:
             return None
         now = self._clock()
+        rest = self._rest()  # one read per poll: the modes badge and the status line agree
         return {
             "poll_ms": cfg.webui.live.poll_ms,
             "mood": self._mood(now),
-            "modes": self._modes(cfg),
+            "modes": self._modes(cfg, rest),
             "conversation": self._host.phase.snapshot(),
             "audio_egress": bool(self._egress()),
             "attention": self._attention(cfg, now),
             "reflexes": self._reflexes(now),
             "motion": self._motion(),
             "system": self._system(cfg, now),
-            "activity": self._activity(cfg) if cfg.webui.live.activity else None,
+            "activity": self._activity(cfg, rest) if cfg.webui.live.activity else None,
             "video": {
                 "enabled": cfg.webui.live.video,
                 "poll_ms": round(MS_PER_S / cfg.webui.live.video_fps),
@@ -152,12 +153,12 @@ class LiveState:
             ring.clear()
         return True
 
-    def _activity(self, cfg: RoboEmotConfig) -> dict[str, Any]:
+    def _activity(self, cfg: RoboEmotConfig, rest: str | None) -> dict[str, Any]:
         """The status code, the conditions that hold and the decision events (newest first)."""
         notes = self._notes(cfg)
         ring = self._host.activity
         return {
-            "status": self._status(cfg, notes),
+            "status": self._status(cfg, notes, rest),
             "notes": notes,
             "events": ring.events() if ring is not None else [],
         }
@@ -175,7 +176,7 @@ class LiveState:
                 notes.append({"code": "cloud_down", "reason": code(reason, ROUTE_REASONS)})
         return notes
 
-    def _status(self, cfg: RoboEmotConfig, notes: list[dict[str, Any]]) -> str:
+    def _status(self, cfg: RoboEmotConfig, notes: list[dict[str, Any]], rest: str | None) -> str:
         """One of ``STATUSES``, from the parts' own state (the first that holds)."""
         if self._p.sleep.asleep:
             return "asleep"
@@ -195,7 +196,6 @@ class LiveState:
             return "listening"
         if notes:
             return notes[0]["code"]
-        rest = self._rest()
         if rest in ("napping", "resting"):
             return rest
         return "alone" if self._p.alone.alone else "idle"
@@ -230,12 +230,12 @@ class LiveState:
             "circadian": energy,
         }
 
-    def _modes(self, cfg: RoboEmotConfig) -> dict[str, Any]:
+    def _modes(self, cfg: RoboEmotConfig, rest: str | None) -> dict[str, Any]:
         p = self._p
         active = p.tracker.active
         return {
             "asleep": p.sleep.asleep,
-            "rest": self._rest(),
+            "rest": rest,
             "alone": p.alone.alone,
             "paused": p.sleep.paused_parts(),
             "online": p.network.online,

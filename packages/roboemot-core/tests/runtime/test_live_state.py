@@ -187,6 +187,20 @@ def test_the_modes_card_names_the_circadian_rest_apart_from_the_motors(state, re
     assert s["activity"]["status"] == status
 
 
+def test_motors_off_and_a_nap_show_both_and_the_status_says_motors_off():
+    host = SimpleNamespace(
+        circadian=SimpleNamespace(state="resting", reason="nap"),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
+    p = parts(sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["app_tick"]))
+    s = live(p, host=host).state()
+    assert s["activity"]["status"] == "asleep"  # the platform sleep wins the status line
+    assert s["modes"]["asleep"] is True and s["modes"]["rest"] == "napping"
+
+
 def test_the_conversation_card_is_the_phase():
     host = SimpleNamespace(
         circadian=None,

@@ -145,6 +145,36 @@ test("the modes card shows the circadian nap apart from the motors, and nothing 
   assert.ok(!quiet.includes("NAP BADGE") && !quiet.includes("DROWSY BADGE"));
 });
 
+for (const [rest, label] of [["drowsy", "DROWSY BADGE"], ["resting", "REST BADGE"]]) {
+  test(`the modes card shows the ${rest} badge`, async (t) => {
+    const strings = { ...STRINGS, live_rest_drowsy: "DROWSY BADGE", live_rest_resting: "REST BADGE", live_rest_napping: "NAP BADGE" };
+    const page = await livePage(t, {
+      "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, rest } },
+      "GET /api/strings": { language: "en", strings },
+    });
+    await openLive(page);
+    const text = page.document.querySelector("#live-cards").textContent;
+    assert.ok(text.includes(label), label);
+    assert.ok(!text.includes("NAP BADGE"));
+  });
+}
+
+test("an old snapshot without the rest field draws the modes card with no rest badge", async (t) => {
+  const { rest, ...modes } = { ...STATE.modes };
+  assert.equal(rest, undefined);
+  assert.ok(!("rest" in modes));
+  const strings = { ...STRINGS, live_motors_on: "MOTORS ON", live_rest_drowsy: "DROWSY BADGE", live_rest_resting: "REST BADGE", live_rest_napping: "NAP BADGE" };
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(page);
+  const text = page.document.querySelector("#live-cards").textContent;
+  assert.ok(text.includes("MOTORS ON"));
+  for (const label of ["DROWSY BADGE", "REST BADGE", "NAP BADGE", "undefined"]) assert.ok(!text.includes(label), label);
+  assert.equal(page.document.querySelector("#live-cards").children.length, 8);
+});
+
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {
   const page = await livePage(t);
   await sleep(WAIT_MS);
