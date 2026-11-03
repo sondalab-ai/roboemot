@@ -12,6 +12,7 @@ Scripts (``scripts``, used in order; the last one repeats):
 - ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
 - ``tool_then_audio``: the ``tool`` call, then the ``reply`` audio (both stop at a cancel);
 - ``tools``: one call per name of ``tool_names`` in one response, then ``response.done``;
+- ``tools_then_audio``: the ``tools`` calls, then the ``reply`` audio;
 - ``tool_close``: the ``tool`` call, then the socket is closed;
 - ``tool_stall``: the ``tool`` call, then ``response.done`` only after ``stall_s``;
 - ``close_before``: the socket is closed on ``response.create``;
@@ -50,7 +51,8 @@ audio. ``end_positions`` off leaves ``audio_end_ms`` out (start positions only).
 that long apart: a late second segment. ``ids`` off leaves every ``item_id`` out (a server
 that does not send them); ``ids_per_session`` numbers the items per connection, so an id
 repeats across sessions. ``tool_names`` (when set) names the call of each response in turn
-(the last repeats) instead of ``tool_name``. ``sent`` records every event the server sent.
+(the last repeats) instead of ``tool_name``; ``call_args`` (call id -> arguments) overrides
+``tool_args`` for one call. ``sent`` records every event the server sent.
 """
 
 from __future__ import annotations
@@ -104,6 +106,7 @@ class TurnServer(FakeServer):
         stall_s: float = 1.5,
         strict_calls: bool = False,
         reject_outputs: bool = False,
+        call_args: dict[str, str] | None = None,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -112,6 +115,7 @@ class TurnServer(FakeServer):
         self.transcript, self.usage = transcript, usage
         self.tool_name, self.tool_args = tool_name, tool_args
         self.tool_names, self.stall_s = tool_names, stall_s
+        self.call_args = call_args or {}
         self.strict_calls = strict_calls
         self.reject_outputs = reject_outputs
         self.open_calls: dict[str, str] = {}  # call id -> its item id, on this connection
@@ -282,9 +286,10 @@ class TurnServer(FakeServer):
             await self._call(ws, rid)
             await self._done(ws, rid, "completed")
             return
-        if script == "tools":
+        if script in ("tools", "tools_then_audio"):
             for i, name in enumerate(self.tool_names or [self.tool_name]):
                 await self._call(ws, rid, name, i)
+        if script == "tools":
             await self._done(ws, rid, "completed")
             return
         if script == "tool_close":
@@ -342,16 +347,17 @@ class TurnServer(FakeServer):
         if name is None and self.tool_names:
             name = self.tool_names[min(self.responses - 1, len(self.tool_names) - 1)]
         suffix = f"_{index}" if index else ""
-        self.open_calls[f"call_{self.responses}{suffix}"] = f"fc_{self.responses}{suffix}"
+        call_id = f"call_{self.responses}{suffix}"
+        self.open_calls[call_id] = f"fc_{self.responses}{suffix}"
         await self._send(
             ws,
             {
                 "type": "response.function_call_arguments.done",
                 "response_id": rid,
                 "item_id": f"fc_{self.responses}{suffix}",
-                "call_id": f"call_{self.responses}{suffix}",
+                "call_id": call_id,
                 "name": name or self.tool_name,
-                "arguments": self.tool_args,
+                "arguments": self.call_args.get(call_id, self.tool_args),
             },
         )
 

@@ -35,6 +35,7 @@ VOCABULARY_RULES = {
 LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 SKIP_PROMPT = "ignore_utterance"  # prompts/ignore_utterance.<language>.txt (the skip tool)
+TONE_PROMPT = "note_tone"  # prompts/note_tone.<language>.txt (the tone tool)
 SKIP_PROMPT_FALLBACK = "en"  # the rule's language when neither the turn's nor the default has one
 # The conversation state of a realtime turn with the skip tool (SPEC 8, Conversation start):
 # ``none`` gets the strict start rule; ``in_progress`` and ``addressed`` (the wake word or the
@@ -74,19 +75,26 @@ def realtime_instructions(
     robot_name: str = "",
     skip_rule: bool = True,
     conversation: str | None = None,
+    tone_rule: bool = True,
 ) -> str:
     """Parts 1 to 4 for the realtime speech route (SPEC 8, Realtime speech route): the same
     prompt without the mood-tag rule, because the server's voice would speak the tags. The
     sentence cap stays a rule in the prompt only (the reply's audio cannot be cut on a sentence
-    boundary). With ``voice.realtime_route.skip_tool`` (and ``skip_rule``: a fixed line leaves
-    it out) the ``ignore_utterance`` rule from the prompt files follows, in the turn's language,
-    then the hint of the turn's ``conversation`` state (one of ``CONVERSATION_STATES``; None,
-    as in ``session.update``: no hint)."""
+    boundary). With ``voice.realtime_route.tone_tool`` (and ``tone_rule``: a fixed line and the
+    round after a tone-only response leave it out) the ``note_tone`` rule follows. With
+    ``voice.realtime_route.skip_tool`` (and ``skip_rule``: a fixed line leaves it out) the
+    ``ignore_utterance`` rule from the prompt files follows, in the turn's language, then the
+    hint of the turn's ``conversation`` state (one of ``CONVERSATION_STATES``; None, as in
+    ``session.update``: no hint)."""
     prompt = _prompt(cfg, register, language, robot_name, False)
-    if not (skip_rule and cfg.voice.realtime_route.skip_tool):
-        return prompt
+    rt = cfg.voice.realtime_route
     lang = language or cfg.conversation.language
-    parts = [prompt, _in_language(skip_prompts(), lang, cfg)]
+    parts = [prompt]
+    if tone_rule and rt.tone_tool:
+        parts.append(_in_language(tone_prompts(), lang, cfg))
+    if not (skip_rule and rt.skip_tool):
+        return "\n".join(p for p in parts if p)
+    parts.append(_in_language(skip_prompts(), lang, cfg))
     if conversation is not None:
         hints = start_prompts() if conversation == NO_CONVERSATION else open_prompts()
         parts.append(_in_language(hints, lang, cfg))
@@ -107,6 +115,12 @@ def skip_prompts() -> dict[str, str]:
     """The skip tool's instruction per language, from ``prompts/ignore_utterance.<lang>.txt``
     (shipped with the package; cached). Prompt text is data, not code (SPEC 8, 11A)."""
     return _prompt_files(SKIP_PROMPT)
+
+
+def tone_prompts() -> dict[str, str]:
+    """The tone tool's instruction per language, from ``prompts/note_tone.<lang>.txt``
+    (SPEC 8, Tone tool): call it once per utterance, beside the spoken reply."""
+    return _prompt_files(TONE_PROMPT)
 
 
 def start_prompts() -> dict[str, str]:
@@ -254,8 +268,15 @@ def check_skip_prompt(cfg: RoboEmotConfig) -> None:
     """Load-time check (SPEC 8, Skip tool, Conversation start): with
     ``voice.realtime_route.skip_tool`` the conversation language needs its ``ignore_utterance``,
     ``conversation_start`` and ``conversation_open`` prompt files, so the tool is never offered
-    without its rule and no turn goes without its state's hint. Raises ``ValueError``."""
+    without its rule and no turn goes without its state's hint; with ``tone_tool`` it needs its
+    ``note_tone`` file the same way (SPEC 8, Tone tool). Raises ``ValueError``."""
     lang = cfg.conversation.language
+    if cfg.voice.realtime_route.tone_tool and not tone_prompts().get(lang):
+        raise ValueError(
+            f"voice.realtime_route.tone_tool: no {TONE_PROMPT}.{lang}.txt prompt file (or it is "
+            f"empty) for conversation.language {lang!r}; available: "
+            f"{', '.join(sorted(tone_prompts())) or 'none'}"
+        )
     if not cfg.voice.realtime_route.skip_tool:
         return
     for stem, texts in (

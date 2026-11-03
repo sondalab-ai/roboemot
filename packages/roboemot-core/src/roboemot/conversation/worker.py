@@ -41,6 +41,13 @@ outcome as its reason, with why the realtime route failed it (``rt_failure``: ``
 (``ignore_utterance``), a refused skip, a stop phrase consumed, a replaced utterance and every
 turn the cue does not already explain publish one too.
 
+Tone tool (SPEC 8, Tone tool; SPEC 7): with ``voice.realtime_route.tone_tool`` the server's
+model reports the user's tone of voice with ``note_tone`` beside its spoken reply. The first
+valid label of a turn becomes one appraisal event ``speech.tone.<label>`` (``emit``, the fast
+path's affect runner) when the turn ends, unless the turn was skipped. Each call gets a
+``function_call_output`` and never starts a round of its own, except one more response when a
+response held only tone calls and no speech.
+
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
 """
@@ -61,7 +68,7 @@ from typing import Any, Protocol
 
 from .. import shutdown
 from ..bus import Bus
-from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
+from ..config.schema import TONE_EVENT_PREFIX, RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
 from ..diag import EventSink, exception_code, no_events
 from ..llm.hub import RouterHub
@@ -90,12 +97,14 @@ from ..persona import apply_to_register, effects
 from ..realtime import protocol as rt_protocol
 from ..realtime.turn import (
     SKIP_TOOL,
+    TONE_TOOL,
     Reply,
     ResponseRun,
     heard_words,
     line_instructions,
     replay_block,
     skip_tool,
+    tone_tool,
     truncate_played,
     wait_in_order,
 )
@@ -123,6 +132,8 @@ INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (histo
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 # ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
+TONE_NOTED = '{"ok": true}'  # the result of a note_tone call (SPEC 8, Tone tool)
+TONE_INVALID = '{"error": "unknown_tone"}'  # not one of voice.realtime_route.tone_labels
 
 
 class Speech(Protocol):
@@ -199,6 +210,10 @@ class _Turn:
     rt_failure: str | None = None  # why the realtime route did not answer (a code)
     rt_detail: str | None = None  # its server error code, close reason or exception type
     cued: bool = False  # a cue was asked for in this turn (its decision event explains it)
+    tone: str | None = None  # the first valid note_tone label of the utterance (a config value)
+    tone_emitted: bool = False  # its speech.tone event went to the affect runner
+    tone_retry: bool = False  # the one more response after a tone-only, speechless one ran
+    rt_tones: dict[str, str] = field(default_factory=dict)  # the round's note_tone call results
 
 
 @dataclass
@@ -228,11 +243,12 @@ class ConversationWorker:
     ``scene(max_chars)`` the summaries (None when empty).
     ``skills`` are the tools offered to the model (SPEC 11) and ``preferences`` where a
     confirmed preference is written (SPEC 6); without them the model gets no tools.
-    ``name_source`` is the process's one pseudonym map (shared with the traits rating and the
-    route checks, SPEC 8): the registry display names that ``privacy.pseudonyms_to_cloud`` swaps
-    for aliases on routes that are not local (SPEC 12). When it is given, ``known_names`` is not
-    used; without it the worker keeps its own map, fed by ``known_names()`` (every record's
-    display name).
+    ``emit(event, now, payload)`` takes the appraisal events of the tone tool (the affect
+    runner's ``on_event``, as for the fast path). ``name_source`` is the process's one pseudonym
+    map (shared with the traits rating and the route checks, SPEC 8): the registry display names
+    that ``privacy.pseudonyms_to_cloud`` swaps for aliases on routes that are not local
+    (SPEC 12). When it is given, ``known_names`` is not used; without it the worker keeps its
+    own map, fed by ``known_names()`` (every record's display name).
     """
 
     def __init__(
@@ -259,8 +275,11 @@ class ConversationWorker:
         transcript: TranscriptRing | None = None,
         realtime: Any = None,
         cues: CueSink | None = None,
+        emit: Callable[[str, float, dict[str, Any]], None] | None = None,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
+        # appraisal events to the affect runner, the fast path's path (the tone tool, SPEC 7)
+        self._emit = emit if emit is not None else lambda event, now, payload: None
         self.cues: CueSink = cues if cues is not None else NoCues()  # SPEC 8, Non-verbal cues
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
@@ -798,11 +817,12 @@ class ConversationWorker:
             recent = self._confirm is not None or now - self._spoke_at <= span
         return IN_PROGRESS if recent else NO_CONVERSATION
 
-    def _base_instructions(self) -> str:
-        """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule)."""
+    def _base_instructions(self, *, tone_rule: bool = True) -> str:
+        """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule);
+        ``tone_rule`` False leaves out the tone tool's rule (the tool is not offered)."""
         cfg = self.stack.effective()
         return realtime_instructions(
-            cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg)
+            cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg), tone_rule=tone_rule
         )
 
     def _delivery(self, turn: _Turn) -> Delivery:
@@ -823,7 +843,8 @@ class ConversationWorker:
     def _rt_instructions(self, turn: _Turn, delivery: Delivery, *, line: bool = False) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
-        out the skip rule and the conversation hint (the server must say it, not judge it)."""
+        out the skip rule and the conversation hint (the server must say it, not judge it), and
+        the tone rule too, as does the round after a tone-only response."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -834,6 +855,7 @@ class ConversationWorker:
                 robot_name=self._prompt_name(cfg),
                 skip_rule=not line,
                 conversation=None if line else turn.conversation,
+                tone_rule=not (line or turn.tone_retry),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -854,6 +876,13 @@ class ConversationWorker:
         inner = self._inner = asyncio.ensure_future(self._realtime_rounds(turn))
         if turn.interrupted:
             inner.cancel()
+        try:
+            return await self._realtime_answer(turn, inner)
+        finally:
+            self._emit_tone(turn)
+
+    async def _realtime_answer(self, turn: _Turn, inner: asyncio.Future) -> bool:
+        """``_realtime_turn`` once its rounds run in ``inner``."""
         try:
             return bool(await inner)
         except asyncio.CancelledError:
@@ -912,12 +941,16 @@ class ConversationWorker:
             max_chars=conv.tool_arg_max_chars,
             choices=choices,
         )
-        skip = turn.cfg.voice.realtime_route.skip_tool
-        # with max_tool_rounds 0 and the skip tool, the skip tool is the only one offered
-        skills = bool(tools) and not (skip and conv.max_tool_rounds == 0)
+        rt_cfg = turn.cfg.voice.realtime_route
+        skip, tone = rt_cfg.skip_tool, rt_cfg.tone_tool
+        # with max_tool_rounds 0, the skip and tone tools are the only ones offered
+        skills = bool(tools) and not ((skip or tone) and conv.max_tool_rounds == 0)
         functions = rt_protocol.function_tools(tools) if skills else []
         functions += [skip_tool()] if skip else []
-        sent = route.send(route.session_update(turn.cfg, self._base_instructions(), functions))
+        toned = [tone_tool(rt_cfg.tone_labels)] if tone else []
+        sent = route.send(
+            route.session_update(turn.cfg, self._base_instructions(), functions + toned)
+        )
         if not sent:
             return False
         audio = turn.utterance.realtime
@@ -940,8 +973,9 @@ class ConversationWorker:
         delivery = self._delivery(turn)
         while True:
             in_cap = turn.rounds < conv.max_tool_rounds and bool(offered)
-            calls: list[ToolCall] = []
+            calls: list[ToolCall] = []  # skill calls (and the skip, refused): never note_tone
             results: list[ToolOutcome] = []
+            tones = turn.rt_tones = {}  # this round's note_tone calls: call id -> result
             on_call = self._rt_caller(turn, choices, in_cap, calls, results)
             instructions = self._rt_instructions(turn, delivery)
             run = ResponseRun(
@@ -957,14 +991,17 @@ class ConversationWorker:
                 generation=turn.rt_gen,  # the session that holds the turn's words
                 mute_on=SKIP_TOOL if skip and not turn.rounds else None,
                 on_late=lambda items, t=turn: self._late_items(t, items),
+                passive=frozenset({TONE_TOOL}) if tone else frozenset(),
             )
             round_from = len(turn.spoken)
             turn.rt_round = (calls, results, round_from)
             turn.rt_run = run
             try:
-                # the skip tool is honoured in the first round only, as its first call
-                ask = in_cap or (skip and not turn.rounds)
-                choice = "auto" if ask else "none" if offered or skip else None
+                # the skip tool is honoured in the first round only, as its first call; the
+                # tone tool is offered there too, until a tone-only response took it away
+                toning = tone and not turn.tone_retry
+                ask = in_cap or (skip and not turn.rounds) or (toning and not turn.rounds)
+                choice = "auto" if ask else "none" if offered or skip or toning else None
                 reply = await run.run(instructions, choice)
             except asyncio.CancelledError:
                 self._absorb(turn, run.reply, instructions)
@@ -987,20 +1024,34 @@ class ConversationWorker:
             if turn.cut:
                 self._cut_realtime(turn)
             ended = turn.cut or any(r.end_turn for r in results)
-            for call, result in zip(calls, results, strict=True):
+            # note_tone is fire-and-forget: only a response of tone calls and no speech gets one
+            # more response, once, without the tool (SPEC 8, Tone tool)
+            retry = not (ended or calls or reply.audio or turn.tone_retry) and bool(tones)
+            more = not ended and (bool(calls) or retry)
+            done = [(c.id, r.content) for c, r in zip(calls, results, strict=True)]
+            for call_id, content in [*done, *tones.items()]:
                 out_id = route.new_item_id()
-                if not route.send(rt_protocol.function_output(call.id, result.content, out_id)):
-                    if ended:
+                if not route.send(rt_protocol.function_output(call_id, content, out_id)):
+                    if not more:
                         self._settle_calls(turn)  # the rest still need a result, if it holds
                         break  # no response follows: nothing is lost
                     return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
-                run.answered(call.id)
+                run.answered(call_id)
                 turn.rt_items.append(out_id)
-            if ended or not calls:
+            if not more:
                 if turn.rounds and not (ended or turn.spoken):
                     turn.outcome = "no_text"
                     self._say_fallback(turn)
                 return True
+            if retry:  # not a tool round: the tool and its rule go for this one response
+                turn.tone_retry = True
+                turn.rt_round = None
+                update = route.session_update(
+                    turn.cfg, self._base_instructions(tone_rule=False), functions
+                )
+                if not route.send(update):
+                    return self._realtime_lost(turn)
+                continue
             turn.rounds += 1
             said = " ".join(turn.spoken[round_from:]) or None
             turn.exchange += self._exchange(calls, results, turn.rounds, said)
@@ -1054,10 +1105,10 @@ class ConversationWorker:
         run = turn.rt_run
         if run is None:
             return
-        results: dict[str, str] = {}
+        results: dict[str, str] = dict(turn.rt_tones)
         if turn.rt_round is not None:
             calls, outcomes, _ = turn.rt_round
-            results = {c.id: r.content for c, r in zip(calls, outcomes, strict=False)}
+            results |= {c.id: r.content for c, r in zip(calls, outcomes, strict=False)}
         turn.rt_items += [i for i in run.settle(results) if i not in turn.rt_items]
 
     def _late_items(self, turn: _Turn, items: list[str]) -> None:
@@ -1093,12 +1144,17 @@ class ConversationWorker:
     ) -> Callable[[rt_protocol.FunctionCall], Awaitable[bool]]:
         """The tool-call handler of one realtime round: runs the call through the executor
         (the per-round cap applies) and says whether it ends the turn. After the round cap a
-        call gets an error result and ends the turn."""
+        call gets an error result and ends the turn. A ``note_tone`` call is noted in the
+        round's ``rt_tones`` only: never a skill call, never in ``calls``."""
         cap = turn.cfg.conversation.max_tool_calls_per_round
+        tones = turn.rt_tones
 
         async def on_call(ev: rt_protocol.FunctionCall) -> bool:
             if turn.skipped:
                 return True  # the skip came first: no later call of its response runs
+            if ev.name == TONE_TOOL and turn.cfg.voice.realtime_route.tone_tool:
+                tones[ev.call_id] = self._tone_call(turn, ev)
+                return False
             if ev.name == SKIP_TOOL and turn.cfg.voice.realtime_route.skip_tool:
                 if not (turn.rounds or calls):  # nothing acted in the turn yet
                     self._skip_call(turn)
@@ -1120,6 +1176,32 @@ class ConversationWorker:
             return turn.cut or results[-1].end_turn
 
         return on_call
+
+    def _tone_call(self, turn: _Turn, ev: rt_protocol.FunctionCall) -> str:
+        """``note_tone`` (SPEC 8, Tone tool): the first valid label of the utterance is kept for
+        its appraisal event; a later one is ignored. An argument that is not one of
+        ``tone_labels`` is counted (``tone_invalid``, and a decision event) and never kept or
+        logged: it is the model's own text. Returns the call's result."""
+        args = tool_arguments(ev.arguments)
+        label = args.get("tone")
+        if not (isinstance(label, str) and label in turn.cfg.voice.realtime_route.tone_labels):
+            self._counts["tone_invalid"] += 1
+            self.events("turn", "tone_invalid", rounds=turn.rounds)
+            return TONE_INVALID
+        if turn.tone is None:
+            turn.tone = label
+        else:
+            self._counts["tone_repeated"] += 1
+        return TONE_NOTED
+
+    def _emit_tone(self, turn: _Turn) -> None:
+        """The turn's tone as one appraisal event, ``speech.tone.<label>`` with the language
+        only (as the fast path's ``speech.*`` events), unless the turn was skipped."""
+        if turn.tone is None or turn.skipped or turn.tone_emitted:
+            return
+        turn.tone_emitted = True
+        self._counts["tones"] += 1
+        self._emit(f"{TONE_EVENT_PREFIX}{turn.tone}", self.clock(), {"language": turn.language})
 
     def _skip_call(self, turn: _Turn) -> None:
         """``ignore_utterance`` (SPEC 8, skip tool): the response plays nothing more (muted, then

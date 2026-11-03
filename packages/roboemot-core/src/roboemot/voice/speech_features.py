@@ -2,8 +2,9 @@
 
 Loudness (RMS in dBFS over the speech frames), pitch (median of the autocorrelation pitch of the
 voiced frames) and speaking rate (words per second of speech). Prosody and keywords are the
-fast path's whole view of emotion: there is no speech-emotion classifier. Pure functions over
-the utterance audio, which stays in RAM and is never logged.
+fast path's whole view of emotion: there is no on-board speech-emotion classifier (with
+the realtime route, the server's model may report the tone of voice: SPEC 8, Tone tool).
+Pure functions over the utterance audio, which stays in RAM and is never logged.
 """
 
 from __future__ import annotations
