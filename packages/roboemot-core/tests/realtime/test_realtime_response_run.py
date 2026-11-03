@@ -330,3 +330,32 @@ async def test_a_mute_on_call_stops_the_audio_that_follows_and_records_its_items
     assert len(speech.streams) == 1  # only the item from before the call
     assert reply.muted_items == ["after"]
     assert reply.item_ids() == ["before", "after", "fc"]
+
+
+async def test_a_passive_call_before_the_mute_on_call_does_not_stop_the_mute():
+    """SPEC 8, Tone tool: ``note_tone`` first does not count as the response's first call, so the
+    skip right behind it still mutes the audio that follows."""
+    route, sent = connected_route()
+    speech = Speech()
+
+    async def on_call(ev):
+        return ev.name == "ignore_utterance"
+
+    run = make_run(
+        route,
+        speech,
+        on_call=on_call,
+        mute_on="ignore_utterance",
+        passive=frozenset({"note_tone"}),
+    )
+    task = asyncio.ensure_future(run.run("x"))
+    await until(lambda: creates(sent))
+    route._on_event(created("r1"))
+    tone = '{"tone": "calm"}'
+    route._on_event(P.FunctionCall(P.FUNCTION_CALL_DONE, "r1", "t", "note_tone", tone, "ft"))
+    route._on_event(P.FunctionCall(P.FUNCTION_CALL_DONE, "r1", "c", "ignore_utterance", "{}", "fc"))
+    route._on_event(delta("r1", "after"))
+    route._on_event(done("r1"))
+    reply = await task
+    assert speech.streams == []
+    assert reply.muted_items == ["after"]

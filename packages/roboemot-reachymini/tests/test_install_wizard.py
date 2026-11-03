@@ -3324,6 +3324,7 @@ CLOUD_KEYS = [
     "voice.realtime_route.mode=platform",
     "voice.realtime_route.input=audio",
     "voice.realtime_route.skip_tool=true",
+    "voice.realtime_route.tone_tool=true",
     "voice.realtime_route.transcript_timeout_s=10.0",
     "privacy.realtime_audio=true",
     "voice.backend=none",

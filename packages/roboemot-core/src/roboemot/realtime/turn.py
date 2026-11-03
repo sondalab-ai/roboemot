@@ -14,7 +14,8 @@ and mood; Conversation state).
   played (``truncate_played``);
 - a session lost meanwhile ends the run with ``closed`` set;
 - a muted run (``mute``: the model called ``ignore_utterance``) plays no more audio; it only
-  records the ids of the audio items that kept coming, so they can be deleted;
+  records the ids of the audio items that kept coming, so they can be deleted; a ``passive``
+  call before it (``note_tone``) does not count as the response's first call;
 - every call of the response is recorded on the client's thread, also one still queued and one
   that comes after the run abandoned the response (``note_call``), so a turn cut or failed
   part way still sends one ``function_call_output`` per call (``settle``): the server refuses
@@ -47,6 +48,11 @@ SKIP_TOOL = "ignore_utterance"  # the skip tool (voice.realtime_route.skip_tool)
 SKIP_DESCRIPTION = (
     "Call this, and say nothing, when the speech you heard is not meant for you "
     "(see the instructions)."
+)
+TONE_TOOL = "note_tone"  # the tone tool (voice.realtime_route.tone_tool)
+TONE_DESCRIPTION = (
+    "Report the tone of voice of the person's last utterance. Call it once, in the same "
+    "response as your spoken reply, never instead of it."
 )
 INTERRUPTED = '{"error": "interrupted"}'  # the result of a call the turn's cut left unanswered
 LINE_RULE = (
@@ -101,7 +107,8 @@ class ResponseRun:
     and delivery; ``on_call`` runs a tool call and returns whether it ends the turn;
     ``input_chars`` is the rest of what the response reads (the utterance), for its estimate;
     a call named ``mute_on``, as the response's first call, mutes the run on the client's
-    thread, before any later audio.
+    thread, before any later audio; a call named in ``passive`` (the tone tool) is not counted
+    as that first call.
 
     The route correlates the events (``RealtimeRoute.request``): this run gets only its own
     response's events, starting with its ``response.created``, and a refusal (an ``error``
@@ -125,9 +132,11 @@ class ResponseRun:
         generation: int | None = None,
         mute_on: str | None = None,
         on_late: Callable[[list[str]], None] | None = None,
+        passive: frozenset[str] = frozenset(),
     ) -> None:
         self.route, self.speech = route, speech
         self.mute_on = mute_on  # this tool as the response's first call mutes it (the skip)
+        self.passive = passive  # calls that do not count as the first one (the tone tool)
         self._called = False  # a call of this response arrived (client thread)
         self.generation = generation  # the session that must hold the turn's words
         self.utterance, self.mood, self.volume_db, self.language = (
@@ -263,7 +272,8 @@ class ResponseRun:
         elif isinstance(event, protocol.FunctionCall):
             if event.name == self.mute_on and not self._called:
                 self.mute()  # here, not on the loop: audio that follows the call never plays
-            self._called = True
+            if event.name not in self.passive:
+                self._called = True
             self.note_call(event)
         self._post(event)
 
@@ -421,6 +431,21 @@ def skip_tool() -> dict[str, Any]:
         "name": SKIP_TOOL,
         "description": SKIP_DESCRIPTION,
         "parameters": {"type": "object", "properties": {}},
+    }
+
+
+def tone_tool(labels: list[str]) -> dict[str, Any]:
+    """The ``note_tone`` tool in the realtime format: one required ``tone``, one of ``labels``
+    (``voice.realtime_route.tone_labels``)."""
+    return {
+        "type": "function",
+        "name": TONE_TOOL,
+        "description": TONE_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {"tone": {"type": "string", "enum": list(labels)}},
+            "required": ["tone"],
+        },
     }
 
 

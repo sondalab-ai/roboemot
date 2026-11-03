@@ -1672,11 +1672,14 @@ class ConfigStack:
         """Load-time check (SPEC 8, Conversation state) on a configuration without person
         layers. It runs when a file loads or a change commits, not on every ``effective()``
         call, so per-person lookups never pay for it or fail on it."""
-        from ..llm.prompt import check_route_budgets, check_skip_prompt  # lazy: llm imports config
+        from ..llm.prompt import (  # lazy: llm imports config
+            check_realtime_prompts,
+            check_route_budgets,
+        )
 
         try:
             check_route_budgets(cfg)
-            check_skip_prompt(cfg)
+            check_realtime_prompts(cfg)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
 
