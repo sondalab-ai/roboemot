@@ -14,7 +14,13 @@ QUIET, LOUD = 0.02, 0.5
 
 
 class ScriptedMini:
-    """A mini whose microphone returns quiet chunks until ``bang`` is set, then one loud one."""
+    """A mini whose microphone returns quiet chunks until ``bang`` is set, then one loud one
+    followed by an empty queue (``None``, as SDK 1.13 may return).
+
+    The hub gives the reflex only the newest chunk of a pass, and a late pass catches up over
+    several chunks. A loud chunk followed by more quiet ones would be dropped as stale whenever
+    the hub thread runs late (CPU load), so the bang would never reach the engine. The ``None``
+    ends the pass on the loud chunk, whatever the scheduling."""
 
     def __init__(self) -> None:
         self.mini = fake_mini()
@@ -25,11 +31,17 @@ class ScriptedMini:
         media.get_input_channels.return_value = 1
         media.get_output_audio_samplerate.return_value = 16000
         media.get_audio_sample.side_effect = self._chunk
+        self._drained = False
 
     def _chunk(self):
-        level = LOUD if self.bang.is_set() else QUIET
-        self.bang.clear()
-        return np.full(160, level, np.float32)
+        if self._drained:
+            self._drained = False
+            return None
+        loud = self.bang.is_set()
+        if loud:
+            self._drained = True
+            self.bang.clear()
+        return np.full(160, LOUD if loud else QUIET, np.float32)
 
 
 def run_app(app, mini):
@@ -192,8 +204,10 @@ def test_no_startle_while_the_robot_speaks_and_during_the_tail_then_startle_agai
         time.sleep(0.2)
         assert startles(app) == 0 and loud == []
         time.sleep(max(0.0, until + 0.15 + 0.1 - time.monotonic()))  # tail over, quiet chunks
-        assert wait_for(lambda: app.audio.snapshot()["chunks"] > 0)
-        time.sleep(0.1)
+        # The first chunk after the tail is never an onset: wait until a quiet one reached the
+        # engine after it. A pass counted later than ``seen + 1`` started after this read.
+        seen = app.audio.snapshot()["chunks"]
+        assert wait_for(lambda: app.audio.snapshot()["chunks"] >= seen + 2)
         scripted.bang.set()
         assert wait_for(lambda: startles(app) == 1)
         assert len(loud) == 1
