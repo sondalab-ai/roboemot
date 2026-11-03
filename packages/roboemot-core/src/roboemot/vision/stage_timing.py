@@ -1,12 +1,17 @@
 """What each vision stage costs, for the debug report (SPEC 12A, 13).
 
-``StageTimer`` keeps, per stage, a fixed ring of (end time, wall seconds, CPU seconds) and
-reports over the last ``vision.timing_window_s`` of wall time: runs per second, wall time per
-run in ms (p50, p90, max) and ``cpu_share``, CPU-seconds per second of wall time (the share of
-one core). Keys: ``face_detect`` (YuNet), ``face_embed`` (SFace), ``object_detect`` (NanoDet),
+``StageTimer`` keeps, per stage, a fixed ring of (end time, wall seconds, CPU seconds). Keys:
+``face_detect`` (YuNet), ``face_embed`` (SFace), ``object_detect`` (NanoDet),
 ``appearance_embed`` (DINOv2) and ``process``, the whole ``VisionPipeline.process`` call of one
 frame (frames the governor lets through without a stage included). The report never carries the
 word "embedding" (privacy guard of the perception tests), hence ``_embed``.
+
+``runs`` is the count since start. Every other field is taken over the last
+``vision.timing_window_s`` of wall time: ``runs_per_s``, ``wall_ms`` per run (p50, p90, max;
+null without a run in the window), ``cpu_share``, CPU-seconds per second of wall time (the
+share of one core), and ``span_s``, the wall time these cover. The span starts at the stage's
+first recorded run, so model loading and a stage that has not run yet never dilute the rate; it
+is 0 before the first run. A run that raises still counts: its time was spent.
 
 CPU time is ``time.thread_time`` of the vision thread. ONNX Runtime runs each model with
 ``intra_op_num_threads = vision.threads`` (2 by default) and OpenCV with ``cv2.setNumThreads``
@@ -15,9 +20,11 @@ bound, and ``wall_ms`` is the cost the frame path sees.
 
 Timing reads its own clocks (the pipeline only uses capture stamps); the values never feed a
 decision, so replays stay deterministic. Recording a run writes three doubles into a ring sized
-once for the largest window at the runner's highest frame rate: no allocation per run. A stage
-that runs more than once per frame (embeddings) can wrap the ring before the window ends;
-``span_s`` then says how much wall time the numbers cover. Numbers only (SPEC 12).
+once for the largest window at the runner's highest frame rate: no allocation per run. The
+report copies the raw rings under the lock and does the rest outside it, so reading the report
+never holds up the vision thread for long. A stage that runs more than once per frame
+(embeddings) can wrap its ring before the window ends; ``span_s`` then shrinks to the wall time
+the ring still covers. Numbers only (SPEC 12).
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ import threading
 import time
 from array import array
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..stats import P50, P90, quantile
 from .runner import MAX_RATE_HZ, MIN_SPAN_S
@@ -44,6 +51,16 @@ FIELDS = 3  # end time, wall seconds, CPU seconds
 Clock = Callable[[], float]
 
 
+class _Copy(NamedTuple):
+    """A ring's raw state, copied under the lock for the report."""
+
+    data: array
+    next: int
+    count: int
+    total: int
+    first: float
+
+
 class _Ring:
     """Fixed-size ring of samples, three doubles each; ``count`` saturates at capacity."""
 
@@ -53,25 +70,21 @@ class _Ring:
         self.next = 0
         self.count = 0
         self.total = 0
+        self.first = math.nan  # wall start of the first recorded run
 
-    def add(self, end: float, wall_s: float, cpu_s: float) -> None:
+    def add(self, start: float, end: float, cpu_s: float) -> None:
+        if self.total == 0:
+            self.first = start
         i = self.next * FIELDS
         self.data[i] = end
-        self.data[i + 1] = wall_s
+        self.data[i + 1] = end - start
         self.data[i + 2] = cpu_s
         self.next = (self.next + 1) % self.capacity
         self.count = min(self.count + 1, self.capacity)
         self.total += 1
 
-    def samples(self) -> list[tuple[float, float, float]]:
-        """The kept samples, oldest first."""
-        start = (self.next - self.count) % self.capacity
-        d = self.data
-        out = []
-        for k in range(self.count):
-            i = ((start + k) % self.capacity) * FIELDS
-            out.append((d[i], d[i + 1], d[i + 2]))
-        return out
+    def copy(self) -> _Copy:
+        return _Copy(self.data[:], self.next, self.count, self.total, self.first)
 
 
 class StageTimer:
@@ -95,7 +108,6 @@ class StageTimer:
         self._capacity = capacity
         self._rings = {stage: _Ring(capacity) for stage in STAGES}
         self._lock = threading.Lock()
-        self._started = wall_clock()
 
     def start(self) -> tuple[float, float]:
         """Wall and CPU clock readings to hand back to ``record`` when the stage returns."""
@@ -105,55 +117,52 @@ class StageTimer:
         """Record one run of ``stage`` that started at ``wall0``/``cpu0`` (from ``start``)."""
         end, cpu = self._wall(), self._cpu()
         with self._lock:
-            self._rings[stage].add(end, end - wall0, max(0.0, cpu - cpu0))
-
-    def reset(self) -> None:
-        """Forget every sample; the window restarts now."""
-        with self._lock:
-            for ring in self._rings.values():
-                ring.next = ring.count = ring.total = 0
-            self._started = self._wall()
+            self._rings[stage].add(wall0, end, max(0.0, cpu - cpu0))
 
     def snapshot(self, window_s: float) -> dict[str, Any]:
-        """Per stage over the last ``window_s`` of wall time: ``runs`` (all time),
-        ``runs_per_s``, ``wall_ms`` (``p50``, ``p90``, ``max``; None before a run in the window),
-        ``cpu_share`` and ``span_s``, the wall time the rate and share are taken over."""
+        """Per stage over the last ``window_s`` of wall time (see the module docstring).
+
+        Only the raw rings are copied under the lock; samples are built, filtered and sorted
+        after it is released.
+        """
         with self._lock:
-            now = self._wall()
-            kept = {s: (r.total, r.count, r.samples()) for s, r in self._rings.items()}
-            started = self._started
+            copies = {stage: ring.copy() for stage, ring in self._rings.items()}
+        now = self._wall()
         out: dict[str, Any] = {"window_s": window_s}
-        for stage, (total, count, samples) in kept.items():
-            out[stage] = _summary(samples, total, count, now, started, window_s, self._capacity)
+        for stage, copy in copies.items():
+            out[stage] = _summary(copy, self._capacity, now, window_s)
         return out
 
 
-def _summary(
-    samples: list[tuple[float, float, float]],
-    total: int,
-    count: int,
-    now: float,
-    started: float,
-    window_s: float,
-    capacity: int,
-) -> dict[str, Any]:
-    """One stage's report entry from its kept samples (oldest first)."""
+def _summary(copy: _Copy, capacity: int, now: float, window_s: float) -> dict[str, Any]:
+    """One stage's report entry from a copy of its ring."""
+    data, count = copy.data, copy.count
+    oldest = (copy.next - count) % capacity
     cutoff = now - window_s
-    first = started
-    if count == capacity and samples:  # the ring wrapped: it covers only from its oldest sample
-        oldest_end, oldest_wall, _ = samples[0]
-        first = max(first, oldest_end - oldest_wall)
-    span = max(MIN_SPAN_S, min(window_s, now - first))
-    recent = [(wall, cpu) for end, wall, cpu in samples if end >= cutoff]
-    walls = sorted(wall * MS_PER_S for wall, _ in recent)
+    walls: list[float] = []
+    cpu_s = 0.0
+    for k in range(count):
+        i = ((oldest + k) % capacity) * FIELDS
+        if data[i] >= cutoff:
+            walls.append(data[i + 1] * MS_PER_S)
+            cpu_s += data[i + 2]
+    if copy.total == 0:
+        span = 0.0
+    else:
+        first = copy.first
+        if count == capacity:  # wrapped: the ring covers only from its oldest sample's start
+            i = oldest * FIELDS
+            first = max(first, data[i] - data[i + 1])
+        span = max(MIN_SPAN_S, min(window_s, now - first))
+    walls.sort()
     return {
-        "runs": total,
-        "runs_per_s": len(recent) / span,
+        "runs": copy.total,
+        "runs_per_s": len(walls) / span if span else 0.0,
         "wall_ms": {
             "p50": quantile(walls, P50) if walls else None,
             "p90": quantile(walls, P90) if walls else None,
             "max": walls[-1] if walls else None,
         },
-        "cpu_share": sum(cpu for _, cpu in recent) / span,
+        "cpu_share": cpu_s / span if span else 0.0,
         "span_s": span,
     }

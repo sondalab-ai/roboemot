@@ -47,8 +47,8 @@ The head pose comes from the frame's joint state through the robot's ``frame_spe
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
 beside their product ``rate_scale``. ``stage_timing`` is what each model stage and the whole
 ``process`` call cost over ``vision.timing_window_s`` (``StageTimer``, its own clocks: the
-values never feed a decision). Numbers only; the frame thread writes them and the report
-thread reads them under one lock.
+values never feed a decision; a stage that raises still counts as a run, its time was spent).
+Numbers only; the frame thread writes them and the report thread reads them under one lock.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -434,8 +434,10 @@ class VisionPipeline:
     def _process_faces(self, frame: Frame, camera: CameraModel) -> None:
         min_px = self.cfg.face_min_px
         wall0, cpu0 = self.timer.start()
-        found = self.face_detector.detect(frame.image)
-        self.timer.record(DETECTION, wall0, cpu0)
+        try:
+            found = self.face_detector.detect(frame.image)
+        finally:
+            self.timer.record(DETECTION, wall0, cpu0)
         dets = [d for d in found if d.min_side >= min_px]
         if len(dets) < len(found):
             self.track_stats.below_min_px(len(found) - len(dets))
@@ -513,8 +515,10 @@ class VisionPipeline:
             return
         self._budget -= 1
         wall0, cpu0 = self.timer.start()
-        embedding = self.face_embedder.embed(frame.image, track.detection)
-        self.timer.record(EMBEDDING, wall0, cpu0)
+        try:
+            embedding = self.face_embedder.embed(frame.image, track.detection)
+        finally:
+            self.timer.record(EMBEDDING, wall0, cpu0)
         identity = self.matcher.observe(
             track.track_id,
             embedding,
@@ -590,8 +594,10 @@ class VisionPipeline:
             **dict.fromkeys(self.cfg.animal_categories, "animal"),
         }
         wall0, cpu0 = self.timer.start()
-        found = self.object_detector.detect(frame.image)
-        self.timer.record(OBJECTS, wall0, cpu0)
+        try:
+            found = self.object_detector.detect(frame.image)
+        finally:
+            self.timer.record(OBJECTS, wall0, cpu0)
         dets: list[Detection] = [
             d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
@@ -649,8 +655,10 @@ class VisionPipeline:
         self._entity_budget -= 1
         self._entity_embeds += 1
         wall0, cpu0 = self.timer.start()
-        embedding = self.appearance_embedder.embed(frame.image, track.box)
-        self.timer.record(APPEARANCE, wall0, cpu0)
+        try:
+            embedding = self.appearance_embedder.embed(frame.image, track.box)
+        finally:
+            self.timer.record(APPEARANCE, wall0, cpu0)
         identity = self.matcher.observe(
             track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
         )
