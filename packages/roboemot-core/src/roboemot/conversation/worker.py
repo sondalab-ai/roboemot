@@ -1890,7 +1890,6 @@ class ConversationWorker:
                 else:  # a barge-in while the last sentences still play settles it later
                     self._reply = (turn.reply_seq, list(turn.queued))
         self._delete_items(dropped)
-        self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         if not (turn.cued or turn.outcome in ("skipped", "not_heard")):
             # a cue, a skip and the did-not-get-it cue published their own reason
@@ -1911,7 +1910,7 @@ class ConversationWorker:
             self.bus.publish(
                 TOPIC,
                 {
-                    "turn": self._counts["turns"],
+                    "turn": self._counts["turns"] + 1,
                     "language": turn.language,
                     "chars_in": len(turn.utterance.text),
                     "chars_out": len(spoken),
@@ -1925,6 +1924,8 @@ class ConversationWorker:
                 },
                 self.clock(),
             )
+        # counted last: a reader that waits on ``turns`` then finds the turn's record published
+        self._counts["turns"] += 1
 
     # ----------------------------------------------------------------- report
 
