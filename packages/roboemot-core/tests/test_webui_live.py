@@ -38,6 +38,7 @@ def pipeline():
         ),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
+        alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1)),
         selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5")),

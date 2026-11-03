@@ -99,6 +99,7 @@ function liveModesCard(d) {
   return card(t("tab_live"), t("live_modes"),
     el("div", { class: "row" },
       badge(t(m.asleep ? "live_asleep" : "live_awake"), m.asleep ? "warning" : "success"),
+      m.alone ? [badge(t("live_alone"), "info")] : [],
       badge(t(m.online ? "live_online" : "live_offline"), m.online ? "success" : "danger"),
       d.audio_egress ? [badge(t("live_audio_egress"), "warning")] : []),
     liveRow(t("live_paused"), paused || t("live_paused_none")),
@@ -150,7 +151,7 @@ function liveRender(box, data) {
 
 const LIVE_STATUS_TONE = {
   asleep: "warning", answering: "success", cut: "warning", waiting: "info", sending: "info",
-  listening: "info", offline: "danger", cloud_down: "danger", idle: "info",
+  listening: "info", offline: "danger", cloud_down: "danger", alone: "info", idle: "info",
 };
 
 function liveActivityBox() {

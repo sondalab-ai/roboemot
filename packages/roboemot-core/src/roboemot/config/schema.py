@@ -2012,6 +2012,14 @@ class WorldScanConfig(Strict):
     doa_confidence: float = param(
         0.5, "Confidence of a sound direction observation", ge=0, le=1, restart=True
     )
+    alone_after_s: float = param(
+        120.0,
+        "With no face in view and no sound for this long the robot is alone and holds still: no "
+        "sweeps, no glances; breathing and reflexes go on. A face or a sound ends it at once",
+        unit="s",
+        ge=10,
+        le=3600,
+    )
 
     @model_validator(mode="after")
     def _jitter_inside_interval(self) -> WorldScanConfig:

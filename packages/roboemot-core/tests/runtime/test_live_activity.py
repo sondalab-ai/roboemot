@@ -86,6 +86,7 @@ def test_the_panel_switch_off_sends_no_block_and_the_live_tab_off_sends_nothing(
             "cloud_down",
         ),  # fmt: skip
         (lambda r: r.events("bargein", "cut"), "cut"),
+        (lambda r: setattr(r.p.alone, "alone", True), "alone"),
     ],
 )
 def test_each_status_comes_from_the_parts_state(setup, status):

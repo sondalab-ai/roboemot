@@ -47,6 +47,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             scan = p.scan
             out.append(("scan", lambda: scan.apply_config(cfg.world.scan)))
             out.append(("planner", lambda: p.plugin.planner.apply_config(cfg)))
+        out.append(("alone", lambda: p.alone.apply_config(cfg.world.scan)))
         out += [
             ("perception", lambda: p.perception.apply_config(cfg)),
             ("affect", lambda: p.runner.apply_config(cfg.affect, cfg.appraisal)),

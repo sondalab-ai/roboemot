@@ -49,6 +49,7 @@ from roboemot.voice.robot_name import RobotName
 from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.world import (
+    AloneWatch,
     Observation,
     ObserveResult,
     ScanController,
@@ -108,6 +109,7 @@ class Pipeline:
     value_cap: Callable[[], int]
     pitch_dof: str
     sleep: SleepGate
+    alone: AloneWatch
     realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
     cue_sounds: dict[str, CueSound] = field(default_factory=dict)  # the robot's (SPEC 8)
     voice_heard: list[float] = field(
@@ -248,6 +250,8 @@ def assemble(
                 log.warning("auto-enrollment: %s", type(exc).__name__)
 
     feed_world(bus, world, on_result)
+    alone = AloneWatch(cfg.world.scan, bus)  # no face and no sound: no scans (SPEC 5A)
+    alone.events = host.events
     reflexes.attach(bus)
     tracker = host.register_tracker = RegisterTracker(
         bus,
@@ -444,6 +448,7 @@ def assemble(
         conv_speaker=speaker_source(selector, world),
         value_cap=value_cap,
         pitch_dof=gaze_map.head_pitch,
+        alone=alone,
         sleep=SleepGate(
             host,
             bus,

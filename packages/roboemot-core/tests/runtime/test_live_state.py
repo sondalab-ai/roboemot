@@ -53,6 +53,7 @@ def parts(entries=(), target=None, registry=None, **over):
         ),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.2}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
+        alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1, params="PRIVATE-PARAMS")),
         selector=SimpleNamespace(target=target),
@@ -121,7 +122,7 @@ def test_the_payload_shape():
         "circadian": {"state": "awake", "sleepiness": 0.2},
     }  # fmt: skip
     assert s["modes"] == {
-        "asleep": False, "paused": [], "online": True,
+        "asleep": False, "alone": False, "paused": [], "online": True,
         "people": 1, "persona": "default",
     }  # fmt: skip
     assert s["conversation"] == {"phase": "idle", "route": None, "elapsed_s": None}
@@ -145,10 +146,11 @@ def test_modes_follow_the_parts():
         network=SimpleNamespace(online=False),
         tracker=SimpleNamespace(active=None),
         reflexes=SimpleNamespace(last_fired=lambda now: None),
+        alone=SimpleNamespace(alone=True),
     )
     s = live(p, host=host).state()
     assert s["modes"] == {
-        "asleep": True, "paused": ["vision", "listener"], "online": False,
+        "asleep": True, "alone": True, "paused": ["vision", "listener"], "online": False,
         "people": 0, "persona": "default",
     }  # fmt: skip
     assert s["mood"]["circadian"] is None and s["reflexes"] == {"last": None}

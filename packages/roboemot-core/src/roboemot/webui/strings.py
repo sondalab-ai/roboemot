@@ -51,6 +51,7 @@ EN: dict[str, str] = {
     "live_modes": "Modes",
     "live_awake": "Awake",
     "live_asleep": "Asleep",
+    "live_alone": "Alone: holding still",
     "live_online": "Online",
     "live_offline": "Offline",
     "live_audio_egress": "Microphone audio may leave the robot (realtime route)",
@@ -81,6 +82,7 @@ EN: dict[str, str] = {
     "live_status_listening": "Listening",
     "live_status_offline": "Offline: the network is down",
     "live_status_cloud_down": "Cloud voice down",
+    "live_status_alone": "Alone: nobody seen or heard, holding still",
     "live_status_idle": "Idle",
     "live_note_offline": "The network is down.",
     "live_note_cloud_down": "The cloud voice is down ({reason}).",
@@ -160,6 +162,9 @@ EN: dict[str, str] = {
     "live_ev_facing_cpu_high": (
         "Facing check skipped: CPU at {cpu_percent}% (limit {cpu_max_percent}%)"
     ),
+    "live_ev_alone_start": "Nobody seen or heard for a while: stopped looking around",
+    "live_ev_alone_face": "Saw a face: looking around again",
+    "live_ev_alone_sound": "Heard a sound: looking around again",
     "live_ev_turn_ok": "Answered ({voice})",
     "live_voice_realtime": "cloud voice",
     "live_voice_local": "local voice",
@@ -732,6 +737,7 @@ IT: dict[str, str] = {
     "live_modes": "Modalità",
     "live_awake": "Sveglio",
     "live_asleep": "Dorme",
+    "live_alone": "Da solo: sta fermo",
     "live_online": "In linea",
     "live_offline": "Fuori linea",
     "live_audio_egress": "L'audio del microfono può uscire dal robot (percorso realtime)",
@@ -762,6 +768,7 @@ IT: dict[str, str] = {
     "live_status_listening": "In ascolto",
     "live_status_offline": "Offline: la rete non c'è",
     "live_status_cloud_down": "Voce cloud non disponibile",
+    "live_status_alone": "Da solo: nessuno visto o sentito, sta fermo",
     "live_status_idle": "A riposo",
     "live_note_offline": "La rete non c'è.",
     "live_note_cloud_down": "La voce cloud non è disponibile ({reason}).",
@@ -851,6 +858,9 @@ IT: dict[str, str] = {
     "live_ev_facing_cpu_high": (
         "Controllo dello sguardo saltato: CPU al {cpu_percent}% (limite {cpu_max_percent}%)"
     ),
+    "live_ev_alone_start": "Nessuno visto o sentito da un po': ha smesso di guardarsi intorno",
+    "live_ev_alone_face": "Ha visto un volto: torna a guardarsi intorno",
+    "live_ev_alone_sound": "Ha sentito un suono: torna a guardarsi intorno",
     "live_ev_turn_ok": "Ha risposto ({voice})",
     "live_voice_realtime": "voce cloud",
     "live_voice_local": "voce locale",

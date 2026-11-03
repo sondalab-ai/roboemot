@@ -113,6 +113,7 @@ BEHAVIOUR_MODULES = [
     "registry/images.py",
     "registry/catalogue.py",
     "registry/tombstones.py",
+    "world/alone.py",
     "world/autoenroll.py",
     "webui/catalogue.py",
     "world/feed.py",

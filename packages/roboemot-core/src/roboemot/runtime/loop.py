@@ -20,6 +20,7 @@ from .ticks import (
     conversation_vision_scale,
     conversing,
     feed_idle,
+    in_conversation,
     scan_context,
     scan_tick,
     soothe_context,
@@ -94,6 +95,12 @@ def run_loop(
             governor.set_scale(CIRCADIAN, circadian_vision_scale(live, host.circadian))
             others = governor.scale_of(CIRCADIAN) * governor.scale_of(LOAD)
             governor.set_scale(CONVERSATION, conversation_vision_scale(live, host.phase, others))
+        busy = (
+            p.selector.engaged
+            or p.selector.speaker_active(now)
+            or in_conversation(host.phase, host.conversation)
+        )
+        alone = p.alone.tick(now, busy)
         if p.scan is not None:
             ctx = scan_context(
                 now,
@@ -102,6 +109,7 @@ def run_loop(
                 effects=fx,
                 hour=p.clock.hour(),
                 circadian=host.circadian,
+                alone=alone,
             )
             scan_tick(ctx, p.scan, p.loop, live)
         if host.soothe_runner is not None and host.speech_output is not None:

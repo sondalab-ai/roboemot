@@ -91,6 +91,19 @@ test("no audio warning in text mode", async (t) => {
   assert.ok(!page.document.querySelector("#live-cards").textContent.includes("AUDIO OUT"));
 });
 
+test("the modes card says when the robot is alone and holding still", async (t) => {
+  const strings = { ...STRINGS, live_alone: "ALONE STILL" };
+  const alone = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, alone: true } },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(alone);
+  assert.ok(alone.document.querySelector("#live-cards").textContent.includes("ALONE STILL"));
+  const company = await livePage(t, { "GET /api/strings": { language: "en", strings } });
+  await openLive(company);
+  assert.ok(!company.document.querySelector("#live-cards").textContent.includes("ALONE STILL"));
+});
+
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {
   const page = await livePage(t);
   await sleep(WAIT_MS);
