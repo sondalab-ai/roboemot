@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..attention.selector import SHOWN, AttentionTarget
+from ..attention.types import SHOWN, AttentionTarget
 from ..bus import Bus, Message
 from ..config.schema import AppraisalConfig
 

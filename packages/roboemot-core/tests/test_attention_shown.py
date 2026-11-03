@@ -3,9 +3,11 @@ face's social pull; the return to the face emerges from the model, never from a 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +15,7 @@ from roboemot.affect.appraisal import AppraisalAdapter
 from roboemot.attention import AttentionSelector, AttentionTarget, SpeakerHint, interest_mod
 from roboemot.attention.interest import InterestModel, in_region
 from roboemot.bus import Bus
+from roboemot.circadian import CircadianRunner
 from roboemot.config.schema import (
     ATTENTION_CATEGORIES,
     AppraisalConfig,
@@ -25,9 +28,15 @@ from roboemot.config.schema import (
     VisionRates,
 )
 from roboemot.persona import effects
-from roboemot.runtime.ticks import interest_modulation, scan_context
+from roboemot.runtime.ticks import (
+    attention_tick,
+    company,
+    episode_rate,
+    interest_modulation,
+    scan_context,
+)
 from roboemot.vision import CIRCADIAN, RateGovernor
-from roboemot.world import Entry, WorldModel
+from roboemot.world import Entry, FrameSpec, WorldModel
 from roboemot.world.scan import ScanContext, ScanPolicy
 from roboemot.world.types import Observation
 
@@ -253,7 +262,15 @@ def test_a_never_still_thing_still_ends_on_the_face():
     trace = simulate(sel, 300.0, wiggle(math.inf))
     last_look = max(t for t, tg in trace if on_thing(tg))
     assert last_look < 250.0
-    assert all(on_face(tg) for t, tg in trace if t > last_look + CFG.switch_hysteresis_s)
+    after = [tg for t, tg in trace if t > last_look + CFG.switch_hysteresis_s]
+    assert not any(on_thing(tg) for tg in after)  # no look starts again
+    # on the face until it habituates (the scene's face never moves: a poster, SPEC 5)
+    settle = [
+        tg
+        for t, tg in trace
+        if last_look + CFG.switch_hysteresis_s < t < last_look + CFG.habituation_s
+    ]
+    assert settle and all(on_face(tg) for tg in settle)
     snap = sel.snapshot()["shown_object"]
     assert snap["episodes"] >= 2 and snap["ended"]["face_pull"] == snap["episodes"]
     durations = list(sel._durations)
@@ -372,11 +389,11 @@ def test_a_face_out_of_the_camera_while_the_robot_looks_down_is_still_there_to_r
 
 
 def test_a_long_episode_holds_off_the_scan_with_no_time_limit():
-    """No maximum duration: with no decay and no pull growth a shown thing holds the gaze, and
-    a due scan (a wake-up sweep) never cuts in, as it would after object_max_hold_s for a thing
-    nobody shows."""
+    """No maximum duration: with no decay and a slow pull a shown thing holds the gaze for
+    minutes, and a due scan (a wake-up sweep) never cuts in, as it would after
+    object_max_hold_s for a thing nobody shows."""
     cfg = RoboEmotConfig(
-        attention={"shown": {"decay_per_s": 0.0, "pull_rate_per_s": 0.0}},
+        attention={"shown": {"decay_per_s": 0.0, "pull_rate_per_s": 0.001}},
     )
     sel = AttentionSelector(cfg.attention)
     policy = ScanPolicy(cfg.world.scan)
@@ -442,16 +459,16 @@ def test_one_hz_observations_read_as_moving_on_every_tick():
 
 
 def test_the_governor_runs_objects_at_the_active_rate_under_the_ceiling():
-    rates = VisionRates(objects_hz=1.0, objects_active_hz=20.0, objects_max_hz=5.0)
+    rates = VisionRates(objects_hz=1.0, objects_active_hz=5.0, objects_max_hz=5.0)
     gov = RateGovernor(rates)
     assert gov.period("objects") == pytest.approx(1.0)
     gov.set_active("objects", True)
     assert gov.active("objects")
-    assert gov.period("objects") == pytest.approx(1 / 5.0)  # the ceiling
+    assert gov.period("objects") == pytest.approx(1 / 5.0)
     runs = sum(gov.allow("objects", i / 30.0) for i in range(60))  # 2 s of 30 Hz frames
-    assert runs <= 2 * 5.0 + 1
+    assert runs <= 2 * rates.objects_max_hz + 1  # never above the ceiling
     gov.set_scale(CIRCADIAN, 0.1)
-    assert gov.period("objects") == pytest.approx(1 / 2.0)  # still scaled
+    assert gov.period("objects") == pytest.approx(1 / 0.5)  # still scaled
     gov.set_active("objects", False)
     assert gov.period("objects") == pytest.approx(1 / 0.1)
     gov.set_active("detection", True)  # no detection_active_hz: no effect
@@ -527,6 +544,8 @@ def test_without_shown_object_in_the_order_a_shown_thing_is_only_motion():
         (ShownObjectConfig, "region_width_faces", -0.1),
         (ShownObjectConfig, "region_above_faces", 11),
         (ShownObjectConfig, "region_below_faces", -1),
+        (ShownObjectConfig, "region_exit_faces", -0.1),
+        (ShownObjectConfig, "region_grace_s", 61),
         (ShownObjectConfig, "recent_s", 0),
         (ShownObjectConfig, "show_gain", -1),
         (ShownObjectConfig, "move_gain_per_s", 11),
@@ -583,3 +602,203 @@ def test_the_world_entry_keeps_a_blended_box_size():
     (e,) = world.entries
     w = RoboEmotConfig().world.position_blend
     assert e.extent_rad == pytest.approx(0.1 + w * 0.1)
+
+
+# ---- fix round: holders, engagement, edges, failures
+
+
+def test_a_poster_with_a_moving_thing_below_it_still_habituates():
+    """A curtain or a fan moving under a poster: the habituated face is nobody to show
+    anything, so no look starts and the poster stays habituated."""
+    sel = AttentionSelector(CFG)
+    later = CFG.habituation_s + 2.0
+    t = 0.0
+    targets = []
+    while t < later + 20.0:
+        entries = [face(t)]
+        if t >= later:
+            stamp = later + math.floor(t - later)
+            moving = thing(stamp, 10.0 * math.sin(1.5 * stamp))
+            entries.append(dataclasses.replace(moving, first_seen=later))
+        tg = sel.update(t, entries)
+        if t >= later:
+            targets.append(tg)
+        t = round(t + TICK, 6)
+    assert sel.snapshot()["shown_object"]["episodes"] == 0
+    assert not any(on_face(tg) for tg in targets)  # the poster never draws the gaze again
+
+
+def test_a_holder_without_a_box_size_gives_no_region():
+    sel = AttentionSelector(CFG)
+    t = 0.0
+    while t < 6.0:
+        stamp = APPEAR + math.floor(max(0.0, t - APPEAR))
+        no_box = dataclasses.replace(face(t), extent_rad=None)
+        entries = [no_box]
+        if t >= APPEAR:
+            entries.append(thing(stamp, wiggle(100.0)(stamp)))
+        sel.update(t, entries)
+        t = round(t + TICK, 6)
+    assert sel.snapshot()["shown_object"]["episodes"] == 0
+
+
+def test_the_person_walks_away_while_the_thing_keeps_moving():
+    """The face is no longer detected from 3 s on. The look still ends from the model (the
+    pull always grows), and the face stops counting as company within stale_s: only a holder
+    really detected keeps the robot engaged; the look-down excuse does not."""
+    left = 3.0
+    sel = AttentionSelector(CFG)
+    engaged = []
+
+    def watch(t, s):
+        engaged.append((t, s.engaged, company(t, s, None, None)))
+
+    trace = simulate(sel, 120.0, wiggle(math.inf), face_seen=lambda t: min(t, left), on_tick=watch)
+    assert first(trace, on_thing) is not None
+    snap = sel.snapshot()["shown_object"]
+    assert snap["episodes"] >= 1 and not snap["active"]
+    bound = left + CFG.stale_s + 2 * TICK
+    assert all(not e and not c for t, e, c in engaged if t > bound)
+
+
+def test_engaged_company_presence_and_the_scan_with_a_shown_thing():
+    sel = AttentionSelector(CFG)
+    simulate(sel, 3.0, wiggle(100.0))
+    assert on_thing(sel.target)
+    assert sel.engaged and company(3.0, sel, None, None)
+    bus, clock = Bus(), SimpleNamespace(monotonic=lambda: 3.0)
+    circ = CircadianRunner(
+        RoboEmotConfig(),
+        bus,
+        None,
+        clock=clock,
+        body_yaw=None,
+        affect_intensity=lambda: 0.0,
+        engaged=lambda: sel.engaged,
+    )
+    assert circ.present()  # the circadian presence reads the same engaged
+    ctx = scan_context(3.0, RoboEmotConfig(), sel, hour=12.0)
+    assert ctx.engaged and ctx.object_target is None
+    # the holder is no longer detected: no company, no presence; the look still holds the scan
+    stale = AttentionSelector(CFG)
+    simulate(stale, 3.0, wiggle(100.0))
+    simulate(stale, 3.0 + CFG.stale_s + 0.5, wiggle(100.0), start=3.0, face_seen=lambda t: 3.0)
+    assert on_thing(stale.target) and stale.episode_active
+    assert not stale.engaged and not company(8.0, stale, None, None)
+    circ2 = CircadianRunner(
+        RoboEmotConfig(),
+        Bus(),
+        None,
+        clock=clock,
+        body_yaw=None,
+        affect_intensity=lambda: 0.0,
+        engaged=lambda: stale.engaged,
+    )
+    assert not circ2.present()
+    assert scan_context(8.0, RoboEmotConfig(), stale, hour=12.0).engaged
+    # no holder at all: the thing far from every face is only motion, never engaged
+    far = AttentionSelector(CFG)
+    t = 0.0
+    while t < 4.0:
+        far.update(t, [thing(math.floor(t), 60.0 + 30.0 * math.floor(t))])
+        t = round(t + TICK, 6)
+    assert far.target is not None and far.target.priority == "salient_motion"
+    assert not far.engaged and not far.episode_active
+
+
+def test_a_thing_wobbling_across_the_region_edge_is_not_shown_anew():
+    edge = CFG.shown.region_width_faces * FACE_SIZE
+    exit_edge = (CFG.shown.region_width_faces + CFG.shown.region_exit_faces) * FACE_SIZE
+    sel = AttentionSelector(CFG)
+    # inside, then just past the entry edge (within the exit margin), then past the exit edge
+    # for less than the grace, then back
+    path = [0.0, edge + 1.0, exit_edge + 2.0, 0.0, edge + 1.0, 0.0]
+    simulate(sel, len(path) + APPEAR, lambda s: path[min(int(s - APPEAR), len(path) - 1)])
+    exposure = sel._interest._exposure_at("cup", len(path) + APPEAR)
+    assert exposure < 1.5  # shown once: the edge did not give it a fresh show gain
+    # past the exit edge for longer than the grace: shown anew
+    gone = int(CFG.shown.region_grace_s) + 2
+    path2 = [0.0] + [exit_edge + 2.0] * gone + [0.0, 5.0]
+    sel2 = AttentionSelector(CFG)
+    simulate(sel2, len(path2) + APPEAR, lambda s: path2[min(int(s - APPEAR), len(path2) - 1)])
+    assert sel2._interest._exposure_at("cup", len(path2) + APPEAR) > 1.5
+
+
+def test_a_failed_attention_tick_clears_the_active_rate():
+    sel = AttentionSelector(CFG)
+    gov = RateGovernor(VisionRates())
+    simulate(sel, 3.0, wiggle(100.0))
+    episode_rate(gov, sel)
+    assert gov.active("objects")
+
+    def boom(*a, **k):
+        raise RuntimeError("selector failed")
+
+    sel._ranked = boom
+    world = SimpleNamespace(
+        cfg=RoboEmotConfig().world,
+        frame=FrameSpec(yaw_dofs=("head.yaw",), pitch_dofs=("head.pitch",)),
+        tick=lambda now, in_view: [],
+        entries=[face(3.0)],
+    )
+    loop = SimpleNamespace(pose=lambda: {}, clear=lambda source: None, feed=lambda cmd: None)
+    gaze = SimpleNamespace(release=lambda: None)
+    assert attention_tick(3.05, world, sel, gaze, loop) is False
+    episode_rate(gov, sel)
+    assert not gov.active("objects")
+
+
+def test_a_failing_interest_modulation_does_not_stop_the_tick():
+    sel = AttentionSelector(CFG)
+    world = SimpleNamespace(
+        cfg=RoboEmotConfig().world,
+        frame=FrameSpec(yaw_dofs=("head.yaw",), pitch_dofs=("head.pitch",)),
+        tick=lambda now, in_view: [],
+        entries=[],
+    )
+    loop = SimpleNamespace(pose=lambda: {}, clear=lambda source: None, feed=lambda cmd: None)
+    gaze = SimpleNamespace(release=lambda: None)
+
+    def broken():
+        raise ValueError("no affect")
+
+    assert attention_tick(0.0, world, sel, gaze, loop, interest=broken) is False
+
+
+def test_a_speaker_hint_that_lapses_while_the_thing_is_still_moving():
+    """Documented behaviour: the speaker takes the gaze at once and ends the look (speaker).
+    When the hint lapses, the still-moving thing takes the gaze back as a new look (counted
+    again) as soon as the hysteresis since the switch to the speaker has passed, if its
+    interest is above the pull plus the start margin; otherwise the face keeps it."""
+    sel = AttentionSelector(CFG)
+    simulate(sel, 3.0, wiggle(100.0))
+    sel.hint_speaker(SpeakerHint(3.0, entry_id="p1"))
+    lapse = 3.0 + CFG.speaker_hold_s
+    trace = simulate(sel, lapse + CFG.switch_hysteresis_s, wiggle(100.0), start=3.0)
+    assert trace[0][1].priority == "active_speaker"
+    assert all(not on_thing(tg) for t, tg in trace if t <= lapse)  # the speaker keeps it
+    back = first(trace, on_thing, after=lapse)
+    snap = sel.snapshot()["shown_object"]
+    assert snap["ended"]["speaker"] == 1
+    assert back is not None and back - 3.0 >= CFG.switch_hysteresis_s
+    assert snap["episodes"] == 2  # a new look, not the old one resumed
+
+
+def test_the_object_rates_must_stay_under_the_ceiling():
+    with pytest.raises(ValidationError, match="objects_hz"):
+        VisionRates(objects_hz=6.0, objects_max_hz=5.0)
+    with pytest.raises(ValidationError, match="objects_active_hz"):
+        VisionRates(objects_active_hz=6.0, objects_max_hz=5.0)
+    assert VisionRates(objects_hz=5.0, objects_active_hz=5.0, objects_max_hz=5.0)
+
+
+def test_every_look_is_finite_because_the_pull_always_grows():
+    with pytest.raises(ValidationError):
+        ShownObjectConfig(pull_rate_per_s=0.0)
+    assert ShownObjectConfig(decay_per_s=0.0).decay_per_s == 0.0
+    # arousal and curiosity scale the interest, never the pull: the look ends at any arousal
+    cfg = AttentionConfig(shown=ShownObjectConfig(decay_per_s=0.0))
+    sel = AttentionSelector(cfg)
+    trace = simulate(sel, 120.0, wiggle(2.5), mod=mod_for(arousal=1.0, label="curiosity"))
+    start = first(trace, on_thing)
+    assert start is not None and first(trace, on_face, after=start) is not None

@@ -23,6 +23,7 @@ from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
+OBJECTS = "objects"  # the governor stage of the object detector
 
 
 def idle_command(
@@ -76,11 +77,12 @@ def attention_tick(
     gaze: GazeController,
     loop: MotionLoop,
     conversing: bool = False,
-    mod: InterestMod | None = None,
+    interest: Callable[[], InterestMod] | None = None,
 ) -> bool:
     """One attention step: decay the world, pick the target, feed or release the gaze command.
-    ``conversing`` (a conversation is in progress) holds off face habituation; ``mod`` is how the
-    robot's state scales the interest in a shown object (``interest_modulation``).
+    ``conversing`` (a conversation is in progress) holds off face habituation; ``interest`` gives
+    how the robot's state scales the interest in a shown object (``interest_modulation``),
+    computed inside the guard.
 
     Returns whether attention owns the head. A failure inside is logged (type and message
     only), the attention command is dropped and idle motion takes over; the app keeps running.
@@ -94,6 +96,7 @@ def attention_tick(
             math.radians(wc.camera_fov_v_deg),
         )
         world.tick(now, in_view)
+        mod = interest() if interest is not None else None
         target = selector.update(now, world.entries, conversing=conversing, mod=mod)
         was_active = gaze.active
         cmd = gaze.step(now, target, None if gaze.active else loop.pose())
@@ -125,10 +128,11 @@ def scan_context(
     the caller has not cached them)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
+    engaged = selector.engaged or selector.episode_active  # a shown thing: no time limit
     return ScanContext(
         now=now,
-        engaged=selector.engaged,
-        object_target=None if target is None or selector.engaged else target.key,
+        engaged=engaged,
+        object_target=None if target is None or engaged else target.key,
         object_max_hold_s=cfg.attention.object_max_hold_s,
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
@@ -203,6 +207,13 @@ def interest_modulation(
         circadian=state_fx,
         persona=effects,
     )
+
+
+def episode_rate(governor: Any, selector: AttentionSelector, *, awake: bool = True) -> None:
+    """Run object detection at its active rate exactly while a shown object was the target of
+    the last completed attention update (SPEC 5, 5A); derived on every tick, so a failed tick,
+    a sleep or a stop leaves no stale rate."""
+    governor.set_active(OBJECTS, awake and selector.episode_active)
 
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:

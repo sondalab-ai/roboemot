@@ -1561,6 +1561,21 @@ class ShownObjectConfig(Strict):
         ge=0,
         le=10,
     )
+    region_exit_faces: float = param(
+        0.5,
+        "A shown thing stays with its person until it is this many face-box heights outside the "
+        "region on any side (so a thing on the edge does not come and go)",
+        ge=0,
+        le=10,
+    )
+    region_grace_s: float = param(
+        2.0,
+        "A shown thing that leaves the region (or the view) keeps its interest and the movement "
+        "already seen for this long; back within it, it is not shown anew",
+        unit="s",
+        ge=0,
+        le=60,
+    )
     recent_s: float = param(
         3.0,
         "An object in a person's region is shown when it moved or first appeared within this "
@@ -1626,9 +1641,10 @@ class ShownObjectConfig(Strict):
     )
     pull_rate_per_s: float = param(
         0.05,
-        "Growth of the social pull per second while the robot looks at the shown thing",
+        "Growth of the social pull per second while the robot looks at the shown thing; above 0, "
+        "so every look ends (the robot's state does not scale it)",
         unit="1/s",
-        ge=0,
+        gt=0,
         le=10,
     )
     pull_recover_per_s: float = param(
@@ -1807,7 +1823,12 @@ class VisionRates(Strict):
         le=30,
     )
     objects_max_hz: float = param(
-        5.0, "Object detection never runs faster than this", unit="Hz", ge=0.1, le=30
+        5.0,
+        "Object detection never runs faster than this: objects_hz and objects_active_hz must not "
+        "exceed it",
+        unit="Hz",
+        ge=0.1,
+        le=30,
     )
     camera_hz: float = param(
         30.0,
@@ -1846,6 +1867,17 @@ class VisionRates(Strict):
         ge=1,
         le=10,
     )
+
+    @model_validator(mode="after")
+    def _object_ceiling(self) -> VisionRates:
+        """The ceiling holds by construction: scales are at most 1 (SPEC 5, 13)."""
+        for name in ("objects_hz", "objects_active_hz"):
+            if getattr(self, name) > self.objects_max_hz:
+                raise ValueError(
+                    f"vision.rates.{name} ({getattr(self, name)} Hz) must not exceed "
+                    f"vision.rates.objects_max_hz ({self.objects_max_hz} Hz)"
+                )
+        return self
 
 
 class TrackerConfig(Strict):

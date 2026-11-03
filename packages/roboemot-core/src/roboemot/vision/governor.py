@@ -11,8 +11,9 @@ never queued (latest-wins).
 
 A stage with an ``<stage>_active_hz`` field may be made active (``set_active``): it then runs at
 that rate instead of ``<stage>_hz``, under the same scales. Attention does this for ``objects``
-while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it. A stage
-with an ``<stage>_max_hz`` field never runs faster than it, active or not.
+while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it. The
+object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
+``objects_active_hz`` above it, and every scale is at most 1.
 """
 
 from __future__ import annotations
@@ -94,10 +95,10 @@ class RateGovernor:
 
         ``stage`` names a field of ``vision.rates`` without its ``_hz`` suffix, for example
         ``detection`` or ``embedding``. The pipeline also uses it for per-track schedules. An
-        active stage uses ``<stage>_active_hz``; ``<stage>_max_hz``, where it exists, caps both.
+        active stage uses ``<stage>_active_hz``.
         """
         base = getattr(self.rates, f"{stage}_active_hz" if self.active(stage) else f"{stage}_hz")
-        rate = min(base * self.scale, getattr(self.rates, f"{stage}_max_hz", math.inf))
+        rate = base * self.scale
         return math.inf if rate <= 0 else 1.0 / rate
 
     def allow(self, stage: str, stamp: float) -> bool:

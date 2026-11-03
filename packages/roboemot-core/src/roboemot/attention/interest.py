@@ -2,7 +2,10 @@
 
 An animal or object entry is *shown* when it lies in a person's region (beside the face or below
 it, in face-box heights, ``attention.shown.region_*``) and it moved or first appeared there within
-``recent_s``. Each shown entry keeps an interest value:
+``recent_s``. The caller leaves habituated faces out (a poster holds nothing). A shown entry
+keeps its person until it is ``region_exit_faces`` outside the region (edge hysteresis), and its
+state survives ``region_grace_s`` outside the region or the view, so coming back within it gives
+no fresh show gain. Each shown entry keeps an interest value:
 
 - rises once when it is shown (``show_gain``) and with each measured movement (``move_gain_per_s``
   times the span of the movement), both times its novelty and the state's ``rise_x``. Movement has
@@ -85,18 +88,21 @@ class Shown:
     known: bool = False
 
 
-def in_region(cfg: ShownObjectConfig, thing: Entry, face: Entry) -> bool:
+def in_region(cfg: ShownObjectConfig, thing: Entry, face: Entry, margin: float = 0.0) -> bool:
     """Whether ``thing`` lies in ``face``'s region: within ``region_width_faces`` face heights to
     either side, from ``region_above_faces`` above the face centre to ``region_below_faces``
-    below it. A face without a box size has no region."""
+    below it, each widened by ``margin`` face heights. A face without a box size has no
+    region."""
     size = face.extent_rad
     if size is None or size <= 0:
         return False
     dx = abs(wrap_angle(thing.azimuth_rad - face.azimuth_rad))
     dy = thing.elevation_rad - face.elevation_rad
     return (
-        dx <= cfg.region_width_faces * size
-        and -cfg.region_below_faces * size <= dy <= cfg.region_above_faces * size
+        dx <= (cfg.region_width_faces + margin) * size
+        and -(cfg.region_below_faces + margin) * size
+        <= dy
+        <= (cfg.region_above_faces + margin) * size
     )
 
 
@@ -106,6 +112,7 @@ class InterestModel:
     def __init__(self, cfg: ShownObjectConfig) -> None:
         self.cfg = cfg
         self.shown: dict[str, Shown] = {}
+        self._parked: dict[str, tuple[Shown, float]] = {}  # left the region: (state, since)
         self.pull_extra = 0.0
         self._exposure: dict[str, tuple[float, float]] = {}  # category -> (value, stamp)
 
@@ -117,6 +124,7 @@ class InterestModel:
     def clear(self) -> None:
         """Forget every shown entry and the extra pull (the robot fell asleep)."""
         self.shown.clear()
+        self._parked.clear()
         self.pull_extra = 0.0
 
     def holds(self, entry_id: str, *, looking: bool) -> bool:
@@ -130,11 +138,6 @@ class InterestModel:
         """Whether a shown entry had a stimulus (shown or moved) within ``recent_s``."""
         s = self.shown.get(entry_id)
         return s is not None and now - s.stimulus <= self.cfg.recent_s
-
-    def holders(self, now: float) -> set[str]:
-        """The people showing an entry now: one that had a stimulus within ``recent_s``. A thing
-        left still near a face does not keep that face from habituating (a poster)."""
-        return {s.holder for s in self.shown.values() if now - s.stimulus <= self.cfg.recent_s}
 
     def step(
         self,
@@ -151,7 +154,8 @@ class InterestModel:
         """Advance by ``dt`` seconds to ``now``.
 
         ``things``: the fresh animals and objects; ``people``: the person entries a region may
-        belong to; ``moves``: entry id to the span (s) of a movement measured this tick;
+        belong to (the caller leaves out habituated faces); ``moves``: entry id to the span (s)
+        of a movement measured this tick;
         ``watched``: the entry the robot looked at over ``dt`` (its interest fades);
         ``looking``: ``"thing"`` while it looked at a shown thing, ``"person"`` at a person
         (the pull grows or falls), None otherwise."""
@@ -167,6 +171,14 @@ class InterestModel:
             s = self._observe(now, e, people, moves.get(e.entry_id), mod)
             if s is not None:
                 kept[e.entry_id] = s
+        for eid, s in self.shown.items():  # left the region or the view: kept for a grace
+            if eid not in kept:
+                self._parked.setdefault(eid, (s, now))
+        self._parked = {
+            eid: (s, since)
+            for eid, (s, since) in self._parked.items()
+            if eid not in kept and now - since <= cfg.region_grace_s
+        }
         self.shown = kept
 
     def _observe(
@@ -181,8 +193,12 @@ class InterestModel:
         is not shown yet and had no stimulus."""
         cfg = self.cfg
         s = self.shown.get(e.entry_id)
+        if s is None and e.entry_id in self._parked:
+            s = self._parked[e.entry_id][0]  # back within the grace: same state, no new gain
         holder = self._holder(e, people, s.holder if s is not None else None)
         if holder is None:
+            if s is not None:
+                self._parked.setdefault(e.entry_id, (s, now))
             return None
         if s is None:
             appeared = now - e.first_seen <= cfg.recent_s
@@ -206,11 +222,14 @@ class InterestModel:
         return s
 
     def _holder(self, e: Entry, people: Iterable[Entry], previous: str | None) -> str | None:
-        """The person whose region holds ``e``: the previous one while it still does, else the
-        nearest face."""
-        inside = [p for p in people if in_region(self.cfg, e, p)]
-        if any(p.entry_id == previous for p in inside):
+        """The person whose region holds ``e``: the previous one while ``e`` is within its region
+        widened by ``region_exit_faces`` (edge hysteresis), else the nearest face."""
+        cfg = self.cfg
+        if any(
+            p.entry_id == previous and in_region(cfg, e, p, cfg.region_exit_faces) for p in people
+        ):
             return previous
+        inside = [p for p in people if in_region(cfg, e, p)]
         if not inside:
             return None
         return min(

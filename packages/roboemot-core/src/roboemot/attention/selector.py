@@ -15,16 +15,20 @@ a moving person is already covered by the face categories.
 Shown object (joint attention, ``interest``): an animal or object a person shows the robot holds
 the gaze while its interest exceeds the social pull of the faces; the end of the look emerges
 from the model, never from a timer. A look starts only on a recent stimulus (shown or moved
-within ``attention.shown.recent_s``). While it lasts the holder's face counts as seen (the head
+within ``attention.shown.recent_s``), and only near a face that has not habituated: a poster
+or a photo is nobody to show anything. While it lasts the holder's face counts as seen (the head
 looks down at the thing, the face may leave the camera) and does not habituate, so the gaze has
-a face to come back to; ``engaged`` is true (a person is interacting). Each episode is counted
-with how it ended (``END_REASONS``) and its duration for the debug report (``snapshot``).
+a face to come back to. ``engaged`` (scanning yields, company, presence, conversation) is true
+for a shown object only while its holder was really detected within ``stale_s``, not merely
+excused; ``episode_active`` alone holds off the scan for the look. Each episode is counted with
+how it ended (``END_REASONS``) and its duration for the debug report (``snapshot``).
 
 Habituation: a face whose bearing stays within ``habituation_move_deg`` of where it settled for
 ``habituation_s`` stops qualifying as an enrolled person or a nearest face (a photo or a poster
 holds the gaze otherwise). A larger move, a speaker hint on the face, or a conversation in
-progress (``update(conversing=True)``) restarts its clock. A habituated face can still be the
-active speaker.
+progress (``update(conversing=True)``) restarts its clock, and so does a look at a thing the
+face holds (the holder of the current episode). A habituated face can still be the active
+speaker.
 
 ``attention.target`` carries no embeddings (SPEC 12). It is published when the target changes
 (or its bearing moves by ``publish_move_deg``) and otherwise at ``publish_hz``; ``None`` is
@@ -46,12 +50,10 @@ from ..stats import SUMMARY_LEVELS, summarise
 from ..world import Entry, angular_distance
 from ..world.types import UNKNOWN_IDENTITY
 from .interest import InterestMod, InterestModel
+from .types import SHOWN, SPEAKER, SPEAKER_KEY, AttentionTarget
 
-SPEAKER_KEY = "speaker-bearing"
 TOPIC = "attention.target"
 MOVING_KINDS = ("animal", "object")
-SHOWN = "shown_object"
-SPEAKER = "active_speaker"
 # How a shown-object episode ended: the face's pull won, a speaker took the gaze, the thing left
 # the person's region or the view, the robot fell asleep, another shown thing won.
 END_REASONS = ("face_pull", "speaker", "left_region", "lost", "asleep", "other_object")
@@ -72,29 +74,6 @@ class SpeakerHint:
     def __post_init__(self) -> None:
         if self.entry_id is None and self.azimuth_rad is None:
             raise ValueError("a speaker hint needs an entry id or a bearing")
-
-
-@dataclass(frozen=True)
-class AttentionTarget:
-    """What to look at: a world entry (or a bare bearing) in the base frame.
-
-    ``priority`` is the category that selected it; ``reason`` says why it is the target now
-    (``new``, ``switched``, ``tracking``, ``held``). ``entry_id`` is None for a bearing-only
-    speaker. ``category`` is the entry's detector class (empty for a bare bearing).
-    """
-
-    entry_id: str | None
-    kind: str
-    azimuth_rad: float
-    elevation_rad: float
-    priority: str
-    reason: str
-    stamp: float
-    category: str = ""
-
-    @property
-    def key(self) -> str:
-        return self.entry_id or SPEAKER_KEY
 
 
 @dataclass
@@ -147,6 +126,8 @@ class AttentionSelector:
         self._last_now: float | None = None
         self._episode: _Episode | None = None
         self._excused: tuple[str, float] | None = None  # (holder, last tick of its episode)
+        self._present = False  # the person behind the target was really seen within stale_s
+        self._completed = False  # the last update ran to its end
         self._stats_lock = threading.Lock()
         self._started = 0
         self._ended = dict.fromkeys(END_REASONS, 0)
@@ -169,15 +150,22 @@ class AttentionSelector:
 
     @property
     def engaged(self) -> bool:
-        """Whether the current target is a person, the active speaker or a thing a person shows
-        (scanning yields, the alone watch counts company)."""
+        """Whether the current target is the active speaker, or a person (or a thing a person
+        shows) while that person was really detected within ``stale_s``, not only excused by the
+        look-down (scanning yields, the alone watch counts company, the circadian presence and
+        the conversation session hold)."""
         t = self._current
-        return t is not None and (t.kind == "person" or t.priority in (SPEAKER, SHOWN))
+        if t is None:
+            return False
+        if t.priority == SPEAKER:
+            return True
+        return (t.kind == "person" or t.priority == SHOWN) and self._present
 
     @property
     def episode_active(self) -> bool:
-        """Whether a shown object is the target now (the object stage runs at its active rate)."""
-        return self._episode is not None
+        """Whether a shown object was the target of the last update, and that update completed
+        (the object stage runs at its active rate; a failed tick clears it)."""
+        return self._completed and self._episode is not None
 
     def sleep(self, now: float) -> None:
         """The robot fell asleep: end a shown-object episode (``asleep``) and forget the shown
@@ -198,6 +186,7 @@ class AttentionSelector:
         """Choose the target at ``now``, publish it when due and return it (None: no target).
         ``conversing``: a conversation is in progress, so no face habituates. ``mod``: how the
         robot's state scales the shown-object interest (``interest_mod``; None: neutral)."""
+        self._completed = False
         fresh = [e for e in entries if now - self._seen(e) <= self.cfg.stale_s]
         by_id = {e.entry_id: e for e in fresh}
         moves = self._track_motion(fresh)
@@ -229,7 +218,9 @@ class AttentionSelector:
             target = self._make(now, cands_by_key[cur.key], qualified[cur.key], "held")
         self._current = target
         self._track_episode(now, target, by_id)
+        self._present = self._really_seen(now, entries, target)
         self._publish(now, target)
+        self._completed = True
         return target
 
     def snapshot(self) -> dict[str, Any]:
@@ -276,6 +267,21 @@ class AttentionSelector:
             return max(e.last_seen, ex[1])
         return e.last_seen
 
+    def _really_seen(
+        self, now: float, entries: Sequence[Entry], target: AttentionTarget | None
+    ) -> bool:
+        """Whether the person behind ``target`` (the person itself, or the holder of a shown
+        thing) was really detected within ``stale_s``: its own ``last_seen``, not the look-down
+        excuse."""
+        if target is None:
+            return False
+        if target.priority == SHOWN:
+            who = self._episode.holder if self._episode is not None else None
+        else:
+            who = target.entry_id
+        person = next((e for e in entries if e.entry_id == who), None)
+        return person is not None and now - person.last_seen <= self.cfg.stale_s
+
     def _step_interest(
         self, now: float, fresh: Sequence[Entry], moves: dict[str, float], mod: InterestMod
     ) -> None:
@@ -291,11 +297,17 @@ class AttentionSelector:
             looking = "thing"
         elif cur is not None and cur.kind == "person":
             looking = "person"
+        holder = self._episode.holder if self._episode is not None else None
+        people = [
+            e
+            for e in fresh
+            if e.kind == "person" and (e.entry_id == holder or not self._habituated(now, e))
+        ]
         model.step(
             now,
             dt,
             [e for e in fresh if e.kind in MOVING_KINDS],
-            [e for e in fresh if e.kind == "person"],
+            people,
             moves,
             watched=cur.entry_id if cur is not None else None,
             looking=looking,
@@ -368,14 +380,11 @@ class AttentionSelector:
 
     def _track_settled(self, now: float, entries: Sequence[Entry], conversing: bool) -> None:
         """Restart a face's habituation clock when it moved past ``habituation_move_deg`` from
-        where it settled, while ``conversing``, or while it shows the robot something (the holder
-        of the look, or of a thing that moved within ``recent_s``); forget faces that
-        vanished."""
+        where it settled, while ``conversing``, or while the robot looks at a thing it holds (the
+        holder of the current episode); forget faces that vanished."""
         limit = math.radians(self.cfg.habituation_move_deg)
         persons = [e for e in entries if e.kind == "person"]
-        holders = self._interest.holders(now)
-        if self._episode is not None:
-            holders.add(self._episode.holder)
+        holders = {self._episode.holder} if self._episode is not None else set()
         for e in persons:
             s = self._settled.get(e.entry_id)
             if s is None:
