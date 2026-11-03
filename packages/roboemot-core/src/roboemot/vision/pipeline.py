@@ -22,7 +22,8 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    embedding rides in the ``Observation`` (SPEC 5A) for world-model matching and the registry.
    ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
    kind; any other class, ``person`` included, is ignored. No age or gender is estimated (owner
-   decision 2026-10-23).
+   decision 2026-10-23). On the ticks the governor allows, ``object_gate`` skips object runs
+   while the scene is still (``vision.object_gate``, SPEC 5, 13; see ``object_gate``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -74,6 +75,7 @@ from ..world import FrameSpec, Observation
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
+from .object_gate import ObjectGate
 from .stages import (
     AppearanceEmbedder,
     FaceDetector,
@@ -170,6 +172,7 @@ class VisionPipeline:
         self.track_stats = TrackDiagnostics(cfg)
         self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
+        self.object_gate = ObjectGate(cfg.object_gate)
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}
@@ -210,13 +213,14 @@ class VisionPipeline:
         if self.governor.allow("detection", stamp):
             self._process_faces(frame, camera)
             faces = True
-        if (
-            self.object_detector is not None
-            and self.cfg.objects_enabled
-            and self.governor.allow("objects", stamp)
-        ):
-            self._process_objects(frame, camera)
-            objects = True
+        if self.object_detector is not None and self.cfg.objects_enabled:
+            pose = head_pose(frame.joint_state, self.frame_spec)
+            self.object_gate.observe(stamp, pose)
+            if self.governor.allow("objects", stamp) and self.object_gate.decide(
+                stamp, frame.image, pose, self.object_tracker.live_count
+            ):
+                self._process_objects(frame, camera)
+                objects = True
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
 
@@ -251,6 +255,7 @@ class VisionPipeline:
         self._lost_held = 0.0
         self._face_lost_held = 0.0
         self.governor.reset()
+        self.object_gate.reset()
 
     def apply_config(
         self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
@@ -264,6 +269,7 @@ class VisionPipeline:
         if world is not None:
             self.world = world
         self.governor.rates = vision.rates
+        self.object_gate.cfg = vision.object_gate
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
@@ -342,6 +348,7 @@ class VisionPipeline:
             "rate_scale": self.governor.scale,
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
+            "object_gate": self.object_gate.snapshot(),
             "tracks": tracks,
         }
 

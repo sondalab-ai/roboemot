@@ -177,6 +177,11 @@ class Tracker:
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
 
+    @property
+    def live_count(self) -> int:
+        """Tracks alive now, tentative ones included."""
+        return len(self._tracks)
+
     def reset(self, ids: Iterator[int] | None = None) -> None:
         """Drop all tracks; IDs keep counting from the allocator unless a new one is given.
 
