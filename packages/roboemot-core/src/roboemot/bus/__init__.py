@@ -21,6 +21,7 @@ TOPICS = (
     "percept.pose",
     "percept.utterance",
     "percept.entity",
+    "percept.scene_motion",
     "sound.loud",
     "world.entity_appeared",
     "world.entity_moved",

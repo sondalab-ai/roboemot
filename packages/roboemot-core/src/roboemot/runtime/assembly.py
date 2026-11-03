@@ -306,6 +306,7 @@ def assemble(
     )
     if perception.pipeline is not None:  # light from the frames vision already captures
         perception.pipeline.light_tap = circ.sampler.offer
+        perception.pipeline.motion_wanted = circ.wants_scene_motion  # a nap's motion watch
     light_reader = host.light_reader = IdleLightReader(circ.sampler, source)
     host.enrollment = perception.enrollment
     pipeline = perception.pipeline

@@ -130,6 +130,8 @@ BEHAVIOUR_MODULES = [
     "vision/governor.py",
     "vision/models.py",
     "vision/object_gate.py",
+    "vision/scene_change.py",
+    "vision/scene_motion.py",
     "vision/onnx.py",
     "vision/pipeline.py",
     "vision/replay.py",

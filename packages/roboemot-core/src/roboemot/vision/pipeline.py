@@ -28,6 +28,11 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
 
+``motion_wanted`` (default never) says whether a day nap waits for motion (SPEC 7A): while it
+does, every captured frame goes to the motion watch (``scene_motion``) before the governor can
+drop it, with the head pose of the frame, and a confirmed change publishes
+``percept.scene_motion`` (a scalar share, never the image). It needs no object stage.
+
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
 
@@ -84,6 +89,7 @@ from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .object_gate import ObjectGate
+from .scene_motion import SceneMotionWatch, ScenePercept
 from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
 from .stages import (
     AppearanceEmbedder,
@@ -192,6 +198,8 @@ class VisionPipeline:
         self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
         self.object_gate = ObjectGate(cfg.object_gate)
+        self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
+        self.motion_wanted: Callable[[], bool] = lambda: False
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}
@@ -229,6 +237,7 @@ class VisionPipeline:
         with self._report_lock:
             self._last_stamp = stamp
         self._tap_light(frame)
+        self._watch_motion(frame)
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
@@ -268,6 +277,15 @@ class VisionPipeline:
         except Exception as exc:
             log.warning("light tap failed: %s", type(exc).__name__)
 
+    def _watch_motion(self, frame: Frame) -> None:
+        """Hand the frame to the nap's motion watch (SPEC 7A) and publish a confirmed change.
+        Inactive, the watch only disarms: no pose is read and no copy is made."""
+        active = self.motion_wanted()
+        pose = head_pose(frame.joint_state, self.frame_spec) if active else None
+        share = self.scene_motion.offer(frame.stamp, frame.image, pose, active)
+        if share is not None:
+            self._publish("percept.scene_motion", ScenePercept(share), frame.stamp)
+
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).
 
@@ -288,6 +306,7 @@ class VisionPipeline:
         self._face_lost_held = 0.0
         self.governor.reset()
         self.object_gate.reset()
+        self.scene_motion.reset()
 
     def apply_config(
         self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
@@ -302,6 +321,7 @@ class VisionPipeline:
             self.world = world
         self.governor.rates = vision.rates
         self.object_gate.cfg = vision.object_gate
+        self.scene_motion.cfg, self.scene_motion.gate = vision.scene_motion, vision.object_gate
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
@@ -393,6 +413,7 @@ class VisionPipeline:
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
             "object_gate": self.object_gate.snapshot(),
+            "scene_motion": self.scene_motion.snapshot(),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
         }
