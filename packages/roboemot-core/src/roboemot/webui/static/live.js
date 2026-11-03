@@ -100,7 +100,8 @@ function liveModesCard(d) {
   const paused = m.paused.map((p) => state.strings["live_part_" + p] || p).join(", ");
   return card(t("tab_live"), t("live_modes"),
     el("div", { class: "row" },
-      badge(t(m.asleep ? "live_asleep" : "live_awake"), m.asleep ? "warning" : "success"),
+      badge(t(m.asleep ? "live_motors_off" : "live_motors_on"), m.asleep ? "warning" : "success"),
+      m.rest ? [badge(word("live_rest_", m.rest), "info")] : [],
       m.alone ? [badge(t("live_alone"), "info")] : [],
       badge(t(m.online ? "live_online" : "live_offline"), m.online ? "success" : "danger"),
       d.audio_egress ? [badge(t("live_audio_egress"), "warning")] : []),
