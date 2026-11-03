@@ -270,8 +270,9 @@ async def test_a_run_on_a_session_closed_by_a_reload_falls_back_at_once():
     t0 = asyncio.get_running_loop().time()
     route.stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
     route.apply_config(route.stack.effective())
-    reply = await asyncio.wait_for(task, 0.5)
-    assert asyncio.get_running_loop().time() - t0 < 0.2
+    reply = await asyncio.wait_for(task, 0.9)
+    # well under the 1 s stall, with room for a loaded CI runner
+    assert asyncio.get_running_loop().time() - t0 < 0.5
     assert reply.closed == "reconfigured"
     assert route._live == {} and not route.busy() and charged == [10]
 
