@@ -102,6 +102,16 @@ class NetworkMonitor:
         """Whether a new realtime connect may be tried (``connectivity.network`` backoff)."""
         return self.realtime.due(self.clock() if now is None else now)
 
+    def realtime_due_in(self, now: float | None = None) -> float:
+        """Seconds until a new realtime connect may be tried (0: now), the same backoff as
+        ``realtime_due``: the realtime route's background reconnect waits this long."""
+        return self.realtime.due_in(self.clock() if now is None else now)
+
+    def due_in(self, route: str, now: float | None = None) -> float:
+        """Seconds until ``route``'s link is checked again (0: now, or no such link)."""
+        link = self._links_map().get(route)
+        return 0.0 if link is None else link.due_in(self.clock() if now is None else now)
+
     def set_routes(self, routes: list[LLMRoute]) -> None:
         """Hot reload (SPEC 11A): follow a changed route list. Removed names lose their link;
         a name whose endpoint (host and port) is unchanged keeps its link state; a new name, or
