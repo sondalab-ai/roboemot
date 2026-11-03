@@ -43,7 +43,9 @@ from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
+from .descriptions import localize
 from .guard import same_origin
+from .robot_section import PATH_ROOT
 from .routes import RouteBusy
 from .secrets_admin import SecretInUse, secret_name, secret_value
 from .settings import SettingNotAllowed
@@ -493,8 +495,12 @@ class WebApi:
 
     # ------------------------------------------------------------------ open routes
 
+    def _language(self) -> str:
+        """The page language (``conversation.language``): the strings and the descriptions."""
+        return language_for(self.config.conversation.language)
+
     def _strings(self, req: Request) -> Response:
-        lang = language_for(self.config.conversation.language)
+        lang = self._language()
         strings = dict(STRINGS[lang])
         cloud = (
             "consent_cloud_pseudonyms"
@@ -793,6 +799,12 @@ class WebApi:
         every write re-enters the PIN."""
         port = self._settings_port()
         fields, robot = port.robot_split(port.fields())
+        lang = self._language()
+        if robot is not None:
+            prefix = f"{PATH_ROOT}.{robot['id']}."
+            own = frozenset(f["path"] for f in robot["fields"] if f["path"].startswith(prefix))
+            robot = {**robot, "fields": localize(robot["fields"], lang, own)}
+        fields = localize(fields, lang)
         return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
@@ -803,7 +815,7 @@ class WebApi:
         body = self._json_body(req)
         v.only_keys(body, {"pin"})
         self._check_pin(req, body.get("pin"))
-        return Response(HTTPStatus.OK, {"fields": port.reveal()})
+        return Response(HTTPStatus.OK, {"fields": localize(port.reveal(), self._language())})
 
     def _settings_change(self, req: Request) -> Response:
         """Change one catalogue field (SPEC 11A). The body holds exactly ``path``, ``value``

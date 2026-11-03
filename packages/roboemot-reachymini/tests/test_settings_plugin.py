@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from importlib.metadata import entry_points
 
 import httpx
@@ -340,3 +341,30 @@ def test_with_the_route_off_no_allocator_is_used_and_no_identifier_is_sent(tmp_p
     rows = session_rows(tmp_path, platform_id=True, enabled=False)
     assert rows[f"{SESSION}.allocator_host"]["value"] is None
     assert rows[f"{SESSION}.sends_platform_id"]["value"] is False
+
+
+def test_every_row_text_exists_in_every_language_with_the_same_placeholders():
+    """SPEC 11A, 12: the page shows one language; the plugin words its own rows."""
+    english = settings_module.TEXTS[settings_module.DEFAULT_LANGUAGE]
+    for lang, words in settings_module.TEXTS.items():
+        assert set(words) == set(english), lang
+        for key, text in words.items():
+            assert sorted(re.findall(r"\{\w+\}", text)) == sorted(
+                re.findall(r"\{\w+\}", english[key])
+            ), (lang, key)
+
+
+@pytest.mark.parametrize(
+    ("language", "word"), [("it-IT", "Minimo hardware"), ("en", "Hardware minimum")]
+)
+def test_the_rows_follow_the_page_language(language, word):
+    stack = ConfigStack(app={"conversation": {"language": language}})
+    section = ReachySettings().section(stack, MANIFEST)
+    limits = [r for r in section.fields if r["path"].endswith(".min_deg")]
+    assert limits and all(r["description"].startswith(word) for r in limits)
+    italian = language.startswith("it")
+    assert all(
+        ("Massima differenza" in r["description"]) is italian
+        for r in section.fields
+        if ".constraints." in r["path"]
+    )

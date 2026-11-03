@@ -119,6 +119,10 @@ def test_direct_mode_connects_answers_and_deletes_the_named_item(caplog):
         check.FIRST_AUDIO: "pass",
         check.ITEM_DELETE: "pass",
     }
+    # the web UI words each result from its code (SPEC 11A, 12)
+    assert [c["code"] for c in report.to_dict()["checks"]] == [
+        "connected", "first_audio", "item_delete_accepted"
+    ]  # fmt: skip
     assert leaks(report, caplog) == []
 
 
@@ -180,6 +184,8 @@ def test_a_key_refused_for_the_allocated_host_is_reported_with_that_host(caplog)
     assert report.update_seen is False and report.item_delete == "not_run"
     assert report.charged == 0
     assert {c.name: c.status for c in report.checks}[check.CONNECT] == "fail"
+    (connect,) = [c for c in report.checks if c.name == check.CONNECT]
+    assert connect.code == "session_failed" and connect.params == {"failure": connect.reason}
     assert leaks(report, caplog) == []
 
 

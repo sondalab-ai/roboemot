@@ -235,9 +235,10 @@ class _Run:
         r.update_seen = ok
         if not ok:
             r.failure = client.reason
-            r.checks.append(CheckResult(CONNECT, FAIL, client.reason or "closed"))
+            why = client.reason or "closed"
+            r.checks.append(CheckResult(CONNECT, FAIL, why, "session_failed", {"failure": why}))
             return
-        r.checks.append(CheckResult(CONNECT, PASS, ""))
+        r.checks.append(CheckResult(CONNECT, PASS, "", "connected"))
         if not self._sent(client, {**protocol.text_item(text, ITEM_ID), "event_id": CREATE_EVENT}):
             return
         sent_at = self.clock()
@@ -259,7 +260,11 @@ class _Run:
             ok = False
         if not ok:
             self.report.failure = SEND_FAILED
-            self.report.checks.append(CheckResult(FIRST_AUDIO, FAIL, SEND_FAILED))
+            self.report.checks.append(
+                CheckResult(
+                    FIRST_AUDIO, FAIL, SEND_FAILED, "session_failed", {"failure": SEND_FAILED}
+                )
+            )
         return ok
 
     def _hosts(self, snap: dict[str, Any], reason: str | None) -> None:
@@ -326,9 +331,13 @@ class _Run:
     def _first_audio(self) -> None:
         r = self.report
         if r.first_audio_ms is not None:
-            r.checks.append(CheckResult(FIRST_AUDIO, PASS, f"{r.first_audio_ms:g} ms"))
+            ms = r.first_audio_ms
+            r.checks.append(CheckResult(FIRST_AUDIO, PASS, f"{ms:g} ms", "first_audio", {"ms": ms}))
+        elif r.failure or r.error:
+            why = r.failure or r.error
+            r.checks.append(CheckResult(FIRST_AUDIO, FAIL, why, "session_failed", {"failure": why}))
         else:
-            r.checks.append(CheckResult(FIRST_AUDIO, FAIL, r.failure or r.error or "no audio"))
+            r.checks.append(CheckResult(FIRST_AUDIO, FAIL, "no audio", "no_audio"))
 
     def _charge(self, done: protocol.ResponseDone | None, sent_chars: int) -> None:
         """The response's usage, else the chars/4 estimate of what was sent and heard."""
@@ -344,7 +353,8 @@ class _Run:
         r = self.report
         if self.create_refused:
             r.item_delete = "refused"
-            r.checks.append(CheckResult(ITEM_DELETE, FAIL, "item create refused"))
+            why = "item create refused"
+            r.checks.append(CheckResult(ITEM_DELETE, FAIL, why, "item_create_refused"))
             return
         client.send({**protocol.item_delete(ITEM_ID), "event_id": DELETE_EVENT})
         verdict = "unconfirmed"
@@ -364,4 +374,4 @@ class _Run:
                 break
         r.item_delete = verdict
         status = {"accepted": PASS, "refused": FAIL}.get(verdict, SKIP)
-        r.checks.append(CheckResult(ITEM_DELETE, status, verdict))
+        r.checks.append(CheckResult(ITEM_DELETE, status, verdict, "item_delete_" + verdict))
