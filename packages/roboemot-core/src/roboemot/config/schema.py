@@ -131,7 +131,10 @@ APPRAISAL_EVENTS = frozenset(
         "object.shown",
     }
 )
-APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
+# connectivity: link.<name>.lost / .restored (SPEC 12A); the realtime model's tone of voice:
+# speech.tone.<label>, one per voice.realtime_route.tone_labels entry (SPEC 7, 8)
+TONE_EVENT_PREFIX = "speech.tone."
+APPRAISAL_EVENT_PREFIXES = ("link.", TONE_EVENT_PREFIX)
 
 
 def rule_identity(event: str, when: Any) -> tuple[str, tuple[tuple[str, Any], ...]]:
@@ -275,6 +278,13 @@ class AppraisalConfig(Strict):
             {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
             {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
             {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
+            # The user's tone of voice as the realtime model heard it (note_tone, SPEC 8): small
+            # nudges toward the person's mood, no label forced.
+            {"event": "speech.tone.calm", "valence": 0.05, "arousal": -0.05, "cooldown_s": 10},
+            {"event": "speech.tone.happy", "valence": 0.15, "arousal": 0.1, "cooldown_s": 10},
+            {"event": "speech.tone.sad", "valence": -0.1, "arousal": -0.1, "cooldown_s": 10},
+            {"event": "speech.tone.angry", "valence": -0.1, "arousal": 0.15, "cooldown_s": 10},
+            {"event": "speech.tone.anxious", "valence": -0.05, "arousal": 0.1, "cooldown_s": 10},
             # Self-soothing sound (SPEC 7B): one rule per default variant label; the runner
             # already spaces the sounds (soothe.cooldown_s), so the rules have no cooldown.
             {
@@ -325,7 +335,7 @@ class AppraisalConfig(Strict):
             if rule.event not in known and not rule.event.startswith(APPRAISAL_EVENT_PREFIXES):
                 raise ValueError(
                     f"appraisal rule for unknown event {rule.event!r}; the library emits "
-                    f"{sorted(APPRAISAL_EVENTS)} and link.*; plugin events go in "
+                    f"{sorted(APPRAISAL_EVENTS)}, link.* and speech.tone.*; plugin events go in "
                     "appraisal.extra_events"
                 )
             ident = rule_identity(rule.event, rule.when)
@@ -1927,9 +1937,85 @@ class TrackerConfig(Strict):
         return self
 
 
+TIMING_WINDOW_MAX_S = 60.0  # vision.timing_window_s upper bound: sizes the timing rings
+
+
+class ObjectGateConfig(Strict):
+    """Scene-change gate of the object stage (SPEC 5, 13): object detection runs only when the
+    image changed while the head was still, with a floor and a fixed schedule as fallbacks."""
+
+    enabled: bool = param(
+        True,
+        "On: object detection runs only when the scene changed (head still), once after the "
+        "head settles, and at least every max_interval_s, never above vision.rates.objects_hz; "
+        "without a head pose, or while an animal, a not yet confirmed or a recently moved track "
+        "is live, it keeps that fixed rate; confirmed still objects do not. Animal and object "
+        "tracks then live at least max_interval_s plus object_lost_periods detection periods. "
+        "Off: always the fixed rate",
+    )
+    thumb_width_px: int = param(
+        80, "Width of the grayscale copy the motion test compares", unit="px", ge=8, le=320
+    )
+    thumb_height_px: int = param(
+        60, "Height of the grayscale copy the motion test compares", unit="px", ge=6, le=240
+    )
+    pixel_diff: float = param(
+        25.0,
+        "A pixel of the grayscale copy changed when its value moved by more than this (0 to 255)",
+        ge=1,
+        le=255,
+    )
+    changed_share: float = param(
+        0.02,
+        "The scene changed when more than this share of the copy's pixels changed",
+        gt=0,
+        le=1,
+    )
+    head_still_deg: float = param(
+        3.0,
+        "The head is still while its yaw and pitch stay within this of where they settled; above "
+        "the idle breathing swing (about 2.3 deg peak to peak), so breathing is not a move",
+        unit="deg",
+        ge=0.1,
+        le=30,
+    )
+    settle_s: float = param(
+        1.0,
+        "After a head move, object detection runs once when the head has been still this long "
+        "(capture time), and the motion test starts again from that view",
+        unit="s",
+        ge=0,
+        le=30,
+    )
+    max_interval_s: float = param(
+        10.0,
+        "Object detection runs at least this often (capture time) even with no change, so a "
+        "still thing that appeared is found",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    moved_share: float = param(
+        0.05,
+        "A track moved when its box centre moved by more than this share of the frame width "
+        "between its last two hits; a moved track keeps the fixed rate (a small rolling ball "
+        "the changed_share test misses)",
+        gt=0,
+        le=1,
+    )
+    moved_hold_s: float = param(
+        3.0,
+        "A moved track keeps the fixed rate until its last hit is older than this (capture time)",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+
+
 class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
+    object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
@@ -2022,6 +2108,14 @@ class VisionConfig(Strict):
         unit="s",
         ge=10,
         le=3600,
+    )
+    timing_window_s: float = param(
+        30.0,
+        "Report only: wall-time window of the per-stage timing (runs per second, wall time per "
+        "run, CPU share) in the vision debug report",
+        unit="s",
+        ge=5,
+        le=TIMING_WINDOW_MAX_S,
     )
     rebirth_window_s: float = param(
         5.0,
@@ -3117,6 +3211,11 @@ class VoiceFacingConfig(Strict):
 # ------------------------------------------------------------------- realtime route (SPEC 8)
 
 
+TONE_LABELS_MAX = 12  # voice.realtime_route.tone_labels: the note_tone enum stays short
+TONE_LABEL_MAX_CHARS = 24
+TONE_LABEL = re.compile(rf"[a-z][a-z_]{{0,{TONE_LABEL_MAX_CHARS - 1}}}")
+
+
 class RealtimeRouteConfig(Strict):
     """The realtime speech route (SPEC 8, Realtime speech route): whether and how the robot
     answers through a ``kind: realtime`` route, and the client's transport limits. Off by
@@ -3251,6 +3350,19 @@ class RealtimeRouteConfig(Strict):
         "other, a video, TV or radio). A skipped utterance gets no answer and its items are "
         "deleted; its audio still reached the server",
     )
+    tone_tool: bool = param(
+        False,
+        "Offer the server's LLM the note_tone tool, with the instruction to call it once per "
+        "user utterance, beside the spoken reply, with the tone of voice it heard (one of "
+        "tone_labels). Each tone becomes the appraisal event speech.tone.<label>; only the label "
+        "is kept, never the audio or the words",
+    )
+    tone_labels: list[str] = param(
+        ["calm", "happy", "sad", "angry", "anxious"],
+        "The tones note_tone may report (its enum); each is the event speech.tone.<label> for "
+        "the appraisal rules (a label without a rule emits an event that changes nothing). "
+        "One to 12 labels of lowercase letters and underscores",
+    )
     conversation_span_s: float = param(
         30.0,
         "With skip_tool: a conversation with the robot counts as in progress while its last "
@@ -3284,6 +3396,21 @@ class RealtimeRouteConfig(Strict):
         ge=65_536,
         le=16_777_216,
     )
+
+    @field_validator("tone_labels")
+    @classmethod
+    def _tone_labels_are_event_names(cls, labels: list[str]) -> list[str]:
+        if not 1 <= len(labels) <= TONE_LABELS_MAX:
+            raise ValueError(f"voice.realtime_route.tone_labels needs 1 to {TONE_LABELS_MAX}")
+        if len(set(labels)) != len(labels):
+            raise ValueError("voice.realtime_route.tone_labels repeats a label")
+        bad = [label for label in labels if not TONE_LABEL.fullmatch(label)]
+        if bad:
+            raise ValueError(
+                "voice.realtime_route.tone_labels: a label is lowercase letters and underscores, "
+                f"at most {TONE_LABEL_MAX_CHARS} characters: {bad}"
+            )
+        return labels
 
     @model_validator(mode="after")
     def _close_after_server_silence(self) -> RealtimeRouteConfig:

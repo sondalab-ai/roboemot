@@ -97,6 +97,7 @@ class RtRig:
     events: list = field(default_factory=list)
     cues: FakeCues = field(default_factory=FakeCues)
     diag: list = field(default_factory=list)  # the decision events (diag.event payloads)
+    emitted: list = field(default_factory=list)  # (event, payload) sent to the affect runner
 
     def say(self, text: str = "ciao", **kw: Any) -> int:
         n = self.worker.snapshot().get("turns", 0)
@@ -193,6 +194,7 @@ def build_rt(
         bus=bus,
         realtime=route_part,
         cues=rig.cues,
+        emit=lambda event, now, payload: rig.emitted.append((event, payload)),
     )
     bus.subscribe("conversation.turn", lambda m: rig.events.append(m.payload))
     bus.subscribe(DIAG_TOPIC, lambda m: rig.diag.append(m.payload))

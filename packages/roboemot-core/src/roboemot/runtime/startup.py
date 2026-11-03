@@ -181,6 +181,7 @@ def start_voice_output(
         transcript=host.transcript,
         realtime=realtime,
         cues=cues,
+        emit=p.runner.on_event,  # the tone tool's speech.tone events, as the fast path's
     )
     conv.events = host.events
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
