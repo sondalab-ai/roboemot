@@ -251,7 +251,7 @@ def assemble(
                 log.warning("auto-enrollment: %s", type(exc).__name__)
 
     feed_world(bus, world, on_result)
-    alone = AloneWatch(cfg.world.scan, bus)  # no face and no sound: no scans (SPEC 5A)
+    alone = AloneWatch(cfg, bus, detection_period=host.detection_period)  # SPEC 5A
     alone.events = host.events
     reflexes.attach(bus)
     tracker = host.register_tracker = RegisterTracker(
@@ -272,7 +272,7 @@ def assemble(
         clips=clips,
         detection_period=host.detection_period,
         engaged=lambda: selector.engaged,
-        conversing=lambda: in_conversation(phase, host.conversation),
+        conversing=lambda: in_conversation(phase, host.conversation, hearing=False),
     )
     circ.events = host.events
     expression.circadian_factor = circ.amplitude_factor

@@ -17,6 +17,7 @@ BEHAVIOUR_MODULES = [
     "affect/expression.py",
     "affect/speaking.py",
     "circadian/model.py",
+    "circadian/nap.py",
     "circadian/light.py",
     "circadian/motion.py",
     "circadian/replay.py",

@@ -1,11 +1,13 @@
-"""SPEC 7A, Day nap: with no face and no speech for circadian.nap_after_s, outside quiet hours,
-the robot rests; a confirmed face or speech wakes it for circadian.wake_hold_s. A single detection
-blip never starts or ends a nap, and the resting reason says why the robot rests."""
+"""SPEC 7A, Day nap: with no confirmed face and no addressed speech for circadian.nap_after_s
+outside quiet hours, the robot rests; a confirmed face or addressed speech wakes it for
+circadian.wake_hold_s. A single detection blip or a television never starts or ends a nap, a stale
+idle clock never fires one, and the resting reason says why the robot rests."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
 from roboemot.circadian.replay import RecordingSink, ReplayClock
@@ -134,21 +136,39 @@ def test_faces_further_apart_than_the_presence_window_never_wake_it():
     assert x.events == [("nap", "start")]
 
 
-def test_speech_wakes_it_even_unaddressed():
+def say(x, **payload) -> None:
+    x.bus.publish("percept.utterance", SimpleNamespace(**payload), x.clock.t)
+
+
+def test_addressed_speech_wakes_it():
     x = napping(rig())
-    x.bus.publish("percept.utterance", SimpleNamespace(addressed=False), x.clock.t)
+    say(x, addressed=True)
     run(x, STEP)
     assert x.r.model.state == "awake"
     assert x.events[-1] == ("nap", "speech")
 
 
-def test_after_the_wake_it_naps_again_only_after_nap_after_s():
-    x = napping(rig())
-    x.bus.publish("percept.utterance", SimpleNamespace(addressed=False), x.clock.t)
-    run(x, STEP)
+def test_television_speech_neither_holds_a_nap_off_nor_wakes_it():
+    """Owner decision 2026-11-03: no wake word, no face in view: not addressed, not activity."""
+    x = rig()
     after = x.cfg.circadian.nap_after_s
-    assert set(run(x, after - 3 * STEP)) == {"awake"}
-    run(x, 4 * STEP)
+    for _ in range(int(after // 60) + 2):
+        say(x, addressed=False)
+        run(x, 60)
+    assert x.r.model.reason == "nap"
+    for _ in range(30):
+        say(x, addressed=False)
+        assert set(run(x, 60)) == {"resting"}
+    assert x.events == [("nap", "start")]
+
+
+def test_after_the_wake_hold_it_naps_again_only_after_nap_after_s():
+    x = napping(rig())
+    say(x, addressed=True)
+    run(x, STEP)
+    c = x.cfg.circadian
+    assert set(run(x, c.wake_hold_s + c.nap_after_s - 3 * STEP)) == {"awake"}  # clock: hold end
+    run(x, 5 * STEP)
     assert x.r.model.reason == "nap"
 
 
@@ -207,3 +227,103 @@ def test_turning_naps_off_ends_the_nap_in_progress():
     x.r.apply_config(config(nap_after_s=None))
     run(x, STEP)
     assert x.r.model.state != "resting" and x.r.snapshot()["nap"]["napping"] is False
+
+
+def percept(track: int, stamp: float):
+    from roboemot.vision.types import FacePercept
+
+    return FacePercept(track, stamp, (0.4, 0.4, 0.6, 0.6), 0.9, 0.0, 0.0, None, "anon", False)
+
+
+def test_two_faces_of_one_frame_count_once_and_the_next_frame_confirms():
+    x = napping(rig())
+    frame = x.clock.t
+    for track in (1, 2):  # the vision pipeline publishes one percept per track, frame stamp
+        x.bus.publish("percept.face", percept(track, frame), frame)
+    run(x, STEP)
+    assert x.r.model.reason == "nap"
+    x.bus.publish("percept.face", percept(1, frame + 0.2), frame + 0.2)
+    run(x, STEP)
+    assert x.r.model.state == "awake" and x.events[-1] == ("nap", "face")
+
+
+@pytest.mark.parametrize("step", [1.0, 60.0])
+def test_idle_time_before_quiet_hours_adds_up_across_midnight(step):
+    """Idle from 22:15, quiet hours 22:30 to 07:00: 15 min before, 15 min after: nap at 07:15."""
+    x = rig(hour=22.25)
+    start_hour = None
+    while start_hour is None:
+        x.clock.advance(step)
+        x.r.tick(x.clock.t)
+        if x.r.model.reason == "nap":
+            start_hour = x.clock.hour()
+    tolerance_h = (step + x.cfg.circadian.update_period_s) / 3600
+    assert start_hour == pytest.approx(7.25, abs=tolerance_h)
+    assert x.r.nap.naps == 1
+
+
+def test_no_nap_while_the_platform_sleeps_and_the_clock_restarts_on_wake():
+    x = rig()
+    after = x.cfg.circadian.nap_after_s
+    run(x, after - 5 * STEP)
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    assert "resting" not in run(x, 2 * after)
+    x.bus.publish("robot.awake", None, x.clock.t)
+    assert set(run(x, after - 3 * STEP)) == {"awake"}  # not within 10 s of the wake
+    run(x, 4 * STEP)
+    assert x.r.model.reason == "nap"
+
+
+@pytest.mark.parametrize("call", [lambda r: r.wake(), lambda r: r.hold("awake", 10)])
+def test_a_wake_or_hold_from_outside_ends_the_nap_and_restarts_the_clock(call):
+    x = napping(rig())
+    call(x.r)
+    run(x, STEP)
+    assert x.r.model.state == "awake" and x.r.snapshot()["nap"]["napping"] is False
+    held = x.r.model.hold_remaining()[1]
+    assert set(run(x, held + x.cfg.circadian.nap_after_s - 3 * STEP)) == {"awake"}
+    run(x, 5 * STEP)
+    assert x.r.model.reason == "nap"
+
+
+def test_a_resting_hold_ends_the_nap_and_no_nap_comes_right_after_it():
+    x = napping(rig())
+    x.r.hold("resting", 20)
+    run(x, STEP)
+    assert x.r.model.reason == "hold"
+    run(x, 20 * 60)
+    assert x.r.model.reason != "nap"
+    assert "resting" not in run(x, x.cfg.circadian.nap_after_s - 3 * STEP)
+
+
+def test_no_nap_right_after_a_rest_of_the_rhythm_ends():
+    x = rig(hour=15.0, peak_hour=3.0, initial_sleep_pressure=1.0, nap_after_s=300.0)
+    run(x, STEP)
+    assert x.r.model.reason == "sleepiness"
+    while x.r.model.state == "resting":  # S decays until the rhythm lets go
+        run(x, STEP)
+    assert x.r.model.reason is None
+    assert "resting" not in run(x, 300.0 - 3 * STEP)
+    run(x, 5 * STEP)
+    assert x.r.model.reason == "nap"
+
+
+@pytest.mark.parametrize(
+    ("first", "then"),
+    [
+        ({"nap_after_s": None}, {"nap_after_s": 1800.0}),  # null to a value
+        ({}, {"nap_after_s": 600.0}),  # a lower value
+        ({}, {"enabled": False}),  # off, then on again (below)
+    ],
+)
+def test_a_reload_never_fires_a_nap_from_a_stale_clock(first, then):
+    x = rig(**first)
+    run(x, 1700)
+    x.r.apply_config(config(**{**first, **then}))
+    if then.get("enabled") is False:
+        run(x, 1000)
+        x.r.apply_config(config(**first))
+    after = x.r.cfg.circadian.nap_after_s
+    assert "resting" not in run(x, after - 3 * STEP)
+    run(x, 5 * STEP)
+    assert x.r.model.reason == "nap"

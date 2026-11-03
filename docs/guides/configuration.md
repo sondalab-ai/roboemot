@@ -469,6 +469,7 @@ robot still answers in every state, only more quietly.
 | `circadian.presence_keeps_awake` | `true` | on/off | People present and active prevent resting, inside quiet hours too. |
 | `circadian.presence_window_s` | `60.0` | s, 1 to 3600 | People seen, recognised or attended to within this time count as present. |
 | `circadian.wake_hold_s` | `300.0` | s, 10 to 3600 | How long the wake word keeps a resting robot awake. |
+| `circadian.nap_after_s` | `1800.0` | s, 300 to 86400, or `null` | Day nap: with no face in view and no speech addressed to the robot for this long, outside quiet hours, the robot rests (reason `nap`) until a face or addressed speech wakes it for `wake_hold_s`. A television does not count. Only time outside quiet hours adds up. `null` turns naps off. |
 | `circadian.peak_hour` | `15.0` | h, 0 to 24 | Hour of the day at which alertness peaks. |
 | `circadian.drowsy_threshold` | `0.55` | 0 to 1 | Sleepiness above which the robot is drowsy. |
 | `circadian.resting_threshold` | `0.75` | 0 to 1 | Sleepiness above which the robot rests. |
@@ -476,6 +477,13 @@ robot still answers in every state, only more quietly.
 | `circadian.location` | `null` | `{lat, lon}` | Optional location for clock-only mode. It is private: the web UI masks it. |
 
 Quiet hours also stop the robot's look-around scans.
+
+| Key | Default | Unit, range | What it does |
+| --- | --- | --- | --- |
+| `world.scan.alone_after_s` | `120.0` | s, 10 to 3600 | With no face in view and no sound for this long, the robot is alone and holds still: no look-around scans or glances. Breathing and reflexes go on. A face or a sound ends it at once. Never shorter than `circadian.presence_periods` face-detection periods, so a robot whose vision runs slowly is not fooled by a still face. With reflexes off, a loud sound does not count, only speech the listener hears. |
+
+The Live tab says why the robot rests (a nap, quiet hours, sleepiness, an app hold) and when it is
+alone.
 
 **Not the same as the robot's sleep.** The owner can put the robot to sleep from the platform
 (motors off). With the default `runtime.pause_when_asleep: true`, RoboEmot then pauses perception,

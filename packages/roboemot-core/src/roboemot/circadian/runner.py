@@ -18,14 +18,16 @@ cue (SPEC 7A): a face, a recognised person or an attention target within
 ``circadian.presence_window_s`` (or ``presence_periods`` face-detection periods), or attention
 engaged now. The app loop calls :meth:`tick`; the hold and wake calls come from any thread.
 
-Day nap (SPEC 7A, Day nap): with no face and no speech for ``circadian.nap_after_s`` of time
-outside the quiet hours, nobody present (with ``presence_keeps_awake``), no attention on a person,
-no conversation (``conversing``), no hold and not resting already, the robot rests (reason
-``nap``). A face counts only when confirmed: a second sighting from another frame within the
-presence window, so a single detection blip neither delays the clock for good nor ends a nap.
-Speech (any utterance, addressed or not) or a conversation counts at once. Either one ends the
-nap like the wake word (``wake_hold_s``). Quiet hours end it without a wake (they rest the robot
-anyway). Each start and wake is a decision event (``nap``: ``start``, ``face``, ``speech``).
+Day nap (SPEC 7A, Day nap; the rules in :class:`DayNap`): with no confirmed face and no addressed
+speech for ``circadian.nap_after_s`` of time outside the quiet hours, nobody present (with
+``presence_keeps_awake``), the robot rests (reason ``nap``). A face counts when confirmed (a
+second sighting from another frame within the presence window); speech counts when addressed
+(the wake word, a face in view: the listener's rules), so a television neither holds a nap off
+nor wakes one; a conversation in progress (``conversing``) counts too. Activity ends the nap like
+the wake word (``wake_hold_s``). Quiet hours end it without a wake. No nap while the robot is
+asleep (``robot.asleep``), held, resting on its own or attending to a person, and the idle clock
+restarts after each of those. Each start and wake is a decision event (``nap``: ``start``,
+``face``, ``speech``).
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ from .model import (
     in_window,
 )
 from .motion import CircadianMotion
+from .nap import DayNap
 from .sampler import LightSampler
 
 TOPIC = "circadian.state"
@@ -139,11 +142,11 @@ class CircadianRunner:
         self._last_stretch = -math.inf
         self.last: CircadianState | None = None
         self.woken_at_night = 0  # count, for the debug report
-        self._active_at: float | None = None  # last confirmed face or speech (outside quiet hours)
-        self._face: tuple[float, float] | None = None  # (clock time, frame stamp) of the last face
-        self.napping = False
-        self.naps = 0  # count, for the debug report
+        self.nap = DayNap()
+        self._asleep = False  # the platform holds no motors (robot.asleep): no nap
         self._unsubscribe = [
+            bus.subscribe("robot.asleep", self._on_asleep),
+            bus.subscribe("robot.awake", self._on_awake),
             bus.subscribe("percept.face", self._on_presence),
             bus.subscribe("person.recognized", self._on_presence),
             bus.subscribe("attention.target", self._on_target),
@@ -158,25 +161,35 @@ class CircadianRunner:
         t, window = self.clock.monotonic(), self._window()
         with self._lock:
             self._seen = t
-            last, self._face = self._face, (t, msg.stamp)
-            confirmed = last is not None and t - last[0] <= window and msg.stamp != last[1]
-            woke = confirmed and self._activity(t)
+            woke = self.nap.face(t, msg.stamp, window) and self._activity(t)
         if woke:
             self.events("nap", "face")
 
     def _on_utterance(self, msg: Message) -> None:
-        """Any speech is activity for the day nap and wakes one. Speech addressed to the robot
-        is also a sign of people, and the wake word (``wake_word`` in the payload) wakes it
-        (SPEC 7A, Waking). Unaddressed speech (a television at night) does neither."""
-        with self._lock:
-            woke = self._activity(self.clock.monotonic())
-        if woke:
-            self.events("nap", "speech")
+        """Speech addressed to the robot is a sign of people and activity for the day nap (it
+        wakes one), and the wake word (``wake_word`` in the payload) wakes it (SPEC 7A, Waking).
+        Unaddressed speech (a television) does none of these."""
         if not getattr(msg.payload, "addressed", False):
             return
-        self._seen = self.clock.monotonic()
+        t = self.clock.monotonic()
+        with self._lock:
+            self._seen = t
+            woke = self._activity(t)
+        if woke:
+            self.events("nap", "speech")
         if getattr(msg.payload, "wake_word", False):
             self.wake()
+
+    def _on_asleep(self, msg: Message) -> None:
+        with self._lock:
+            self._asleep = True
+
+    def _on_awake(self, msg: Message) -> None:
+        """The platform holds the motors again: the idle clock restarts (nothing was seen or
+        heard while asleep)."""
+        with self._lock:
+            self._asleep = False
+            self.nap.restart(self.clock.monotonic())
 
     def _on_target(self, msg: Message) -> None:
         if msg.payload is not None:
@@ -196,6 +209,7 @@ class CircadianRunner:
             raise ValueError(f"minutes must be in (0, {top}], got {minutes}")
         with self._lock:
             self.model.hold(state, minutes * SECONDS_PER_MINUTE, self._lag())  # type: ignore[arg-type]
+            self.nap.cancel(self.clock.monotonic())
             self._force = True
             self._cause = "hold"
 
@@ -204,32 +218,29 @@ class CircadianRunner:
         reset, S stops decaying (SPEC 7A, Waking); the state changes within one tick."""
         with self._lock:
             self.model.wake(lag_s=self._lag())
+            self.nap.cancel(self.clock.monotonic())
             self._force = True
             self._cause = "wake"
 
     def _activity(self, t: float, lag_s: float | None = None) -> bool:
-        """Confirmed face or speech at ``t``: the nap clock restarts and a nap ends with a wake
-        (caller holds the lock; ``lag_s`` as in :meth:`CircadianModel.hold`, default the time
-        since the last update). Returns whether a nap ended."""
-        self._active_at = t
-        if not self.napping:
+        """Confirmed face, addressed speech or a conversation at ``t``: the nap clock restarts
+        and a nap ends with a wake (caller holds the lock; ``lag_s`` as in
+        :meth:`CircadianModel.hold`, default the time since the last update). Returns whether a
+        nap ended."""
+        if not self.nap.activity(t):
             return False
-        self.napping = False
         self.model.wake(lag_s=self._lag() if lag_s is None else lag_s)
         self._force = True
         self._cause = "wake"
         return True
 
-    def _nap_due(self, t: float, dt: float) -> bool:
-        """Whether a nap starts now (caller holds the lock; quiet hours already excluded)."""
-        c = self.cfg.circadian
-        if c.nap_after_s is None or self._active_at is None:
-            return False
-        if t - self._active_at < c.nap_after_s or self.model.state == "resting":
-            return False
-        if self.model.hold_remaining(dt) is not None:
-            return False
-        return not (c.presence_keeps_awake and self.present())
+    def _nap_blocked(self, dt: float, engaged: bool) -> bool:
+        """Whether no nap is possible now (caller holds the lock): the robot asleep, a hold, a
+        rest of the rhythm's own (the quiet hours only pause the clock), or attention on a
+        person."""
+        resting = self.model.state == "resting" and self.model.reason != "quiet_hours"
+        held = self.model.hold_remaining(dt) is not None
+        return self._asleep or held or resting or engaged
 
     def _lag(self) -> float:
         """Seconds since the last model update: the model's clock stands that far behind, and a
@@ -244,14 +255,18 @@ class CircadianRunner:
         Turning the rhythm off hands the robot back to the awake state at once: the arousal
         baseline, the rest posture and any yawn or stretch go."""
         with self._lock:
-            was = self.cfg.circadian.enabled
+            was = self.cfg.circadian
             self.cfg = cfg
-            if was and not cfg.circadian.enabled:
+            after, before = cfg.circadian.nap_after_s, was.nap_after_s
+            if after is not None and (before is None or after < before):
+                self.nap.restart(self.clock.monotonic())  # never a nap from a stale clock
+            if not was.enabled and cfg.circadian.enabled:
+                self.nap.restart(self.clock.monotonic())
+            if was.enabled and not cfg.circadian.enabled:
                 self.model.state = "awake"
                 self.model.reason = None
                 self.model.clear_hold()
-                self.napping = False
-                self._active_at = None
+                self.nap.cancel(self.clock.monotonic())
                 self._applied = self.last = None
                 self._last_update = None
                 self._cause = None
@@ -345,18 +360,16 @@ class CircadianRunner:
                     elif level == "dark":
                         events.append(("light.off", {}))
                 self._level = level
-            quiet = in_window(hour, c.quiet_hours)
-            if self._active_at is None or quiet:  # only time outside quiet hours counts
-                self._active_at = t
             if talking and self._activity(t, dt):
                 decisions.append("speech")
-            elif engaged and not self.napping:  # attention on a person: not a nap's waking cue
-                self._active_at = t
-            if self.napping and (quiet or c.nap_after_s is None):
-                self.napping = False  # quiet hours rest the robot anyway; null: naps off now
-            elif not self.napping and not quiet and self._nap_due(t, dt):
-                self.napping = True
-                self.naps += 1
+            started = self.nap.step(
+                t,
+                after_s=c.nap_after_s,
+                quiet=in_window(hour, c.quiet_hours),
+                blocked=self._nap_blocked(dt, engaged),  # engaged holds off, never wakes
+                held=c.presence_keeps_awake and self.present(),
+            )
+            if started:
                 decisions.append("start")
             prev = self.model.state
             st = self.model.update(
@@ -364,7 +377,7 @@ class CircadianRunner:
                 dt,
                 light=level,  # type: ignore[arg-type]
                 presence_active=self.present(),
-                nap=self.napping,
+                nap=self.nap.napping,
             )
             changed = st.state != prev or self._applied is None
             if changed and self.affect is not None:
@@ -406,14 +419,10 @@ class CircadianRunner:
                 "state": self.model.state,
                 "reason": self.model.reason,
                 "nap": {
-                    "napping": self.napping,
+                    "napping": self.nap.napping,
                     "after_s": c.nap_after_s,
-                    "inactive_s": (
-                        None
-                        if self._active_at is None
-                        else round(max(0.0, self.clock.monotonic() - self._active_at), 1)
-                    ),
-                    "naps": self.naps,
+                    "idle_s": round(self.nap.idle_s, 1),  # as of the last update
+                    "naps": self.nap.naps,
                 },
                 "present": self.present(),
                 "hold": None if hold is None else {"state": hold[0], "left_s": round(hold[1], 1)},

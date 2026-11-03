@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
 from roboemot.bus import Bus
-from roboemot.config.schema import WorldScanConfig
+from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationPhase
-from roboemot.runtime.ticks import in_conversation
+from roboemot.runtime.ticks import company, in_conversation
 from roboemot.world import AloneWatch
 
 AFTER = 120.0
@@ -22,9 +23,13 @@ class Clock:
         return self.t
 
 
-def rig(after: float = AFTER):
+def config(after: float = AFTER):
+    return ConfigStack(app={"world": {"scan": {"alone_after_s": after}}}).effective()
+
+
+def rig(after: float = AFTER, period: float = math.inf):
     clock, bus, events = Clock(), Bus(), []
-    watch = AloneWatch(WorldScanConfig(alone_after_s=after), bus, clock)
+    watch = AloneWatch(config(after), bus, clock, detection_period=lambda: period)
     watch.events = lambda kind, reason, **f: events.append((kind, reason))
     return SimpleNamespace(clock=clock, bus=bus, watch=watch, events=events)
 
@@ -86,7 +91,7 @@ def test_a_hot_reload_changes_the_delay():
     r = rig()
     r.watch.tick(r.clock.t)
     run(r, 30)
-    r.watch.apply_config(WorldScanConfig(alone_after_s=20.0))
+    r.watch.apply_config(config(20.0))
     assert r.watch.tick(r.clock.t) is True
 
 
@@ -127,3 +132,72 @@ def test_the_robot_speaking_alone_is_no_conversation():
     session = SimpleNamespace(in_session=lambda: True)
     assert in_conversation(ConversationPhase(), session) is True
     assert in_conversation(None) is False
+
+    assert in_conversation(listening, hearing=False) is False  # the VAD: a television too
+    assert in_conversation(thinking, hearing=False) is True
+
+
+def selector(engaged=False, speaker=False):
+    return SimpleNamespace(engaged=engaged, speaker_active=lambda now: speaker)
+
+
+@pytest.mark.parametrize(
+    ("sel", "phase", "conversation", "busy"),
+    [
+        (selector(), None, None, False),
+        (selector(engaged=True), None, None, True),
+        (selector(speaker=True), None, None, True),
+        (selector(), "listening", None, True),
+        (selector(), None, SimpleNamespace(in_session=lambda: True), True),
+        (selector(), "speaking", None, False),  # the robot alone speaking (a soothe sound)
+    ],
+)
+def test_what_reaches_the_watch_as_busy(sel, phase, conversation, busy):
+    """The loop's wiring (``company``): attention, a speaker hint and a conversation."""
+    p = ConversationPhase(lambda now: phase == "speaking")
+    if phase == "listening":
+        p.set_listening(True)
+    assert company(0.0, sel, p, conversation) is busy
+
+
+def test_a_slow_detector_lengthens_the_delay():
+    """A still face seen once every 30 s (drowsy or resting vision) is not an empty room."""
+    r = rig(after=10.0, period=30.0)
+    periods = r.watch.cfg.circadian.presence_periods
+    assert r.watch.after_s() == periods * 30.0
+    r.watch.tick(r.clock.t)
+    assert run(r, periods * 30.0 - 2) is False
+    assert run(r, 2) is True
+
+
+def test_waking_from_platform_sleep_restarts_the_delay():
+    r = rig()
+    r.watch.tick(r.clock.t)
+    assert run(r, AFTER + 5)
+    r.bus.publish("robot.asleep", None, r.clock.t)
+    r.clock.t += 3 * AFTER  # the loop does not tick the watch while asleep
+    r.bus.publish("robot.awake", None, r.clock.t)
+    assert r.watch.alone is False
+    assert r.watch.tick(r.clock.t) is False  # not alone on the first tick after the wake
+    assert run(r, AFTER - 2) is False
+    assert run(r, 2) is True
+
+
+def test_with_reflexes_off_loud_talk_alone_does_not_count():
+    """SPEC 5A: sound.loud comes from the reflex engine. With reflexes.enabled off it never
+    comes, so people talking count only through the listener (an utterance, the VAD): a robot
+    without voice goes alone while they talk."""
+    from test_reflex import LOUD, Rig, cfg_with, rule
+
+    reflex = Rig(cfg_with(rule(), enabled=False))
+    clock, events = Clock(), []
+    watch = AloneWatch(config(), reflex.bus, clock)
+    watch.events = lambda kind, reason, **f: events.append(reason)
+    watch.tick(clock.t)
+    reflex.settle_audio()
+    for _ in range(int(AFTER) + 1):
+        reflex.engine.offer_audio_level(LOUD, reflex.t)
+        reflex.tick()
+        clock.t += 1.0
+        watch.tick(clock.t)
+    assert watch.alone and events == ["start"]

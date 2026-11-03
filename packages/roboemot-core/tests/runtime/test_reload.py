@@ -47,7 +47,7 @@ def test_a_config_change_reaches_every_part_that_holds_a_copy():
     assert ("apply_config", (cfg,)) in host.speech_output.calls
     assert ("sync", (cfg,)) in p.hub.calls and ("apply_config", (cfg,)) in p.loop.calls
     assert ("apply_config", (cfg,)) in p.perception.calls
-    assert ("apply_config", (cfg.world.scan,)) in p.alone.calls
+    assert ("apply_config", (cfg,)) in p.alone.calls
     assert ("apply_config", (cfg,)) in host.conversation.calls
     assert ("set_echo_tail_ms", (cfg.voice.echo_tail_ms,)) in p.speech.calls
     assert ("set_policy", (cfg.connectivity.network,)) in p.network.calls

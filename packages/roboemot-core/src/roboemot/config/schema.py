@@ -603,9 +603,9 @@ class CircadianConfig(Strict):
     )
     nap_after_s: float | None = param(
         1800.0,
-        "Day nap: with no face in view and no speech for this long, outside quiet hours, the "
-        "robot rests until a face or speech wakes it (for wake_hold_s). Only time outside quiet "
-        "hours counts. null: no naps",
+        "Day nap: with no face in view and no speech addressed to the robot for this long, the "
+        "robot rests until a face or addressed speech wakes it (for wake_hold_s). A television "
+        "does not count. Only time outside quiet hours adds up. null: no naps",
         unit="s",
         ge=300,
         le=86400,
@@ -2024,7 +2024,8 @@ class WorldScanConfig(Strict):
     alone_after_s: float = param(
         120.0,
         "With no face in view and no sound for this long the robot is alone and holds still: no "
-        "sweeps, no glances; breathing and reflexes go on. A face or a sound ends it at once",
+        "sweeps, no glances; breathing and reflexes go on. A face or a sound ends it at once. "
+        "Never shorter than circadian.presence_periods face-detection periods",
         unit="s",
         ge=10,
         le=3600,
