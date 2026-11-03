@@ -1739,9 +1739,82 @@ class TrackerConfig(Strict):
 TIMING_WINDOW_MAX_S = 60.0  # vision.timing_window_s upper bound: sizes the timing rings
 
 
+class ObjectGateConfig(Strict):
+    """Scene-change gate of the object stage (SPEC 5, 13): object detection runs only when the
+    image changed while the head was still, with a floor and a fixed schedule as fallbacks."""
+
+    enabled: bool = param(
+        True,
+        "On: object detection runs only when the scene changed (head still), once after the "
+        "head settles, and at least every max_interval_s, never above vision.rates.objects_hz; "
+        "without a head pose, or while an animal, a not yet confirmed or a recently moved track "
+        "is live, it keeps that fixed rate; confirmed still objects do not. Animal and object "
+        "tracks then live at least max_interval_s plus object_lost_periods detection periods. "
+        "Off: always the fixed rate",
+    )
+    thumb_width_px: int = param(
+        80, "Width of the grayscale copy the motion test compares", unit="px", ge=8, le=320
+    )
+    thumb_height_px: int = param(
+        60, "Height of the grayscale copy the motion test compares", unit="px", ge=6, le=240
+    )
+    pixel_diff: float = param(
+        25.0,
+        "A pixel of the grayscale copy changed when its value moved by more than this (0 to 255)",
+        ge=1,
+        le=255,
+    )
+    changed_share: float = param(
+        0.02,
+        "The scene changed when more than this share of the copy's pixels changed",
+        gt=0,
+        le=1,
+    )
+    head_still_deg: float = param(
+        3.0,
+        "The head is still while its yaw and pitch stay within this of where they settled; above "
+        "the idle breathing swing (about 2.3 deg peak to peak), so breathing is not a move",
+        unit="deg",
+        ge=0.1,
+        le=30,
+    )
+    settle_s: float = param(
+        1.0,
+        "After a head move, object detection runs once when the head has been still this long "
+        "(capture time), and the motion test starts again from that view",
+        unit="s",
+        ge=0,
+        le=30,
+    )
+    max_interval_s: float = param(
+        10.0,
+        "Object detection runs at least this often (capture time) even with no change, so a "
+        "still thing that appeared is found",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    moved_share: float = param(
+        0.05,
+        "A track moved when its box centre moved by more than this share of the frame width "
+        "between its last two hits; a moved track keeps the fixed rate (a small rolling ball "
+        "the changed_share test misses)",
+        gt=0,
+        le=1,
+    )
+    moved_hold_s: float = param(
+        3.0,
+        "A moved track keeps the fixed rate until its last hit is older than this (capture time)",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+
+
 class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
+    object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
