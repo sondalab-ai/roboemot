@@ -1734,7 +1734,9 @@ class ObjectGateConfig(Strict):
         True,
         "On: object detection runs only when the scene changed (head still), once after the "
         "head settles, and at least every max_interval_s, never above vision.rates.objects_hz; "
-        "without a head pose or with a live animal or object track it keeps that fixed rate. "
+        "without a head pose, or while an animal, a not yet confirmed or a recently moved track "
+        "is live, it keeps that fixed rate; confirmed still objects do not. Animal and object "
+        "tracks then live at least max_interval_s plus object_lost_periods detection periods. "
         "Off: always the fixed rate",
     )
     thumb_width_px: int = param(
@@ -1778,6 +1780,21 @@ class ObjectGateConfig(Strict):
         unit="s",
         ge=1,
         le=600,
+    )
+    moved_share: float = param(
+        0.05,
+        "A track moved when its box centre moved by more than this share of the frame width "
+        "between its last two hits; a moved track keeps the fixed rate (a small rolling ball "
+        "the changed_share test misses)",
+        gt=0,
+        le=1,
+    )
+    moved_hold_s: float = param(
+        3.0,
+        "A moved track keeps the fixed rate until its last hit is older than this (capture time)",
+        unit="s",
+        ge=0,
+        le=60,
     )
 
 

@@ -31,7 +31,7 @@ the same with or without it.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -52,6 +52,8 @@ STATE_DIM = 8
 BOX_COLUMNS = 4
 HEIGHT = 3
 MEASURE_DIM = 4
+HOLD_ANIMAL, HOLD_TENTATIVE, HOLD_MOVING = "animal", "tentative", "moving"
+HOLD_REASONS = (HOLD_ANIMAL, HOLD_TENTATIVE, HOLD_MOVING)
 
 
 def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -121,6 +123,20 @@ class Track:
     _cov: np.ndarray = field(default_factory=lambda: np.eye(STATE_DIM), repr=False)
     _stamp: float = 0.0
     _matched_last: bool = True
+    _hit_centres: list[tuple[float, float]] = field(default_factory=list, repr=False)
+
+    def _hit(self, det: Detection) -> None:
+        """Keep the detection centres of the last two hits, for ``moved_px``."""
+        x1, y1, x2, y2 = det.box
+        self._hit_centres = [*self._hit_centres[-1:], ((x1 + x2) / 2, (y1 + y2) / 2)]
+
+    @property
+    def moved_px(self) -> float:
+        """Distance in pixels between the detection centres of the last two hits; 0 with one."""
+        if len(self._hit_centres) < 2:
+            return 0.0
+        (ax, ay), (bx, by) = self._hit_centres
+        return float(np.hypot(bx - ax, by - ay))
 
     @property
     def box(self) -> Box:
@@ -134,6 +150,7 @@ class Track:
         std = [INITIAL_POSITION_STD * h] * MEASURE_DIM + [INITIAL_VELOCITY_STD * h] * MEASURE_DIM
         self._cov = np.diag(np.array(std) ** 2)
         self._stamp = stamp
+        self._hit(det)
 
     def _predict(self, stamp: float) -> None:
         dt = max(0.0, stamp - self._stamp)
@@ -177,10 +194,22 @@ class Tracker:
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
 
-    @property
-    def live_count(self) -> int:
-        """Tracks alive now, tentative ones included."""
-        return len(self._tracks)
+    def holds(
+        self, stamp: float, labels: Collection[str], min_move_px: float, hold_s: float
+    ) -> frozenset[str]:
+        """Why the live tracks need a steady detector (the object gate, SPEC 5): ``animal``
+        when a track has a label in ``labels``, ``tentative`` when one is not confirmed yet,
+        ``moving`` when one's centre moved more than ``min_move_px`` between its last two hits
+        and the last hit is at most ``hold_s`` before ``stamp``. Empty when none applies."""
+        reasons: set[str] = set()
+        for t in self._tracks:
+            if t.label in labels:
+                reasons.add(HOLD_ANIMAL)
+            if not t.confirmed:
+                reasons.add(HOLD_TENTATIVE)
+            if t.moved_px > min_move_px and stamp - t.last_stamp <= hold_s:
+                reasons.add(HOLD_MOVING)
+        return frozenset(reasons)
 
     def reset(self, ids: Iterator[int] | None = None) -> None:
         """Drop all tracks; IDs keep counting from the allocator unless a new one is given.
@@ -274,6 +303,7 @@ class Tracker:
         visible: list[Track] = []
         for t, d, distance in matched + matched_low:
             t._correct(d)
+            t._hit(d)
             t.detection, t.score, t.last_stamp, t.hits = d, d.score, stamp, t.hits + 1
             t._matched_last = True
             if self.observer is not None:

@@ -217,7 +217,7 @@ class VisionPipeline:
             pose = head_pose(frame.joint_state, self.frame_spec)
             self.object_gate.observe(stamp, pose)
             if self.governor.allow("objects", stamp) and self.object_gate.decide(
-                stamp, frame.image, pose, self.object_tracker.live_count
+                stamp, frame.image, pose, self._object_holds(stamp, frame.image.shape[1])
             ):
                 self._process_objects(frame, camera)
                 objects = True
@@ -292,12 +292,24 @@ class VisionPipeline:
         return self.cfg.tracker.model_copy(update={"lost_s": lost})
 
     def _object_lost_s(self) -> float:
-        """Lifetime of an animal or object track at the rate the governor allows now."""
+        """Lifetime of an animal or object track at the rate the governor allows now. With the
+        object gate on, runs may be ``max_interval_s`` apart, so a still thing lives at least
+        that plus ``object_lost_periods`` periods and keeps its ID between floor runs."""
         lost = self.cfg.object_lost_s
         period = self.governor.period("objects")
         if math.isfinite(period):
             lost = max(lost, self.cfg.object_lost_periods * period)
+            gate = self.cfg.object_gate
+            if gate.enabled:
+                lost = max(lost, gate.max_interval_s + self.cfg.object_lost_periods * period)
         return lost
+
+    def _object_holds(self, stamp: float, width_px: int) -> frozenset[str]:
+        """Why live animal or object tracks keep the object gate on the fixed schedule."""
+        gate = self.cfg.object_gate
+        return self.object_tracker.holds(
+            stamp, self.cfg.animal_categories, gate.moved_share * width_px, gate.moved_hold_s
+        )
 
     def _object_tracker_cfg(self) -> TrackerConfig:
         """Tracker settings for animals and objects, derived from the vision config.

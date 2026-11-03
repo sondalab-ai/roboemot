@@ -1,6 +1,7 @@
 """Scene-change gate of the object stage (SPEC 5, 13): object detection runs only when the
 image changed while the head was still, after the head settles, at a floor interval, and on the
-fixed schedule without a head pose or with a live animal or object track. Mock stages only."""
+fixed schedule without a head pose or while an animal, tentative or recently moved track is
+live. Mock stages only."""
 
 from __future__ import annotations
 
@@ -49,6 +50,11 @@ def drive(pipe, frames):
     return [s for s, img, j in frames if pipe.process(Frame(img, s, j)).objects_detected]
 
 
+def gate_cfg(**update) -> object:
+    """The default vision config with ``vision.object_gate`` fields replaced."""
+    return CFG.vision.model_copy(update={"object_gate": GATE.model_copy(update=update)})
+
+
 def counts(pipe) -> tuple[dict[str, int], dict[str, int]]:
     gate = pipe.stats()["object_gate"]
     return gate["skipped"], gate["triggered"]
@@ -63,6 +69,7 @@ def test_defaults_and_units():
     assert (g.thumb_width_px, g.thumb_height_px) == (80, 60)
     assert g.pixel_diff == 25.0 and g.changed_share == 0.02
     assert g.head_still_deg == 3.0 and g.settle_s == 1.0 and g.max_interval_s == 10.0
+    assert g.moved_share == 0.05 and g.moved_hold_s == 3.0
     fields = ObjectGateConfig.model_fields
     for name, unit in {
         "thumb_width_px": "px",
@@ -70,6 +77,7 @@ def test_defaults_and_units():
         "head_still_deg": "deg",
         "settle_s": "s",
         "max_interval_s": "s",
+        "moved_hold_s": "s",
     }.items():
         assert fields[name].json_schema_extra["unit"] == unit
     assert RoboEmotConfig().vision.object_gate == g
@@ -92,6 +100,10 @@ def test_defaults_and_units():
         ("settle_s", 31),
         ("max_interval_s", 0.5),
         ("max_interval_s", 601),
+        ("moved_share", 0),
+        ("moved_share", 1.01),
+        ("moved_hold_s", -0.1),
+        ("moved_hold_s", 61),
         ("enabled", "maybe"),
     ],
 )
@@ -121,8 +133,8 @@ def test_thumbnail_is_small_grayscale_and_area_pooled():
 def test_unsigned_difference_does_not_wrap():
     gate = ObjectGate(GATE)
     dark, bright = np.full((H, W, 3), 10, np.uint8), np.full((H, W, 3), 12, np.uint8)
-    assert gate.decide(0.0, dark, (0.0, 0.0), live_tracks=0)  # floor: never ran
-    assert not gate.decide(1.0, bright, (0.0, 0.0), live_tracks=0)  # 2 levels, not 254
+    assert gate.decide(0.0, dark, (0.0, 0.0), holds=())  # floor: never ran
+    assert not gate.decide(1.0, bright, (0.0, 0.0), holds=())  # 2 levels, not 254
 
 
 # ---------------------------------------------------------------------- the pipeline
@@ -201,6 +213,7 @@ def test_a_live_animal_track_keeps_the_fixed_schedule(tmp_path):
     ran = drive(pipe, [(i * DT, scene(), joint()) for i in range(40)])
     assert ran == [0.0, 1.0, 2.0, 3.0, 4.0]
     assert counts(pipe)[1]["live_track"] == 4
+    assert pipe.stats()["object_gate"]["live_track_by"]["animal"] == 4
     assert got["percept.entity"]  # confirmed on the second object frame
 
 
@@ -281,3 +294,149 @@ def test_reset_clears_the_gate(tmp_path):
     drive(pipe, [(i * DT, scene(), joint()) for i in range(20)])
     pipe.reset()
     assert counts(pipe) == (dict.fromkeys(SKIP_REASONS, 0), dict.fromkeys(RUN_REASONS, 0))
+
+
+# --------------------------------------------------------------- fix round (review)
+
+
+def track_ids(pipe) -> set[int]:
+    return {t.track_id for t in pipe.object_tracker._tracks}
+
+
+def test_a_still_confirmed_object_does_not_hold_and_keeps_one_track_id(tmp_path):
+    chair = Detection((100, 60, 220, 200), 0.8, "chair")
+    pipe, _, _ = gated(tmp_path, dets=[chair])
+    ran, ids = [], set()
+    for i in range(int(30 / DT)):
+        stamp = i * DT
+        if pipe.process(Frame(scene(), stamp, joint())).objects_detected:
+            ran.append(stamp)
+        ids |= track_ids(pipe)
+    floor = GATE.max_interval_s
+    assert ran == [0.0, 1.0, 1.0 + floor, 1.0 + 2 * floor]  # tentative holds once, then floor
+    assert len(ids) == 1
+    by = pipe.stats()["object_gate"]["live_track_by"]
+    assert by == {"animal": 0, "tentative": 1, "moving": 0}
+
+
+def test_object_lifetime_covers_the_floor_only_while_the_gate_is_on(tmp_path):
+    pipe, _, _ = gated(tmp_path)
+    periods = CFG.vision.object_lost_periods * PERIOD
+    assert pipe._object_lost_s() == GATE.max_interval_s + periods
+    pipe.apply_config(gate_cfg(enabled=False), CFG.identity)
+    assert pipe._object_lost_s() == max(CFG.vision.object_lost_s, periods)
+
+
+def test_a_moving_box_holds_the_fixed_schedule_until_the_hold_time(tmp_path):
+    pipe, objs, _ = gated(tmp_path)
+    step = GATE.moved_share * W + 4  # just over the moved share per object frame
+    ran = []
+    for i in range(int(12 / DT)):
+        stamp = i * DT
+        x = 20 + step * math.floor(stamp)
+        objs.dets = [Detection((x, 60, x + 80, 140), 0.8, "cup")] if stamp <= 4.0 else []
+        if pipe.process(Frame(scene(), stamp, joint())).objects_detected:
+            ran.append(stamp)
+    last_hit = 4.0
+    held = [float(t) for t in range(int(last_hit + GATE.moved_hold_s) + 1)]
+    assert ran == held  # every tick while moving, then until the last hit is moved_hold_s old
+    assert pipe.stats()["object_gate"]["live_track_by"]["moving"] >= 1
+    assert counts(pipe)[0]["still_scene"] > 0
+
+
+def test_negative_and_large_yaw_and_a_move_across_the_anchor():
+    gate, img, r = ObjectGate(GATE), scene(), math.radians
+
+    def tick(stamp, yaw_deg):
+        gate.observe(stamp, (r(yaw_deg), 0.0))
+        return gate.decide(stamp, img, (r(yaw_deg), 0.0), ())
+
+    assert tick(0.0, -170)  # floor
+    assert not tick(1.0, -172)  # 2 deg: still
+    gate.observe(1.5, (r(-174), 0.0))  # 4 deg: a move
+    assert not tick(2.0, -174)  # head moving
+    assert tick(3.0, -174)  # settled; anchored at -174
+    gate.observe(3.5, (r(-176.5), 0.0))  # 2.5 deg one side
+    gate.observe(3.75, (r(-172), 0.0))  # 2 deg the other side
+    assert not tick(4.0, -172)  # still: both within 3 deg of the anchor
+    gate.observe(4.5, (r(-170.5), 0.0))  # 3.5 deg across the anchor: a move
+    assert not tick(5.0, -170.5)
+    snap = gate.snapshot()
+    assert snap["skipped"]["head_moving"] == 2 and snap["triggered"]["settled"] == 1
+
+
+def test_joint_state_missing_on_alternate_frames(tmp_path):
+    pipe, _, _ = gated(tmp_path)  # pose on even frames, which carry every object tick
+    frames = [(i * DT, scene(), joint() if i % 2 == 0 else None) for i in range(int(25 / DT))]
+    assert drive(pipe, frames) == [0.0, GATE.max_interval_s, 2 * GATE.max_interval_s]
+    assert counts(pipe)[1]["no_pose"] == 0
+    odd, _, _ = gated(tmp_path / "odd")  # pose only between ticks: the fixed schedule
+    frames = [(i * DT, scene(), None if i % 2 == 0 else joint()) for i in range(40)]
+    assert drive(odd, frames) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_the_floor_fires_while_the_head_moves_continuously(tmp_path):
+    pipe, _, _ = gated(tmp_path)
+    frames = [
+        (i * DT, scene(int(i * DT * 8) % 200), joint(10.0 * i * DT)) for i in range(int(25 / DT))
+    ]
+    floor = GATE.max_interval_s
+    assert drive(pipe, frames) == [0.0, floor, 2 * floor]
+    skipped, triggered = counts(pipe)
+    assert triggered["floor"] == 3 and skipped["head_moving"] == 22 and triggered["motion"] == 0
+
+
+def test_a_gate_skipped_tick_uses_the_governor_slot(tmp_path):
+    pipe, _, _ = gated(tmp_path)
+    frames = [(i * DT, scene(None if i < 9 else 100), joint()) for i in range(24)]
+    assert drive(pipe, frames) == [0.0, 2.0]  # the change at 1.125 s waits for the 2.0 s tick
+
+
+def test_thresholds_are_strict():
+    gate, pose = ObjectGate(GATE), (0.0, 0.0)
+    h, w = GATE.thumb_height_px, GATE.thumb_width_px
+    base = np.full((h, w), 100, np.uint8)
+    assert gate.decide(0.0, base, pose, ())
+    assert not gate.decide(1.0, base + int(GATE.pixel_diff), pose, ())  # exactly pixel_diff
+    assert gate.decide(2.0, base + int(GATE.pixel_diff) + 1, pose, ())
+    img = base + int(GATE.pixel_diff) + 1
+    n = round(h * w * GATE.changed_share)
+    img.flat[:n] = 250
+    assert not gate.decide(3.0, img, pose, ())  # exactly changed_share
+    img.flat[: n + 1] = 250
+    assert gate.decide(4.0, img, pose, ())
+
+
+@pytest.mark.parametrize("shape", [(479, 641, 3), (479, 641), (479, 641, 4)])
+def test_odd_frame_sizes_gray_and_bgra(shape):
+    small = thumbnail(np.full(shape, 90, np.uint8), 80, 60)
+    assert small.shape == (60, 80) and small.dtype == np.float32
+    assert small == pytest.approx(90.0, abs=0.01)
+
+
+def test_an_unsupported_frame_shape_runs_instead_of_raising():
+    assert thumbnail(np.zeros((10, 10, 2), np.uint8), 80, 60) is None
+    gate = ObjectGate(GATE)
+    odd = np.zeros((10, 10, 2), np.uint8)
+    assert gate.decide(0.0, odd, (0.0, 0.0), ())  # floor
+    assert gate.decide(1.0, odd, (0.0, 0.0), ())  # cannot compare: counts as changed
+    assert gate.snapshot()["triggered"]["motion"] == 1
+
+
+def test_disabled_then_reenabled_by_hot_reload(tmp_path):
+    pipe, _, _ = gated(tmp_path, vision=gate_cfg(enabled=False))
+    still = [(i * DT, scene(), joint()) for i in range(160)]
+    assert drive(pipe, still[:40]) == [0.0, 1.0, 2.0, 3.0, 4.0]
+    pipe.apply_config(gate_cfg(enabled=True), CFG.identity)
+    assert drive(pipe, still[40:120]) == [5.0]  # never ran while on: floor, then still
+    pipe.apply_config(gate_cfg(enabled=False), CFG.identity)
+    assert drive(pipe, still[120:]) == [15.0, 16.0, 17.0, 18.0, 19.0]
+
+
+def test_stamps_that_go_back_never_raise_and_reset_replays_the_same(tmp_path):
+    frames = [(i * DT, scene(None if i < 20 else 100), joint()) for i in range(100)]
+    pipe, _, _ = gated(tmp_path)
+    first = drive(pipe, frames)
+    assert drive(pipe, frames[:10]) == []  # stamps went back without a reset: no run, no raise
+    pipe.reset()
+    assert drive(pipe, frames) == first
