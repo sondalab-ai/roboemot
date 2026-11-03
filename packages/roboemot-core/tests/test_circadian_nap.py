@@ -12,6 +12,8 @@ from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
 from roboemot.circadian.replay import RecordingSink, ReplayClock
 from roboemot.config import ConfigStack
+from roboemot.reflex.engine import SoundLoud
+from roboemot.vision.scene_motion import ScenePercept
 
 STEP = 10.0
 
@@ -327,3 +329,250 @@ def test_a_reload_never_fires_a_nap_from_a_stale_clock(first, then):
     assert "resting" not in run(x, after - 3 * STEP)
     run(x, 5 * STEP)
     assert x.r.model.reason == "nap"
+
+
+# ------------------------------------------------- light, motion and loud wakes (2026-11-03)
+
+DIM, BRIGHT, DARK = 0.2, 0.6, 0.03  # normalised luma of each light level (LightConfig defaults)
+
+
+def lit(x, seconds: float, luma: float) -> list[str]:
+    """Tick for ``seconds`` with one light sample per tick; the states seen."""
+    seen = []
+    end = x.clock.t + seconds
+    while x.clock.t < end:
+        x.clock.advance(STEP)
+        x.r.sampler.offer_stats(luma, 0.0)
+        x.r.tick(x.clock.t)
+        seen.append(x.r.model.state)
+    return seen
+
+
+def loud(x) -> None:
+    x.bus.publish("sound.loud", SoundLoud(ratio=6.0, level=0.3), x.clock.t)
+
+
+def motion(x) -> None:
+    x.bus.publish("percept.scene_motion", ScenePercept(0.2), x.clock.t)
+
+
+STIMULI = {"loud": loud, "motion": motion}
+
+
+def napping_lit(x, luma: float = DIM) -> SimpleNamespace:
+    lit(x, x.cfg.circadian.nap_after_s + 3 * STEP, luma)
+    assert x.r.model.reason == "nap"
+    return x
+
+
+def past_grace(x, luma: float = DIM) -> None:
+    lit(x, x.cfg.circadian.nap_light_grace_s + STEP, luma)
+    assert x.r.model.reason == "nap"
+
+
+def woke(x, reason: str) -> None:
+    run(x, STEP)
+    assert x.r.model.state == "awake" and x.r.model.reason is None
+    assert x.events[-1] == ("nap", reason)
+    assert x.r.snapshot()["nap"]["wakes"][reason] == 1
+    held = x.r.model.hold_remaining()
+    assert held is not None and held[0] == "awake"
+
+
+def test_new_wake_switches_default_on():
+    c = config()
+    assert c.circadian.nap_wake_on_light and c.circadian.nap_wake_on_motion
+    assert c.circadian.nap_wake_on_loud and c.circadian.nap_light_grace_s == 300.0
+
+
+def test_light_rising_from_dim_to_bright_wakes_the_nap():
+    """The robot was in dim when the owner's test failed (2026-11-03): dim to bright counts."""
+    x = napping_lit(rig())
+    past_grace(x)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)
+    assert x.r.model.state == "awake" and x.events[-1] == ("nap", "light")
+    assert x.r.snapshot()["nap"]["wakes"]["light"] == 1
+
+
+def test_light_rising_from_dark_to_dim_wakes_the_nap():
+    x = napping_lit(rig(), DARK)
+    past_grace(x, DARK)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, DIM)
+    assert x.r.model.state == "awake" and x.events[-1] == ("nap", "light")
+
+
+def test_light_falling_does_not_wake_the_nap():
+    x = napping_lit(rig(), BRIGHT)
+    past_grace(x, BRIGHT)
+    assert set(lit(x, x.cfg.light.confirm_s + 6 * STEP, DARK)) == {"resting"}
+    assert x.r.model.reason == "nap"
+
+
+def test_a_light_rise_within_the_grace_after_the_nap_start_is_the_rest_posture():
+    x = rig()
+    lit(x, x.cfg.circadian.nap_after_s + STEP, DIM)
+    assert x.r.model.reason == "nap"
+    # the rest posture shows the camera a brighter view: confirmed light.confirm_s later
+    assert x.cfg.light.confirm_s + 2 * STEP < x.cfg.circadian.nap_light_grace_s
+    assert set(lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)) == {"resting"}
+    assert set(lit(x, x.cfg.circadian.nap_light_grace_s, BRIGHT)) == {"resting"}
+    assert x.r.model.reason == "nap"  # bright is now the nap's level: no rise, no wake
+
+
+@pytest.mark.parametrize("name", sorted(STIMULI))
+def test_motion_or_a_loud_sound_wakes_the_nap(name):
+    x = napping(rig())
+    STIMULI[name](x)
+    woke(x, name)
+
+
+@pytest.mark.parametrize("name", ["light", "motion", "loud"])
+def test_each_switch_turns_its_stimulus_off(name):
+    x = napping_lit(rig(**{f"nap_wake_on_{name}": False}))
+    past_grace(x)
+    if name == "light":
+        assert set(lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)) == {"resting"}
+    else:
+        STIMULI[name](x)
+        run(x, STEP)
+    assert x.r.model.reason == "nap"
+    assert x.r.snapshot()["nap"]["wakes"][name] == 0
+
+
+def test_none_of_them_ends_a_quiet_hours_rest():
+    x = rig(hour=23.0)
+    lit(x, 3600, DIM)
+    assert x.r.model.reason == "quiet_hours"
+    loud(x)
+    motion(x)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)
+    assert x.r.model.state == "resting" and x.r.model.reason == "quiet_hours"
+    assert x.r.woken_at_night == 0 and x.events == []
+
+
+@pytest.mark.parametrize("name", sorted(STIMULI))
+def test_a_stimulus_between_ticks_after_quiet_hours_began_does_not_wake(name):
+    """Sound and frames arrive on their own threads: the nap flag is cleared only at the next
+    update after 22:30, so the handler checks the quiet hours itself."""
+    x = napping(rig(hour=21.5))
+    while x.clock.hour() < 22.5 - STEP / 3600:
+        run(x, STEP)
+    assert x.r.model.reason == "nap"
+    x.clock.advance(STEP)  # into the quiet hours, no update yet
+    STIMULI[name](x)
+    run(x, STEP)
+    assert x.r.model.reason == "quiet_hours" and x.r.woken_at_night == 0
+    assert x.events == [("nap", "start")]
+
+
+@pytest.mark.parametrize("name", sorted(STIMULI))
+def test_none_of_them_ends_a_rest_held_by_the_app(name):
+    x = napping(rig())
+    x.r.hold("resting", 20)
+    run(x, STEP)
+    STIMULI[name](x)
+    run(x, STEP)
+    assert x.r.model.reason == "hold"
+
+
+def test_while_awake_none_of_them_restarts_the_idle_clock():
+    """Not people engaging (a television's bang, a car, clouds, the robot's own moves): a busy
+    room would otherwise never let the robot nap."""
+    x = rig()
+    after, start = x.cfg.circadian.nap_after_s, x.clock.t
+    lit(x, after / 2, DARK)  # then the light rises while awake
+    for _ in range(int(after / 2 // 60) - 1):
+        loud(x)
+        motion(x)
+        assert set(lit(x, 60, BRIGHT)) == {"awake"}
+    lit(x, start + after + 3 * STEP - x.clock.t, BRIGHT)
+    assert x.r.model.reason == "nap"  # on time: the clock ran from the start
+    assert sum(x.r.snapshot()["nap"]["wakes"].values()) == 0
+
+
+def test_the_motion_watch_is_wanted_only_during_a_nap_with_its_switch():
+    x = rig()
+    assert x.r.wants_scene_motion() is False
+    napping(x)
+    assert x.r.wants_scene_motion() is True
+    x.r.apply_config(config(nap_wake_on_motion=False))
+    assert x.r.wants_scene_motion() is False
+    x.r.apply_config(config())
+    motion(x)
+    run(x, STEP)
+    assert x.r.wants_scene_motion() is False  # awake
+
+
+def test_wakes_are_counted_per_reason():
+    x = napping(rig())
+    face(x, stamp=1.0)
+    face(x, stamp=2.0)
+    run(x, STEP)
+    wakes = x.r.snapshot()["nap"]["wakes"]
+    assert wakes == {"face": 1, "speech": 0, "light": 0, "motion": 0, "loud": 0}
+
+
+def test_none_of_them_wakes_a_nap_while_the_platform_sleeps():
+    x = napping_lit(rig())
+    past_grace(x)
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    assert x.r.wants_scene_motion() is False
+    loud(x)
+    motion(x)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)
+    assert x.r.model.state == "resting"
+    assert x.r.model.hold_remaining() is None
+    assert sum(x.r.snapshot()["nap"]["wakes"].values()) == 0
+    assert x.events == [("nap", "start")]
+
+
+def test_motion_within_the_grace_after_the_nap_start_is_ignored():
+    x = rig()
+    grace = x.cfg.circadian.nap_motion_grace_s
+    assert grace == 10.0
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    start = x.r.nap.started
+    assert x.clock.t == start
+    x.clock.advance(grace - 1.0)  # inside the grace, between ticks
+    motion(x)
+    run(x, STEP)
+    assert x.r.model.reason == "nap"
+    motion(x)  # past it
+    woke(x, "motion")
+
+
+@pytest.mark.parametrize(("offset", "wakes"), [(-STEP, False), (0.0, True)])
+def test_the_light_grace_boundary(offset, wakes):
+    """A rise first seen at an update exactly nap_light_grace_s after the start wakes the nap;
+    one an update earlier does not, and is not looked at again (the level stays bright)."""
+    x = rig()
+    level = {"now": "dim"}
+    x.r.sampler.level = lambda: level["now"]
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    rise_at = x.r.nap.started + x.cfg.circadian.nap_light_grace_s + offset
+    run(x, rise_at - STEP - x.clock.t)
+    assert x.clock.t == rise_at - STEP and x.r.model.reason == "nap"
+    level["now"] = "bright"
+    run(x, STEP)
+    assert (x.r.model.reason is None) is wakes
+    run(x, 3 * STEP)
+    assert (x.r.model.reason is None) is wakes  # the earlier rise is not re-evaluated
+
+
+def test_scene_motion_from_the_pipeline_ends_a_nap_end_to_end(tmp_path):
+    from roboemot.vision import Frame
+    from test_vision import rig as vision_rig
+    from test_vision_scene_motion import DT, GATE, MOTION, SPEC, joint, scene
+
+    x = napping(rig())
+    _, vbus, pipe, _, _ = vision_rig(tmp_path, lambda i: [], frame_spec=SPEC)
+    vbus.subscribe("percept.scene_motion", lambda m: x.bus.publish(m.topic, m.payload, m.stamp))
+    pipe.motion_wanted = x.r.wants_scene_motion
+    span = GATE.settle_s + 2 * MOTION.interval_s
+    n, m = round(span / DT), round(3 * MOTION.interval_s / DT)
+    for i in range(n + m):
+        pipe.process(Frame(scene(100 if i >= n else None), i * DT, joint()))
+    woke(x, "motion")
+    assert x.r.wants_scene_motion() is False

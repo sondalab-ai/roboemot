@@ -641,11 +641,44 @@ class CircadianConfig(Strict):
     nap_after_s: float | None = param(
         1800.0,
         "Day nap: with no face in view and no speech addressed to the robot for this long, the "
-        "robot rests until a face or addressed speech wakes it (for wake_hold_s). A television "
-        "does not count. Only time outside quiet hours adds up. null: no naps",
+        "robot rests until a face, addressed speech or a nap_wake_on_* stimulus wakes it (for "
+        "wake_hold_s). A television's speech does not count. Only time outside quiet hours "
+        "adds up. null: no naps",
         unit="s",
         ge=300,
         le=86400,
+    )
+    nap_wake_on_light: bool = param(
+        True,
+        "A day nap ends when the confirmed room light rises (dark to dim or bright, dim to "
+        "bright); never a night rest",
+    )
+    nap_wake_on_motion: bool = param(
+        True,
+        "A day nap ends on motion in front of the camera while the head is still "
+        "(vision.scene_motion); never a night rest",
+    )
+    nap_wake_on_loud: bool = param(
+        True,
+        "A day nap ends on a loud sound (sound.loud, the reflex engine's loud onset: needs "
+        "reflexes.enabled and reflexes.audio.enabled); never a night rest",
+    )
+    nap_light_grace_s: float = param(
+        300.0,
+        "A light rise confirmed this soon after a day nap starts does not wake it: the rest "
+        "posture moves the camera, and the new view can read brighter (light.confirm_s later, "
+        "or after light.noise_smooth_s when its image noise differs)",
+        unit="s",
+        ge=0,
+        le=1800,
+    )
+    nap_motion_grace_s: float = param(
+        10.0,
+        "Motion reported this soon after a day nap starts does not wake it: the camera's "
+        "auto-exposure may still be settling on the rest posture's view after the head stopped",
+        unit="s",
+        ge=0,
+        le=300,
     )
     update_period_s: float = param(
         10.0,
@@ -2023,10 +2056,32 @@ class ObjectGateConfig(Strict):
     )
 
 
+class SceneMotionConfig(Strict):
+    """Motion watch of a day nap (SPEC 5, 7A): the object gate's scene-change test on captured
+    frames, while the head is still; its thresholds are vision.object_gate's."""
+
+    interval_s: float = param(
+        0.5,
+        "While a day nap waits for motion, one captured frame per this time (capture time) is "
+        "compared with the last still view (the object gate's thumbnail and thresholds)",
+        unit="s",
+        ge=0.1,
+        le=10,
+    )
+    confirm_samples: int = param(
+        2,
+        "Motion counts (percept.scene_motion) only when this many samples in a row differ from "
+        "the last still view, so one odd frame or an exposure step does not wake the nap",
+        ge=1,
+        le=10,
+    )
+
+
 class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
     object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
+    scene_motion: SceneMotionConfig = param({}, "Motion watch of a day nap (SPEC 5, 7A)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True

@@ -8,9 +8,18 @@ asleep, a hold, a rest of the rhythm's own, attention on a person), so a stale c
 nap the moment one becomes possible again. Presence (``held``) only holds a due nap off: a single
 blip never resets the clock. Times are passed in; the caller (``CircadianRunner``) holds its lock
 and acts on the model (a wake, the ``nap`` input).
+
+A nap ends on activity (``activity``: a confirmed face, addressed speech, a conversation) and on
+a stimulus (``stimulus``: the room light rising, motion in front of a still camera, a loud sound;
+owner decision 2026-11-03). A stimulus only ends a nap in progress: while awake it leaves the
+idle clock alone, because none of them is a person engaging with the robot (a television's bang,
+a car passing the window, clouds, the robot's own moves), and a busy room would otherwise never
+let it nap. ``wakes`` counts the wakes by reason for the debug report.
 """
 
 from __future__ import annotations
+
+WAKE_REASONS = ("face", "speech", "light", "motion", "loud")
 
 
 class DayNap:
@@ -20,6 +29,8 @@ class DayNap:
         self.napping = False
         self.naps = 0  # count, for the debug report
         self.idle_s = 0.0
+        self.started: float | None = None  # time the nap in progress started
+        self.wakes = dict.fromkeys(WAKE_REASONS, 0)  # count by reason, for the debug report
         self._last: float | None = None  # last counted time; None while paused or not started
         self._face: tuple[float, float] | None = None  # (clock time, frame stamp) of a face
 
@@ -33,12 +44,20 @@ class DayNap:
         last, self._face = self._face, (t, stamp)
         return last is not None and t - last[0] <= window_s and stamp != last[1]
 
-    def activity(self, t: float) -> bool:
-        """A confirmed face, addressed speech or a conversation at ``t``: the clock restarts.
-        Returns whether a nap was in progress (the caller wakes the robot)."""
+    def activity(self, t: float, reason: str) -> bool:
+        """A confirmed face, addressed speech or a conversation at ``t`` (``reason``: ``face``
+        or ``speech``): the clock restarts. Returns whether a nap was in progress (the caller
+        wakes the robot); that wake is counted under ``reason``."""
         self.restart(t)
         woke, self.napping = self.napping, False
+        if woke:
+            self.wakes[reason] += 1
         return woke
+
+    def stimulus(self, t: float, reason: str) -> bool:
+        """The light rising, motion or a loud sound at ``t`` (``reason``): ends a nap in progress
+        like activity and returns True; while awake it does nothing (module docstring)."""
+        return self.napping and self.activity(t, reason)
 
     def cancel(self, t: float) -> None:
         """A wake or a hold from outside (the app, the web UI): no nap, the clock restarts."""
@@ -70,4 +89,5 @@ class DayNap:
             return False
         self.napping = True
         self.naps += 1
+        self.started = t
         return True

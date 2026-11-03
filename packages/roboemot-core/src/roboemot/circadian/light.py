@@ -9,13 +9,14 @@ this module: no frame is stored.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
 
 from ..config.schema import LightConfig
 
 Level = Literal["dark", "dim", "bright"]
+LEVELS: tuple[Level, ...] = get_args(Level)  # darkest first: a later level is a rise
 UINT8_MAX = 255.0
 COLOR_NDIM = 3  # H x W x channels
 # ITU-R BT.601 luma weights

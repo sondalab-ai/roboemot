@@ -13,7 +13,8 @@ import pytest
 from pydantic import ValidationError
 from roboemot.config.schema import ObjectGateConfig, RoboEmotConfig
 from roboemot.vision import CIRCADIAN, Detection, Frame, RateGovernor
-from roboemot.vision.object_gate import RUN_REASONS, SKIP_REASONS, ObjectGate, thumbnail
+from roboemot.vision.object_gate import RUN_REASONS, SKIP_REASONS, ObjectGate
+from roboemot.vision.scene_change import thumbnail
 from roboemot.world import FrameSpec
 from test_vision import CFG, H, ObjectMock, W, rig
 
