@@ -62,7 +62,7 @@ const visibility = (page, value) => {
 test("the Live tab sits next to the others and draws one card per group", async (t) => {
   const page = await livePage(t);
   const tabs = [...page.document.querySelectorAll("#tabs button")].map((b) => b.dataset.tab);
-  assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]);
+  assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "emotions", "debug"]);
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
   assert.equal(grid.children.length, 8);

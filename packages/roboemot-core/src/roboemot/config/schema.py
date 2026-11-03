@@ -4454,6 +4454,27 @@ class LiveConfig(Strict):
         return self
 
 
+class EmotionsPageConfig(Strict):
+    """The web UI's Emotions tab: the affect, register, persona and circadian state live, the
+    impulses that moved the affect, and two test controls behind the PIN (SPEC 11A, 12)."""
+
+    enabled: bool = param(
+        True,
+        "Serve the Emotions tab (affect, register, persona, circadian state, recent impulses and "
+        "the play and inject test controls); it shows no person, frame or audio",
+    )
+    poll_ms: int = param(
+        1000, "How often the open Emotions tab asks for the state", unit="ms", ge=250, le=10000
+    )
+    events: int = param(
+        20,
+        "How many of the impulses that moved the affect are kept for the Emotions tab, "
+        "newest first (none while the tab is off)",
+        ge=5,
+        le=200,
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -4623,6 +4644,7 @@ class WebUIConfig(Strict):
         1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
     )
     live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
+    emotions: EmotionsPageConfig = param({}, "SPEC 11A, 12: the Emotions tab")
 
     @field_validator("frame_ancestors")
     @classmethod

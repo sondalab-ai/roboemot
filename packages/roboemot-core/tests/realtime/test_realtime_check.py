@@ -119,6 +119,13 @@ def test_direct_mode_connects_answers_and_deletes_the_named_item(caplog):
         check.FIRST_AUDIO: "pass",
         check.ITEM_DELETE: "pass",
     }
+    # the web UI words each result from its code (SPEC 11A, 12)
+    assert [c["code"] for c in report.to_dict()["checks"]] == [
+        "connected", "first_audio", "item_delete_accepted"
+    ]  # fmt: skip
+    # the CLI's reasons are as before the codes
+    ms = report.first_audio_ms
+    assert [c.reason for c in report.checks] == ["", f"{ms:g} ms", "accepted"]
     assert leaks(report, caplog) == []
 
 
@@ -137,6 +144,10 @@ def test_without_usage_the_estimate_is_charged(monkeypatch):
         router = make_router(cfg)
         report = run(cfg, router)
     assert report.failure == "stall" and report.first_audio_ms is None
+    (audio,) = [c for c in report.checks if c.name == check.FIRST_AUDIO]
+    assert (audio.reason, audio.code, audio.params) == (
+        "stall", "session_failed", {"failure": "stall"}
+    )  # fmt: skip
     assert report.charged > 0 and router.used("rt") == report.charged
     assert not report.ok
 
@@ -180,6 +191,8 @@ def test_a_key_refused_for_the_allocated_host_is_reported_with_that_host(caplog)
     assert report.update_seen is False and report.item_delete == "not_run"
     assert report.charged == 0
     assert {c.name: c.status for c in report.checks}[check.CONNECT] == "fail"
+    (connect,) = [c for c in report.checks if c.name == check.CONNECT]
+    assert connect.code == "session_failed" and connect.params == {"failure": connect.reason}
     assert leaks(report, caplog) == []
 
 
@@ -200,6 +213,8 @@ def test_an_item_delete_the_server_refuses_is_reported_refused_without_its_text(
         report = run(make_cfg(make_route(server.http_base())))
     assert report.item_delete == "refused"
     assert {c.name: c.status for c in report.checks}[check.ITEM_DELETE] == "fail"
+    (delete,) = [c for c in report.checks if c.name == check.ITEM_DELETE]
+    assert (delete.reason, delete.code) == ("refused", "item_delete_refused")
     assert leaks(report, caplog) == []
 
 
@@ -209,6 +224,8 @@ def test_an_item_delete_with_no_answer_is_unconfirmed():
         report = run(make_cfg(route))
     assert report.item_delete == "unconfirmed"
     assert {c.name: c.status for c in report.checks}[check.ITEM_DELETE] == "skip"
+    (delete,) = [c for c in report.checks if c.name == check.ITEM_DELETE]
+    assert (delete.reason, delete.code) == ("unconfirmed", "item_delete_unconfirmed")
     assert report.ok  # a server that never confirms deletes is not a failure of the route
 
 
@@ -471,6 +488,8 @@ def test_a_send_that_fails_is_reported_at_once_not_as_a_stall():
     report = run(cfg, client_factory=SendFails)
     assert time.monotonic() - started < 5
     assert report.failure == "send_failed" and report.item_delete == "not_run"
+    sent = [(c.reason, c.code) for c in report.checks if c.name == check.FIRST_AUDIO]
+    assert sent[0] == ("send_failed", "session_failed")
     assert report.charged == 0  # nothing reached the server
 
 

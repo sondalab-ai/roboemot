@@ -252,9 +252,7 @@ KEYS = ["target", "ok", "error"]  # what SkillRegistry.structural_keys() gives f
 
 
 def keyed(*names) -> Pseudonyms:
-    p = pseudo(*names)
-    p.set_structural_keys(KEYS)
-    return p
+    return pseudo(*names).snapshot(KEYS)
 
 
 def tool_msg(content: str) -> dict:
@@ -599,8 +597,8 @@ def tooled(rigs):  # noqa: F811
         rig.who = ["p1"]
         rig.worker._speaker = lambda: "p1"
         rig.worker._known_names = lambda: KNOWN
-        pseudonyms = rig.worker._pseudonyms
-        pseudonyms.sync(KNOWN, TEMPLATES, "en", "en")  # so the test knows the aliases
+        # the worker's own map, synced as a turn would, so the test knows the aliases
+        pseudonyms = rig.worker._name_source.for_config(rig.stack.effective(), "en")
         script.rounds = rounds(lambda name: alias_of(pseudonyms, name))
         rig.profile[0] = "Marta; preferences colore=blu"
         rig.scene[0] = "Marta (a person), a dog, Luca Bianchi, Ömer"
@@ -624,13 +622,17 @@ def test_a_cloud_turn_hides_every_name_and_speaks_and_acts_with_the_real_ones(to
     rig.turn("hello, I am Marta and this is luca bianchi, with Ömer", language="en")
     assert env.looked == ["Marta"]  # the executor got the real name from the alias
     assert rig.speech.texts() == ["Ciao Marta, guardo Luca Bianchi.", "Fatto, Marta."]
+    # the check the router runs: a snapshot with the skills' structural keys
+    sent_with = rig.worker._name_source.for_config(
+        rig.stack.effective(), "en", env.registry.structural_keys()
+    )
     for body in srv.bodies:
         for text in wire(body):
-            assert not rig.worker._pseudonyms.leaks(body), text
+            assert not sent_with.leaks(body), text
             for word in ("Marta", "marta", "Luca", "Bianchi", "Ömer", "u00d6"):
                 assert word not in text, word
     first = srv.bodies[0]
-    alias = rig.worker._pseudonyms.to_alias("Marta")
+    alias = sent_with.to_alias("Marta")
     assert alias in json.dumps(first["messages"][0])
     assert alias in first["messages"][-1]["content"]
     enum = next(t for t in first["tools"] if t["function"]["name"] == "look_at")["function"][
@@ -690,7 +692,7 @@ def test_a_forgotten_name_is_gone_from_the_next_request(tooled):
     rig.worker._known_names = lambda: ["Luca Bianchi"]
     rig.turn("sono Marta")
     assert "Marta" in json.dumps(srv.bodies[1])  # no longer registered: sent as typed
-    assert rig.worker._pseudonyms.to_alias("Marta") == "Marta"
+    assert rig.worker._name_source.peek().to_alias("Marta") == "Marta"
 
 
 def test_aliases_are_stable_across_sessions(tooled):

@@ -78,7 +78,7 @@ class RuntimeHost:
     soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
     cues: Cues | None = None  # non-verbal cues: listening, offline, not heard (SPEC 8); needs voice
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
-    name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
+    name_source: NameSource | None = None  # the one pseudonym map (SPEC 8, Pseudonyms)
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
     realtime_route: RealtimeRoute | None = None  # the realtime speech route, when enabled

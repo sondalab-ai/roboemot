@@ -270,9 +270,14 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         gestures = skills.get("play").resolved_choices()["gesture"]
         assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None
+        # One pseudonym map for the conversation, the traits rating and the route checks (SPEC 8)
+        assert app.name_source is not None
+        assert app.conversation._name_source is app.name_source is app.traits_worker.names
         # BargeIn is fed by the listener thread only. The scripted mic never blocks, so that thread
         # would push its quiet chunks into `on_chunk` between the loud ones below and reset the run;
         # stop it, so this thread is the only one driving the hook.
+        # the listener starts after the barge-in is bound (runtime startup): wait for its thread
+        assert wait_for(lambda: app.voice_listener._thread is not None)
         listener_thread = app.voice_listener._thread
         app.voice_listener.stop()
         assert not listener_thread.is_alive()  # the join did not time out

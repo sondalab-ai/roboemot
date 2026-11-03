@@ -75,7 +75,7 @@ from ..llm.prompt import (
     realtime_instructions,
     system_prompt,
 )
-from ..llm.pseudonyms import Pseudonyms
+from ..llm.pseudonyms import NameSource, Pseudonyms
 from ..llm.router import (
     ActiveRoute,
     Done,
@@ -228,8 +228,11 @@ class ConversationWorker:
     ``scene(max_chars)`` the summaries (None when empty).
     ``skills`` are the tools offered to the model (SPEC 11) and ``preferences`` where a
     confirmed preference is written (SPEC 6); without them the model gets no tools.
-    ``known_names()`` gives the registry display names (every record), which
-    ``privacy.pseudonyms_to_cloud`` swaps for aliases on routes that are not local (SPEC 12).
+    ``name_source`` is the process's one pseudonym map (shared with the traits rating and the
+    route checks, SPEC 8): the registry display names that ``privacy.pseudonyms_to_cloud`` swaps
+    for aliases on routes that are not local (SPEC 12). When it is given, ``known_names`` is not
+    used; without it the worker keeps its own map, fed by ``known_names()`` (every record's
+    display name).
     """
 
     def __init__(
@@ -251,6 +254,7 @@ class ConversationWorker:
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
         known_names: Callable[[], Iterable[str]] = lambda: (),
+        name_source: NameSource | None = None,
         phase: ConversationPhase | None = None,
         transcript: TranscriptRing | None = None,
         realtime: Any = None,
@@ -271,7 +275,9 @@ class ConversationWorker:
         self.skills, self.preferences = skills, preferences
         self.bus, self.clock = bus, clock
         self._known_names = known_names
-        self._pseudonyms = Pseudonyms()
+        self._name_source = (
+            name_source if name_source is not None else NameSource(lambda: self._known_names())
+        )
         self._refused_names = 0  # last count of registry names that cannot be aliased
         self._active_turn: _Turn | None = None
         self._inner: asyncio.Future | None = None
@@ -1416,33 +1422,28 @@ class ConversationWorker:
             messages += turn.exchange[-(len(calls) + 1) :]
 
     def _learn_names(self, turn: _Turn) -> Pseudonyms | None:
-        """With ``privacy.pseudonyms_to_cloud``: bring the map in line with the registry as it is
-        now (new names get aliases, forgotten ones are dropped) and return it for the router,
-        which applies it to routes that are not local. Read before every request. If the names
-        cannot be read the exception ends the turn: sending without the map would put real names
-        on the cloud route. None when the option is off. A change in the number of registry names
-        that cannot be aliased (they reach a cloud route as typed) is logged for the admin, as a
-        count only."""
-        cfg = turn.cfg
-        if not cfg.privacy.pseudonyms_to_cloud:
-            return None
-        self._pseudonyms.set_structural_keys(
-            self.skills.structural_keys() if self.skills is not None else ()
-        )
-        self._pseudonyms.sync(
-            self._known_names(),
-            cfg.privacy.pseudonym_templates,
+        """With ``privacy.pseudonyms_to_cloud``: bring the shared map in line with the registry as
+        it is now (new names get aliases, forgotten ones are dropped) and return a snapshot of it,
+        with the skills' structural keys, for the router, which applies it to routes that are not
+        local. Read before every request. If the names cannot be read the exception ends the turn:
+        sending without the map would put real names on the cloud route. None when the option is
+        off. A change in the number of registry names that cannot be aliased (they reach a cloud
+        route as typed) is logged for the admin, as a count only."""
+        pseudonyms = self._name_source.for_config(
+            turn.cfg,
             turn.language,
-            cfg.conversation.language,
+            self.skills.structural_keys() if self.skills is not None else (),
         )
-        if self._pseudonyms.refused != self._refused_names:
-            self._refused_names = self._pseudonyms.refused
+        if pseudonyms is None:
+            return None
+        if pseudonyms.refused != self._refused_names:
+            self._refused_names = pseudonyms.refused
             log.warning(
                 "conversation: %d registry names cannot be aliased for cloud routes (no letter, "
                 "a template word or a request keyword); rename them to keep them private",
                 self._refused_names,
             )
-        return self._pseudonyms
+        return pseudonyms
 
     def _offer(self, turn: _Turn) -> list[Skill]:
         """The skills the model may call in this request (visible and listed)."""

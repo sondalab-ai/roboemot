@@ -92,7 +92,7 @@ def test_list_has_value_default_source_and_admin_flag(served, stack):
     wake = rows[WAKE]
     assert wake["value"] == ["hey robot", "hello robot"] == wake["default"]
     assert wake["kind"] == "string_list" and wake["admin_only"] is False
-    assert "Phrases that wake" in wake["description"]
+    assert "Frasi che svegliano" in wake["description"]  # the default language is Italian
     assert rows[PROMPT]["admin_only"] and rows[TEMPLATES]["admin_only"]
     assert rows[NAME]["nullable"] and rows[NAME]["kind"] == "text"
     assert served.request("GET", "/api/settings").json["pin_required"] is True

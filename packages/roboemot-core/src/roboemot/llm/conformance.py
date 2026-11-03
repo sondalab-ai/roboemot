@@ -84,6 +84,17 @@ MASK = "[masked]"
 ECHO_MIN_WORDS = 4
 ECHO_WORD = re.compile(r"[^\W_]+")
 ECHO_WITHHELD = "[server message withheld: it quoted the request]"
+PERCENT = 100  # a ratio as the page's percent param
+# Every ``CheckResult.code`` this module gives (the page has a ``check_reason_<code>`` for each;
+# a test walks the module's syntax tree and holds the calls to this list).
+REASON_CODES = (
+    "chunks", "chunks_cut", "no_stream", "stream_broke", "no_text_stream", "single_chunk",
+    "out_of_tokens", "no_content_within", "no_answer", "latency", "no_reply", "too_short",
+    "italian_ratio", "unreachable", "budget_spent", "tool_failed", "no_tool_call", "unknown_tool",
+    "bad_arguments", "no_call_id", "budget_before_answer", "tool_result_rejected",
+    "no_text_after", "round_trip_ok",
+)  # fmt: skip
+WHY_CODES = ("http", "timeout", "unreachable", "error")  # ``params["why"]`` of a failed request
 # The ``[mood=x]`` tags of ``voice.mood_source: llm_tagged`` (as ``voice.prosody.TAG``).
 MOOD_TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 
@@ -104,9 +115,15 @@ class RouteKeyUnavailable(RuntimeError):
 
 @dataclass
 class CheckResult:
+    """One verdict. ``reason`` is the English sentence (CLI, logs); ``code`` and ``params`` are
+    the same reason for the web UI, which words it in its own language (SPEC 11A, 12):
+    ``check_reason_<code>`` filled with plain values (numbers, codes, a technical ``detail``)."""
+
     name: str
     status: str
     reason: str
+    code: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -141,6 +158,7 @@ class _Answer:
     timing: FirstToken = field(default_factory=FirstToken)
     error: Exception | None = None
     why: str = ""
+    why_params: dict[str, Any] = field(default_factory=dict)  # ``why`` for the web UI
 
     @property
     def timed_out(self) -> bool:
@@ -176,6 +194,25 @@ def _why(exc: Exception, route: LLMRoute, key: str = "", sent: tuple[str, ...] =
     if isinstance(exc, (APIConnectionError, OSError)):
         return "route unreachable"
     return type(exc).__name__
+
+
+def _why_params(
+    exc: Exception, route: LLMRoute, key: str = "", sent: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """:func:`_why` for the web UI: ``why`` (``http``, ``timeout``, ``unreachable`` or
+    ``error``) and ``detail``, the technical part as it is (``HTTP <status> at <path>`` and the
+    cleaned server message, or the exception type); ``withheld`` when the server message was
+    withheld because it quoted the request."""
+    if isinstance(exc, APIStatusError):
+        says = _server_says(exc, route, key, sent)
+        withheld = says == f": {ECHO_WITHHELD}"
+        detail = f"HTTP {exc.status_code}{_called_path(exc, route)}{'' if withheld else says}"
+        return {"why": "http", "detail": detail, **({"withheld": True} if withheld else {})}
+    if isinstance(exc, (TimeoutError, APITimeoutError)):
+        return {"why": "timeout"}
+    if isinstance(exc, (APIConnectionError, OSError)):
+        return {"why": "unreachable"}
+    return {"why": "error", "detail": type(exc).__name__}
 
 
 def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
@@ -287,7 +324,9 @@ async def _ask(
     except Exception as exc:  # CancelledError (the caller's deadline) is not caught
         ans.error = exc
         sent = tuple(str(m.get("content") or "") for m in messages)
-        ans.why = _why(exc, route, _sent_key(router, route), sent)
+        key = _sent_key(router, route)
+        ans.why = _why(exc, route, key, sent)
+        ans.why_params = _why_params(exc, route, key, sent)
     return ans
 
 
@@ -308,27 +347,46 @@ def _reasoned(ans: _Answer) -> str:
     return f"; the model reasoned for {n} chars before answering" if n else ""
 
 
-def _no_text(ans: _Answer, route: LLMRoute, fallback: str) -> str:
-    """Why a reply that ended cleanly has no text: out of tokens (``finish_reason: length``,
-    a standard field) or ``fallback``, with the reasoning hint."""
+def _hint(ans: _Answer) -> dict[str, Any]:
+    """:func:`_reasoned` as a param: ``reasoned`` (chars) when the router counted any."""
+    n = ans.timing.reasoning_chars
+    return {"reasoned": n} if n else {}
+
+
+def _failed(ans: _Answer) -> dict[str, Any]:
+    """The params of a request that failed: why, its detail and the reasoning hint."""
+    return {**ans.why_params, **_hint(ans)}
+
+
+def _no_text(ans: _Answer, route: LLMRoute, name: str, fallback: str, code: str) -> CheckResult:
+    """Why a reply that ended cleanly has no text, as a failed ``name`` check: out of tokens
+    (``finish_reason: length``, a standard field) or ``fallback`` (``code``), with the
+    reasoning hint."""
     if ans.finish_reason == LENGTH:
         why = f"ran out of tokens before answering (max_tokens {route.max_tokens})"
+        code, params = "out_of_tokens", {"max_tokens": route.max_tokens}
     else:
-        why = fallback
-    return why + _reasoned(ans)
+        why, params = fallback, {}
+    return CheckResult(name, FAIL, why + _reasoned(ans), code, {**params, **_hint(ans)})
 
 
 def _streaming(ans: _Answer, route: LLMRoute) -> CheckResult:
     if ans.error is not None and not ans.chunks:
-        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}{_reasoned(ans)}")
+        why = f"no streamed text: {ans.why}{_reasoned(ans)}"
+        return CheckResult(STREAMING, FAIL, why, "no_stream", _failed(ans))
     if ans.error is not None:
-        return CheckResult(STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {ans.why}")
+        why = f"stream broke after {ans.chunks} chunks: {ans.why}"
+        params = {"chunks": ans.chunks, **ans.why_params}
+        return CheckResult(STREAMING, FAIL, why, "stream_broke", params)
     if not ans.chunks:
-        return CheckResult(STREAMING, FAIL, _no_text(ans, route, "no text in the stream"))
+        return _no_text(ans, route, STREAMING, "no text in the stream", "no_text_stream")
     if ans.chunks == 1:
-        return CheckResult(STREAMING, FAIL, "text came as a single chunk")
-    cut = f", cut at max_tokens {route.max_tokens}" if ans.finish_reason == LENGTH else ""
-    return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks{cut}")
+        return CheckResult(STREAMING, FAIL, "text came as a single chunk", "single_chunk")
+    if ans.finish_reason == LENGTH:
+        why = f"{ans.chunks} chunks, cut at max_tokens {route.max_tokens}"
+        params = {"chunks": ans.chunks, "max_tokens": route.max_tokens}
+        return CheckResult(STREAMING, PASS, why, "chunks_cut", params)
+    return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks", "chunks", {"chunks": ans.chunks})
 
 
 def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
@@ -336,26 +394,33 @@ def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
     seconds = ans.timing.seconds
     if seconds is None:
         if ans.timed_out:
-            return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s{_reasoned(ans)}")
-        return CheckResult(FIRST_TOKEN, SKIP, "no answer to measure")
+            why = f"no content within {limit:g} s{_reasoned(ans)}"
+            params = {"limit": limit, **_hint(ans)}
+            return CheckResult(FIRST_TOKEN, FAIL, why, "no_content_within", params)
+        return CheckResult(FIRST_TOKEN, SKIP, "no answer to measure", "no_answer")
     verdict = PASS if seconds <= limit else FAIL
     return CheckResult(
         FIRST_TOKEN,
         verdict,
         f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)"
         f"{_reasoned(ans)}",
+        "latency",
+        {"seconds": round(seconds, 2), "limit": limit, **_hint(ans)},
     )
 
 
 def _italian(ans: _Answer, settings: LLMCheckConfig) -> CheckResult:
     if not ans.text:
-        return CheckResult(ITALIAN, SKIP, "no reply to judge")
+        return CheckResult(ITALIAN, SKIP, "no reply to judge", "no_reply")
     count, ratio = italian_ratio(MOOD_TAG.sub("", ans.text), settings.italian_stopwords)
     if count < settings.italian_min_words:
-        return CheckResult(ITALIAN, FAIL, f"reply too short to judge ({count} words)")
+        why = f"reply too short to judge ({count} words)"
+        return CheckResult(ITALIAN, FAIL, why, "too_short", {"count": count})
     need = settings.italian_min_stopword_ratio
     verdict = PASS if ratio >= need else FAIL
-    return CheckResult(ITALIAN, verdict, f"{ratio:.0%} Italian stopwords, {need:.0%} needed")
+    why = f"{ratio:.0%} Italian stopwords, {need:.0%} needed"
+    params = {"ratio": round(ratio * PERCENT), "need": round(need * PERCENT)}
+    return CheckResult(ITALIAN, verdict, why, "italian_ratio", params)
 
 
 async def check_route(
@@ -435,32 +500,33 @@ async def _tool_round_trip(
 ) -> CheckResult:
     """One tool call with parsable arguments, then a text answer to its result."""
     if unreachable:
-        return CheckResult(TOOL_ROUND_TRIP, SKIP, "route unreachable")
+        return CheckResult(TOOL_ROUND_TRIP, SKIP, "route unreachable", "unreachable")
     if router.used(route.name) >= route.daily_token_budget:
-        return CheckResult(TOOL_ROUND_TRIP, SKIP, "daily token budget spent by the earlier request")
+        why = "daily token budget spent by the earlier request"
+        return CheckResult(TOOL_ROUND_TRIP, SKIP, why, "budget_spent")
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
     first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
         why = f"tool request failed: {first.why}{_reasoned(first)}"
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why, "tool_failed", _failed(first))
     if not first.calls:
-        why = (
-            _no_text(first, route, "no tool call in the reply")
-            if not first.text.strip()
-            else "no tool call in the reply"
-        )
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
+        if not first.text.strip():
+            return _no_text(
+                first, route, TOOL_ROUND_TRIP, "no tool call in the reply", "no_tool_call"
+            )
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, "no tool call in the reply", "no_tool_call")
     call = first.calls[0]
     if call.name != TOOL_NAME:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call names an unknown tool")
+        why = "tool call names an unknown tool"
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why, "unknown_tool")
     if "_raw" in call.arguments:
-        return CheckResult(
-            TOOL_ROUND_TRIP, FAIL, "tool call arguments are not a JSON object within limits"
-        )
+        why = "tool call arguments are not a JSON object within limits"
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why, "bad_arguments")
     if not call.id:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call has no id")
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call has no id", "no_call_id")
     if router.used(route.name) >= route.daily_token_budget:
-        return CheckResult(TOOL_ROUND_TRIP, SKIP, "daily token budget spent before the answer")
+        why = "daily token budget spent before the answer"
+        return CheckResult(TOOL_ROUND_TRIP, SKIP, why, "budget_before_answer")
     messages += [
         {
             "role": "assistant",
@@ -477,8 +543,9 @@ async def _tool_round_trip(
     ]
     second = await _ask(router, route, messages, TOOLS, pseudonyms)
     if second.error is not None:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {second.why}")
+        why = f"tool result rejected: {second.why}"
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why, "tool_result_rejected", second.why_params)
     if not second.text.strip():
-        why = _no_text(second, route, "no text answer after the tool result")
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
-    return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer")
+        why = "no text answer after the tool result"
+        return _no_text(second, route, TOOL_ROUND_TRIP, why, "no_text_after")
+    return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer", "round_trip_ok")
