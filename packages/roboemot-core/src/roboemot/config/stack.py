@@ -216,12 +216,12 @@ def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None)
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value, p, at=sub)
         elif (
-            p in KEYED_LISTS
+            sub in KEYED_LISTS
             and key != REPLACED_BY_LAYER
             and isinstance(value, list)
             and isinstance(out.get(key), list)
         ):
-            out[key] = _merge_keyed(out[key], value, KEYED_LISTS[p])
+            out[key] = _merge_keyed(out[key], value, KEYED_LISTS[sub])
         else:
             out[key] = copy.deepcopy(value)
     return out
