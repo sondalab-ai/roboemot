@@ -45,7 +45,9 @@ born near where one ended, with gap, IoU, distance and head pose change), and th
 low-score detections the tracker refused or left unmatched, beside those that started tracks.
 The head pose comes from the frame's joint state through the robot's ``frame_spec``.
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
-beside their product ``rate_scale``. Numbers only; the frame thread writes them and the report
+beside their product ``rate_scale``. ``stage_timing`` is what each model stage and the whole
+``process`` call cost over ``vision.timing_window_s`` (``StageTimer``, its own clocks: the
+values never feed a decision). Numbers only; the frame thread writes them and the report
 thread reads them under one lock.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
@@ -67,13 +69,20 @@ from typing import Any, Literal
 import numpy as np
 
 from ..bus import Bus
-from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldConfig
+from ..config.schema import (
+    TIMING_WINDOW_MAX_S,
+    IdentityConfig,
+    TrackerConfig,
+    VisionConfig,
+    WorldConfig,
+)
 from ..registry import Matcher
 from ..stats import SUMMARY_LEVELS, summarise
 from ..world import FrameSpec, Observation
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
+from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
 from .stages import (
     AppearanceEmbedder,
     FaceDetector,
@@ -144,6 +153,7 @@ class VisionPipeline:
         camera_model: CameraProvider | None = None,
         world: WorldConfig | None = None,
         frame_spec: FrameSpec | None = None,
+        timer: StageTimer | None = None,
     ):
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
@@ -184,9 +194,18 @@ class VisionPipeline:
         self._created_stamps: deque[float] = deque()
         self._lifetimes_s: deque[float] = deque(maxlen=cfg.report_window)
         self._face_lost_held = 0.0
+        self.timer = timer or StageTimer(TIMING_WINDOW_MAX_S)
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
+        """Run the stages that are due (``_process``), timed as ``process`` for the report."""
+        wall0, cpu0 = self.timer.start()
+        try:
+            return self._process(frame)
+        finally:
+            self.timer.record(PROCESS, wall0, cpu0)
+
+    def _process(self, frame: Frame) -> FrameReport:
         """Run the stages that are due for one frame; frames that are not due are dropped.
 
         Uses only ``frame.stamp`` for time. Publishes on the bus as described in the module
@@ -317,8 +336,8 @@ class VisionPipeline:
         )
 
     def stats(self) -> dict[str, Any]:
-        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops and face
-        track churn (see the module docstring).
+        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops, stage
+        timing and face track churn (see the module docstring).
 
         Numbers only; no identity, embedding or image.
         """
@@ -342,6 +361,7 @@ class VisionPipeline:
             "rate_scale": self.governor.scale,
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
+            "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
         }
 
@@ -413,7 +433,9 @@ class VisionPipeline:
 
     def _process_faces(self, frame: Frame, camera: CameraModel) -> None:
         min_px = self.cfg.face_min_px
+        wall0, cpu0 = self.timer.start()
         found = self.face_detector.detect(frame.image)
+        self.timer.record(DETECTION, wall0, cpu0)
         dets = [d for d in found if d.min_side >= min_px]
         if len(dets) < len(found):
             self.track_stats.below_min_px(len(found) - len(dets))
@@ -490,7 +512,9 @@ class VisionPipeline:
         if self._budget <= 0 or not self._face_due(track, state, frame.stamp):
             return
         self._budget -= 1
+        wall0, cpu0 = self.timer.start()
         embedding = self.face_embedder.embed(frame.image, track.detection)
+        self.timer.record(EMBEDDING, wall0, cpu0)
         identity = self.matcher.observe(
             track.track_id,
             embedding,
@@ -565,10 +589,11 @@ class VisionPipeline:
             **dict.fromkeys(self.cfg.object_categories, "object"),
             **dict.fromkeys(self.cfg.animal_categories, "animal"),
         }
+        wall0, cpu0 = self.timer.start()
+        found = self.object_detector.detect(frame.image)
+        self.timer.record(OBJECTS, wall0, cpu0)
         dets: list[Detection] = [
-            d
-            for d in self.object_detector.detect(frame.image)
-            if d.score >= self.cfg.object_score_min and d.label in kinds
+            d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
         result = self.object_tracker.update(dets, frame.stamp)
         self._lost_held = self._object_lost_s()
@@ -623,7 +648,9 @@ class VisionPipeline:
             return
         self._entity_budget -= 1
         self._entity_embeds += 1
+        wall0, cpu0 = self.timer.start()
         embedding = self.appearance_embedder.embed(frame.image, track.box)
+        self.timer.record(APPEARANCE, wall0, cpu0)
         identity = self.matcher.observe(
             track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
         )
