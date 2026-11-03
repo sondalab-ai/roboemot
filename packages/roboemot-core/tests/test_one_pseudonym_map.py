@@ -3,18 +3,24 @@ checks and the conversation give a registry name the same alias."""
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
+import random
 import threading
+import time
 
+import httpx
 import test_conversation_worker
 from roboemot.config import ConfigStack
-from roboemot.config.schema import RoboEmotConfig
+from roboemot.config.schema import RoboEmotConfig, SafetyConfig
 from roboemot.conversation import ConversationWorker
+from roboemot.llm import Router, TextDelta
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from test_conversation_worker import rigs  # noqa: F401  (fixture)
 from test_llm_conformance import Fake
+from test_llm_router import chunk, route
 from test_traits_worker import Server as TraitsServer
 from test_traits_worker import energy
 from test_webui_routes import ROUTE, checker_for, finish, serve
@@ -64,7 +70,7 @@ def test_traits_route_check_and_conversation_send_the_same_alias(tmp_path, rigs,
         assert test_conversation_worker.wait_for(lambda: energy(stack) == 0.8)
     finally:
         traits.close()
-    alias = source.pseudonyms.to_alias(NAME)
+    alias = source.peek().to_alias(NAME)
     assert alias != NAME
     rated = json.dumps(traits_server.requests, ensure_ascii=False)
     assert alias in rated and NAME not in rated
@@ -94,11 +100,11 @@ def test_traits_route_check_and_conversation_send_the_same_alias(tmp_path, rigs,
         functools.partial(ConversationWorker, name_source=source),
     )
     rig = rigs(routes=(CLOUD,), privacy=PRIVACY)
-    assert rig.worker._pseudonyms is source.pseudonyms
+    assert rig.worker._name_source is source
     rig.turn(f"I am {NAME}", language="en")
     sent = json.dumps([body for _, body in rig.server.requests], ensure_ascii=False)
     assert alias in sent and NAME not in sent
-    assert source.pseudonyms.to_alias(NAME) == alias  # still the one alias
+    assert source.peek().to_alias(NAME) == alias  # still the one alias
 
 
 def test_concurrent_callers_get_one_alias_per_name():
@@ -183,3 +189,94 @@ def test_repr_shows_no_name():
     source = NameSource(lambda: NAMES)
     source.for_config(cfg_on())
     assert "Marta" not in repr(source) and "Person-" not in repr(source)
+
+
+def test_a_name_added_while_callers_race_keeps_one_alias_and_is_never_dropped():
+    """Why ``NameSource`` reads and syncs under one lock: a caller holding a list read before a
+    name was added must not sync after a caller that saw it (the name would be dropped, then
+    come back with a new label)."""
+    registry = list(NAMES)
+    added = threading.Event()
+
+    jitter = random.Random(7)
+
+    def slow_names() -> list[str]:
+        out = list(registry)
+        time.sleep(jitter.uniform(0, 0.004))  # reads take varying time: they finish out of order
+        return out
+
+    source = NameSource(slow_names)
+    aliases: dict[str, set[str]] = {}
+    dropped: list[str] = []
+    lock = threading.Lock()
+
+    def caller() -> None:
+        seen: set[str] = set()
+        for _ in range(40):
+            snapshot = source.for_config(cfg_on())
+            assert snapshot is not None
+            for name in [*NAMES, *(f"New{i}" for i in range(10))]:
+                alias = snapshot.to_alias(name)
+                if alias == name:
+                    if name in seen:
+                        dropped.append(name)  # once seen by this caller, it must stay
+                    continue
+                seen.add(name)
+                with lock:
+                    aliases.setdefault(name, set()).add(alias)
+
+    def writer() -> None:
+        for i in range(10):
+            registry.append(f"New{i}")
+            time.sleep(0.004)
+        added.set()
+
+    threads = [threading.Thread(target=caller) for _ in range(6)]
+    threads.append(threading.Thread(target=writer))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert added.is_set()
+    assert dropped == []
+    assert {n: len(a) for n, a in aliases.items() if len(a) != 1} == {}
+    assert all(f"New{i}" in aliases for i in range(10))
+
+
+async def test_a_request_in_flight_keeps_its_snapshot_while_another_thread_renames():
+    registry = ["Marta", "Luca"]
+    source = NameSource(lambda: registry)
+    snapshot = source.for_config(cfg_on(), "en", ("target",))
+    assert snapshot is not None
+    alias = snapshot.to_alias("Marta")
+    bodies: list[dict] = []
+
+    def rename() -> None:  # the traits worker or a route check, on its own thread
+        registry[0] = "Martina"
+        later = source.for_config(cfg_on())
+        assert later is not None and later.to_alias("Marta") == "Marta"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+
+        async def body():
+            yield f"data: {json.dumps(chunk(f'Ciao {alias[:-1]}'))}\n\n".encode()
+            await asyncio.to_thread(rename)  # mid-stream
+            yield f"data: {json.dumps(chunk(alias[-1:] + '.'))}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+    r = Router(
+        [route("cloud", "api.example.com", timeout=2.0)],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    messages = [{"role": "user", "content": "sono Marta"}]
+    events = [ev async for ev in r.stream(messages, None, pseudonyms=snapshot)]
+    text = "".join(ev.text for ev in events if isinstance(ev, TextDelta))
+    assert text == "Ciao Marta."  # restored by the request's own snapshot
+    assert "Marta" not in json.dumps(bodies, ensure_ascii=False)
+    assert source.peek().to_alias("Marta") == "Marta"  # the live map moved on ...
+    assert snapshot.to_alias("Marta") == alias  # ... the snapshot did not
+    assert snapshot.leaks([{"role": "user", "content": "Marta"}])

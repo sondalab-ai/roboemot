@@ -29,12 +29,15 @@ to ask about names, and ordinary words ("persona a cui") are never turned into n
 is rebuilt from the registry before every request, so a forgotten or renamed record is dropped
 and can no longer be restored.
 
-The map lives in RAM, is never written or logged (this module logs nothing). A label (A, B, ...
-Z, AA, ...) is handed out the first time a name is seen, in random order, so it says nothing
-about the person; labels are stable for the process and reassigned after a restart. Limits:
-nicknames, a first name when only the full name is registered, inflections, misspellings and
-personal details that are not registry names are not caught; a name that is also a common word is
-replaced wherever it appears.
+The map lives in RAM, is never written or logged (this module logs nothing). There is one per
+process (``NameSource``): the conversation, the persona traits rating and the route checks share
+it. A label (A, B, ... Z, AA, ...) is handed out the first time a name is seen, in random order,
+so it says nothing about the person; labels are stable for the process and reassigned after a
+restart. The template language is the one of the first caller that sees the name (the traits
+rating syncs at startup in ``conversation.language``). Limits: nicknames, a first name when only
+the full name is registered, inflections, misspellings and personal details that are not
+registry names are not caught; a name that is also a common word is replaced wherever it
+appears; one alias links the requests of the three callers that carry the same name.
 """
 
 from __future__ import annotations
@@ -725,7 +728,7 @@ class Pseudonyms:
         ``type``, ``format`` and ``required``, image parts (a name there is not a leak, and
         checking it would let a registry name like "User" or "Target" disable every cloud
         route). The same holds for the JSON keys the app itself writes in tool calls and
-        results (``set_structural_keys``: the parameter names of its skills and the keys of
+        results (``snapshot(structural_keys)``: the parameter names of its skills and the keys of
         their results, so a record "Target" and the ``target`` argument of ``look_at`` do not
         block a request that carries no tools). Only the JSON of tool call arguments and of
         ``tool`` messages gets that exemption, and only for those exact keys (their values and
@@ -748,11 +751,6 @@ class Pseudonyms:
         yield shown
         yield json.dumps(shown, ensure_ascii=False)[1:-1]
         yield from _decoded(text, exempt)
-
-    def set_structural_keys(self, keys: Iterable[str]) -> None:
-        """The JSON keys the app writes itself in tool calls and results (see :meth:`leaks`)."""
-        with self._lock:
-            self._structural = frozenset(keys)
 
     def _aliased(self, value: Any, used: set[str]) -> Any:
         if isinstance(value, str):
@@ -910,7 +908,7 @@ class NameSource:
     def __init__(self, names: Callable[[], Iterable[str]]) -> None:
         self._names = names
         self._lock = threading.Lock()
-        self.pseudonyms = Pseudonyms()  # the shared map; only ``for_config`` syncs it
+        self._pseudonyms = Pseudonyms()  # the shared map; only ``for_config`` syncs it
 
     def __repr__(self) -> str:
         return "NameSource(<map not shown>)"
@@ -928,10 +926,15 @@ class NameSource:
             return None
         default = cfg.conversation.language
         with self._lock:  # read and sync together: a stale list must not drop a newer name
-            self.pseudonyms.sync(
+            self._pseudonyms.sync(
                 self._names(), cfg.privacy.pseudonym_templates, language or default, default
             )
-            return self.pseudonyms.snapshot(structural_keys)
+            return self._pseudonyms.snapshot(structural_keys)
+
+    def peek(self) -> Pseudonyms:
+        """A snapshot of the map as it is, without reading the registry (no sync)."""
+        with self._lock:
+            return self._pseudonyms.snapshot()
 
     def refused_names(self, cfg: RoboEmotConfig) -> list[str]:
         """The registry names that cannot be aliased under ``cfg``'s templates, sorted, for the

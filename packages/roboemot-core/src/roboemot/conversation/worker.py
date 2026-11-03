@@ -228,10 +228,11 @@ class ConversationWorker:
     ``scene(max_chars)`` the summaries (None when empty).
     ``skills`` are the tools offered to the model (SPEC 11) and ``preferences`` where a
     confirmed preference is written (SPEC 6); without them the model gets no tools.
-    ``known_names()`` gives the registry display names (every record), which
-    ``privacy.pseudonyms_to_cloud`` swaps for aliases on routes that are not local (SPEC 12).
     ``name_source`` is the process's one pseudonym map (shared with the traits rating and the
-    route checks, SPEC 8); without it the worker keeps its own, fed by ``known_names``.
+    route checks, SPEC 8): the registry display names that ``privacy.pseudonyms_to_cloud`` swaps
+    for aliases on routes that are not local (SPEC 12). When it is given, ``known_names`` is not
+    used; without it the worker keeps its own map, fed by ``known_names()`` (every record's
+    display name).
     """
 
     def __init__(
@@ -277,7 +278,6 @@ class ConversationWorker:
         self._name_source = (
             name_source if name_source is not None else NameSource(lambda: self._known_names())
         )
-        self._pseudonyms = self._name_source.pseudonyms  # the shared map, synced per request
         self._refused_names = 0  # last count of registry names that cannot be aliased
         self._active_turn: _Turn | None = None
         self._inner: asyncio.Future | None = None
