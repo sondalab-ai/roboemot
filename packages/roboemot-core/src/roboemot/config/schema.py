@@ -601,6 +601,15 @@ class CircadianConfig(Strict):
     wake_hold_s: float = param(
         300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
     )
+    nap_after_s: float | None = param(
+        1800.0,
+        "Day nap: with no face in view and no speech addressed to the robot for this long, the "
+        "robot rests until a face or addressed speech wakes it (for wake_hold_s). A television "
+        "does not count. Only time outside quiet hours adds up. null: no naps",
+        unit="s",
+        ge=300,
+        le=86400,
+    )
     update_period_s: float = param(
         10.0,
         "Seconds between two model updates (process S, entrainment, state)",
@@ -2011,6 +2020,15 @@ class WorldScanConfig(Strict):
     )
     doa_confidence: float = param(
         0.5, "Confidence of a sound direction observation", ge=0, le=1, restart=True
+    )
+    alone_after_s: float = param(
+        120.0,
+        "With no face in view and no sound for this long the robot is alone and holds still: no "
+        "sweeps, no glances; breathing and reflexes go on. A face or a sound ends it at once. "
+        "Never shorter than circadian.presence_periods face-detection periods",
+        unit="s",
+        ge=10,
+        le=3600,
     )
 
     @model_validator(mode="after")

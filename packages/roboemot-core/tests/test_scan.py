@@ -230,6 +230,39 @@ def test_never_while_resting_or_in_quiet_hours(kw):
     assert all(p.update(ctx(float(i), engaged=True, **kw)) is None for i in range(500, 600))
 
 
+def test_alone_no_sweep_and_no_glance():
+    """SPEC 5A: alone (no face, no sound for alone_after_s) the robot holds still."""
+    p = ScanPolicy(CFG, random.Random(1))
+    p.note_unexplained(1.0, 0.0, 0.0)
+    assert all(p.update(ctx(float(i), alone=True)) is None for i in range(500))
+
+
+def test_alone_ending_restarts_the_idle_clock_without_a_wakeup_sweep():
+    p = ScanPolicy(CFG, random.Random(1))
+    for i in range(200):
+        assert p.update(ctx(float(i), alone=True)) is None
+    t, d = first_decision(p, 200.0)
+    assert d.reason == "idle" and 50.0 <= t - 200.0 <= 70.0  # idle_interval_s +- jitter_s
+
+
+def test_alone_after_a_lost_target_waits_the_full_interval_once_it_ends():
+    p = ScanPolicy(CFG, random.Random(1))
+    engage(p, 5)
+    for i in range(5, 100):
+        assert p.update(ctx(float(i), alone=True)) is None
+    t, d = first_decision(p, 100.0)
+    assert d.reason == "idle" and t - 100.0 >= 50.0
+
+
+def test_controller_stops_a_sweep_when_the_robot_is_left_alone():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    run_controller(ctrl, 0.0, 70.0, pose)
+    assert ctrl.active
+    assert ctrl.tick(ctx(70.0, alone=True), pose, 1.0) is None
+    assert not ctrl.active
+
+
 def test_drowsy_still_scans():
     assert first_decision(ScanPolicy(CFG, random.Random(1)), 0.0, circadian="drowsy")
 

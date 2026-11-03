@@ -659,7 +659,14 @@ def test_light_off_makes_the_robot_slightly_sleepy(cfg):
 # ----------------------------------------------------------------------------- replay
 
 
+def no_naps(cfg):
+    """The synthetic day has nobody around: without this the day naps (test_circadian_nap.py)."""
+    circ = cfg.circadian.model_copy(update={"nap_after_s": None})
+    return cfg.model_copy(update={"circadian": circ})
+
+
 def test_replay_of_a_synthetic_day_goes_awake_drowsy_resting_awake(cfg):
+    cfg = no_naps(cfg)
     samples = synthetic_day()
     assert len(samples) == 24 * 60
     sink = RecordingSink()
@@ -687,11 +694,16 @@ def test_replay_of_a_synthetic_day_goes_awake_drowsy_resting_awake(cfg):
 
 
 def test_quiet_hours_force_resting_in_the_replay(cfg):
-    result = replay(synthetic_day(), cfg)
+    result = replay(synthetic_day(), no_naps(cfg))
     quiet = [p for p in result.timeline if p.hour >= 22.75 or p.hour < 6.75]
     assert quiet and {p.state for p in quiet} == {"resting"}
     noon = [p for p in result.timeline if 11 <= p.hour < 15]
     assert {p.state for p in noon} == {"awake"}
+
+
+def test_a_day_with_nobody_around_naps_in_the_replay(cfg):
+    noon = [p for p in replay(synthetic_day(), cfg).timeline if 11 <= p.hour < 15]
+    assert {p.state for p in noon} == {"resting"}
 
 
 def test_people_around_at_night_keep_the_robot_awake_and_wake_it(cfg):

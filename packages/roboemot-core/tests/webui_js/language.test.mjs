@@ -110,6 +110,31 @@ test("the Live tab words every code: label, reflex, notes, events, levels", asyn
   assert.deepEqual(leftovers(p.document.body, ["Mia", "ciao robot", "cloud", "default"]), []);
 });
 
+test("the Live tab words the alone state, the nap and the resting reasons (CV-16)", async (t) => {
+  const reasons = ["nap", "quiet_hours", "sleepiness", "hold"];
+  for (const [i, status] of ["napping", "resting", "alone", "idle"].entries()) {
+    const state = {
+      ...LIVE_STATE,
+      mood: { ...LIVE_STATE.mood, circadian: { state: "resting", reason: reasons[i], sleepiness: 0.9 } },
+      modes: { ...LIVE_STATE.modes, alone: true },
+      activity: {
+        status,
+        notes: [],
+        events: [
+          { kind: "alone", reason: "start", t: T0, seq: 4, count: 1 },
+          { kind: "alone", reason: "face", t: T0, seq: 3, count: 1 },
+          { kind: "alone", reason: "sound", t: T0, seq: 2, count: 1 },
+          { kind: "nap", reason: "start", t: T0, seq: 1, count: 1 },
+          { kind: "nap", reason: "face", t: T0, seq: 0, count: 1 },
+          { kind: "nap", reason: "speech", t: T0, seq: 5, count: 1 },
+        ],
+      },
+    };
+    const p = await page(t, { "GET /api/live/state": state, "GET /api/live/audio": LIVE_AUDIO }, "live");
+    assert.deepEqual(leftovers(p.document.body, ["Mia", "ciao robot", "cloud", "default"]), [], status);
+  }
+});
+
 test("the Routes tab words the check reasons and the realtime facts", async (t) => {
   const chat = {
     name: "cloud", model: "m1", endpoint: "api.example.com", locality: "cloud", kind: "chat", key: "none", removable: false, running: false,

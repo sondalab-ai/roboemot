@@ -34,7 +34,8 @@ MS_PER_S = 1000
 ROUND_DIGITS = 3  # decimals kept in the numbers sent to the page
 # what the robot is doing, most telling first ("What's happening" status line)
 STATUSES = (
-    "asleep", "answering", "cut", "waiting", "sending", "listening", "offline", "cloud_down", "idle"
+    "asleep", "answering", "cut", "waiting", "sending", "listening", "offline", "cloud_down",
+    "napping", "resting", "alone", "idle",
 )  # fmt: skip
 ROUTE_DOWN = ("fallback_local", "blocked")  # realtime route states that mean it cannot answer
 ROUTE_UP_REASONS = (None, "off")  # a blocked route with these reasons is just not in use
@@ -192,7 +193,12 @@ class LiveState:
             return "sending"
         if phase == "listening":
             return "listening"
-        return notes[0]["code"] if notes else "idle"
+        if notes:
+            return notes[0]["code"]
+        circ = self._host.circadian
+        if circ is not None and circ.state == "resting":
+            return "napping" if circ.reason == "nap" else "resting"
+        return "alone" if self._p.alone.alone else "idle"
 
     def _mood(self, now: float) -> dict[str, Any]:
         s = self._p.runner.engine.state(now)
@@ -202,6 +208,7 @@ class LiveState:
             sleepiness = circ.get("sleepiness")
             energy = {
                 "state": circ["state"],
+                "reason": circ.get("reason"),
                 "sleepiness": None if sleepiness is None else round(sleepiness, ROUND_DIGITS),
             }
         return {
@@ -217,6 +224,7 @@ class LiveState:
         active = p.tracker.active
         return {
             "asleep": p.sleep.asleep,
+            "alone": p.alone.alone,
             "paused": p.sleep.paused_parts(),
             "online": p.network.online,
             "people": active.people if active is not None else 0,

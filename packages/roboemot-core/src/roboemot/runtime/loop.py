@@ -17,6 +17,7 @@ from .host import RuntimeHost
 from .ticks import (
     attention_tick,
     circadian_vision_scale,
+    company,
     conversation_vision_scale,
     conversing,
     feed_idle,
@@ -94,6 +95,7 @@ def run_loop(
             governor.set_scale(CIRCADIAN, circadian_vision_scale(live, host.circadian))
             others = governor.scale_of(CIRCADIAN) * governor.scale_of(LOAD)
             governor.set_scale(CONVERSATION, conversation_vision_scale(live, host.phase, others))
+        alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
             ctx = scan_context(
                 now,
@@ -102,6 +104,7 @@ def run_loop(
                 effects=fx,
                 hour=p.clock.hour(),
                 circadian=host.circadian,
+                alone=alone,
             )
             scan_tick(ctx, p.scan, p.loop, live)
         if host.soothe_runner is not None and host.speech_output is not None:

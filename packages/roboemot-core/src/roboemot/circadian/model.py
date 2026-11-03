@@ -7,7 +7,9 @@
 - Light entrainment: light that contradicts the subjective day/night shifts the phase toward
   the observed pattern, at most ``max_shift_h_per_day`` per day.
 - States awake / drowsy / resting with hysteresis; quiet hours force resting; people present
-  and active prevent resting; ``hold`` and ``wake`` let the app or the wake word override.
+  and active prevent resting; ``hold`` and ``wake`` let the app or the wake word override; a
+  day nap (``nap``, decided by the runner) rests outside quiet hours. ``reason`` says why the
+  robot rests: ``hold``, ``quiet_hours``, ``nap`` or ``sleepiness`` (None while not resting).
 
 Time is passed in explicitly (local hour of day and elapsed seconds), so the model is
 deterministic and can be replayed at accelerated time (SPEC 14).
@@ -22,6 +24,7 @@ from typing import Literal
 from ..config.schema import CircadianConfig, StateEffects
 
 State = Literal["awake", "drowsy", "resting"]
+Reason = Literal["hold", "quiet_hours", "nap", "sleepiness"]
 Light = Literal["dark", "dim", "bright"]
 SECONDS_PER_MINUTE = 60.0
 SECONDS_PER_HOUR = 3600.0
@@ -38,6 +41,7 @@ class CircadianState:
     sleepiness: float
     state: State
     light: Light | None
+    reason: Reason | None = None  # why it rests; None while awake or drowsy
 
 
 def _hhmm(text: str) -> float:
@@ -56,6 +60,7 @@ class CircadianModel:
         self.s = cfg.initial_sleep_pressure
         self.phase_shift_h = phase_shift_h
         self.state: State = "awake"
+        self.reason: Reason | None = None
         self._hold: tuple[State, float] | None = None  # (state, until elapsed seconds)
         self._elapsed = 0.0
         # Unwrapped wall-clock hours: process C runs on it, so a period other than 24 h has no
@@ -100,7 +105,13 @@ class CircadianModel:
         self.hold("awake", self.cfg.wake_hold_s if seconds is None else seconds, lag_s)
 
     def update(
-        self, hour: float, dt_s: float, *, light: Light | None = None, presence_active: bool = False
+        self,
+        hour: float,
+        dt_s: float,
+        *,
+        light: Light | None = None,
+        presence_active: bool = False,
+        nap: bool = False,
     ) -> CircadianState:
         cfg = self.cfg
         self._elapsed += dt_s
@@ -122,9 +133,16 @@ class CircadianModel:
             self._entrain(self.t_h, light, dt_h)
 
         sl = self.sleepiness(self.t_h)
-        self.state = self._next_state(hour, sl, light, presence_active)
+        self.state, self.reason = self._next_state(hour, sl, light, presence_active, nap)
         self.last = CircadianState(
-            hour, self.phase_shift_h, self.process_c(self.t_h), self.s, sl, self.state, light
+            hour,
+            self.phase_shift_h,
+            self.process_c(self.t_h),
+            self.s,
+            sl,
+            self.state,
+            light,
+            self.reason,
         )
         return self.last
 
@@ -154,17 +172,20 @@ class CircadianModel:
         self.phase_shift_h = (self.phase_shift_h + half) % self.cfg.period_h - half
 
     def _next_state(
-        self, hour: float, sl: float, light: Light | None, presence_active: bool
-    ) -> State:
+        self, hour: float, sl: float, light: Light | None, presence_active: bool, nap: bool
+    ) -> tuple[State, Reason | None]:
         cfg = self.cfg
         if self._hold and self._elapsed < self._hold[1]:
-            return self._hold[0]
+            held = self._hold[0]
+            return held, "hold" if held == "resting" else None
         self._hold = None
         keep_awake = presence_active and cfg.presence_keeps_awake
         if in_window(hour, cfg.quiet_hours) and not keep_awake:
-            return "resting"
+            return "resting", "quiet_hours"
+        if nap:  # the runner starts and ends it, with its own presence rules
+            return "resting", "nap"
         h = cfg.hysteresis
-        st = self.state
+        st = "drowsy" if self.reason == "nap" else self.state  # a nap ended: no inherited rest
         if st == "awake" and sl > cfg.drowsy_threshold + h:
             st = "drowsy"
         if st == "drowsy" and sl < cfg.drowsy_threshold - h:
@@ -178,4 +199,4 @@ class CircadianModel:
             st = "resting"
         if st == "resting" and (sl < cfg.resting_threshold - h or light == "bright" or keep_awake):
             st = "drowsy"
-        return st
+        return st, "sleepiness" if st == "resting" else None

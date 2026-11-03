@@ -3,9 +3,10 @@
 - ``ScanPolicy`` decides *when*: idle for ``idle_interval_s`` (jittered, stretched by the
   persona's energy), or only ``target_lost_delay_s`` (same scaling, own jitter) after a person
   target or speaker hint is lost, wake-up from rest, and a glance toward an unexplained bearing.
-  Never while resting or in quiet hours; never a sweep while engaged with a person (one glance per
-  engagement is allowed). It reads no clock and no global RNG: stamps and the RNG are passed
-  in, so a replay with the same seed gives the same decisions.
+  Never while resting or in quiet hours, nor while the robot is alone (``AloneWatch``: no face and
+  no sound for ``alone_after_s``; the idle clock restarts when that ends); never a sweep while
+  engaged with a person (one glance per engagement is allowed). It reads no clock and no global
+  RNG: stamps and the RNG are passed in, so a replay with the same seed gives the same decisions.
 - ``SweepRunner`` walks the planner's waypoints with a rate-limited target, waits for the
   measured pose to arrive, dwells, and moves on.
 - ``ScanController`` ties both to a ``ScanPlanner``. A sweep ends with a waypoint at home, at
@@ -50,6 +51,7 @@ class ScanContext:
     object_max_hold_s: float = math.inf  # attention.object_max_hold_s
     circadian: str = "awake"  # awake | drowsy | resting
     quiet_hours: bool = False
+    alone: bool = False  # no face and no sound for world.scan.alone_after_s (AloneWatch)
     effects: PersonaEffects = PersonaEffects()
 
     @property
@@ -111,6 +113,12 @@ class ScanPolicy:
         if woke:
             self._wake_pending = True
         if ctx.asleep:
+            self._drop_pending()
+            self._wake_pending = False
+            self._next_at = None
+            self._was_engaged = False
+            return None
+        if ctx.alone:  # hold still; the idle clock restarts once a face or a sound ends it
             self._drop_pending()
             self._wake_pending = False
             self._next_at = None
@@ -348,9 +356,11 @@ class ScanController:
         """Advance one tick and return the scan command, or None when nothing should move.
 
         The caller feeds a command and clears ``SOURCE`` on None. A running sweep is cancelled
-        when the robot falls asleep or engages with a person (attention takes the head).
+        when the robot falls asleep, is left alone or engages with a person (attention takes the
+        head).
         """
-        if self.runner.active and (ctx.asleep or (ctx.engaged and not self._engaged_glance)):
+        still = ctx.asleep or ctx.alone
+        if self.runner.active and (still or (ctx.engaged and not self._engaged_glance)):
             self.runner.cancel()
             self.policy.finished()
         decision = self.policy.update(ctx)

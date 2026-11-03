@@ -136,3 +136,54 @@ def test_web_ui_settings_are_replayed_before_the_pipeline_is_built(tmp_path, mon
     with pytest.raises(Assembled):
         Runtime(stack, manifest, platform, platform.bind(object())).run(threading.Event())
     assert seen == ["platform"]
+
+
+def test_breathing_goes_on_while_alone_and_the_nap_hears_only_a_conversation(monkeypatch):
+    """SPEC 5A, 7A: alone, the loop still feeds idle breathing (only scans stop); the circadian
+    runner's ``conversing`` is the robot thinking or a session, not the VAD (a television)."""
+    from roboemot.world import AloneWatch
+
+    ticks: list[bool] = []
+
+    def always_alone(self, now, busy=False):
+        ticks.append(busy)
+        self.alone = True
+        return True
+
+    monkeypatch.setattr(AloneWatch, "tick", always_alone)
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    session = platform.bind(object())
+    host = DaytimeHost()
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=lambda: Runtime(stack, manifest, platform, session, host=host).run(stop),
+        daemon=True,
+    )
+    thread.start()
+
+    def breathing() -> bool:
+        driver = platform.session.built
+        return driver is not None and any(
+            abs(w.get("neck_tilt", 0.0)) > 0 for _, w in driver.writes
+        )
+
+    try:
+        assert wait_for(lambda: len(ticks) > 5)
+        assert wait_for(breathing)
+        runner = host.circadian_runner
+        assert runner.conversing() is False
+        host.phase.set_listening(True)
+        assert runner.conversing() is False  # speech heard is not a conversation
+        host.phase.set_listening(False)
+        host.phase.begin_thinking()
+        assert runner.conversing() is True
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive()

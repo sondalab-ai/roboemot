@@ -38,6 +38,7 @@ def pipeline():
         runner=SimpleNamespace(engine=engine),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
+        alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1)),
         selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5")),
@@ -57,7 +58,7 @@ def stack(tmp_path):
 @pytest.fixture
 def served(tmp_path, stack):
     host = SimpleNamespace(
-        circadian=object(),
+        circadian=SimpleNamespace(state="awake", reason=None),
         phase=ConversationPhase(),
         activity=None,
         realtime_route=None,

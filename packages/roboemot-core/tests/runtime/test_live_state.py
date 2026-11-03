@@ -53,6 +53,7 @@ def parts(entries=(), target=None, registry=None, **over):
         ),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.2}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
+        alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1, params="PRIVATE-PARAMS")),
         selector=SimpleNamespace(target=target),
@@ -68,7 +69,7 @@ def parts(entries=(), target=None, registry=None, **over):
 
 def live(p=None, config=None, host=None, **kw):
     host = host or SimpleNamespace(
-        circadian=object(),
+        circadian=SimpleNamespace(state="awake", reason=None),
         phase=ConversationPhase(),
         activity=None,
         realtime_route=None,
@@ -118,10 +119,10 @@ def test_the_payload_shape():
     assert s["poll_ms"] == 750
     assert s["mood"] == {
         "label": "calm", "valence": 0.25, "arousal": -0.1, "intensity": 0.4,
-        "circadian": {"state": "awake", "sleepiness": 0.2},
+        "circadian": {"state": "awake", "reason": None, "sleepiness": 0.2},
     }  # fmt: skip
     assert s["modes"] == {
-        "asleep": False, "paused": [], "online": True,
+        "asleep": False, "alone": False, "paused": [], "online": True,
         "people": 1, "persona": "default",
     }  # fmt: skip
     assert s["conversation"] == {"phase": "idle", "route": None, "elapsed_s": None}
@@ -145,13 +146,20 @@ def test_modes_follow_the_parts():
         network=SimpleNamespace(online=False),
         tracker=SimpleNamespace(active=None),
         reflexes=SimpleNamespace(last_fired=lambda now: None),
+        alone=SimpleNamespace(alone=True),
     )
     s = live(p, host=host).state()
     assert s["modes"] == {
-        "asleep": True, "paused": ["vision", "listener"], "online": False,
+        "asleep": True, "alone": True, "paused": ["vision", "listener"], "online": False,
         "people": 0, "persona": "default",
     }  # fmt: skip
     assert s["mood"]["circadian"] is None and s["reflexes"] == {"last": None}
+
+
+def test_the_mood_card_says_why_the_robot_rests():
+    p = parts(circ=SimpleNamespace(snapshot=lambda: {"state": "resting", "reason": "nap"}))
+    circadian = live(p).state()["mood"]["circadian"]
+    assert circadian == {"state": "resting", "reason": "nap", "sleepiness": None}
 
 
 def test_the_conversation_card_is_the_phase():

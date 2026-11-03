@@ -49,6 +49,7 @@ from roboemot.voice.robot_name import RobotName
 from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.world import (
+    AloneWatch,
     Observation,
     ObserveResult,
     ScanController,
@@ -62,6 +63,7 @@ from .host import RuntimeHost
 from .levels import AudioLevels
 from .reports import register_overrides
 from .sleep import SleepGate
+from .ticks import in_conversation
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -108,6 +110,7 @@ class Pipeline:
     value_cap: Callable[[], int]
     pitch_dof: str
     sleep: SleepGate
+    alone: AloneWatch
     realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
     cue_sounds: dict[str, CueSound] = field(default_factory=dict)  # the robot's (SPEC 8)
     voice_heard: list[float] = field(
@@ -248,6 +251,8 @@ def assemble(
                 log.warning("auto-enrollment: %s", type(exc).__name__)
 
     feed_world(bus, world, on_result)
+    alone = AloneWatch(cfg, bus, detection_period=host.detection_period)  # SPEC 5A
+    alone.events = host.events
     reflexes.attach(bus)
     tracker = host.register_tracker = RegisterTracker(
         bus,
@@ -267,7 +272,9 @@ def assemble(
         clips=clips,
         detection_period=host.detection_period,
         engaged=lambda: selector.engaged,
+        conversing=lambda: in_conversation(phase, host.conversation, hearing=False),
     )
+    circ.events = host.events
     expression.circadian_factor = circ.amplitude_factor
     # Speaking motion (SPEC 7): reads the speech timeline of the speech output, which is built
     # after assembly (startup), so lazily; ducks the channels of a playing expression.
@@ -444,6 +451,7 @@ def assemble(
         conv_speaker=speaker_source(selector, world),
         value_cap=value_cap,
         pitch_dof=gaze_map.head_pitch,
+        alone=alone,
         sleep=SleepGate(
             host,
             bus,
