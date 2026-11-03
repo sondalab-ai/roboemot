@@ -116,6 +116,32 @@ def test_a_tool_round_trip(rigs):
         assert [m["role"] for m in exchange] == ["user", "assistant", "tool", "assistant"]
 
 
+def test_the_realtime_route_offers_and_enforces_the_configured_tool_arg_cap(rigs):
+    """SPEC 8, 11A: the same conversation.tool_arg_max_chars as the chat route (its twin is in
+    tests/test_conversation_tools.py); its calls are parsed by the router's tool_arguments."""
+    args = '{"key": "' + "k" * 38 + '", "value": "blu"}'
+    app = {"conversation": {"tool_arg_max_chars": 37}}
+    with TurnServer(["tool", "reply"], tool_name="remember_preference", tool_args=args) as srv:
+        rig, _ = tooled(rigs, srv, store=Store(), app=app)
+        rig.turn()
+        update = srv.of("session.update")[-1]["session"]
+        [tool] = [t for t in update["tools"] if t["name"] == "remember_preference"]
+        assert tool["parameters"]["properties"]["key"]["maxLength"] == 37
+        assert wait_for(
+            lambda: any(
+                "too long" in e["item"]["output"]
+                for e in srv.of("conversation.item.create")
+                if e["item"]["type"] == "function_call_output"
+            )
+        )
+        assert rig.worker._confirm is None
+    args = '{"key": "' + "k" * 37 + '", "value": "blu"}'
+    with TurnServer(["tool", "reply"], tool_name="remember_preference", tool_args=args) as srv:
+        rig, _ = tooled(rigs, srv, store=Store(), app=app)
+        rig.turn()
+        assert rig.worker._confirm is not None
+
+
 def test_the_tool_round_cap(rigs):
     with TurnServer(["tool"], tool_name="play", tool_args='{"gesture": "joy"}') as srv:
         rig, env = tooled(rigs, srv, app={"conversation": {"max_tool_rounds": 1}})
