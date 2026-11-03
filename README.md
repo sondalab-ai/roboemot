@@ -201,6 +201,10 @@ CPU use but does not stop it. There is no automatic nap on inactivity yet.
 To answer through Pollen's realtime voice server on Hugging Face (off by default), follow
 [Realtime voice through Hugging Face](docs/realtime-voice-setup.md).
 
+The settings an owner is most likely to change (cloud and local voice, LLM routes, safety, quiet
+hours, privacy), where each value lives and which one wins, are in the
+[Configuration guide](docs/guides/configuration.md).
+
 Debug report with the robot's own system, temperature and battery data (SPEC 12A):
 
 ```bash
