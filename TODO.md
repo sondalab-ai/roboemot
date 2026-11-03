@@ -17,7 +17,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `test_expression.py`, `test_app_expression.py`, and the M2 exit test). The reflex path is
       deliberately left out: reflexes do not read the register or the persona (SPEC 10).
 - [ ] Scale `motion.idle.gaze_shift_interval_s` by `idle_period_x` once gaze shifts run (only
-      breathing and the scan interval use it today).
+      breathing and the scan interval use it today). Blocked: idle gaze shifts are not implemented;
+      `motion.idle.gaze_shift_*` is read by nothing (CV-16, 2026-11-03).
 - [x] Create the app's `Router` and run `apply_llm_traits` at startup and on every
       `config.changed` (trait source `llm`). Done: `TraitsWorker` (`roboemot.persona.llm_traits`)
       runs it on its own thread and event loop, woken by `persona.*` or `llm_routes` changes
@@ -75,7 +76,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       skills' parameter names and result keys, `SkillRegistry.structural_keys()`), in tool call
       arguments and `tool` messages; any other key that holds a name (a tool result keyed by
       names, the result key of a custom skill) blocks the route instead of being renamed.
-- [ ] Pseudonyms follow-up: `NameSource` (traits, route checks) and the conversation's own
+- [x] Pseudonyms follow-up (CV-18, PR 155): `NameSource` (traits, route checks) and the conversation's own
       `Pseudonyms` are two maps with different aliases; merge them into one source.
 - [x] Pseudonyms residual: a name written with `\uXXXX` escapes in text that is not JSON was
       neither scrubbed nor caught by the leak check. Escapes now count as their character in
@@ -138,7 +139,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] `Pseudonyms._aliased_json` / `_aliased` recursed on deep tool-message content: `_nesting` and
       `TOOL_ARGS_MAX_DEPTH` now live in `pseudonyms.py` (the router imports them); JSON nested deeper than the
       limit is aliased as plain text (SPEC 8, 12).
-- [ ] `conversation.tool_arg_max_chars` and the router's `TOOL_ARGS_MAX_CHARS` are two caps on the same thing:
+- [x] (CV-13, PR 156: the config field owns the argument size; the router constant stays as a raw-JSON parse guard) `conversation.tool_arg_max_chars` and the router's `TOOL_ARGS_MAX_CHARS` are two caps on the same thing:
       decide one owner (SPEC 8, 11A).
 - [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover
       aarch64 py3.11 and py3.12 until then; drop the unused one (SPEC 4A Installer).
@@ -148,15 +149,23 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
       now do not follow them, like the speech client (SPEC 8, 12).
 - [ ] Barge-in keyword worker on the CM4 (SPEC 8 stage 8): the ring is now fed to Vosk one VAD frame at a time (more partials and JSON calls than the old single `accept`), on a second thread; measure the CPU (`keyword_seconds`, load) and the keyword-stop latency on the robot, and the grace of `runtime.shutdown_budget_s` against a real SIGINT.
-- [ ] Runtime section override of `appraisal` (a dict write of the whole section) may replace `appraisal.rules`
+- [x] (CV-14, PR 154: reproduced and fixed) Runtime section override of `appraisal` (a dict write of the whole section) may replace `appraisal.rules`
       instead of merging them by key: the runtime merge in `config/stack.py` passes `path=""` to `deep_merge`, so
       the `KEYED_LISTS` lookup sees `rules`, not `appraisal.rules`. Seen in review, not reproduced yet: write a
       failing test first, then fix off `main` (SPEC 11A).
 - [ ] R&D: use motion flow to predict where the locked face went
-- [ ] Add page to debug and test emotions to the dashboard
-- [ ] Document critical configurations (e.g. cloud voice)
+- [x] Add page to debug and test emotions to the dashboard (CV-17, PR 159: Emotions tab)
+- [x] Document critical configurations (e.g. cloud voice) (CV-19, PR 153: `docs/guides/configuration.md`)
 - [ ] Simplify configurations
-- [ ] No mixed language on the dashboard
-- [ ] The bot should sleep during the day after long inactivity (keep it accurate)
-- [ ] When the robot is alone, it should stop moving around, only if there is someone on the. view field or a sound should resume (subtle movement are expected though)
+- [x] No mixed language on the dashboard (CV-17, PR 159)
+- [x] The bot should sleep during the day after long inactivity (keep it accurate) (CV-16, PR 158: `circadian.nap_after_s`)
+- [x] When the robot is alone, it should stop moving around, only if there is someone on the. view field or a sound should resume (subtle movement are expected though) (CV-16, PR 158: `world.scan.alone_after_s`)
 - [ ] Test mirror neural net
+- [ ] `reflexes.rules` and `soothe.variants` show as keyed lists in the settings catalogue but are not in
+      `KEYED_LISTS` (`config/stack.py`), so every layer replaces them whole (found in CV-14, 2026-11-03).
+- [ ] Startle on the robot under load: the audio hub gives the reflex only the newest chunk of a pass, so a
+      bang shorter than one chunk (10 ms) can be missed when the hub runs late. Owner decision pending:
+      keep, or pass the loudest chunk of the pass (SPEC change) (found in CV-15, 2026-11-03).
+- [ ] Realtime tests flaked once each on CI after CV-12 (`test_realtime_turns.py` pending-call reset,
+      `test_realtime_response_run.py:274` 0.2 s bound, `test_realtime_input.py` cancel/delete). If they
+      recur, check for reconnect threads outliving a test and compare the rate before CV-12.

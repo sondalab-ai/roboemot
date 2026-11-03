@@ -253,3 +253,29 @@ Build cost: 14 agents (Opus authors, Sonnet/Opus reviews), within the 14-15 esti
   report shows `realtime_route.state: connected`, `speech.backend: none`, no Piper process, `local_fallbacks` 0,
   `latency_ms.transcript` p95 well below the 2026-10-30 figure (17.6 s), CPU below the 2026-10-28 figure,
   `skipped` counted for a phone call in front of the robot.
+
+## Round 3 (2026-11-03): CV-12 and the TODO batch
+
+Owner decision 2026-11-03: the TODO batch goes into this epic, so the robot test covers it.
+
+| Slice | What | TODO.md item | PR | Status |
+| --- | --- | --- | --- | --- |
+| CV-12 | Background reconnect after a lost realtime session | robot QA (`connection_lost` stayed red) | https://github.com/sondalab-ai/roboemot/pull/152 | merged |
+| CV-13 | One owner for the tool-argument cap | `tool_arg_max_chars` vs `TOOL_ARGS_MAX_CHARS` | https://github.com/sondalab-ai/roboemot/pull/156 | merged |
+| CV-14 | Runtime override of `appraisal` merges `rules` by key | `appraisal.rules` override | https://github.com/sondalab-ai/roboemot/pull/154 | merged |
+| CV-15 | Root cause of the `test_app_reflex.py` flake | (new) | https://github.com/sondalab-ai/roboemot/pull/157 | merged |
+| CV-16 | Alone stillness, day nap (the `idle_period_x` gaze-shift item stays open: no gaze shifts exist) | 2 items | https://github.com/sondalab-ai/roboemot/pull/158 | merged |
+| CV-17 | No mixed language on the dashboard, emotions debug page | 2 items | https://github.com/sondalab-ai/roboemot/pull/159 | merged |
+| CV-18 | One pseudonym map (`NameSource` and `Pseudonyms`) | pseudonyms follow-up | https://github.com/sondalab-ai/roboemot/pull/155 | merged |
+| CV-19 | Operator guide to the critical configurations | document critical configurations | https://github.com/sondalab-ai/roboemot/pull/153 | merged |
+
+Owner decisions for CV-16 (2026-11-03):
+- Alone: after 120 s (config) with no face in view and no sound above the VAD, scans and idle gaze
+  shifts stop; breathing and micro-motions stay; a face or a sound resumes them at once.
+- Day nap: no face in view and no speech for 1800 s (config), outside quiet hours, the robot rests;
+  a face or speech wakes it; `presence_keeps_awake` still applies.
+- Later (2026-11-03): only addressed speech (wake word, speech with a face in view, a conversation)
+  blocks or wakes a nap, so a TV left on lets the robot nap. An animal or object target still turns the
+  head while alone; no sweep when stillness ends; `nap_after_s: null` turns naps off.
+
+Owner decision for CV-17 (2026-11-03): the Emotions tab stays on by default (its writes need the PIN).
