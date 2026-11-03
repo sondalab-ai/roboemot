@@ -425,6 +425,17 @@ def test_face_percept_has_bearing_and_anonymous_id_until_recognised(tmp_path):
     assert got["person.recognized"] == []
 
 
+def test_entity_observations_carry_the_box_angular_height(tmp_path):
+    """SPEC 5A, Joint attention: the region of a face is in face-box heights."""
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100, y=80, size=60)])
+    run(pipe, 4)
+    obs = got["percept.entity"][-1].payload
+    cam = CameraModel(W, H, CFG.world.camera_fov_h_deg, vfov_deg=CFG.world.camera_fov_v_deg)
+    _, top = cam.bearing(130, 80)
+    _, bottom = cam.bearing(130, 140)
+    assert obs.extent_rad == pytest.approx(top - bottom) and obs.extent_rad > 0
+
+
 def test_small_faces_are_ignored(tmp_path):
     _, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100, size=CFG.vision.face_min_px - 1)])
     run(pipe, 8)

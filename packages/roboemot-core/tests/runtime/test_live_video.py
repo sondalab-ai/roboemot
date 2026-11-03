@@ -360,7 +360,8 @@ def test_the_loop_tick_calls_expire():
 
     from roboemot.runtime import loop
 
-    assert "live_video.expire()" in inspect.getsource(loop.run_loop)
+    # run_loop wraps the tick loop in try/finally; the loop body is _tick_until_stopped
+    assert "live_video.expire()" in inspect.getsource(loop._tick_until_stopped)
 
 
 def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):

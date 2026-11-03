@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 from roboemot.config.schema import ObjectGateConfig, RoboEmotConfig
-from roboemot.vision import CIRCADIAN, Detection, Frame
+from roboemot.vision import CIRCADIAN, Detection, Frame, RateGovernor
 from roboemot.vision.object_gate import RUN_REASONS, SKIP_REASONS, ObjectGate, thumbnail
 from roboemot.world import FrameSpec
 from test_vision import CFG, H, ObjectMock, W, rig
@@ -440,3 +440,56 @@ def test_stamps_that_go_back_never_raise_and_reset_replays_the_same(tmp_path):
     assert drive(pipe, frames[:10]) == []  # stamps went back without a reset: no run, no raise
     pipe.reset()
     assert drive(pipe, frames) == first
+
+
+# ---- a shown-object look (SPEC 5A, Joint attention)
+
+
+def turning(n: int, dt: float = DT, start: float = 0.0):
+    """Frames of a head that keeps turning (5 deg per frame): the gate sees a head move on
+    every frame, as when the gaze follows a thing."""
+    out = []
+    for i in range(n):
+        yaw = 5.0 * i
+        out.append((start + i * dt, scene(int(yaw) % 200), joint(yaw)))
+    return out
+
+
+def allowed(rates, stamps, active: bool) -> list[float]:
+    """The ticks the governor alone allows (no gate), for comparison."""
+    gov = RateGovernor(rates)
+    gov.set_active("objects", active)
+    return [s for s in stamps if gov.allow("objects", s)]
+
+
+def test_during_a_look_the_gate_runs_every_allowed_tick_while_the_head_moves(tmp_path):
+    pipe, _, _ = gated(tmp_path)
+    pipe.governor.set_active("objects", True)
+    frames = turning(40)
+    ran = drive(pipe, frames)
+    assert ran == allowed(CFG.vision.rates, [s for s, _, _ in frames], True)
+    skipped, triggered = counts(pipe)
+    assert skipped["head_moving"] == 0 and triggered["episode"] == len(ran)
+    assert len(ran) > 40 * DT * CFG.vision.rates.objects_hz  # faster than the usual rate
+
+
+def test_after_the_look_the_head_moving_skip_applies_again(tmp_path):
+    pipe, _, _ = gated(tmp_path)
+    pipe.governor.set_active("objects", True)
+    drive(pipe, turning(16))
+    pipe.governor.set_active("objects", False)
+    before = counts(pipe)[1]["episode"]
+    drive(pipe, turning(16, start=16 * DT))
+    skipped, triggered = counts(pipe)
+    assert triggered["episode"] == before
+    assert skipped["head_moving"] >= 1
+
+
+def test_the_look_rate_is_still_capped_by_objects_max_hz(tmp_path):
+    rates = CFG.vision.rates.model_copy(update={"objects_active_hz": 5.0, "objects_max_hz": 5.0})
+    pipe, _, _ = gated(tmp_path, vision=CFG.vision.model_copy(update={"rates": rates}))
+    pipe.governor.set_active("objects", True)
+    dt = 1 / 30
+    ran = drive(pipe, turning(90, dt=dt))  # 3 s of 30 Hz frames
+    assert len(ran) <= 3 * rates.objects_max_hz + 1
+    assert all(b - a >= 1 / rates.objects_max_hz - 1e-9 for a, b in zip(ran, ran[1:], strict=False))

@@ -13,7 +13,9 @@ The gate does not compensate for it: it trusts the motion test only while the he
   within +-pi, which head joints do.
 - ``decide`` runs only on the ticks the governor allowed, so the gate can skip runs, never add
   one above ``objects_hz``; a skipped tick still used the governor's slot. In order: no head
-  pose (no joint state or no ``FrameSpec``) runs (``no_pose``, the fixed schedule); a live
+  pose (no joint state or no ``FrameSpec``) runs (``no_pose``, the fixed schedule); a look at
+  a shown object (``episode``: the governor's object stage is active, SPEC 5A) runs, before the
+  head-moving skip, because the head moves on purpose while it follows the thing; a live
   track that needs a steady detector (``Tracker.holds``: an animal, a tentative track, so a new
   thing gets its confirming hits, or a recently moved one) runs (``live_track``, counted per
   hold in ``live_track_by``; confirmed still objects do not hold); ``max_interval_s`` since the
@@ -54,7 +56,7 @@ GRAY_DIMS = 2  # HxW
 COLOUR_DIMS = 3  # HxWxC
 COLOUR_CHANNELS = (3, 4)  # BGR, BGRA (alpha ignored)
 SKIP_REASONS = ("still_scene", "head_moving")
-RUN_REASONS = ("motion", "settled", "floor", "live_track", "no_pose")
+RUN_REASONS = ("motion", "settled", "floor", "live_track", "no_pose", "episode")
 
 
 def _pool(gray: np.ndarray, size: int, axis: int) -> np.ndarray:
@@ -128,10 +130,17 @@ class ObjectGate:
                 self._reference = None
 
     def decide(
-        self, stamp: float, image: np.ndarray, pose: Pose | None, holds: Collection[str]
+        self,
+        stamp: float,
+        image: np.ndarray,
+        pose: Pose | None,
+        holds: Collection[str],
+        *,
+        episode: bool = False,
     ) -> bool:
         """True when object detection should run on this governor-allowed tick. ``holds`` are
-        the reasons live tracks need a steady detector (``Tracker.holds``). Counts the reason,
+        the reasons live tracks need a steady detector (``Tracker.holds``); ``episode``: a
+        shown object is the attention target, so every allowed tick runs. Counts the reason,
         and on a run with a pose takes a fresh reference copy anchored at ``pose``."""
         if not self.cfg.enabled:
             return True
@@ -142,6 +151,8 @@ class ObjectGate:
             small: np.ndarray | None = None
             if pose is None:
                 reason = "no_pose"
+            elif episode:
+                reason = "episode"
             elif holds:
                 reason = "live_track"
                 for hold in holds:

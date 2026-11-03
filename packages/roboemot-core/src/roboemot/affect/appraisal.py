@@ -10,6 +10,10 @@ appraisal rules decide what it means. Events (payload fields usable in a rule's 
   recognised later has already emitted it). Payload: ``track_id``.
 - ``animal.appears`` (named ``animal.appeared`` in early drafts): ``world.entity_appeared`` of
   kind ``animal``. Payload: ``entity_id``, ``category``.
+- ``object.shown``: an ``attention.target`` whose priority is ``shown_object`` (a person shows
+  the robot an animal or object, SPEC 5A, Joint attention); once per look, again when another
+  thing is shown or the same thing after the gaze left it. Payload: ``category`` only (no box,
+  no entry or registry id).
 - ``sound.loud``: a ``sound.loud`` message from the reflex engine's audio intake (a level scalar,
   never audio). Payload: empty.
 - ``idle.long``: no face, attention target or recognised person for ``appraisal.idle_after_s``;
@@ -33,6 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..attention.types import SHOWN, AttentionTarget
 from ..bus import Bus, Message
 from ..config.schema import AppraisalConfig
 
@@ -62,6 +67,7 @@ class AppraisalAdapter:
     _announced: dict[int, float] = field(default_factory=dict)  # track -> last seen
     _last_interaction: float = 0.0
     _idle_fired: bool = False
+    _shown_key: str | None = None  # the shown thing of the current look, if any
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _unsubscribe: list[Callable[[], None]] = field(default_factory=list, repr=False)
 
@@ -157,7 +163,12 @@ class AppraisalAdapter:
                 self._interaction(msg.stamp)
 
     def _on_attention(self, msg: Message) -> None:
-        if msg.payload is None:  # the target was cleared: nobody to interact with
-            return
+        target = msg.payload
+        shown = isinstance(target, AttentionTarget) and target.priority == SHOWN
         with self._lock:
-            self._interaction(msg.stamp)
+            new_look = shown and target.key != self._shown_key
+            self._shown_key = target.key if shown else None
+            if target is not None:  # a cleared target: nobody to interact with
+                self._interaction(msg.stamp)
+        if new_look:
+            self.emit("object.shown", msg.stamp, {"category": target.category})
