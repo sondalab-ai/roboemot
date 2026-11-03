@@ -15,32 +15,64 @@ import pytest
 from realtime_helpers import wait_until
 from roboemot.realtime.input import RealtimeInput
 from roboemot.voice.direction import DirectionSample, VoiceDirection
+from roboemot.voice.facing import CpuLoad, FacingCheck
 from rt_rig import build_rt
 from test_voice_listener import CHUNK, RATE, FakeASR, Rig, silence, voice
 from turn_server import TurnServer
 
 FACE_RAD = 0.2
 OFF_FACE_RAD = 1.3
+NO_YAW = object()  # the facing check on, the face with no head yaw
+
+
+class FakeDecoder:
+    """One decode of ``DecodeASR``: ``text`` reports the scripted words once audio came in
+    (``partial`` when given), ``finish`` the final ones; it records the audio it got."""
+
+    def __init__(self, asr, index):
+        self.asr, self.index, self.pieces = asr, index, 0
+
+    def accept(self, samples):
+        import threading
+
+        asr = self.asr
+        if not self.pieces:
+            asr.decode_threads.append(threading.current_thread().name)
+            if asr.decode_s:
+                time.sleep(asr.decode_s)
+        elif asr.continue_s:
+            time.sleep(asr.continue_s)  # the rest past the first piece is slow
+        self.pieces += 1
+        asr.decoded_s[self.index] += samples.size / RATE
+
+    def text(self):
+        if not self.pieces:
+            return ""
+        partial = self.asr.partial
+        return partial if partial is not None else self.finish()
+
+    def finish(self):
+        asr = self.asr
+        return asr.decoded if asr.decoded is not None else asr.script[-1]
 
 
 class DecodeASR(FakeASR):
-    """The fake recognizer, plus the whole-utterance decode of the realtime fallback."""
+    """The fake recognizer, plus the decoder of the realtime fallback."""
 
     def __init__(self, script, final=None, decoded=None, decode_s=0.0):
         super().__init__(script, final)
         self.decoded = decoded
+        self.partial = None  # the words a decode reports before its finish (None: decoded)
         self.decodes = 0
+        self.decoded_s: list[float] = []  # the audio each decode got
         self.decode_s = decode_s  # a slow decode (a long utterance on the CM4)
+        self.continue_s = 0.0  # a slow decode past its first piece
         self.decode_threads: list[str] = []
 
-    def decode(self, language, samples):
-        import threading
-
+    def decoder(self, language):
         self.decodes += 1
-        self.decode_threads.append(threading.current_thread().name)
-        if self.decode_s:
-            time.sleep(self.decode_s)
-        return self.decoded if self.decoded is not None else self.finish()
+        self.decoded_s.append(0.0)
+        return FakeDecoder(self, len(self.decoded_s) - 1)
 
 
 class Ear:
@@ -55,6 +87,7 @@ class Ear:
         final=None,
         decoded=None,
         bearing=None,
+        yaw=None,
         to_worker=False,
         decode_s=0.0,
         background=False,
@@ -66,10 +99,17 @@ class Ear:
         if bearing is not None:
             self.bearing = bearing
 
-            def lookup(now):
-                return DirectionSample(self.bearing, (FACE_RAD,), True)
+            y = None if yaw is NO_YAW else yaw
 
-            direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True)
+            def lookup(now):
+                return DirectionSample(self.bearing, (FACE_RAD,), True, False, (y,), y)
+
+            facing = None
+            if yaw is not None:  # the faces' head yaw for the facing check; the CPU never busy
+                facing = FacingCheck(cfg.voice.facing, CpuLoad(reader=lambda: (0.0, 1.0)))
+            direction = VoiceDirection(
+                cfg.voice.direction, lookup, doa_available=True, facing=facing
+            )
         self.r = Rig(script, final, cfg=cfg, direction=direction, grammar_background=background)
         self.r.asr = DecodeASR(script, final, decoded, decode_s)
         self.r.asr.loaded = list(cfg.voice.asr.models)
@@ -161,6 +201,35 @@ def test_a_voice_at_face_reject_is_never_sent(ears):
         assert appended(server) == []
 
 
+def test_a_face_looking_away_is_never_sent(ears):
+    with TurnServer() as server:
+        on = {"voice": {"wake_word_policy": "never", "facing": {"enabled": True}}}
+        ear = ears(
+            server, script=["che bel video"], bearing=FACE_RAD, yaw=0.7, app=on
+        )  # 40 deg away
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert ear.r.asr.decodes == 1  # decoded locally for a wake word, never sent
+        snap = ear.r.listener.snapshot()
+        assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
+        assert sum(snap["wake"]["decisions"].values()) == 1  # decided once
+        assert snap["direction"]["facing"]["checks"]["not_facing"] == 1  # checked once
+        assert appended(server) == []
+
+
+def test_a_face_without_a_yaw_is_never_sent(ears):
+    with TurnServer() as server:
+        on = {"voice": {"wake_word_policy": "never", "facing": {"enabled": True}}}
+        ear = ears(server, script=["che bel video"], bearing=FACE_RAD, yaw=NO_YAW, app=on)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        decisions = ear.r.listener.snapshot()["wake"]["decisions"]
+        assert decisions["rejected_no_facing_data"] == 1 and sum(decisions.values()) == 1
+        assert appended(server) == []
+
+
 def test_a_rejected_voice_with_the_wake_word_in_its_buffer_is_sent(ears):
     with TurnServer(heard=[["ciao robot accendi la luce"]]) as server:
         ear = ears(server, script=["ciao robot accendi"], bearing=OFF_FACE_RAD)
@@ -172,6 +241,70 @@ def test_a_rejected_voice_with_the_wake_word_in_its_buffer_is_sent(ears):
         assert len(server.of("input_audio_buffer.commit")) == 1
 
 
+# ------------------------------------------------------------------ wake decode cap (CV-7)
+
+
+def pre_roll_s(ear):
+    return ear.rt.stack.effective().voice.vad.pre_roll_ms / 1000
+
+
+def say_after_quiet(ear, seconds):
+    """Silence first, so the utterance's buffer holds a full pre-roll before its speech."""
+    ear.r.feed(silence(1.0))
+    ear.say(seconds)
+
+
+def test_a_long_rejected_utterance_decodes_only_its_first_seconds(ears):
+    """Robot run 2026-11-02: a video's long utterances timed out in the whole decode."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="che bel video", bearing=OFF_FACE_RAD)
+        say_after_quiet(ear, 6.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        cap = ear.rt.stack.effective().voice.realtime_route.wake_decode_max_s
+        assert cap == 3.0
+        assert ear.r.asr.decoded_s == [pytest.approx(cap + pre_roll_s(ear), abs=0.07)]
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["decodes"] == 1 and audio["decodes_capped"] == 1
+        assert not ear.utterances[0].addressed and appended(server) == []
+
+
+def test_a_short_rejected_utterance_is_decoded_whole(ears):
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="ciao", bearing=OFF_FACE_RAD)
+        say_after_quiet(ear, 1.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.r.asr.decoded_s == [pytest.approx(1.0 + pre_roll_s(ear), abs=0.1)]
+        assert ear.r.listener.snapshot()["realtime_audio"]["decodes_capped"] == 0
+
+
+def test_the_wake_word_in_the_first_seconds_still_sends_the_whole_utterance(ears):
+    with TurnServer(heard=[["ciao robot raccontami una storia lunga"]]) as server:
+        ear = ears(server, script=["x"], decoded="ciao robot raccontami", bearing=OFF_FACE_RAD)
+        say_after_quiet(ear, 6.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.text == "ciao robot raccontami una storia lunga"
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["decodes_capped"] == 0 and audio["decodes"] == 1  # one pass, continued
+        assert ear.r.asr.decoded_s == [pytest.approx(6.0 + pre_roll_s(ear), abs=0.1)]
+        assert len(server.audio()) > 2 * RATE * 6.0  # PCM16: the whole utterance left
+
+
+def test_a_wake_decode_whose_audio_is_refused_is_decoded_whole_in_one_pass(ears):
+    """The chat routes never answer only the first seconds of an addressed utterance: the
+    wake word in the first piece continues the same decode to the end."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="ciao robot accendi", bearing=OFF_FACE_RAD)
+        ear.rt.stack.set("privacy.realtime_audio", False, source="test", admin=True)
+        say_after_quiet(ear, 6.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.realtime is None and not u.local_only
+        assert u.text == "ciao robot accendi"
+        assert ear.r.asr.decoded_s == [pytest.approx(6.0 + pre_roll_s(ear), abs=0.1)]
+        assert appended(server) == []
+
+
 def test_nothing_is_sent_while_the_robot_speaks(ears):
     with TurnServer() as server:
         ear = ears(server, script=["ciao robot come stai"])
@@ -180,6 +313,101 @@ def test_nothing_is_sent_while_the_robot_speaks(ears):
         assert ear.settle(lambda: ear.r.listener.snapshot()["dropped_speaking"] > 0)
         assert ear.utterances == []
         assert appended(server) == []
+
+
+def test_a_wake_decode_with_no_audio_path_left_is_decoded_whole(ears):
+    """The route stops wanting audio between the utterance's start and its wake decision: the
+    chat routes get the whole utterance's text, never its first seconds."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="ciao robot accendi", bearing=OFF_FACE_RAD)
+        ear.r.feed(silence(1.0))
+        ear.r.feed(voice(seconds=6.0))  # addressable at its start: Vosk skipped
+        ear.input.wants = lambda cfg: False
+        ear.r.feed(silence(ear.r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.realtime is None and not u.local_only
+        assert ear.r.asr.decoded_s == [pytest.approx(6.0 + pre_roll_s(ear), abs=0.1)]
+        assert appended(server) == []
+
+
+def test_an_addressed_utterance_whose_decode_runs_out_of_time_keeps_the_words_so_far(ears):
+    """Review of #147: the wake word in the first piece, the rest too slow: the words heard
+    so far are delivered (the grammar pass and the speaking rate on the audio they came from),
+    never dropped."""
+    with TurnServer() as server:
+        ear = ears(
+            server, script=["x"], decoded="ciao robot accendi la luce", bearing=OFF_FACE_RAD,
+            background=True,
+        )  # fmt: skip
+        ear.r.asr.partial = "ciao robot accendi"
+        ear.r.asr.continue_s = 0.5
+        ear.rt.stack.set("privacy.realtime_audio", False, source="test", admin=True)
+        say_after_quiet(ear, 10.0)
+        assert ear.settle(lambda: ear.r.asr.decoded_s and ear.r.asr.decoded_s[0] > 0)
+        ear.r.now += ear.rt.stack.effective().voice.realtime_route.local_decode_timeout_s
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.text == "ciao robot accendi" and u.realtime is None
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["decode_timeouts"] == 1 and audio["decodes_lost"] == 0
+
+
+def test_an_addressed_utterance_whose_decode_hears_nothing_gets_the_not_heard_cue(ears):
+    """Its audio was refused and the local decode found no word: the did-not-get-it cue,
+    never a silent drop."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="", bearing=FACE_RAD)
+        events = []
+        ear.r.listener.bind_realtime(ear.input, lambda event, key: events.append(event))
+        ear.rt.stack.set("privacy.realtime_audio", False, source="test", admin=True)
+        say_after_quiet(ear, 1.0)
+        assert ear.settle(lambda: "not_heard" in events)
+        assert ear.utterances == [] and events == ["sent", "unsent", "not_heard"]
+        assert ear.r.listener.snapshot()["realtime_audio"]["decodes_lost"] == 1
+
+
+def test_the_listening_blip_is_not_robot_speech(ears):
+    """CV-7: the blip opens only the own-sound window. The listener keeps the audio, barge-in
+    never sees it, and the realtime input sends the utterance while the blip plays."""
+    with TurnServer(heard=[["ciao Neve come stai"]]) as server:
+        ear = ears(server, script=["x"], bearing=FACE_RAD)
+        speech = ear.r.speech
+        ear.input._speaking = lambda: speech.speaking(ear.r.now)  # as the runtime binds it
+        heard_by_bargein = []
+        ear.r.listener._on_speaking_chunk = heard_by_bargein.append
+        speech.extend_own(ear.r.t + 10.0, 10.0)  # an own sound covering the utterance
+        assert speech.sounding(ear.r.t) and not speech.speaking(ear.r.t)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].text == "ciao Neve come stai"
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        assert heard_by_bargein == []
+        assert ear.r.listener.snapshot()["dropped_speaking"] == 0
+
+
+def test_a_blip_just_before_an_utterance_loses_it_no_doa_sample(ears):
+    """Review of #147: a 1 s utterance that starts as the blip plays keeps every voice-at-face
+    sample (none muted), so it is judged on its sound direction, not the degraded path."""
+    with TurnServer(heard=[["ciao Neve"]]) as server:
+        ear = ears(server, script=["x"], bearing=FACE_RAD)
+        samples = []
+        direction = ear.r.listener._direction
+        original = direction.sample
+
+        def record(stamp, muted=False):
+            samples.append(muted)
+            return original(stamp, muted=muted)
+
+        direction.sample = record
+        # the blip fired as the user began, before the VAD declared speech: it and its tail
+        # cover the utterance's first samples
+        ear.r.speech.extend_own(ear.r.t + 0.3, 0.1)
+        ear.say(1.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert samples and not any(samples)
+        snap = ear.r.listener.snapshot()["direction"]
+        assert snap["checks"]["passed"] == 1 and sum(snap["degraded"].values()) == 0
 
 
 def test_nothing_is_sent_while_asleep(ears):
@@ -277,7 +505,8 @@ def test_a_pause_inside_one_utterance_and_a_server_that_splits_it_give_one_answe
         assert history[0][0]["rt"][1][:2] == ["in_1_0", "in_1_1"]  # then the reply item
 
 
-def test_a_transcript_timeout_goes_to_the_local_decode_and_the_chat_path(ears):
+def test_a_transcript_timeout_goes_to_the_local_decode_and_is_not_answered(ears):
+    """CV-2 (SPEC 8, Non-verbal cues): the did-not-get-it cue, never a chat answer."""
     with TurnServer(heard=[[]]) as server:
         ear = ears(server, script=["x"], decoded="che tempo fa", bearing=FACE_RAD, to_worker=True)
         ear.say()
@@ -291,7 +520,8 @@ def test_a_transcript_timeout_goes_to_the_local_decode_and_the_chat_path(ears):
         assert ear.r.listener.snapshot()["realtime_audio"]["transcript_timeouts"] == 1
         assert ear.rt.route.snapshot()["transcript_timeouts"] == 1
         assert ear.settle(lambda: len(ear.rt.events) == 1, 10.0)
-        assert ear.rt.chat_hosts()  # the chat routes answered
+        assert ear.rt.events[0]["outcome"] == "not_heard"
+        assert ear.rt.chat_hosts() == []  # the chat routes did not answer
         assert server.of("response.create") == []
 
 

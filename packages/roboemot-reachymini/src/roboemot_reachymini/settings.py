@@ -31,6 +31,7 @@ from roboemot.manifest import Manifest
 from roboemot.realtime.session import route_origin
 from roboemot.webui.robot_section import PATH_ROOT, RobotSection
 from roboemot.webui.settings import StackPort
+from roboemot.webui.strings import DEFAULT_LANGUAGE, language_for
 
 from .daemon import STOP_TIMEOUT_S, DaemonClient, DaemonError
 
@@ -49,6 +50,49 @@ RESTART_EFFECTS = (
     ("remote_session_drop", {}),
     ("kill_on_timeout", {"timeout_s": STOP_TIMEOUT_S}),
 )
+# The rows' descriptions in each page language (``conversation.language``, SPEC 11A, 12): the
+# page shows one language only, so the plugin words its own rows.
+TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "min": "Hardware minimum of {name}; a ceiling no setting can exceed.",
+        "max": "Hardware maximum of {name}; a ceiling no setting can exceed.",
+        "dynamics": "Measured {key} of {group}; empty until measured on the robot.",
+        "constraint": "Largest allowed yaw difference between {a} and {b}.",
+        "allocator_host": "Host of the realtime route's session allocator (platform mode).",
+        "sends_platform_id": (
+            "Whether the robot's platform identifier goes with each session request "
+            "(privacy.realtime_platform_id, platform mode)."
+        ),
+        "estop": "Hardware emergency-stop input.",
+        "soft_stop": "What a soft stop does.",
+        "hard_stop": "What a hard stop does.",
+        "watchdog": "Ceiling for {ceiling}: the config value can only be lower.",
+    },
+    "it": {
+        "min": "Minimo hardware di {name}; un limite che nessuna impostazione può superare.",
+        "max": "Massimo hardware di {name}; un limite che nessuna impostazione può superare.",
+        "dynamics": "{key} misurato di {group}; vuoto finché non è misurato sul robot.",
+        "constraint": "Massima differenza di imbardata ammessa tra {a} e {b}.",
+        "allocator_host": (
+            "Host dell'allocatore di sessioni della route realtime (modalità platform)."
+        ),
+        "sends_platform_id": (
+            "Se l'identificativo di piattaforma del robot accompagna ogni richiesta di sessione "
+            "(privacy.realtime_platform_id, modalità platform)."
+        ),
+        "estop": "Ingresso hardware di arresto d'emergenza.",
+        "soft_stop": "Cosa fa un arresto morbido.",
+        "hard_stop": "Cosa fa un arresto brusco.",
+        "watchdog": "Limite per {ceiling}: il valore in configurazione può solo essere più basso.",
+    },
+}
+
+
+def texts(language: str) -> dict[str, str]:
+    """The row descriptions for a ``conversation.language`` value (``it``, ``it-IT``...);
+    English when the plugin has no wording for it. The language is the page's (core's
+    ``language_for``), so the rows always match the rest of the page."""
+    return TEXTS.get(language_for(language), TEXTS[DEFAULT_LANGUAGE])
 
 
 def _row(path: str, kind: str, value: Any, description: str, **fields: Any) -> FieldDescriptor:
@@ -114,18 +158,20 @@ class ReachySettings:
         """The title, the claimed behaviour paths and the read-only hardware rows of
         ``manifest``, plus the realtime session rows read from ``stack`` when there is one."""
         base = f"{PATH_ROOT}.{manifest.robot.id}"
+        cfg = stack.effective() if stack is not None else None
+        words = texts(cfg.conversation.language if cfg is not None else DEFAULT_LANGUAGE)
         rows = [
-            *self._limits(base, manifest),
-            *self._dynamics(base, manifest),
-            *self._constraints(base, manifest),
-            *self._safety(base, manifest),
+            *self._limits(base, manifest, words),
+            *self._dynamics(base, manifest, words),
+            *self._constraints(base, manifest, words),
+            *self._safety(base, manifest, words),
         ]
-        if stack is not None:
-            rows += self._realtime_session(base, stack.effective())
+        if cfg is not None:
+            rows += self._realtime_session(base, cfg, words)
         return RobotSection(TITLE, rows, CLAIMS)
 
     @staticmethod
-    def _limits(base: str, manifest: Manifest) -> list[FieldDescriptor]:
+    def _limits(base: str, manifest: Manifest, words: dict[str, str]) -> list[FieldDescriptor]:
         """Min and max of every dof: angles from radians to degrees, translations to mm."""
         rows = []
         for name, dof in manifest.dofs.items():
@@ -133,23 +179,20 @@ class ReachySettings:
                 unit, scale = "deg", math.degrees
             else:
                 unit, scale = "mm", _to_mm
-            for edge, text, value in (
-                ("min", "Hardware minimum", dof.min),
-                ("max", "Hardware maximum", dof.max),
-            ):
+            for edge, value in (("min", dof.min), ("max", dof.max)):
                 rows.append(
                     _row(
                         f"{base}.limits.{name}.{edge}_{unit}",
                         "number",
                         round(scale(value), 6),
-                        f"{text} of {name}; a ceiling no setting can exceed.",
+                        words[edge].format(name=name),
                         unit=unit,
                     )
                 )
         return rows
 
     @staticmethod
-    def _dynamics(base: str, manifest: Manifest) -> list[FieldDescriptor]:
+    def _dynamics(base: str, manifest: Manifest, words: dict[str, str]) -> list[FieldDescriptor]:
         """Velocity and acceleration caps per pose group, as in the manifest (null: not measured,
         the limiter then uses its conservative fallbacks)."""
         units = {
@@ -171,7 +214,7 @@ class ReachySettings:
                         f"{base}.dynamics.{group}.{key}",
                         "number",
                         value,
-                        f"Measured {key} of {group}; empty until measured on the robot.",
+                        words["dynamics"].format(key=key, group=group),
                         nullable=True,
                         unit=unit,
                     )
@@ -179,7 +222,7 @@ class ReachySettings:
         return rows
 
     @staticmethod
-    def _constraints(base: str, manifest: Manifest) -> list[FieldDescriptor]:
+    def _constraints(base: str, manifest: Manifest, words: dict[str, str]) -> list[FieldDescriptor]:
         """Yaw-delta limits between two dofs, in degrees."""
         rows = []
         for c in manifest.constraints:
@@ -189,14 +232,16 @@ class ReachySettings:
                     f"{base}.constraints.{name}.max_deg",
                     "number",
                     c.max_deg,
-                    f"Largest allowed yaw difference between {c.a} and {c.b}.",
+                    words["constraint"].format(a=c.a, b=c.b),
                     unit="deg",
                 )
             )
         return rows
 
     @staticmethod
-    def _realtime_session(base: str, cfg: RoboEmotConfig) -> list[FieldDescriptor]:
+    def _realtime_session(
+        base: str, cfg: RoboEmotConfig, words: dict[str, str]
+    ) -> list[FieldDescriptor]:
         """The allocator host and whether the identifier is sent, in platform mode (SPEC 12,
         Data); with the route off or in direct mode the provider is not used: no host, nothing
         sent."""
@@ -212,32 +257,31 @@ class ReachySettings:
                 origin[1] if origin else None,
                 nullable=True,
                 source=CONFIG_SOURCE,
-                description="Host of the realtime route's session allocator (platform mode).",
+                description=words["allocator_host"],
             ),
             descriptor(
                 f"{prefix}.sends_platform_id",
                 "bool",
                 platform and cfg.privacy.realtime_platform_id,
                 source=CONFIG_SOURCE,
-                description="Whether the robot's platform identifier goes with each session "
-                "request (privacy.realtime_platform_id, platform mode).",
+                description=words["sends_platform_id"],
             ),
         ]
 
     @staticmethod
-    def _safety(base: str, manifest: Manifest) -> list[FieldDescriptor]:
+    def _safety(base: str, manifest: Manifest, words: dict[str, str]) -> list[FieldDescriptor]:
         """Stop behaviour and the watchdog ceiling declared by the manifest."""
         s = manifest.model.safety
         estop = "none" if s.estop == "none" else "configured"
         return [
-            _row(f"{base}.safety.estop", "text", estop, "Hardware emergency-stop input."),
-            _row(f"{base}.safety.soft_stop", "text", s.soft_stop, "What a soft stop does."),
-            _row(f"{base}.safety.hard_stop", "text", s.hard_stop, "What a hard stop does."),
+            _row(f"{base}.safety.estop", "text", estop, words["estop"]),
+            _row(f"{base}.safety.soft_stop", "text", s.soft_stop, words["soft_stop"]),
+            _row(f"{base}.safety.hard_stop", "text", s.hard_stop, words["hard_stop"]),
             _row(
                 f"{base}.safety.watchdog_ms",
                 "number",
                 s.watchdog_ms,
-                f"Ceiling for {WATCHDOG_CEILING}: the config value can only be lower.",
+                words["watchdog"].format(ceiling=WATCHDOG_CEILING),
                 unit="ms",
             ),
         ]

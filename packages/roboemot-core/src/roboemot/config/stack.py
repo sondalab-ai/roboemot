@@ -216,12 +216,12 @@ def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None)
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value, p, at=sub)
         elif (
-            p in KEYED_LISTS
+            sub in KEYED_LISTS
             and key != REPLACED_BY_LAYER
             and isinstance(value, list)
             and isinstance(out.get(key), list)
         ):
-            out[key] = _merge_keyed(out[key], value, KEYED_LISTS[p])
+            out[key] = _merge_keyed(out[key], value, KEYED_LISTS[sub])
         else:
             out[key] = copy.deepcopy(value)
     return out
@@ -1672,10 +1672,11 @@ class ConfigStack:
         """Load-time check (SPEC 8, Conversation state) on a configuration without person
         layers. It runs when a file loads or a change commits, not on every ``effective()``
         call, so per-person lookups never pay for it or fail on it."""
-        from ..llm.prompt import check_route_budgets  # lazy: llm imports the config package
+        from ..llm.prompt import check_route_budgets, check_skip_prompt  # lazy: llm imports config
 
         try:
             check_route_budgets(cfg)
+            check_skip_prompt(cfg)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
 

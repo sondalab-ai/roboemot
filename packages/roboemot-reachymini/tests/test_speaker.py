@@ -358,3 +358,35 @@ def test_the_echo_reference_holds_the_ducked_audio_the_speaker_really_played():
     until = sp.playing_until()
     played = ref.window(until - 0.5, until)
     assert float(np.abs(played).max()) == pytest.approx(0.125, abs=0.01)
+
+
+def test_an_aside_sound_opens_only_the_own_sound_window():
+    """CV-7: the listening blip plays through the speaker but is not robot speech."""
+    mini, log = fake(out_rate=48000)
+    clock = Clock()
+    act = SpeechActivity(300)
+    sp = ReachySpeaker(mini, 100, act, clock)
+    sp.start_playing()
+    until = sp.push_aside(np.full(1600, 0.1, np.float32), 16000)  # 0.1 s
+    assert until == pytest.approx(clock.t + 0.1, abs=1e-3)
+    assert sum(len(p) for p in log.pushed) == 4800  # resampled whole to the output rate
+    assert not act.speaking(clock.t) and act.sounding(clock.t + 0.05)
+    sp.push_audio_sample(np.zeros(1600, np.float32), 16000)  # speech after it opens the window
+    assert act.speaking(clock.t)
+
+
+def test_an_aside_sound_through_the_speech_output_is_not_speech():
+    """SpeechOutput.play_aside on the real speaker: nothing queued, the gate not speaking."""
+    mini, log = fake()
+    act = SpeechActivity(300)
+    sp = ReachySpeaker(mini, 100, act)
+    sp.start_playing()
+    out = SpeechOutput(RoboEmotConfig(), sp, ToneBackend())
+    out.start()
+    try:
+        assert out.play_aside(np.full(1600, 0.1, np.float32), 16000)
+        now = time.monotonic()
+        assert log.pushed and not act.speaking(now) and act.sounding(now)
+        assert out.waiting() == 0
+    finally:
+        out.close()

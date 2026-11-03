@@ -76,8 +76,24 @@ phone calls included. The skip decides only whether the robot answers; the audio
 
 ## Status (handoff, 2026-10-30)
 
-Step 0 is done. The epic started 2026-10-30: branch `epic/cloud-voice-default`; CV-1 is
-https://github.com/sondalab-ai/roboemot/pull/139; CV-0 and CV-6 authors running. Merged on `main`:
+**Epic status (2026-10-30, end of the build):** every slice is merged into `epic/cloud-voice-default`; the epic is
+not on `main` yet. It waits for the owner's robot run (see "QA handoff" below).
+
+| Slice | PR |
+| --- | --- |
+| CV-1 transcription language | https://github.com/sondalab-ai/roboemot/pull/139 |
+| CV-0 audio hub catch-up | https://github.com/sondalab-ai/roboemot/pull/140 |
+| CV-6 facing gate | https://github.com/sondalab-ai/roboemot/pull/141 |
+| CV-3 skip tool | https://github.com/sondalab-ai/roboemot/pull/142 |
+| CV-2 no local voice, cues, listening cue | https://github.com/sondalab-ai/roboemot/pull/143 |
+| CV-4 installer `--cloud-voice` | https://github.com/sondalab-ai/roboemot/pull/144 |
+| CV-5 docs | this PR |
+
+Owner decisions taken during the build (2026-10-30): `muted` utterances pass when the attended face looks at the
+robot; with no local voice and the route down, the robot plays the fallback cue and sends no chat request; the
+profile writes `transcript_timeout_s` 10 s until the robot run measures the transcript p95.
+
+Before the epic (step 0), merged on `main`:
 
 | PR | What |
 | --- | --- |
@@ -195,12 +211,21 @@ CV-5. **Docs.** SPEC 8 (backend `none`, skip tool, transcription language, liste
 for the robot's transcript round-trip, as Pollen's app does (`create_response`); it affects the wake-word check and
 the skip tool (CV-3), which need the text.
 
-## How to start the next session
+## QA handoff (owner, on the robot)
 
-1. Read this file, `CLAUDE.md`, SPEC 8 "Realtime speech route" and `docs/realtime-voice-setup.md`.
-2. Create `epic/cloud-voice-default` from `main`; slice PRs into it; the epic lands with one merge.
-3. Start with CV-0 (needs the owner on the robot for before/after figures) and CV-1 (small, independent) in parallel.
-4. Report agent count and what is left after each slice (owner's budget check-ins).
+1. Install the epic branch: `python scripts/install_on_robot.py --dry-run --cloud-voice --host 192.168.88.198`, then
+   the same without `--dry-run`. The installer asks for `hf_token` if the store has none and stops before any change
+   if saved web UI settings contradict the privacy choice.
+2. Start with `python scripts/run_on_robot.py --host 192.168.88.198` and wait about 2 minutes.
+3. Run the SPEC 15 item "Cloud-voice install on the Wireless" and fill the SPEC 13 "after" figures.
+4. Watch the facing yaw: `direction.facing.yaw_deg` in the debug report. Real landmark noise was -15 to +9 degrees on
+   a frontal test portrait; if the owner is rejected while looking at the robot, raise `voice.facing.max_yaw_deg`.
+5. If the figures hold, merge `epic/cloud-voice-default` into `main` (one merge, full CI).
+
+Not verified: the SDK 1.13 read behaviour on the robot (CV-0 handles both an immediate `None` and a waiting read),
+and the facing yaw on real faces at the robot's distance.
+
+Build cost: 14 agents (Opus authors, Sonnet/Opus reviews), within the 14-15 estimate.
 
 ## Open items (not in this epic)
 
@@ -228,3 +253,29 @@ the skip tool (CV-3), which need the text.
   report shows `realtime_route.state: connected`, `speech.backend: none`, no Piper process, `local_fallbacks` 0,
   `latency_ms.transcript` p95 well below the 2026-10-30 figure (17.6 s), CPU below the 2026-10-28 figure,
   `skipped` counted for a phone call in front of the robot.
+
+## Round 3 (2026-11-03): CV-12 and the TODO batch
+
+Owner decision 2026-11-03: the TODO batch goes into this epic, so the robot test covers it.
+
+| Slice | What | TODO.md item | PR | Status |
+| --- | --- | --- | --- | --- |
+| CV-12 | Background reconnect after a lost realtime session | robot QA (`connection_lost` stayed red) | https://github.com/sondalab-ai/roboemot/pull/152 | merged |
+| CV-13 | One owner for the tool-argument cap | `tool_arg_max_chars` vs `TOOL_ARGS_MAX_CHARS` | https://github.com/sondalab-ai/roboemot/pull/156 | merged |
+| CV-14 | Runtime override of `appraisal` merges `rules` by key | `appraisal.rules` override | https://github.com/sondalab-ai/roboemot/pull/154 | merged |
+| CV-15 | Root cause of the `test_app_reflex.py` flake | (new) | https://github.com/sondalab-ai/roboemot/pull/157 | merged |
+| CV-16 | Alone stillness, day nap (the `idle_period_x` gaze-shift item stays open: no gaze shifts exist) | 2 items | https://github.com/sondalab-ai/roboemot/pull/158 | merged |
+| CV-17 | No mixed language on the dashboard, emotions debug page | 2 items | https://github.com/sondalab-ai/roboemot/pull/159 | merged |
+| CV-18 | One pseudonym map (`NameSource` and `Pseudonyms`) | pseudonyms follow-up | https://github.com/sondalab-ai/roboemot/pull/155 | merged |
+| CV-19 | Operator guide to the critical configurations | document critical configurations | https://github.com/sondalab-ai/roboemot/pull/153 | merged |
+
+Owner decisions for CV-16 (2026-11-03):
+- Alone: after 120 s (config) with no face in view and no sound above the VAD, scans and idle gaze
+  shifts stop; breathing and micro-motions stay; a face or a sound resumes them at once.
+- Day nap: no face in view and no speech for 1800 s (config), outside quiet hours, the robot rests;
+  a face or speech wakes it; `presence_keeps_awake` still applies.
+- Later (2026-11-03): only addressed speech (wake word, speech with a face in view, a conversation)
+  blocks or wakes a nap, so a TV left on lets the robot nap. An animal or object target still turns the
+  head while alone; no sweep when stillness ends; `nap_after_s: null` turns naps off.
+
+Owner decision for CV-17 (2026-11-03): the Emotions tab stays on by default (its writes need the PIN).

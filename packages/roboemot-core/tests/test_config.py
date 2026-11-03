@@ -177,6 +177,44 @@ def test_section_override_keeps_other_values():
     assert stack.get("affect.half_life_s") == 9 and stack.get("affect.update_hz") == 30
 
 
+def test_section_override_merges_keyed_lists_by_identity():
+    """SPEC 11A: a runtime write of a whole section merges its keyed lists (``KEYED_LISTS``) by
+    identity, as at every other layer; it must not replace them."""
+    stack = rules_stack()
+    stack.set("appraisal", {"rules": [{"event": "zz.b", "valence": 0.9}]}, source="t")
+    rules = {r.event: r.valence for r in stack.effective().appraisal.rules}
+    assert rules["zz.a"] == 0.1 and rules["zz.b"] == 0.9
+
+
+@pytest.mark.parametrize(
+    ("at", "base", "over", "expected"),
+    [
+        (  # merged by identity under its section
+            "appraisal",
+            {"rules": [{"event": "a", "valence": 0.1}, {"event": "b", "valence": 0.2}]},
+            {"rules": [{"event": "b", "valence": 0.9}]},
+            {"rules": [{"event": "a", "valence": 0.1}, {"event": "b", "valence": 0.9}]},
+        ),
+        (  # a layer's variants replace the ones below whole (SPEC 7), wherever the merge starts
+            "expression_map",
+            {"joy": {"variants": [{"clip": "soft"}, {"clip": "wide"}]}},
+            {"joy": {"variants": [{"clip": "wide", "weight": 2}]}},
+            {"joy": {"variants": [{"clip": "wide", "weight": 2}]}},
+        ),
+        (
+            "circadian_motion",
+            {"yawn": {"variants": [{"clip": "soft"}, {"clip": "wide"}]}},
+            {"yawn": {"variants": [{"clip": "wide", "weight": 2}]}},
+            {"yawn": {"variants": [{"clip": "wide", "weight": 2}]}},
+        ),
+    ],
+)
+def test_deep_merge_finds_keyed_lists_by_location(at, base, over, expected):
+    from roboemot.config.stack import deep_merge
+
+    assert deep_merge(base, over, at=at) == expected
+
+
 def test_privacy_opt_in_with_integer_one_still_needs_admin():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):

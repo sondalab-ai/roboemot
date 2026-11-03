@@ -56,6 +56,7 @@ from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, MotionCore
 from .external import ExternalControl
+from .state import MeasuredPair, MotionSample, MotionState
 
 MS_PER_S = 1000.0
 log = logging.getLogger(__name__)
@@ -109,6 +110,10 @@ class MotionLoop:
         # this class, which take the lock). A raising hook is counted and skipped, the tick goes on.
         self.tick_hooks: list[Callable[[float, MotionCore], None]] = []
         self._hook_error: str | None = None
+        self._angle_dofs = [n for n, d in manifest.dofs.items() if d.kind == "angle"]
+        # Diagnostics (MotionProbe): raw values only, one attribute store each per tick.
+        self._tick_stamp: float | None = None
+        self._measured: MeasuredPair | None = None
 
     # ---- configuration (SPEC 11A hot reload)
 
@@ -134,6 +139,38 @@ class MotionLoop:
     @property
     def external_events(self) -> int:
         return self.external_ctl.events
+
+    def motion_sample(self) -> MotionSample | None:
+        """Raw movement values (``MotionProbe``), read without the lock from any thread: a copy
+        of the limiter's velocities (floats replaced in place, so the copy is consistent enough
+        for diagnostics) and the references the tick stored. None before the first tick."""
+        stamp = self._tick_stamp
+        if stamp is None:
+            return None
+        return MotionSample(
+            stamp,
+            dict(self.core.limiter.vel),
+            self._measured,
+            self.external_ctl.yielding,
+            self.core.arbiter.reflex_active,
+        )
+
+    def motion_state(self, sample: MotionSample) -> MotionState:
+        """Derive ``sample``: the highest commanded and measured angular speed (deg/s) per
+        manifest group. Measured needs two fresh poses; call it off any hot path."""
+        commanded: dict[str, float] = {}
+        measured: dict[str, float] = {}
+        pair = sample.measured
+        t0, prev, t1, last = pair if pair is not None else (None, None, 0.0, {})
+        span = t1 - t0 if t0 is not None else 0.0
+        for name in self._angle_dofs:
+            group = self.manifest.dofs[name].group
+            speed = math.degrees(abs(sample.velocities.get(name, 0.0)))
+            commanded[group] = max(commanded.get(group, 0.0), speed)
+            if prev is not None and span > 0 and name in prev and name in last:
+                speed = math.degrees(abs(last[name] - prev[name]) / span)
+                measured[group] = max(measured.get(group, 0.0), speed)
+        return MotionState(sample.stamp, commanded, measured, sample.external, sample.reflex)
 
     # ---- inputs
 
@@ -204,6 +241,7 @@ class MotionLoop:
                 # re-enabling never jumps
                 state = self._resync()
                 self.ticks += 1
+                self._tick_stamp, self._measured = now, None  # not driving: no motion to judge
                 return state
             ext = self.external_ctl
             ext.tick(now)
@@ -223,6 +261,8 @@ class MotionLoop:
                 self._call(self.driver.write_pose_targets, now, targets)
             measured = self._read_fresh()
             if measured is not None:
+                last_t, last = self._measured[2:] if self._measured else (None, None)
+                self._measured = (last_t, last, now, measured)  # one store: readers see a pair
                 if held:
                     self._follow(measured, held)
                     self._watch_external(now, measured)
@@ -233,6 +273,7 @@ class MotionLoop:
                     log.info("motion: external control of the robot detected (%s), yielding", names)
             ext.push(out)
             self.ticks += 1
+            self._tick_stamp = now
             return out
 
     def _read_fresh(self) -> dict[str, float] | None:

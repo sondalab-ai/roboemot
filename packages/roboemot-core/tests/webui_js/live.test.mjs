@@ -62,7 +62,7 @@ const visibility = (page, value) => {
 test("the Live tab sits next to the others and draws one card per group", async (t) => {
   const page = await livePage(t);
   const tabs = [...page.document.querySelectorAll("#tabs button")].map((b) => b.dataset.tab);
-  assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]);
+  assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "emotions", "debug"]);
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
   assert.equal(grid.children.length, 8);
@@ -89,6 +89,28 @@ test("no audio warning in text mode", async (t) => {
   });
   await openLive(page);
   assert.ok(!page.document.querySelector("#live-cards").textContent.includes("AUDIO OUT"));
+});
+
+test("the mood card says why the robot rests", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, mood: { ...STATE.mood, circadian: { state: "resting", reason: "nap", sleepiness: 0.4 } } },
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_circ_resting: "resting", live_circ_reason_nap: "A NAP" } },
+  });
+  await openLive(page);
+  assert.ok(page.document.querySelector("#live-cards").textContent.includes("resting (A NAP)"));
+});
+
+test("the modes card says when the robot is alone and holding still", async (t) => {
+  const strings = { ...STRINGS, live_alone: "ALONE STILL" };
+  const alone = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, alone: true } },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(alone);
+  assert.ok(alone.document.querySelector("#live-cards").textContent.includes("ALONE STILL"));
+  const company = await livePage(t, { "GET /api/strings": { language: "en", strings } });
+  await openLive(company);
+  assert.ok(!company.document.querySelector("#live-cards").textContent.includes("ALONE STILL"));
 });
 
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {

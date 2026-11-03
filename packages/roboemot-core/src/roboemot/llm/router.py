@@ -53,8 +53,10 @@ log = logging.getLogger(__name__)
 # level is, so no prompt or reply text can reach a log (SPEC 12).
 logging.getLogger("openai").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-# Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
-# this only bounds what a broken or hostile route can make json.loads chew on.
+# Longest raw tool-call JSON parsed (chat and realtime routes). Not a behavioural cap: the
+# argument size is conversation.tool_arg_max_chars, checked after parsing, and this bound holds
+# the longest call it accepts (tests/test_llm_router.py). It only bounds what a broken or
+# hostile route can make json.loads chew on (SPEC 8, 11A).
 TOOL_ARGS_MAX_CHARS = 50_000
 SECRET = SECRET_REF
 

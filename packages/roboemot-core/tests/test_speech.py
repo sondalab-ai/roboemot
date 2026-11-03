@@ -1167,3 +1167,158 @@ def test_a_sink_that_takes_the_duck_gets_the_samples_unscaled_and_reports_its_pa
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert np.concatenate(sink.samples) == pytest.approx(1.0)  # never applied twice
     assert out.snapshot()["pacing"] == {"lead_ms": 200.0}
+
+
+def test_backend_none_builds_no_piper_and_needs_no_piper_files(tmp_path, monkeypatch):
+    """SPEC 8 (CV-2): ``voice.backend: none`` is no local speech synthesis at all."""
+    from roboemot.llm import Router
+    from roboemot.voice import factory
+
+    def no_piper(*args, **kwargs):
+        raise AssertionError("Piper must not be built with backend none")
+
+    monkeypatch.setattr(factory, "PiperBackend", no_piper)
+    monkeypatch.setattr(factory, "manifest_voice_files", no_piper)
+    empty = {"data_dir": str(tmp_path), "voice": {"models_dir": str(tmp_path / "nothing")}}
+    cfg = RoboEmotConfig.model_validate(
+        {**empty, "voice": {**empty["voice"], "backend": "none", "fallback_backend": "none"}}
+    )
+    router = Router([], cfg.safety)
+    backend = factory.build_backend(cfg, lambda: router)
+    assert backend.name == "none" and not backend.available()
+    remote_voice = {**empty["voice"], "backend": "openai_speech", "fallback_backend": "none"}
+    remote = RoboEmotConfig.model_validate({**empty, "voice": remote_voice})
+    chain = factory.build_backend(remote, lambda: router)
+    assert isinstance(chain, FallbackTTS) and chain.fallback is None
+
+
+def test_speech_output_without_a_local_voice_refuses_sentences_but_plays_raw_sound(make):
+    from roboemot.voice.tts import NoVoice
+
+    out = make(NoVoice())
+    assert say(out) is None
+    assert out.snapshot()["backend"] == "none"
+    assert out.snapshot()["no_voice"] == 1 and out.sentences_dropped == 0
+    assert out.play(np.zeros(160, np.float32), 16000) is not None
+
+
+# ------------------------------------------------------------------ aside sound (CV-7)
+
+
+class AsideSink(FakeSink):
+    """A sink that can play a sound that is not speech (the Reachy speaker's ``push_aside``);
+    ``busy_until`` stands in for audio still in the player."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asides: list[tuple[int, int, float]] = []
+        self.busy_until = -math.inf
+
+    def push_aside(self, samples, rate_hz):
+        self.asides.append((samples.size, rate_hz, float(np.max(np.abs(samples)))))
+        return time.monotonic() + samples.size / rate_hz
+
+    def playing_until(self):
+        return max(time.monotonic(), self.busy_until) if self.busy_until > 0 else time.monotonic()
+
+
+def blip(seconds=0.1, level=0.5):
+    return np.full(round(seconds * RATE), level, np.float32)
+
+
+def test_an_aside_sound_plays_at_once_outside_the_queue(make):
+    sink = AsideSink()
+    out = make(sink=sink)
+    assert out.play_aside(blip(), RATE, volume_db=-6.0)
+    assert sink.asides == [(1600, RATE, pytest.approx(0.5 * 10 ** (-6 / 20), rel=1e-4))]
+    assert sink.pushed == [] and out.waiting() == 0  # never a job of the speech queue
+    assert out.snapshot()["aside"] == {"played": 1}
+
+
+def test_an_aside_sound_does_not_delay_the_answer(make):
+    """A raw job holds the queue while it plays; the aside sound does not: a sentence queued
+    right after it reaches the sink at once."""
+    sink = AsideSink()
+    out = make(FakeBackend(), sink=sink)
+    t0 = time.monotonic()
+    assert out.play_aside(blip(0.15), RATE)
+    say(out)
+    assert wait_for(lambda: sink.pushed)
+    assert sink.pushed_at[0] - t0 < 0.1  # not behind the sound's 0.15 s
+
+
+def test_an_aside_sound_is_dropped_while_the_output_is_busy(make):
+    sink = AsideSink()
+    out = make(HoldingBackend(), sink=sink)
+    say(out)
+    say(out)  # held in synthesis: a job in flight
+    assert wait_for(lambda: len(out.backend.texts) == 2)
+    assert not out.play_aside(blip(), RATE)
+    sink2 = AsideSink()
+    sink2.busy_until = time.monotonic() + 5.0  # audio still in the player
+    out2 = make(sink=sink2)
+    assert not out2.play_aside(blip(), RATE)
+    assert out.snapshot()["aside"] == {"busy": 1} and out2.snapshot()["aside"] == {"busy": 1}
+    assert sink.asides == sink2.asides == []
+
+
+def test_an_aside_sound_needs_a_sink_that_keeps_it_out_of_the_speaking_window(make):
+    sink = FakeSink()
+    out = make(sink=sink)
+    assert not out.play_aside(blip(), RATE)
+    assert sink.pushed == [] and out.waiting() == 0  # never falls back to a raw job
+    assert out.snapshot()["aside"] == {"unsupported": 1}
+
+
+def test_an_aside_sound_must_be_shorter_than_the_vad_min_speech(make):
+    sink = AsideSink()
+    out = make(sink=sink)
+    min_speech_s = out.config.voice.vad.min_speech_ms / 1000
+    assert not out.play_aside(blip(min_speech_s), RATE)
+    assert sink.asides == [] and out.snapshot()["aside"] == {"too_long": 1}
+
+
+class LockedAsideSink(AsideSink):
+    """Fails if the output calls ``push_aside`` with its own lock held (review of #147)."""
+
+    out = None
+
+    def push_aside(self, samples, rate_hz):
+        # the lock is not reentrant: held by this thread, it could never be taken here
+        assert self.out._lock.acquire(timeout=2.0)
+        self.out._lock.release()
+        return super().push_aside(samples, rate_hz)
+
+
+def test_play_aside_racing_say_and_stop_never_blocks_or_breaks_the_output(make):
+    sink = LockedAsideSink()
+    out = make(FakeBackend(), sink=sink)
+    sink.out = out
+    calls, errors = 200, []
+
+    def asides():
+        try:
+            for _ in range(calls):
+                out.play_aside(blip(0.01), RATE)
+        except Exception as exc:  # pragma: no cover - the assertion below reports it
+            errors.append(exc)
+
+    def speech():
+        try:
+            for _ in range(calls // 4):
+                say(out)
+                out.stop()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=asides), threading.Thread(target=speech)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10.0)
+    assert not any(t.is_alive() for t in threads) and errors == []
+    counts = out.snapshot()["aside"]
+    assert sum(counts.values()) == calls and counts.get("failed", 0) == 0
+    before = out.sentences_spoken
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == before + 1)  # the output still works

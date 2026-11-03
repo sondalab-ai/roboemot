@@ -32,12 +32,13 @@ def pipeline():
         azimuth_rad=0.31, elevation_rad=0.0, distance_m=1.4, uncertainty_rad=0.1,
         confidence=0.9, first_seen=0.0, last_seen=NOW, embedding=np.full(64, 0.5),
     )  # fmt: skip
+    engine = SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5), history_cap=None)
+    engine.keep_history = lambda cap: setattr(engine, "history_cap", cap)
     return SimpleNamespace(
-        runner=SimpleNamespace(
-            engine=SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5))
-        ),
+        runner=SimpleNamespace(engine=engine),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
+        alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1)),
         selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5")),
@@ -56,7 +57,13 @@ def stack(tmp_path):
 
 @pytest.fixture
 def served(tmp_path, stack):
-    host = SimpleNamespace(circadian=object(), phase=ConversationPhase())
+    host = SimpleNamespace(
+        circadian=SimpleNamespace(state="awake", reason=None),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)
     stack.subscribe(live.apply_config)
     editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
@@ -113,7 +120,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
-        "video", "audio_egress",
+        "video", "audio_egress", "activity",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
@@ -222,19 +229,28 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         route_check_router=lambda: None,
         circadian=None,
         phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
         webui=None,
         bus=None,
-        realtime_route=None,
     )
+    p = pipeline()
+    before = len(stack._listeners)
     with ExitStack() as cleanup:
-        server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
+        server = start_webui(host, stack, stack.effective(), manifest, cleanup, p)
         assert server is not None
         live = server._httpd.api.live
+        assert server._httpd.api.emotions is not None  # the Emotions tab is wired too
+        assert p.runner.engine.history_cap == stack.effective().webui.emotions.events
         assert live.state() is None
         stack.set("webui.live.enabled", True, source="test", admin=True)
         assert live.state() is not None
         stack.set("webui.live.enabled", False, source="test", admin=True)
         assert live.state() is None
+    # the page stopped: no listener is left and the engine keeps no history
+    assert len(stack._listeners) == before
+    assert p.runner.engine.history_cap == 0
 
 
 def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
@@ -250,14 +266,17 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
     host = SimpleNamespace(
         perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
         name_source=None, route_check_router=lambda: None, circadian=None,
-        phase=ConversationPhase(), webui=None,
+        phase=ConversationPhase(), activity=None, realtime_route=None, voice_listener=None,
+        webui=None, bus=None,  # gets as far as make_server, which fails
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
+    p = pipeline()
     with ExitStack() as cleanup:
         assert (
-            webui_module.start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
-            is None
+            webui_module.start_webui(host, stack, stack.effective(), manifest, cleanup, p) is None
         )
+        assert len(stack._listeners) == before  # undone at once, not only at the cleanup
+        assert p.runner.engine.history_cap == 0
     assert len(stack._listeners) == before
 
 
@@ -327,6 +346,9 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         route_check_router=lambda: None,
         circadian=None,
         phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
         webui=None,
         bus=bus,
         live_video=None,

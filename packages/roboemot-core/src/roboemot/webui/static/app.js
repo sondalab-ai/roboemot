@@ -3,13 +3,29 @@
 // registry are never HTML. Styles are set through the CSSOM only (the CSP forbids style attributes).
 
 const ROUTES_POLL_MS = 2000;
-const state = { strings: {}, csrf: null, session: {}, tab: "enroll", timer: null, form: null };
+const state = { strings: {}, lang: undefined, csrf: null, session: {}, tab: "enroll", timer: null, form: null };
 
 const t = (key, vars) => {
   let text = state.strings[key] || key;
   for (const [k, v] of Object.entries(vars || {})) text = text.replace("{" + k + "}", () => String(v));
   return text;
 };
+
+// A server code in the page language: the string `prefix + code` (spaces and dashes as "_") when
+// the page has one, else the code as it is (a name the owner chose, such as a custom label).
+function word(prefix, code) {
+  const key = prefix + String(code).replace(/[ -]/g, "_");
+  return Object.prototype.hasOwnProperty.call(state.strings, key) ? state.strings[key] : String(code);
+}
+
+// A date (ms, ISO text or Date) in the page language, not the browser's; `timeOnly` drops the day.
+function when(value, timeOnly) {
+  const d = new Date(value);
+  return timeOnly ? d.toLocaleTimeString(state.lang) : d.toLocaleString(state.lang);
+}
+
+// Shown when the page cannot load its strings: the only text the page holds itself.
+const UNREACHABLE = { en: "Cannot reach the robot.", it: "Impossibile raggiungere il robot." };
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -148,7 +164,6 @@ async function api(method, path, body, extra) {
   if (!resp.ok) {
     const err = new Error(data.error || "generic");
     err.status = resp.status;
-    err.detail = data.detail;
     err.endpoint = data.endpoint;
     err.retryAfter = Number(resp.headers.get("Retry-After"));
     throw err;
@@ -159,7 +174,6 @@ async function api(method, path, body, extra) {
 function explain(err) {
   const known = state.strings["err_" + err.message];
   let text = known || t("err_generic");
-  if (err.message === "consent_refused" && err.detail) text += " " + err.detail;
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   if (err.saved) text += " " + err.saved;
   const wait = err.retryAfter;
@@ -406,7 +420,7 @@ async function registryView() {
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
         badge(state.strings["status_" + r.status] || r.status, STATUS_TONE[r.status] || "info")),
-      el("td", {}, r.last_seen ? new Date(r.last_seen).toLocaleString() : t("never")),
+      el("td", {}, r.last_seen ? when(r.last_seen) : t("never")),
       el("td", { class: "actions" }, el("div", { class: "row" }, rowActions(r, entities))))));
   view.append(card(t("tab_registry"), t("registry_title"), body));
   view.append(card(t("tab_registry"), t("quarantined_title"),
@@ -527,15 +541,15 @@ async function catalogueView() {
     [t("display_name"), "", ""],
     data.records.map((r) => el("tr", {},
       el("td", {}, r.display_name),
-      el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + r.category + ")" : "")), " " + origin(r)),
+      el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
       el("td", { class: "actions" }, el("div", { class: "row" },
         r.status === "pending" && r.has_appearance ?
           button(t("catalogue_activate"), "plain", () => confirmBy(r, null), { small: true }) : [],
         data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
-          .map((e) => button(t("catalogue_confirm", { name: r.display_name }) + " ← " + e.category + " #" + e.entry_id.split("-").pop(),
+          .map((e) => button(t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop(),
             "plain", () => confirmBy(r, e.entry_id), { small: true })))))));
   const live = data.live.length === 0 ? empty(t("catalogue_live"), t("catalogue_live_none")) :
-    el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + e.category + " #" + e.entry_id.split("-").pop() +
+    el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + word("category_", e.category) + " #" + e.entry_id.split("-").pop() +
       (e.identified ? " ✓" : ""))));
   const clearCandidates = () => ask({
     title: t("catalogue_clear"), message: t("catalogue_clear_confirm"), pin: true, danger: true, confirm: t("catalogue_clear"),
@@ -763,6 +777,29 @@ const REALTIME_FACTS = [
   "server_error_code", "server_error_about",
 ];
 
+const REALTIME_WORDS = { mode: "rt_mode_", header_to_connect_host: "rt_header_", item_delete: "rt_item_", failure: "live_code_" };
+
+// One fact of a realtime check: yes / no, a worded code, or a host or server code as it is.
+function realtimeFact(name, value) {
+  if (value === null || value === undefined) return t("live_none");
+  if (typeof value === "boolean") return t(value ? "live_yes" : "live_no");
+  return REALTIME_WORDS[name] ? word(REALTIME_WORDS[name], value) : String(value);
+}
+
+// A check's reason in the page language from its `code` and `params`. A report kept from before
+// the codes has none: only its status shows (its English reason is not). `why` and `reasoned`
+// add a clause.
+function checkReason(c) {
+  if (!c.code) return "";
+  const p = Object.assign({}, c.params);
+  if (p.failure !== undefined) p.failure = word("live_code_", p.failure);
+  const parts = [t("check_reason_" + c.code, p)];
+  if (p.why) parts.push(t("check_why_" + p.why, { detail: p.detail || "" }));
+  if (p.withheld) parts.push(t("check_withheld"));
+  if (p.reasoned) parts.push(t("check_reasoned", { n: p.reasoned }));
+  return parts.join("; ");
+}
+
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
@@ -776,15 +813,15 @@ async function routesView() {
   }
   const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
-  const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + c.reason);
-  // A realtime check names hosts and outcome codes only (SPEC 8, 12): shown as they come.
-  const shown = (v) => (v === null || v === undefined ? "-" : String(v));
+  const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + checkReason(c));
+  // A realtime check names hosts and outcome codes only (SPEC 8, 12): codes are worded, hosts
+  // and the server's own error codes are shown as they come.
   const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
-    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + shown(report[f]))))];
+    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + realtimeFact(f, report[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
-      el("p", {}, head + " " + t("route_at", { at: report.checked_at })),
+      el("p", {}, head + " " + t("route_at", { at: when(report.checked_at) })),
       el("ul", {}, report.checks.map(verdict)),
       ...realtimeFacts(report));
   };
@@ -874,6 +911,7 @@ const TABS = {
   routes: routesView,
   settings: settingsView,
   live: liveView,
+  emotions: emotionsView,
   debug: debugView,
 };
 
@@ -940,6 +978,7 @@ async function boot() {
   liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
   state.strings = strings.strings;
+  state.lang = strings.language;
   state.session = session;
   document.documentElement.lang = strings.language;
   document.title = t("title");
@@ -962,4 +1001,7 @@ async function boot() {
 const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
 
-boot().catch(() => notice("Cannot reach the robot.", true));
+boot().catch(() => {
+  const lang = state.lang || String(navigator.language || "").slice(0, 2);
+  notice(state.strings.err_unreachable || UNREACHABLE[lang] || UNREACHABLE.en, true);
+});

@@ -479,6 +479,11 @@ class Ui:
         :class:`MissingFlag` naming ``flag``. Default no for anything that changes the robot."""
         if self.assume_yes:
             return True
+        return self.confirm_opt_in(question, default, flag=flag)
+
+    def confirm_opt_in(self, question: str, default: bool, *, flag: str) -> bool:
+        """``confirm`` that ``--yes`` never answers: an opt-in only a person or its own ``flag``
+        gives (the cloud-voice profile sends audio off the robot, SPEC 12)."""
         self.require(flag, False)
         try:
             return _term.confirm(

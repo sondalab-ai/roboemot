@@ -8,6 +8,7 @@ import math
 import pytest
 from roboemot.config.schema import VoiceDirectionConfig
 from roboemot.voice.direction import DirectionSample, VoiceDirection, face_offset
+from roboemot.voice.wake import AT_FACE, NO_FACE_AT_VOICE
 
 FACE = math.radians(10.0)
 SEEN = DirectionSample(None, (FACE,), True)  # no reading, an attended face in view
@@ -21,7 +22,7 @@ def run(samples, doa=True, muted=False, **cfg):
     d.begin()
     for k in range(len(samples)):
         d.sample(float(k), muted=muted)
-    return d, d.check()
+    return d, d.check() == AT_FACE
 
 
 def heard(deg, faces=(FACE,), engaged=False):
@@ -129,18 +130,18 @@ def test_a_raising_lookup_counts_as_nothing_heard():
     d = VoiceDirection(VoiceDirectionConfig(), boom, doa_available=True)
     d.begin()
     d.sample(0.0)
-    assert not d.check() and d.snapshot()["degraded"]["silent"] == 1
+    assert d.check() == NO_FACE_AT_VOICE and d.snapshot()["degraded"]["silent"] == 1
 
 
 def test_begin_forgets_the_previous_utterance_and_reload_applies():
     d, _ = run([heard(70.0)] * 3)
     d.apply_config(VoiceDirectionConfig(tolerance_deg=80.0))
     d.begin()
-    assert d.check() is False  # no samples left: degraded, silent
+    assert d.check() == NO_FACE_AT_VOICE  # no samples left: degraded, silent
     d._lookup = lambda now: heard(70.0)
     d.begin()
     d.sample(0.0)
-    assert d.check()
+    assert d.check() == AT_FACE
 
 
 def test_snapshot_is_json_numbers_only():

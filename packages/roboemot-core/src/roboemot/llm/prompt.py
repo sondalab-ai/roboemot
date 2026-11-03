@@ -12,7 +12,9 @@ parts 1 to 4 leave room for a turn on every route.
 
 from __future__ import annotations
 
+import functools
 import json
+from pathlib import Path
 from typing import Any
 
 from ..config.schema import RegisterParams, RoboEmotConfig
@@ -31,6 +33,16 @@ VOCABULARY_RULES = {
     "formal": "Use polite, formal wording.",
 }
 LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
+PROMPTS_DIR = Path(__file__).with_name("prompts")
+SKIP_PROMPT = "ignore_utterance"  # prompts/ignore_utterance.<language>.txt (the skip tool)
+SKIP_PROMPT_FALLBACK = "en"  # the rule's language when neither the turn's nor the default has one
+# The conversation state of a realtime turn with the skip tool (SPEC 8, Conversation start):
+# ``none`` gets the strict start rule; ``in_progress`` and ``addressed`` (the wake word or the
+# robot's name heard) get the open-conversation hint.
+NO_CONVERSATION, IN_PROGRESS, ADDRESSED = "none", "in_progress", "addressed"
+CONVERSATION_STATES = (NO_CONVERSATION, IN_PROGRESS, ADDRESSED)
+START_PROMPT = "conversation_start"  # prompts/conversation_start.<language>.txt (state none)
+OPEN_PROMPT = "conversation_open"  # prompts/conversation_open.<language>.txt (the other states)
 
 
 def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
@@ -60,12 +72,65 @@ def realtime_instructions(
     *,
     language: str | None = None,
     robot_name: str = "",
+    skip_rule: bool = True,
+    conversation: str | None = None,
 ) -> str:
     """Parts 1 to 4 for the realtime speech route (SPEC 8, Realtime speech route): the same
     prompt without the mood-tag rule, because the server's voice would speak the tags. The
     sentence cap stays a rule in the prompt only (the reply's audio cannot be cut on a sentence
-    boundary)."""
-    return _prompt(cfg, register, language, robot_name, False)
+    boundary). With ``voice.realtime_route.skip_tool`` (and ``skip_rule``: a fixed line leaves
+    it out) the ``ignore_utterance`` rule from the prompt files follows, in the turn's language,
+    then the hint of the turn's ``conversation`` state (one of ``CONVERSATION_STATES``; None,
+    as in ``session.update``: no hint)."""
+    prompt = _prompt(cfg, register, language, robot_name, False)
+    if not (skip_rule and cfg.voice.realtime_route.skip_tool):
+        return prompt
+    lang = language or cfg.conversation.language
+    parts = [prompt, _in_language(skip_prompts(), lang, cfg)]
+    if conversation is not None:
+        hints = start_prompts() if conversation == NO_CONVERSATION else open_prompts()
+        parts.append(_in_language(hints, lang, cfg))
+    return "\n".join(p for p in parts if p)
+
+
+def _in_language(texts: dict[str, str], lang: str, cfg: RoboEmotConfig) -> str:
+    """The text in ``lang``, else in ``conversation.language``, else in English, else ""."""
+    return (
+        texts.get(lang)
+        or texts.get(cfg.conversation.language)
+        or texts.get(SKIP_PROMPT_FALLBACK)
+        or ""
+    )
+
+
+def skip_prompts() -> dict[str, str]:
+    """The skip tool's instruction per language, from ``prompts/ignore_utterance.<lang>.txt``
+    (shipped with the package; cached). Prompt text is data, not code (SPEC 8, 11A)."""
+    return _prompt_files(SKIP_PROMPT)
+
+
+def start_prompts() -> dict[str, str]:
+    """The strict start rule per language (no conversation in progress), from
+    ``prompts/conversation_start.<lang>.txt`` (SPEC 8, Conversation start)."""
+    return _prompt_files(START_PROMPT)
+
+
+def open_prompts() -> dict[str, str]:
+    """The open-conversation hint per language (a conversation in progress, or the robot was
+    called), from ``prompts/conversation_open.<lang>.txt`` (SPEC 8, Conversation start)."""
+    return _prompt_files(OPEN_PROMPT)
+
+
+@functools.cache
+def _prompt_files(stem: str) -> dict[str, str]:
+    """Non-empty ``prompts/<stem>.<lang>.txt`` files by language (shipped with the package;
+    cached). No stem holds a dot, so one family's glob never takes another family's files."""
+    out = {}
+    for path in sorted(PROMPTS_DIR.glob(f"{stem}.*.txt")):
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            out[path.name.removeprefix(f"{stem}.").removesuffix(".txt")] = text
+    return out
 
 
 def _prompt(
@@ -183,6 +248,27 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     conv = cfg.conversation
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS
+
+
+def check_skip_prompt(cfg: RoboEmotConfig) -> None:
+    """Load-time check (SPEC 8, Skip tool, Conversation start): with
+    ``voice.realtime_route.skip_tool`` the conversation language needs its ``ignore_utterance``,
+    ``conversation_start`` and ``conversation_open`` prompt files, so the tool is never offered
+    without its rule and no turn goes without its state's hint. Raises ``ValueError``."""
+    lang = cfg.conversation.language
+    if not cfg.voice.realtime_route.skip_tool:
+        return
+    for stem, texts in (
+        (SKIP_PROMPT, skip_prompts()),
+        (START_PROMPT, start_prompts()),
+        (OPEN_PROMPT, open_prompts()),
+    ):
+        if not texts.get(lang):
+            raise ValueError(
+                f"voice.realtime_route.skip_tool: no {stem}.{lang}.txt prompt file (or it is "
+                f"empty) for conversation.language {lang!r}; available: "
+                f"{', '.join(sorted(texts)) or 'none'}"
+            )
 
 
 def check_route_budgets(cfg: RoboEmotConfig) -> None:

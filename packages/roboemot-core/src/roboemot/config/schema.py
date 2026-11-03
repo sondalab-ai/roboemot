@@ -601,6 +601,15 @@ class CircadianConfig(Strict):
     wake_hold_s: float = param(
         300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
     )
+    nap_after_s: float | None = param(
+        1800.0,
+        "Day nap: with no face in view and no speech addressed to the robot for this long, the "
+        "robot rests until a face or addressed speech wakes it (for wake_hold_s). A television "
+        "does not count. Only time outside quiet hours adds up. null: no naps",
+        unit="s",
+        ge=300,
+        le=86400,
+    )
     update_period_s: float = param(
         10.0,
         "Seconds between two model updates (process S, entrainment, state)",
@@ -1754,6 +1763,35 @@ class VisionConfig(Strict):
     max_embeds_per_frame: int = param(
         2, "Cap on face embeddings computed for one frame, to bound its latency", ge=1, le=16
     )
+    facing_window_s: float = param(
+        0.5,
+        "A face track's head yaw (the facing check of voice.facing, from the detector's "
+        "landmarks) is the median of its detections over this capture-time window, so one noisy "
+        "frame does not flip it",
+        unit="s",
+        ge=0,
+        le=5,
+    )
+    facing_nose_depth_ratio: float = param(
+        0.43,
+        "Head yaw model: the nose tip's depth in front of the eye centres over the distance "
+        "between the eyes (about 27 mm over 63 mm for an adult, the common 3D face model for "
+        "head pose from 2D landmarks). The yaw is atan(offset / ratio), the offset being the "
+        "nose tip's distance from the eye midpoint along the eye axis over the eye span, so this "
+        "scales every yaw: lower reads larger angles",
+        ge=0.1,
+        le=1,
+    )
+    facing_min_eye_px: float = param(
+        16.0,
+        "Faces whose eyes are closer than this on the camera image get no head yaw (the facing "
+        "check then has no data for them): one pixel of landmark error moves the yaw by about "
+        "8 deg at 16 px and 13 to 20 deg at 8 to 10 px. Camera-frame pixels; the detector runs "
+        "at vision.detector_width_px, so a camera wider than that has coarser landmarks",
+        unit="px",
+        ge=1,
+        le=200,
+    )
     max_entity_embeds_per_frame: int = param(
         1,
         "Cap on animal and object appearance embeddings (DINOv2-S, the costly part of the "
@@ -1983,6 +2021,15 @@ class WorldScanConfig(Strict):
     doa_confidence: float = param(
         0.5, "Confidence of a sound direction observation", ge=0, le=1, restart=True
     )
+    alone_after_s: float = param(
+        120.0,
+        "With no face in view and no sound for this long the robot is alone and holds still: no "
+        "sweeps, no glances; breathing and reflexes go on. A face or a sound ends it at once. "
+        "Never shorter than circadian.presence_periods face-detection periods",
+        unit="s",
+        ge=10,
+        le=3600,
+    )
 
     @model_validator(mode="after")
     def _jitter_inside_interval(self) -> WorldScanConfig:
@@ -2071,6 +2118,15 @@ class WorldConfig(Strict):
     )
     match_gate_deg: float = param(
         15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
+    )
+    facing_history_s: float = param(
+        20.0,
+        "A person's head yaw readings (voice.facing) are kept this long, so the voice listener "
+        "finds the one at an utterance's time even when it runs behind real time (16 s seen on "
+        "the robot, 2026-10-30); a listener further behind finds none",
+        unit="s",
+        ge=1,
+        le=120,
     )
     tie_tolerance_deg: float = param(
         3.0,
@@ -2602,6 +2658,26 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+    recent_triggers: int = param(
+        20,
+        "Report only (SPEC 12A): how many recent barge-in trigger records the debug report keeps "
+        "(bargein.recent: path, outcome, levels, echo, motion at the trigger; numbers and short "
+        "labels only)",
+        ge=1, le=200,
+    )  # fmt: skip
+    moving_min_speed_dps: float = param(
+        5.0,
+        "Report only (SPEC 12A): a trigger record marks the robot as moving when moving_group "
+        "turned at least this fast at the first candidate frame (measured when two fresh poses "
+        "are known, else commanded), or when it yielded to external control",
+        unit="deg/s", ge=0.1, le=720,
+    )  # fmt: skip
+    moving_group: str | None = param(
+        "head",
+        "Report only (SPEC 12A): the manifest pose group whose speed decides a trigger record's "
+        "moving (the one that carries the microphones and turns toward faces); null: the "
+        "fastest group",
+    )
     duck: BargeInDuckConfig = param(
         {}, "Ducking: a lower voice while a barge-in is a candidate, not yet confirmed"
     )
@@ -2777,6 +2853,66 @@ class VoiceDirectionConfig(Strict):
     )  # fmt: skip
 
 
+class VoiceFacingConfig(Strict):
+    """Facing check: without the wake word, answer only a face that looks at the robot (SPEC 8
+    stage 2). Part of the voice-at-face check (voice.direction), off when that is off."""
+
+    enabled: bool = param(
+        False,
+        "An utterance that would be addressed without the wake word is addressed only when the "
+        "face its voice came from (or, degraded, the face attention is on) looked at the robot "
+        "for min_share of its samples; otherwise it needs the wake word. A person watching a "
+        "screen near the robot looks at the screen, not at the robot. Needs voice.direction "
+        "(on with it off is rejected). Off: the voice-at-face check alone. Library default off; "
+        "the installer's --cloud-voice profile turns it on",
+    )
+    max_yaw_deg: float = param(
+        30.0,
+        "A face looks at the robot when its head yaw (from the face detector's landmarks, "
+        "relative to the line to the camera) is at most this. On the robot (2026-11-02, owner "
+        "40 cm away, a video playing) the owner looking at the robot read about 17 to 23 deg "
+        "and the owner watching the video 47 to 73 deg; at 20 the owner was rejected too. The "
+        "estimate is rough (one head shape for every face): lower values reject the owner, "
+        "higher ones let a watched screen through",
+        unit="deg", ge=1, le=90,
+    )  # fmt: skip
+    min_share: float = param(
+        0.5,
+        "Share of the utterance's samples with a head yaw for the checked face (yaw_max_age_ms) "
+        "in which it must look at the robot",
+        ge=0, le=1,
+    )  # fmt: skip
+    yaw_max_age_ms: float = param(
+        1000.0,
+        "A sample takes the checked face's head yaw measured nearest its time, at most this far "
+        "from it on either side (the world keeps world.facing_history_s of them per person). "
+        "At the default vision.rates face detection runs at 4 Hz while the robot speaks or "
+        "listens, so this spans several detections. No yaw in any sample: the utterance is "
+        "rejected (a visible face with no yaw is not one looking at the robot)",
+        unit="ms", ge=0, le=10000,
+    )  # fmt: skip
+    cpu_max_percent: float = param(
+        90.0,
+        "When the whole CPU stays busier than this for cpu_hold_s, face detection runs late and "
+        "the yaw is not trusted (counted cpu_high): a voice heard at a face is decided by the "
+        "voice-at-face check alone, and a degraded one (muted, no_source) is rejected",
+        unit="%", ge=1, le=100,
+    )  # fmt: skip
+    cpu_hold_s: float = param(
+        10.0,
+        "How long the CPU must stay above cpu_max_percent before cpu_high; one sample at or "
+        "below it ends it, and so does a gap longer than this between two samples (the stretch "
+        "restarts at the later one)",
+        unit="s", ge=0, le=600,
+    )  # fmt: skip
+    cpu_sample_s: float = param(
+        1.0,
+        "Shortest time between two CPU usage samples, taken only while an utterance is heard; a "
+        "sample covers the whole time since the previous one",
+        unit="s", ge=0.1, le=60,
+    )  # fmt: skip
+
+
 # ------------------------------------------------------------------- realtime route (SPEC 8)
 
 
@@ -2816,8 +2952,9 @@ class RealtimeRouteConfig(Strict):
     )
     transcript_timeout_s: float = param(
         4.0,
-        "Longest wait for the server's transcript of an utterance's audio; past it the "
-        "utterance is decoded locally and the chat routes answer it",
+        "Longest wait for the server's transcript of an utterance's audio; past it the robot "
+        "shows the did-not-get-it cue and the utterance is not answered (its local decode "
+        "still feeds keywords)",
         unit="s",
         ge=0.5,
         le=15,
@@ -2847,6 +2984,17 @@ class RealtimeRouteConfig(Strict):
         ge=1,
         le=60,
     )
+    wake_decode_max_s: float = param(
+        3.0,
+        "The local decode of a voice-at-face reject only looks for the wake word, which is short "
+        "and comes first: it decodes the first this-many seconds of speech (the pre-roll before "
+        "them), counted decodes_capped. On the robot (2026-11-02, a video playing) whole decodes "
+        "cost 460 to 710 ms per audio second and 27 of 36 timed out. An utterance the wake word "
+        "addresses still sends, or is decoded, whole",
+        unit="s",
+        ge=0.5,
+        le=30,
+    )
     transcript_max_items: int = param(
         8,
         "Most server items one utterance's audio may produce; past it the transcript is "
@@ -2870,6 +3018,19 @@ class RealtimeRouteConfig(Strict):
         le=86400,
     )
     voice: str = param("", "Server voice name; empty uses the server's default")
+    transcription_language: str = param(
+        "",
+        "Language the server transcribes an utterance's audio in (session.update "
+        "audio.input.transcription.language, sent with input: audio only). Empty (the default): "
+        "the route always sends conversation.language. It does not follow a speaker's "
+        "preferences.language, which the local Vosk recognizer uses per speaker",
+    )
+    transcription_model: str = param(
+        "",
+        "Model the server transcribes an utterance's audio with (session.update "
+        "audio.input.transcription.model, sent with input: audio only); empty leaves it out, so "
+        "the server's default applies. Sent as given, not validated",
+    )
     prebuffer_ms: float = param(
         200.0,
         "Reply audio held before playback starts, against network jitter",
@@ -2881,6 +3042,23 @@ class RealtimeRouteConfig(Strict):
         True,
         "Add the mood's voice instructions to each request (shapes the wording; the server's "
         "voice ignores rate, pitch and pauses)",
+    )
+    skip_tool: bool = param(
+        False,
+        "Offer the server's LLM the ignore_utterance tool, with the instruction to call it and "
+        "say nothing for speech not meant for the robot (a phone call, people talking to each "
+        "other, a video, TV or radio). A skipped utterance gets no answer and its items are "
+        "deleted; its audio still reached the server",
+    )
+    conversation_span_s: float = param(
+        30.0,
+        "With skip_tool: a conversation with the robot counts as in progress while its last "
+        "spoken answer ended at most this long ago (or a confirmation waits, or the wake word "
+        "or the name was heard). Otherwise each turn's instructions carry the strict start "
+        "rule: only words clearly meant for the robot are answered",
+        unit="s",
+        ge=1,
+        le=600,
     )
 
     connect_timeout_s: float = param(
@@ -2914,6 +3092,47 @@ class RealtimeRouteConfig(Strict):
                 "server's VAD ends the turn within the burst"
             )
         return self
+
+
+class CueConfig(Strict):
+    """Non-verbal cues: a gesture of the manifest's ``gesture_map`` plus a short sound of the
+    robot's cue library (SPEC 8, Non-verbal cues)."""
+
+    enabled: bool = param(
+        True,
+        "Show the non-verbal cues: listening while an utterance's audio waits for the realtime "
+        "route, and the offline, did-not-get-it and fallback cues where no voice can speak",
+    )
+    listening_onset_s: float = param(
+        0.3,
+        "Delay from the moment an utterance's audio leaves the robot to the listening gesture; "
+        "an answer that starts sooner shows none",
+        unit="s",
+        ge=0,
+        le=3,
+    )
+    listening_hold_max_s: float = param(
+        10.0,
+        "Longest the listening gesture is held without an answer, whatever else happens",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    listening_sound: bool = param(
+        True,
+        "Play the robot's listening blip once when the listening gesture shows: a very short, "
+        "quiet sound saying the voice was heard. It plays beside the speech queue and is not "
+        "robot speech (it never holds an utterance's audio back, never triggers a barge-in and "
+        "never delays the answer); it is dropped when the speaker is busy and must be shorter "
+        "than voice.vad.min_speech_ms",
+    )
+    volume_db: float = param(
+        -6.0,
+        "Level of a cue sound against its recorded level (the circadian offset adds to it)",
+        unit="dB",
+        ge=-40,
+        le=0,
+    )
 
 
 class VoiceConfig(Strict):
@@ -2952,11 +3171,14 @@ class VoiceConfig(Strict):
         "low and a late pacer lets the player run dry (counted as underruns)",
         unit="ms", ge=0, le=2000, restart=True,
     )  # fmt: skip
-    backend: Literal["piper", "openai_speech", "kokoro"] = param(
-        "piper", "TTS backend", restart=True
+    backend: Literal["piper", "openai_speech", "kokoro", "none"] = param(
+        "piper",
+        "TTS backend. none: no local speech synthesis (no Piper, no voice files); only the "
+        "realtime route's voice speaks, and a line it cannot say becomes a non-verbal cue",
+        restart=True,
     )
-    fallback_backend: Literal["piper", "kokoro"] = param(
-        "piper", "Offline fallback backend", restart=True
+    fallback_backend: Literal["piper", "kokoro", "none"] = param(
+        "piper", "Offline fallback backend (none: no fallback voice)", restart=True
     )
     voices: dict[str, str] = param(
         {"it": "it_IT-paola-medium", "en": "en_US-amy-medium"}, "Voice per language", restart=True
@@ -3159,6 +3381,19 @@ class VoiceConfig(Strict):
     direction: VoiceDirectionConfig = param(
         {}, "Without the wake word, answer only a voice from a visible face (SPEC 8, 5A)"
     )
+    facing: VoiceFacingConfig = param(
+        {}, "Without the wake word, answer only a face that looks at the robot (SPEC 8)"
+    )
+
+    @model_validator(mode="after")
+    def _facing_needs_direction(self) -> VoiceConfig:
+        if self.facing.enabled and not self.direction.enabled:
+            raise ValueError(
+                "voice.facing.enabled needs voice.direction.enabled: the facing check judges "
+                "the face the voice-at-face check matched"
+            )
+        return self
+
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 
     @field_validator("voices")
@@ -3181,6 +3416,9 @@ class VoiceConfig(Strict):
     )
     realtime_route: RealtimeRouteConfig = param(
         {}, "Realtime speech route client: connect, send and size limits (SPEC 8)"
+    )
+    cues: CueConfig = param(
+        {}, "Non-verbal cues: listening, offline, did not get it, fallback (SPEC 8)"
     )
 
 
@@ -4182,6 +4420,23 @@ class LiveConfig(Strict):
         ge=60,
         le=86400,
     )
+    activity: bool = param(
+        True,
+        'Show the "What\'s happening" panel on the Live tab: one line for what the robot is '
+        "doing and its last decisions with their reasons (a cue played, an utterance not "
+        "answered, a barge-in, a session reset). Codes and numbers only, kept in memory while "
+        "webui.live.enabled is on; off forgets them",
+    )
+    activity_events: int = param(
+        20, 'Most decisions the "What\'s happening" panel keeps; the oldest go first', ge=5, le=200
+    )
+    activity_cut_hold_s: float = param(
+        3.0,
+        "How long the status line says the robot was cut off by a barge-in",
+        unit="s",
+        ge=0.5,
+        le=30,
+    )
 
     @model_validator(mode="after")
     def _window_spans_two_polls(self) -> LiveConfig:
@@ -4197,6 +4452,27 @@ class LiveConfig(Strict):
                 f"polls at webui.live.video_fps ({self.video_fps} Hz)"
             )
         return self
+
+
+class EmotionsPageConfig(Strict):
+    """The web UI's Emotions tab: the affect, register, persona and circadian state live, the
+    impulses that moved the affect, and two test controls behind the PIN (SPEC 11A, 12)."""
+
+    enabled: bool = param(
+        True,
+        "Serve the Emotions tab (affect, register, persona, circadian state, recent impulses and "
+        "the play and inject test controls); it shows no person, frame or audio",
+    )
+    poll_ms: int = param(
+        1000, "How often the open Emotions tab asks for the state", unit="ms", ge=250, le=10000
+    )
+    events: int = param(
+        20,
+        "How many of the impulses that moved the affect are kept for the Emotions tab, "
+        "newest first (none while the tab is off)",
+        ge=5,
+        le=200,
+    )
 
 
 class WebUIConfig(Strict):
@@ -4368,6 +4644,7 @@ class WebUIConfig(Strict):
         1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
     )
     live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
+    emotions: EmotionsPageConfig = param({}, "SPEC 11A, 12: the Emotions tab")
 
     @field_validator("frame_ancestors")
     @classmethod

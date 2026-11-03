@@ -45,6 +45,10 @@ def changed(cfg, section, **values):
 
 @pytest.fixture()
 def built(monkeypatch):
+    return build(monkeypatch)
+
+
+def build(monkeypatch, **kwargs):
     monkeypatch.setattr(pipeline.voice_models, "model_file", lambda root, name: Path(name))
     monkeypatch.setattr(pipeline, "SileroVAD", lambda path, threads: EnergyVAD(16000, 512))
     monkeypatch.setattr(pipeline, "VoskASR", FakeASR)
@@ -63,6 +67,7 @@ def built(monkeypatch):
         None,
         bearing,
         lambda u: None,
+        **kwargs,
     )
     return cfg, listener, bargein, bearing
 
@@ -92,3 +97,13 @@ def test_the_barge_in_language_follows_a_reloaded_default_language(built):
     assert bargein._language() == cfg.conversation.language
     listener.apply_config(changed(cfg, "conversation", language=other))
     assert bargein._language() == other
+
+
+def test_the_barge_in_records_get_the_motion_probe_and_the_face_lookup(monkeypatch):
+    """SPEC 12A: ``build_listener(motion=...)`` hands the probe to the barge-in detector, and its
+    face-offset lookup reads the robot's sound direction at the stamp asked."""
+    probe = SimpleNamespace(motion_sample=lambda: None, motion_state=lambda sample: None)
+    _, _, bargein, bearing = build(monkeypatch, motion=probe)
+    assert bargein._motion is probe
+    assert bargein._face_offset(NOW) is None  # no reading: no offset
+    assert len(bearing.max_ages) == 1

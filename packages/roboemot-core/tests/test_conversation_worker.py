@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -92,6 +93,8 @@ def sse_piece(text: str) -> bytes:
 
 
 class FakeSpeech:
+    backend = SimpleNamespace(name="fake")  # the TTS backend it was built with
+
     def __init__(self) -> None:
         self.said: list[dict] = []
         self.stops = 0

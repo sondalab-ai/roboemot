@@ -10,14 +10,16 @@ from __future__ import annotations
 import gc
 import random
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any
 
 from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
+from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
-from roboemot.conversation.sources import profile_source, registry_names, scene_source
+from roboemot.conversation.sources import profile_source, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
 from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
@@ -25,7 +27,10 @@ from roboemot.realtime.route import RealtimeRoute
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
 from roboemot.soothe import SootheRunner
+from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
+from roboemot.voice.listener import AUDIO_NOT_HEARD, AUDIO_SENT
+from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
 from .host import RuntimeHost
@@ -35,7 +40,8 @@ from .webui import WebAdmin, start_webui
 def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
     """The responder's cue, speaking on ``host.speech_output`` (SPEC 12A, Behaviour while
     offline). Installed once that output exists; the register, circadian state and affect are
-    read when the phrase is said. Muted while asleep (the speaker is quiet then)."""
+    read when the phrase is said. Muted while asleep (the speaker is quiet then). Without a
+    local voice the phrase the route cannot say is the non-verbal ``offline`` cue (SPEC 8)."""
 
     def delivery() -> Delivery:
         cfg, active = stack.effective(), p.tracker.active
@@ -52,11 +58,42 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
         conv = host.conversation
         return conv is not None and conv.say_line(text, language)
 
+    def cue() -> bool:
+        cues = host.cues
+        return cues is not None and cues.play("offline", "offline")
+
     return SpeechCue(
         lambda: host.speech_output,
         delivery,
         lambda: p.sleep.asleep or p.sleep.paused,
         line,
+        no_voice=lambda: (out := host.speech_output) is not None and out.backend.name == NO_VOICE,
+        cue=cue,
+    )
+
+
+def build_cues(host: RuntimeHost, stack: ConfigStack, p: Pipeline, output: Any) -> Cues:
+    """The non-verbal cues (SPEC 8, Non-verbal cues): the manifest's ``cue_<kind>`` gestures and
+    the robot's cue sounds on ``output``, at the circadian volume, muted while asleep or paused;
+    the listening cue ends when the robot's speech plays (not a raw sound). The listening blip
+    plays only in a quiet moment: nobody's speech in progress and no answer in progress (a turn
+    in flight or the robot speaking: the gaps between its sentences included)."""
+
+    def quiet() -> bool:
+        listener, phase = p.listener, host.phase
+        if listener is not None and listener.hearing():
+            return False
+        return phase is None or phase.current()[0] not in (THINKING, SPEAKING)
+
+    return Cues(
+        p.cfg.voice.cues,
+        gesture=p.expression.gesture,
+        sounds=p.cue_sounds,
+        output=lambda: host.speech_output,
+        volume_db=lambda: effects_now(host, stack, p).volume_db,
+        muted=lambda: p.sleep.asleep or p.sleep.paused,
+        speaking=lambda now: output.timeline.sentence_at(now) is not None,
+        quiet=quiet,
     )
 
 
@@ -86,6 +123,8 @@ def start_voice_output(
         volume_db=lambda: effects_now(host, stack, p).volume_db,
     )
     cleanup.callback(soothe.close)  # before the output goes away
+    cues = host.cues = build_cues(host, stack, p, output)
+    cues.events = host.events
     p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
@@ -100,6 +139,8 @@ def start_voice_output(
         if p.cfg.voice.realtime_route.enabled
         else None
     )
+    if realtime is not None:
+        realtime.events = host.events
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
     registry = p.perception.registry
@@ -121,7 +162,7 @@ def start_voice_output(
         ),
         speaker=p.conv_speaker,
         names=p.names,
-        known_names=registry_names(registry, p.value_cap),
+        name_source=host.name_source,  # one alias per name with traits and route checks
         skills=default_skills(
             SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
                 p.runner.engine
@@ -139,10 +180,12 @@ def start_voice_output(
         phase=host.phase,
         transcript=host.transcript,
         realtime=realtime,
+        cues=cues,
     )
+    conv.events = host.events
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
         cleanup.callback(realtime.close)
-        bind_realtime_input(host, realtime, listener, cleanup, p.sleep)
+        bind_realtime_input(host, realtime, listener, cleanup, p.sleep, cues)
     cleanup.callback(conv.close)
     conv.start()
     if realtime is not None:
@@ -152,20 +195,42 @@ def start_voice_output(
 
 
 def bind_realtime_input(
-    host: RuntimeHost, realtime: RealtimeRoute, listener: Any, cleanup: ExitStack, sleep: Any
+    host: RuntimeHost,
+    realtime: RealtimeRoute,
+    listener: Any,
+    cleanup: ExitStack,
+    sleep: Any,
+    cues: CueSink | None = None,
 ) -> None:
     """Addressed utterances' audio to the realtime route (SPEC 8, Realtime speech route): the
     listener hands it to a ``RealtimeInput``, which sends nothing while the robot speaks or
     sleeps (``sleep`` is the ``SleepGate``: asleep counts whatever
     ``runtime.pause_when_asleep`` says) and only through the route's send gate
-    (``input: audio`` with ``privacy.realtime_audio``). Closed before the route."""
+    (``input: audio`` with ``privacy.realtime_audio``). Closed before the route. What becomes
+    of the audio drives ``cues`` (the listening and did-not-get-it cues, SPEC 8)."""
     audio_in = RealtimeInput(
         realtime,
         speaking=lambda: host.speech.speaking(time.monotonic()),
         asleep=lambda: bool(sleep.asleep),
     )
-    listener.bind_realtime(audio_in)
+    listener.bind_realtime(audio_in, audio_cues(cues) if cues is not None else None)
     cleanup.callback(audio_in.close)
+
+
+def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
+    """The listener's audio events as cues, keyed by the utterance's start stamp: audio sent
+    begins the listening cue; audio that did not leave ends it; audio without a transcript ends
+    it and shows ``not_heard``."""
+
+    def on_audio(event: str, key: float) -> None:
+        if event == AUDIO_SENT:
+            cues.listening_begin(key)
+            return
+        cues.listening_end(key)
+        if event == AUDIO_NOT_HEARD:
+            cues.play("not_heard", "no_transcript")
+
+    return on_audio
 
 
 def bind_barge_in(bargein: Any, output: Any, conv: Any, listener: Any) -> None:
@@ -218,7 +283,7 @@ def start_all(
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
     for world_source in p.plugin.sources:
-        world_source.speaking = p.speech.speaking  # no turning towards its own voice
+        world_source.speaking = p.speech.sounding  # no turning towards its own sound
         cleanup.callback(world_source.stop)
         world_source.start(p.publish)
     if stack.effective().runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the models

@@ -307,3 +307,26 @@ async def test_a_reply_without_a_reported_rate_plays_at_the_native_16_khz():
     await asyncio.wait_for(task, 2)
     assert [rate for _, rate in speech.streams[0]._chunks] == [P.NATIVE_OUTPUT_RATE_HZ]
     assert P.NATIVE_OUTPUT_RATE_HZ == 16000
+
+
+async def test_a_mute_on_call_stops_the_audio_that_follows_and_records_its_items():
+    """SPEC 8, skip tool: the call mutes the run on the client's thread, before the loop sees
+    it, so a delta right behind it never opens a stream; its item is kept for the delete."""
+    route, sent = connected_route()
+    speech = Speech()
+
+    async def on_call(ev):
+        return True
+
+    run = make_run(route, speech, on_call=on_call, mute_on="ignore_utterance")
+    task = asyncio.ensure_future(run.run("x"))
+    await until(lambda: creates(sent))
+    route._on_event(created("r1"))
+    route._on_event(delta("r1", "before"))
+    route._on_event(P.FunctionCall(P.FUNCTION_CALL_DONE, "r1", "c", "ignore_utterance", "{}", "fc"))
+    route._on_event(delta("r1", "after"))  # same thread, before the loop ran on_call
+    route._on_event(done("r1"))
+    reply = await task
+    assert len(speech.streams) == 1  # only the item from before the call
+    assert reply.muted_items == ["after"]
+    assert reply.item_ids() == ["before", "after", "fc"]

@@ -33,9 +33,17 @@ Speech that is not addressable runs Vosk as before; if the wake decision address
 buffered audio goes. The final of an utterance whose audio went is the server's transcript: it
 waits in the same hand-off queue with the deadline ``transcript_timeout_s``, so this thread
 never waits on the network. Past the deadline (or when the audio was refused) the utterance is
-decoded locally from its buffer and handed off for the chat routes. Hand-offs keep the order
+decoded locally from its buffer and handed off: a refused one for the chat routes, one whose
+audio left marked ``local_only`` (the did-not-get-it cue shows at once, through ``on_audio``,
+and the conversation does not answer it; its keywords still count). Hand-offs keep the order
 of the utterances; each carries the fast path's state of its utterance, so a newer utterance
 can begin while an older one waits.
+
+Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
+not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
+check's numbers (the facing check's median head yaw and its limit); a facing check that did not
+trust the yaw on a busy CPU publishes ``facing``/``cpu_high``; a transcript that did not come
+publishes ``audio``/``transcript_timeout``. No speaker id, no text.
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
 per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
@@ -60,6 +68,7 @@ import numpy as np
 from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
+from ..diag import EventSink, no_events
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .decode_worker import DecodeJob, DecodeWorker
@@ -69,13 +78,15 @@ from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
-from .wake import WakeGate
+from .wake import AT_FACE, AtFace, WakeGate
 
 log = logging.getLogger(__name__)
 TOPIC = "percept.utterance"
 POLL_S = 0.1
 JOIN_S = 2.0
 MS_PER_S = 1000.0
+# what became of an utterance's audio (``bind_realtime``'s ``on_audio``, the listening cue)
+AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 
 
 class VoiceChunkLike(Protocol):
@@ -105,7 +116,8 @@ class Utterance:
     final: bool = True
     # The realtime route's audio input (SPEC 8, Realtime speech route): the server session
     # (generation) and its user items that hold this utterance's words; None when its audio
-    # did not go. ``local_only``: its audio went but no transcript came, the chat routes answer.
+    # did not go. ``local_only``: its audio went but no transcript came; it is not answered
+    # (the did-not-get-it cue showed, SPEC 8, Non-verbal cues).
     realtime: tuple[int, tuple[str, ...]] | None = field(default=None, repr=False)
     local_only: bool = False
 
@@ -133,7 +145,7 @@ class _Handoff:
     the realtime route's transcript of its audio (``rt``) or for its local decode (``decode``,
     then its grammar pass). ``state`` is the fast path's state
     of the utterance (held at its end); ``addressed`` the wake decision once made (None
-    before); ``face`` the voice-at-face check's answer once asked (None: not asked);
+    before); ``face`` the voice-at-face check's verdict once asked (None: not asked);
     ``heard`` what its grammar pass heard."""
 
     ev: SpeechEnd
@@ -146,10 +158,23 @@ class _Handoff:
     state: UtteranceState | None = None
     rt: Any = None  # the RealtimeInput job (realtime.input.InputJob)
     addressed: bool | None = None
-    face: bool | None = None
+    face: str | None = None
+    face_info: dict[str, Any] = field(default_factory=dict)  # that check's numbers
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
-    local_only: bool = False  # its audio left without a transcript: the chat routes answer
+    local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
+    progress: _DecodeProgress | None = field(default=None, repr=False)  # its local decode's
+    decoded_end: int | None = None  # index in ``ev.audio`` the local text was decoded up to
+
+
+class _DecodeProgress:
+    """What a local decode has heard so far, written by the decode worker after each piece and
+    read by the listener at the deadline (one tuple: a single store). ``stop`` asks the worker
+    to end the decode after its current piece."""
+
+    def __init__(self) -> None:
+        self.heard: tuple[str, int] = ("", 0)  # the words so far, and the audio index up to them
+        self.stop = False
 
 
 class VoiceListener:
@@ -198,6 +223,8 @@ class VoiceListener:
         self._timer = timer
         self._direction = direction
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
+        self._face_info: dict[str, Any] = {}  # the last voice-at-face check's numbers
         self.load = ListenerLoad(cfg.voice.listener)
         self._last_end: float | None = None  # stamp of the end of the last chunk read
         self._grammar = GrammarWorker(
@@ -216,6 +243,7 @@ class VoiceListener:
         self._queue: collections.deque[_Handoff] = collections.deque()
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
         self._realtime: Any = None  # the realtime route's audio input (bind_realtime)
+        self._on_audio: Callable[[str, float], None] = lambda event, key: None  # bind_realtime
         self._audio = {
             "vosk_skipped": 0,
             "sent": 0,
@@ -225,6 +253,8 @@ class VoiceListener:
             "local_fallbacks": 0,
             "decodes": 0,
             "decode_timeouts": 0,
+            "decodes_capped": 0,
+            "decodes_lost": 0,  # an addressed utterance whose decode heard nothing: not_heard cue
         }
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -246,6 +276,7 @@ class VoiceListener:
         # CPython, so no lock; the counters have their own.
         self._active = False  # an utterance is in progress or waiting for its hand-off
         self._recording = False  # the recognizer is taking the utterance's audio
+        self._hearing = False  # speech in progress, from its start to its end (``hearing``)
         self._muted = False
         self._open_until = -math.inf  # barge-in handoff: chunks starting before this pass the gate
         self._state = "off"
@@ -261,12 +292,26 @@ class VoiceListener:
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
-            self._direction.apply_config(cfg.voice.direction)
+            self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
 
-    def bind_realtime(self, realtime: Any) -> None:
+    def bind_realtime(
+        self, realtime: Any, on_audio: Callable[[str, float], None] | None = None
+    ) -> None:
         """Send addressed utterances' audio to the realtime route through ``realtime`` (a
-        ``RealtimeInput``; None stops it). Bound after the route exists (start-up)."""
+        ``RealtimeInput``; None stops it). Bound after the route exists (start-up).
+        ``on_audio(event, key)`` hears what became of an utterance's audio (``key``: its start
+        stamp, the ``Utterance.start_stamp`` it is handed off with), for the listening cue
+        (SPEC 8, Non-verbal cues): ``AUDIO_SENT`` when it is handed off to leave,
+        ``AUDIO_UNSENT`` when it did not leave after all (refused, or dropped on stop) and
+        ``AUDIO_NOT_HEARD`` when it left and no transcript came (timeout or failure)."""
         self._realtime = realtime
+        self._on_audio = on_audio or (lambda event, key: None)
+
+    def _audio_event(self, event: str, p: _Handoff) -> None:
+        try:
+            self._on_audio(event, p.ev.start_stamp)
+        except Exception as exc:  # a cue must not stop the listener
+            log.warning("voice listener: audio event consumer raised %s", type(exc).__name__)
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -438,7 +483,7 @@ class VoiceListener:
         handed off first (``wait``: for its grammar pass, within its deadline). The barge-in gives
         the recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
         self._settle(wait)
-        self._recording = False
+        self._recording = self._hearing = False
         if self._before_asr_reset is not None:
             try:
                 self._before_asr_reset()
@@ -542,7 +587,23 @@ class VoiceListener:
 
     # ---- utterance edges
 
+    def awaiting_transcript(self) -> bool:
+        """Whether an utterance's audio went to the realtime route and its transcript has not
+        come yet (the Live tab's "sending to the cloud"). Safe from any thread: a copy of the
+        queue, nothing waits."""
+        try:
+            return any(p.rt is not None for p in tuple(self._queue))
+        except RuntimeError:  # the queue changed during the copy: ask again at the next poll
+            return False
+
+    def hearing(self) -> bool:
+        """Whether someone's speech is in progress now (from its start to its end): the
+        listening blip waits for a quiet moment (SPEC 8, Non-verbal cues). Safe from any thread
+        (a single flag)."""
+        return self._hearing
+
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
+        self._hearing = True  # before the hand-offs below: their blip must not cover this speech
         self._settle(wait=True)  # the per-utterance state below is the pending one's until then
         try:
             speaker = self._speaker_language()
@@ -592,12 +653,12 @@ class VoiceListener:
         dropped."""
         if not self._recording:
             return
-        self._recording = False
+        self._recording = self._hearing = False
         if not self._vosk:  # buffered only: addressed now, or decoded from the buffer
             face = self._face()
             if not self._send_unheard(ev, face):
                 p = self._handoff_for(ev, face)
-                self._decode(p)
+                self._decode(p, wake=True)
                 self._queue.append(p)
                 self.poll_handoff()
             return
@@ -621,18 +682,44 @@ class VoiceListener:
         )
         self.poll_handoff()
 
-    def _handoff_for(self, ev: SpeechEnd, face: bool | None) -> _Handoff:
+    def _handoff_for(self, ev: SpeechEnd, face: str | None) -> _Handoff:
         """The hand-off of an utterance that skipped Vosk, its final still to come."""
         now = self._clock()
         held = self._fast.hold()
-        return _Handoff(ev, "", self._language, None, None, now, now, held, face=face)
+        info = self._face_info if face is not None else {}
+        return _Handoff(
+            ev, "", self._language, None, None, now, now, held, face=face, face_info=info
+        )
 
-    def _face(self) -> bool | None:
-        """The voice-at-face check, asked once for an utterance; None without one."""
+    def _face(self) -> str | None:
+        """The voice-at-face check's verdict, asked once for an utterance; None without one."""
         check = self._at_face()
-        return None if check is None else bool(check())
+        return None if check is None else check()
 
-    def _send_unheard(self, ev: SpeechEnd, face: bool | None) -> bool:
+    def _decided(self, p: _Handoff, outcome: str, text: str) -> None:
+        """Publish the wake decision of an utterance with words: ``unanswered`` with the rule
+        when it was rejected, and the facing check's CPU fallback when it took one."""
+        info = p.face_info
+        if info.get("facing") == "cpu_high":
+            self.events(
+                "facing",
+                "cpu_high",
+                path=info.get("path"),
+                cpu_percent=info.get("cpu_percent"),
+                cpu_max_percent=info.get("cpu_max_percent"),
+            )
+        if not text.strip() or not outcome.startswith("rejected_"):
+            return
+        self.events(
+            "unanswered",
+            outcome.removeprefix("rejected_"),
+            policy=self._cfg.voice.wake_word_policy,
+            facing=info.get("facing"),
+            yaw_deg=info.get("yaw_deg"),
+            limit_deg=info.get("limit_deg"),
+        )
+
+    def _send_unheard(self, ev: SpeechEnd, face: str | None) -> bool:
         """An utterance that skipped Vosk ended: if the wake gate addresses it without the
         wake word (its voice-at-face check passed) its audio goes and its final waits for the
         server. False: it is decoded locally (the check rejected it, or the window closed)."""
@@ -640,11 +727,11 @@ class VoiceListener:
             return False
         start, speaker = ev.start_stamp, self._speaker()
         enrolled = self._enrolled(start)
-        if face is False or not self._gate.addressable(
+        if face not in (None, AT_FACE) or not self._gate.addressable(
             enrolled_in_view=enrolled, start=start, speaker=speaker
         ):
             return False
-        addressed = self._gate.decide(
+        outcome = self._gate.outcome(
             wake_word=False,
             enrolled_in_view=enrolled,
             start=start,
@@ -652,8 +739,11 @@ class VoiceListener:
             speaker=speaker,
             at_face=None if face is None else (lambda: face),
         )
+        addressed = not outcome.startswith("rejected")
         p = self._handoff_for(ev, face)
         p.addressed = addressed
+        if addressed:
+            self._decided(p, outcome, "")  # its CPU fallback; words come with its final
         if addressed:
             self._send(p)
         else:  # decided already (a reload changed the policy meanwhile): decoded, not re-decided
@@ -672,33 +762,64 @@ class VoiceListener:
             self._speech_audio(p.ev), rate, deadline=p.deadline, clock=self._clock
         )
         self._count_audio("sent")
+        self._audio_event(AUDIO_SENT, p)
 
     def _speech_audio(self, ev: SpeechEnd) -> np.ndarray:
         """The utterance's audio from its first to its last speech frame, pre-roll included."""
         return ev.audio[: self._last_sample(ev)]
 
-    def _decode(self, p: _Handoff) -> None:
-        """Decode ``p``'s buffer for its local final, off this thread (the decode worker): a
-        whole-utterance decode on a recognizer of its own, waited for until
-        ``local_decode_timeout_s``; its grammar pass follows (``poll_handoff``)."""
-        language, audio = p.language, self._speech_audio(p.ev)
-        p.deadline = self._clock() + self._cfg.voice.realtime_route.local_decode_timeout_s
-        p.decode = self._decoder.submit(
-            lambda: str(self._asr.decode(language, audio)).strip(), p.deadline
-        )
+    def _decode(self, p: _Handoff, *, wake: bool = False) -> None:
+        """Decode ``p``'s buffer for its local final, off this thread (the decode worker), on a
+        recognizer of its own, in one pass, waited for until ``local_decode_timeout_s``; its
+        grammar pass follows (``poll_handoff``). The audio goes in pieces of
+        ``wake_decode_max_s`` of speech (the first with the pre-roll before it), and the words
+        so far are kept after each (``_DecodeProgress``), so a decode out of time still gives
+        them. ``wake``: the decode looks for the wake word (a voice-at-face reject); it stops
+        after the first piece unless that piece wakes the robot (counted ``decodes_capped``)."""
+        rt = self._cfg.voice.realtime_route
+        rate = self._cfg.voice.sample_rate_hz
+        language, audio, state = p.language, self._speech_audio(p.ev), p.state
+        first = max(0, round((p.ev.start_stamp - p.ev.audio_stamp) * rate))
+        step = max(1, round(rt.wake_decode_max_s * rate))
+        bounds = list(range(first + step, audio.size, step)) + [audio.size]
+        progress = p.progress = _DecodeProgress()
+
+        def run() -> str:
+            dec = self._asr.decoder(language)
+            if dec is None:
+                return ""
+            start = 0
+            for end in bounds:
+                dec.accept(audio[start:end])
+                start = end
+                progress.heard = (dec.text().strip(), end)
+                if end == audio.size or progress.stop:
+                    break
+                woke = self._fast.wakes(progress.heard[0], state=state)
+                if wake and end == bounds[0] and not woke:
+                    self._count_audio("decodes_capped")
+                    break
+            text = dec.finish()
+            progress.heard = (text, start)
+            return text
+
+        p.deadline = self._clock() + rt.local_decode_timeout_s
+        p.decode = self._decoder.submit(run, p.deadline)
         self._count_audio("decodes")
 
     def _decoded(self, p: _Handoff) -> None:
         """``p``'s local decode is over (or out of time): its text, then its grammar pass
         (submitted like any utterance's, under ``voice.grammar.handoff_timeout_s``)."""
         job, p.decode = p.decode, None
-        if job is None or not job.ran:
+        progress = p.progress
+        if job is None or not job.ran:  # out of time: the words heard so far, if any
             self._count_audio("decode_timeouts")
-            return
-        p.text = job.result
+            if progress is not None:
+                progress.stop = True
+        p.text, p.decoded_end = progress.heard if progress is not None else ("", 0)
         if not p.text:
             return
-        audio = p.ev.audio[: self._last_sample(p.ev)]
+        audio = p.ev.audio[: p.decoded_end]  # the grammar pass hears what the text came from
         p.grammar_pass = self._fast.grammar_pass(p.text, audio, p.language)
         now = self._clock()
         p.deadline = now + self._cfg.voice.grammar.handoff_timeout_s
@@ -724,6 +845,9 @@ class VoiceListener:
                 if not p.text:  # nothing heard, or out of time
                     self._queue.popleft()
                     self._count("empty")
+                    if p.addressed and not p.local_only:  # never dropped without a word
+                        self._count_audio("decodes_lost")
+                        self._audio_event(AUDIO_NOT_HEARD, p)
                     self._set_active(self._recording or bool(self._queue))
                     continue
             if p.rt is not None:
@@ -751,6 +875,11 @@ class VoiceListener:
     def _rt_timeout(self, p: _Handoff) -> None:
         """No transcript within ``transcript_timeout_s``: the job is cancelled (its server
         items are deleted) and the utterance is decoded locally."""
+        self.events(
+            "audio",
+            "transcript_timeout",
+            timeout_s=self._cfg.voice.realtime_route.transcript_timeout_s,
+        )
         try:
             self._realtime.cancel(p.rt)
             self._realtime.route.count("transcript_timeouts")
@@ -805,6 +934,7 @@ class VoiceListener:
                     self._realtime.cancel(p.rt)
                 except Exception as exc:
                     log.warning("voice listener: realtime input: %s", type(exc).__name__)
+                self._audio_event(AUDIO_UNSENT, p)
             self._count_handoff("dropped_on_stop")
         self._set_active(False)
 
@@ -839,14 +969,16 @@ class VoiceListener:
         if p.addressed is None:
             wake = self._fast.wakes(text, grammar_pass=p.grammar_pass, heard=heard, state=p.state)
             face = p.face
-            p.addressed = self._gate.decide(
+            outcome = self._gate.outcome(
                 wake_word=wake,
                 enrolled_in_view=self._enrolled(ev.start_stamp),
                 start=ev.start_stamp,
                 last_speech=ev.last_speech_stamp,
                 speaker=self._speaker(),
-                at_face=self._at_face() if face is None else (lambda: face),
+                at_face=self._checked(p) if face is None else (lambda: face),
             )
+            p.addressed = not outcome.startswith("rejected")
+            self._decided(p, outcome, text)
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)
@@ -860,7 +992,8 @@ class VoiceListener:
     def _deliver_heard(self, p: _Handoff) -> _Handoff | None:
         """``p``'s audio went to the realtime route: its final is the server's transcript
         (keywords, the wake word and the speaking rate come from it), else a local decode of
-        its buffer, which the chat routes answer when the audio did leave."""
+        its buffer: handed off ``local_only`` when the audio did leave (not answered, the
+        did-not-get-it cue shows now), for the chat routes when it did not."""
         job = p.rt
         result = job.result
         if result is not None:
@@ -873,6 +1006,7 @@ class VoiceListener:
             return None
         self._count_audio("local_fallbacks")
         p.rt, p.local_only = None, job.sent
+        self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
         if not p.text:  # Vosk never ran: decoded off this thread, then handed off
             self._decode(p)
             return p
@@ -895,9 +1029,10 @@ class VoiceListener:
         ev = p.ev
         rate = self._cfg.voice.sample_rate_hz
         first = max(0, round((ev.start_stamp - ev.audio_stamp) * rate))
+        end = self._last_sample(ev) if server or p.decoded_end is None else p.decoded_end
         fast = self._fast.end(
             text,
-            ev.audio[first : self._last_sample(ev)],
+            ev.audio[first:end],
             rate,
             last_speech_stamp=ev.last_speech_stamp,
             endpoint_stamp=ev.endpoint_stamp,
@@ -933,15 +1068,39 @@ class VoiceListener:
 
     def _sample_direction(self, stamp: float) -> None:
         """One voice-at-face sample at ``stamp`` (skipped while the check is off: it scans the
-        world model). Muted while the robot speaks: its sound direction is off then (barge-in)."""
+        world model). Muted while the robot speaks: its sound direction is off then (barge-in).
+        The listening blip never mutes a sample: it is short, plays only when nobody speaks, and
+        its own window is not speech."""
         d = self._direction
         if d is not None and d.enabled:
             d.sample(stamp, muted=self._speech.speaking(stamp))
 
-    def _at_face(self) -> Callable[[], bool] | None:
-        """The voice-at-face check for the wake gate, None when there is none or it is off."""
+    def _at_face(self) -> AtFace | None:
+        """The voice-at-face check for the wake gate, None when there is none or it is off.
+        Each check keeps its numbers in ``_face_info`` (listener thread only)."""
         d = self._direction
-        return d.check if d is not None and d.enabled else None
+        if d is None or not d.enabled:
+            return None
+
+        def check() -> str:
+            verdict = d.check()
+            self._face_info = dict(d.last)
+            return verdict
+
+        return check
+
+    def _checked(self, p: _Handoff) -> AtFace | None:
+        """The voice-at-face check for ``p``'s decision: its numbers land in ``p.face_info``."""
+        check = self._at_face()
+        if check is None:
+            return None
+
+        def run() -> str:
+            verdict = check()
+            p.face_info = self._face_info
+            return verdict
+
+        return run
 
     def _speaker(self) -> str | None:
         try:

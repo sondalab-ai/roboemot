@@ -45,6 +45,18 @@ the turn's first send and before each ``response.create``); past the route's
 ``response.created`` resets the session. A detached session's requests are settled at the
 detach (charged once, their runs ended ``closed``): its close comes later, or never. Nothing
 here logs or reports a key, a URL's path or query, text, audio or an identifier (SPEC 12).
+
+A session lost on its own (not one the robot closed) and a connect that failed are retried in the
+background by one reconnect worker (``_keep_connecting``), paced by the same backoff a turn's
+``ready`` honours (the ``realtime`` link of ``connectivity.network``, and ``_reopen_at``), until a
+session is up, the route is blocked or the robot closes it (sleep, shutdown, the budget; the
+conversation's end after a loss keeps it): the status clears without waiting for the next turn,
+and that turn does not pay the connect. A loss counts in the reset streak, so a server that keeps
+dropping its sessions is reconnected ever more slowly.
+
+Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
+12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
+session lost (its close reason) and a server error (its code only, never its message).
 """
 
 from __future__ import annotations
@@ -67,8 +79,9 @@ from pathlib import Path
 from typing import Any
 
 from ..config.schema import LLMRoute, RoboEmotConfig
+from ..diag import EventSink, no_events
 from ..health.network import route_endpoint
-from ..llm.prompt import CHARS_PER_TOKEN
+from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
@@ -81,6 +94,7 @@ STATES = ("off", "blocked", "connecting", "connected", "closed", "fallback_local
 # Reasons a route is blocked; the first ones hold until a restart or a config change.
 BLOCKS = ("off", "no_route", "no_opt_in", "no_extra", "provider", "pseudonyms", "budget",
           "unavailable")  # fmt: skip
+UNREACHABLE_STATE = ("blocked", "unavailable")  # waited for in the background (its link's checks)
 OWN_CLOSES = (
     "conversation_end",
     "asleep",
@@ -100,6 +114,8 @@ APPEND_SHARE_OF_CAP = (
     2  # an append carries at most 1/2 of max_message_bytes of PCM (base64 grows it)
 )
 UPLOAD_FILE_MODE = 0o600  # the day's upload seconds (data folder)
+# the server's refusal of a response.create while a tool call has no output
+PENDING_CALLS = "function_call_output_pending"
 # events that carry no data (send_control): everything else goes through the send gate
 CONTROL_EVENTS = (protocol.RESPONSE_CANCEL, protocol.ITEM_DELETE, protocol.ITEM_TRUNCATE)
 
@@ -123,6 +139,7 @@ class Request:
     estimate: int = 0  # tokens charged when no usage comes (the run keeps it current)
     response_id: str | None = None
     token: _Token | None = None  # the client it was sent on
+    recorder: Any | None = None  # its run after it abandoned it: still records its calls
     last_event: float = 0.0  # when its last event came (expiry ages from it)
     charged: bool = False  # charged once already (at its done, refusal, expiry or close)
 
@@ -155,9 +172,12 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
     """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate (null at
     the native 16 kHz, which Pollen's server requires) and out at the server's own, the voice,
     server VAD that never answers or interrupts on its own and ends a turn after
-    ``server_silence_ms``, and the tools (left as they are when None). The route and the realtime
-    check (``realtime.check``) send the same one."""
+    ``server_silence_ms``, with ``input: audio`` the input transcription's language
+    (``transcription_language``, else ``conversation.language``) and model (left out when
+    empty), and the tools (left as they are when None). The route and the realtime check
+    (``realtime.check``) send the same one."""
     rt, vad = cfg.voice.realtime_route, cfg.voice.vad
+    audio = rt.input == "audio"
     return protocol.session_update(
         instructions=instructions,
         input_rate_hz=None  # the server's native rate (protocol.NATIVE_INPUT_RATE_HZ)
@@ -170,7 +190,20 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
         create_response=False,
         interrupt_response=False,
         tools=tools,
+        transcription_language=(rt.transcription_language or cfg.conversation.language)
+        if audio
+        else None,
+        transcription_model=(rt.transcription_model or None) if audio else None,
     )
+
+
+def streak_delay(n: int, policy: Any) -> float:
+    """The wait before the next connect after the ``n``-th reset or loss in a row (the
+    ``connectivity.network`` backoff): none after the first, then ``probe_initial_s`` growing by
+    ``probe_backoff`` up to ``probe_max_s``."""
+    if n <= 1:
+        return 0.0
+    return min(policy.probe_max_s, policy.probe_initial_s * policy.probe_backoff ** (n - 2))
 
 
 def realtime_extra() -> bool:
@@ -231,13 +264,28 @@ class RealtimeRoute:
         self.reason: str | None = None
         self._closed = False
         self._lost = False
-        self._resets_in_row = 0  # resets since the server last answered (a response, a transcript)
+        # resets and losses since the server last answered (a response, a transcript): each one
+        # after the first waits the connectivity.network backoff before the next connect
+        self._resets_in_row = 0
+        self._opened_at = 0.0  # when the current session was stored (clock)
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
+        self._outputs: set[str] = set()  # event ids of the settling tool results on this session
         self._reopens = 0  # reconnects a reset started that have not returned yet
+        self.last_reset: tuple[str, float] | None = None  # (reason, clock) of the last reset
+        self._reopen_after: str | None = None  # a reset or loss the next session follows
+        self._retrying = False  # the background reconnect worker runs (one at a time)
+        self._retry_closes = 0  # the close count it follows: any later close ends it
+        self._retry_wake = threading.Event()  # cuts its wait short (a close, a new start)
+        self._retry_thread: threading.Thread | None = None  # the last worker (tests join it)
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.base_instructions: Callable[[], str] = lambda: ""
         self._counts: collections.Counter[str] = collections.Counter()
         self._statuses: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
+        # turns and skips by conversation state (SPEC 8, Conversation start): kind -> state -> n
+        self._by_state: dict[str, collections.Counter[str]] = {
+            kind: collections.Counter() for kind in STATE_COUNTS
+        }
         self._first_audio_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._transcript_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._stages: dict[str, collections.deque[float]] = {
@@ -271,6 +319,14 @@ class RealtimeRoute:
         self._settle(orphans, "reconfigured")
         if client is not None:
             self._close_client(client, "reconfigured")
+        # the reconnect worker re-reads the backoff (a new endpoint's fresh link is due now) and
+        # the block: a reload that blocks the route ends it, one that unblocks a lost route
+        # starts it
+        self._retry_wake.set()
+        with self._lock:
+            lost, closes = self.state == "fallback_local", self._closes
+        if reason is None and lost:
+            self._reconnect_soon(closes)
 
     def _fits(self, cfg: RoboEmotConfig, client: Any) -> bool:
         """Whether ``cfg`` would open ``client``'s session (``_lock`` held): the route is not
@@ -399,9 +455,13 @@ class RealtimeRoute:
         return self._connect(cfg, closes)
 
     def start(self) -> None:
-        """Connect in the background (start, wake): nothing waits for it."""
+        """Connect in the background (start, wake): nothing waits for it. The background
+        reconnect worker makes the attempt, so a failed one (or one the backoff still holds
+        after a loss before sleep) is retried without waiting for a turn."""
         if self.blocked(self.stack.effective()) is None and not self._closed:
-            threading.Thread(target=self.ready, name="realtime-connect", daemon=True).start()
+            with self._lock:
+                closes = self._closes
+            self._reconnect_soon(closes)
         else:
             self.ready()  # records the state
 
@@ -414,6 +474,7 @@ class RealtimeRoute:
             if reason == "shutdown":
                 self._closed = True
             client, orphans = self._detach()
+        self._retry_wake.set()  # the reconnect worker sees the close now and ends
         self._settle(orphans, reason)
         if client is not None:
             client.close()
@@ -422,11 +483,23 @@ class RealtimeRoute:
     def close_soon(self, reason: str) -> None:
         """``close`` without waiting: the session is detached now (no later turn uses it: a new
         person never inherits the server's history), its socket closes on a thread of its own
-        (the caller is an event loop)."""
+        (the caller is an event loop). The conversation's end after a lost session keeps the
+        reconnect worker (it follows the new close count): the next session is a new one anyway;
+        any other close ends it."""
         with self._lock:
             self._closes += 1
             self._close_reason = reason
             client, orphans = self._detach()
+            lost = (
+                reason == "conversation_end"
+                and self._retrying
+                and not self._closed
+                and self.state == "fallback_local"
+                and (client is None or client.state != "connected")
+            )
+            if lost:
+                self._retry_closes = self._closes
+        self._retry_wake.set()  # the reconnect worker sees the close now (and ends, or not)
         self._settle(orphans, reason)
         if client is not None:
             self._close_client(client, reason)
@@ -437,6 +510,7 @@ class RealtimeRoute:
         callbacks no longer count (its token is no longer current), its close is expected."""
         client, token = self._client, self._token
         self._client = self._token = None
+        self._outputs.clear()  # their errors would come from a client that no longer counts
         if token is None:
             return client, []
         token.detached = True
@@ -483,6 +557,8 @@ class RealtimeRoute:
                 cur = self._client
                 if cur is not None and cur.state == "connected" and self._fits(now, cur):
                     return "ok", None  # another call connected meanwhile
+                if self._held_back():
+                    return "wait", None  # a connect this call queued behind failed meanwhile
                 return "connect", self._detach()
 
             verdict, stale = self._with_config(precheck)
@@ -514,6 +590,7 @@ class RealtimeRoute:
                     orphans = self._take(token)  # an unrequested response during the connect
                 self._settle(orphans, client.reason or "closed")
                 self._count("connect_failures")
+                self.events("session", "connect_failed", why=client.reason)
                 client.close()
                 if client.reason == "pseudonyms":  # the allocated host is a cloud one
                     self._set_state("blocked", "pseudonyms")
@@ -523,6 +600,7 @@ class RealtimeRoute:
                     self._set_state("closed", why)
                 else:
                     self._set_state("fallback_local", client.reason)
+                    self._reconnect_soon(closes)  # retried in the background (the backoff)
                 return False
 
             def store(now: RoboEmotConfig) -> bool:
@@ -534,14 +612,18 @@ class RealtimeRoute:
                     self.state, self.reason = "closed", "reconfigured"
                     return False
                 self._client, self._token = client, token
+                self._opened_at = self.clock()
                 self.generation += 1
                 self._counts["opened"] += 1
                 if self._lost:  # the last session was lost, not closed by the robot
                     self._counts["reconnects"] += 1
                 self._lost = False
+                after.append(self._reopen_after)
+                self._reopen_after = None
                 self.state, self.reason = "connected", None
                 return True
 
+            after: list[str | None] = []  # the reset or loss this session follows (store)
             if not self._with_config(store):
                 with self._lock:
                     token.detached = True
@@ -550,6 +632,8 @@ class RealtimeRoute:
                 client.close()
                 return False
             self.network.report_realtime(True)
+            if after and after[0] is not None:
+                self.events("session", "reconnected", after=after[0])
             return True
 
     def _may_send_update(self, token: _Token, closes: int, client: Any) -> bool:
@@ -671,10 +755,7 @@ class RealtimeRoute:
             self._counts[counter] += 1
             self._resets_in_row += 1
             n = self._resets_in_row
-            delay = 0.0
-            if n > 1:
-                grown = policy.probe_initial_s * policy.probe_backoff ** (n - 2)
-                delay = min(policy.probe_max_s, grown)
+            delay = streak_delay(n, policy)
             self._reopen_at = now + delay
             self._closes += 1
             self._close_reason = reason
@@ -682,6 +763,10 @@ class RealtimeRoute:
             closes = self._closes
             if delay == 0.0:
                 self._reopens += 1
+            self.last_reset = (reason, now)
+            self._reopen_after = reason
+        self._retry_wake.set()
+        self.events("session", "reset", why=reason, counter=counter, in_row=n, delay_s=delay)
         self._settle(orphans, reason)
         if client is not None:
             self._close_client(client, reason)
@@ -704,11 +789,125 @@ class RealtimeRoute:
         with self._lock:
             return self._reopens > 0 or self._connecting is not None
 
+    def _streak_loss(self) -> None:
+        """A stored session was lost: one more step of the reset streak (``_reopen_at``)."""
+        policy = self.stack.effective().connectivity.network  # never under _lock
+        now = self.clock()
+        with self._lock:
+            if now - self._opened_at >= policy.probe_max_s:
+                self._resets_in_row = 0  # it held long enough: not a flapping server
+            self._resets_in_row += 1
+            self._reopen_at = max(self._reopen_at, now + streak_delay(self._resets_in_row, policy))
+
+    def _held_back(self) -> bool:
+        """The backoff holds the next connect (``_lock`` held): a reset streak's ``_reopen_at``,
+        or, after a failure, the ``realtime`` link's ``connectivity.network`` backoff."""
+        if self.clock() < self._reopen_at:
+            return True
+        retry = self.state == "fallback_local" or self.reason == "pseudonyms"
+        return retry and not self.network.realtime_due()
+
+    def _reconnect_soon(self, closes: int) -> None:
+        """Have the background reconnect worker follow ``closes`` (the close count of the loss,
+        the failed connect or the start), starting it when none runs. Nothing when a close came
+        since: a session the robot closed is never reopened in the background."""
+        with self._lock:
+            if self._closed or self._closes != closes:
+                return
+            self._retry_closes = closes
+            spawn = not self._retrying
+            self._retrying = True
+        self._retry_wake.set()
+        if spawn:
+            thread = threading.Thread(
+                target=self._keep_connecting, name="realtime-reconnect", daemon=True
+            )
+            self._retry_thread = thread
+            thread.start()
+
+    def _keep_connecting(self) -> None:
+        """The reconnect worker (its own thread): steps until ``_reconnect_step`` says it is
+        over, waiting between steps on ``_retry_wake`` (a close cuts the wait short)."""
+        try:
+            while True:
+                self._retry_wake.clear()
+                wait = self._reconnect_step()
+                if wait is None:
+                    return
+                if wait > 0:
+                    self._retry_wake.wait(wait)
+        except Exception as exc:
+            log.warning("realtime route: background reconnect: %s", type(exc).__name__)
+            with self._lock:
+                self._retrying = False
+
+    def _reconnect_step(self) -> float | None:
+        """One step of the reconnect worker: the seconds to wait before the next one, or None
+        when it is over (marked in the same critical section that decides it). An attempt is
+        ``ready`` with the worker's close count (a turn's locks, checks and backoff). Over when:
+
+        - a session is up;
+        - a close came since the worker's close count;
+        - there is no router or no session provider;
+        - an attempt left the route blocked (except ``unavailable`` while the route's own link
+          is offline: waited for, never connected through).
+        """
+        absent = self._router() is None or self.provider is None
+        with self._lock:
+            closes = self._retry_closes
+            if absent or self._retry_over(closes):
+                self._retrying = False
+                return None
+        blocked = self.blocked(self.stack.effective()) is not None
+        wait = 0.0 if blocked else self._retry_wait()  # a block is recorded (ready) at once
+        if wait > 0:
+            return wait
+        if self.ready(closes=closes):
+            return 0.0  # the next step sees the session and ends
+        route = self.route()
+        offline = route is not None and not self.network.is_online(route.name)
+        with self._lock:
+            if self._retry_closes != closes or self._retry_over(closes):
+                return 0.0  # a new start, a close or a session meanwhile: the next step decides
+            down = self.state == "fallback_local"
+            if not (down or (offline and (self.state, self.reason) == UNREACHABLE_STATE)):
+                self._retrying = False
+                return None
+        # an attempt that scheduled no backoff (it changed nothing) waits its first step
+        policy = self.stack.effective().connectivity.network
+        return self._retry_wait() or policy.probe_initial_s
+
+    def _retry_over(self, closes: int) -> bool:
+        """(``_lock`` held.) A close came since ``closes``, or a session is up."""
+        client = self._client
+        up = client is not None and client.state == "connected"
+        return self._closed or self._closes != closes or up
+
+    def _retry_wait(self) -> float:
+        """Seconds until the next attempt is due: ``_reopen_at``, and the backoff of the link
+        that holds it (the ``realtime`` link after a failure, the route's own link while it is
+        known unreachable)."""
+        route = self.route()
+        with self._lock:
+            state, reason = self.state, self.reason
+            reopen_in = self._reopen_at - self.clock()
+        due_in = 0.0
+        if state == "fallback_local":
+            due_in = self.network.realtime_due_in()
+        elif (
+            (state, reason) == UNREACHABLE_STATE
+            and route is not None
+            and not self.network.is_online(route.name)  # back online: try now
+        ):
+            due_in = self.network.due_in(route.name)
+        return max(0.0, reopen_in, due_in)
+
     def abandon(self, req: Request, estimate: int) -> None:
         """``req``'s run stops following it (barge-in, a failure, its own timeout): the
         response is cancelled when it is still in flight, and charged once when its
         ``response.done`` comes, when it expires, or when the session closes."""
         with self._lock:
+            req.recorder = req.recorder or req.run
             req.run, req.estimate = None, max(req.estimate, estimate)
             in_flight = req in self._pending or (
                 req.response_id is not None and self._live.get(req.response_id) is req
@@ -830,7 +1029,11 @@ class RealtimeRoute:
 
     def _error(self, event: protocol.ServerError, token: _Token | None) -> None:
         """An ``error`` refuses the request whose ``event_id`` it echoes; others are only
-        counted (by the client)."""
+        counted (by the client). A refusal for a tool call left open
+        (``function_call_output_pending``, also one whose request is no longer tracked) and an
+        error about a settling tool result (``send_output``: the call may still be open) reset
+        the session (``pending_call_resets``, the reset streak's backoff applies): the server
+        would refuse every later response on it."""
         with self._lock:
             if not self._current(token):
                 self._counts["stale_callbacks"] += 1
@@ -843,13 +1046,25 @@ class RealtimeRoute:
             if req is not None:
                 self._pending.remove(req)
             run = req.run if req is not None else None
+            generation = self.generation
+            output = req is None and event.event_id in self._outputs
+            self._outputs.discard(event.event_id or "")
+            if event.code == PENDING_CALLS or output:
+                # marked before the run hears the error: its fallback cue then names the reset
+                self.last_reset = ("pending_calls", self.clock())
+        self.events("session", "server_error", code=event.code, request=req is not None)
         if req is None:
-            self._count("errors_unrelated")
-            return
-        self._count("refused")
-        self._give_up([req])
-        if run is not None:
-            run.deliver(event)
+            self._count("outputs_refused" if output else "errors_unrelated")
+        else:
+            self._count("refused")
+            self._give_up([req])
+            if run is not None:
+                run.deliver(event)
+        if (event.code == PENDING_CALLS or output) and self._reset(
+            "pending_calls", "pending_call_resets", generation
+        ):
+            # a tool call is (or may be) still open: the server would refuse every later response
+            log.warning("realtime: a tool call was left open; the session is reset")
 
     def _response_event(self, event: Any, token: _Token | None) -> None:
         done = isinstance(event, protocol.ResponseDone)
@@ -869,6 +1084,9 @@ class RealtimeRoute:
                     del self._live[rid]
                     self._resets_in_row = 0  # the server answers: the reset streak ends
             run = req.run if req is not None else None
+            recorder = req.recorder if req is not None and run is None else None
+        if recorder is not None and isinstance(event, protocol.FunctionCall):
+            recorder.note_call(event)  # a call after the cut still needs its output
         if done:
             self.network.report_realtime(True)  # real traffic: the session works
             self._account(event, req)
@@ -892,10 +1110,18 @@ class RealtimeRoute:
             self.charge(req.estimate)
 
     def _on_close(self, reason: str, token: _Token | None = None) -> None:
+        """A client's socket closed. A session that was up and is lost on its own (not a close
+        of the robot's) is reconnected in the background (``_reconnect_soon``); a connect that
+        failed is handled by ``_connect``, which knows the close count it began with. A loss
+        counts in the reset streak (``streak_delay``): a server that accepts sessions and drops
+        them, never answering, is reconnected ever more slowly. A session that lived
+        ``probe_max_s`` or more starts a new streak."""
         with self._lock:
             current = self._current(token)
             tok = token or self._token
             expected = tok is not None and tok.detached
+            stored = tok is not None and tok is self._token  # an open session, not a connect
+            closes = self._closes
             # the current client's requests; a detached client's were settled at the detach
             # (none should be left: swept anyway)
             reqs = self._take(tok) if tok is not None else []
@@ -910,18 +1136,37 @@ class RealtimeRoute:
             with self._lock:
                 self._failures[reason] += 1
                 self._lost = self._lost or self.state == "connected"
+                self._reopen_after = reason
             self._set_state("fallback_local", reason)
+            self.events("session", "lost", why=reason)
+            if stored:
+                self._streak_loss()
+                self._reconnect_soon(closes)
         for r in reqs:
             if r.run is not None:
                 r.run.closed(reason)
 
     # ----------------------------------------------------------------- sending
 
-    def send(self, event: dict[str, Any]) -> bool:
+    def send(self, event: dict[str, Any], *, generation: int | None = None) -> bool:
         """Send a data-carrying event (text items, tool results, ``session.update``) through the
         send gate: the committed configuration must still fit the session, checked atomically
-        with the send (SPEC 12). Refused: nothing is sent and the session is closed."""
-        return self._gated(event)
+        with the send (SPEC 12). Refused: nothing is sent and the session is closed.
+        ``generation``: only on that session (another one: nothing sent, False)."""
+        return self._gated(event, generation=generation)
+
+    def send_output(self, call_id: str, output: str, item_id: str, generation: int | None) -> bool:
+        """Send the ``function_call_output`` of a call a cut or failed turn settles, on
+        ``generation``'s session only, through the send gate. Its ``event_id`` is kept, so an
+        error the server sends about it resets the session (``_error``)."""
+        event_id = f"{EVENT_PREFIX}{next(self._events)}"
+        event = protocol.function_output(call_id, output, item_id)
+        event["event_id"] = event_id
+
+        def track() -> None:  # under _lock, with the send
+            self._outputs.add(event_id)
+
+        return self._gated(event, track, generation)
 
     def _gated(
         self,
@@ -1161,6 +1406,13 @@ class RealtimeRoute:
     def count(self, key: str, n: int = 1) -> None:
         self._count(key, n)
 
+    def count_state(self, kind: str, state: str) -> None:
+        """Count a turn (``kind`` ``turns``) or a skip (``skipped``) in its conversation state
+        (SPEC 8, Conversation start); reported as ``<kind>_by_state``."""
+        assert kind in self._by_state, kind
+        with self._lock:
+            self._by_state[kind][state] += 1
+
     def _count(self, key: str, n: int = 1) -> None:
         with self._lock:
             self._counts[key] += n
@@ -1192,6 +1444,10 @@ class RealtimeRoute:
                 self._client_snapshot = snap
             snap = dict(self._client_snapshot)
             counts = dict(self._counts)
+            by_state = {
+                f"{kind}_by_state": {s: n[s] for s in CONVERSATION_STATES}
+                for kind, n in self._by_state.items()
+            }
             audio = rt.input == "audio"
             out = {
                 "state": self.state,
@@ -1224,10 +1480,12 @@ class RealtimeRoute:
             out[key] = counts.get(key, 0)
         out["unknown_events"] = snap.get("unknown", 0)
         out["oversize"] = snap.get("oversize", 0)
+        out.update(by_state)
         out["client"] = {k: v for k, v in snap.items() if k != "key_hosts"}
         return out
 
 
+STATE_COUNTS = ("turns", "skipped")  # counted by conversation state (count_state)
 COUNTERS = (
     "opened",
     "reconnects",
@@ -1250,6 +1508,9 @@ COUNTERS = (
     "transcript_timeouts",
     "unrequested",
     "tool_calls",
+    "skipped",  # the model called ignore_utterance before any of its audio played
+    "skipped_late",  # ... after some played: cut like a barge-in
+    "skips_refused",  # ignore_utterance after a skill acted in the turn: an error result
     "lines",
     "fallbacks_start",
     "fallbacks_mid_turn",
@@ -1262,6 +1523,8 @@ COUNTERS = (
     "sends_refused",
     "resets",
     "input_resets",
+    "pending_call_resets",  # a response refused for a tool call left open: session reset
+    "outputs_refused",  # the server refused a settling tool result (the session is reset)
 )
 
 # the server's confirmations of a delete and a truncate, and the counter each one moves

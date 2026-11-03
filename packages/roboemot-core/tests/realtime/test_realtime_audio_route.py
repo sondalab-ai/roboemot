@@ -10,7 +10,7 @@ import pytest
 from roboemot.config import ConfigStack
 from roboemot.health.network import NetworkMonitor
 from roboemot.realtime import protocol
-from roboemot.realtime.route import RealtimeRoute
+from roboemot.realtime.route import RealtimeRoute, session_update
 from test_realtime_route import CHAT, DIRECT, POLICY, RT, FakeRouter
 
 RATE = 16000
@@ -124,6 +124,57 @@ def test_a_burst_is_the_instructions_then_the_audio_then_the_commit():
     assert "tools" not in session  # the turn's own update sets the tools
     assert base64.b64decode(made[0].sent[1]["audio"]) == SECOND
     assert r.snapshot()["upload_s_today"] == 1.0
+
+
+def transcription(client):
+    updates = [e for e in client.sent if e["type"] == "session.update"]
+    return updates[-1]["session"]["audio"]["input"].get("transcription")
+
+
+def test_the_transcription_language_follows_the_conversation_language():
+    stack = audio_stack(conversation={"language": "en"})
+    r, made = audio_route(stack)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    assert transcription(made[0]) == {"language": "en"}  # no model: the server's default
+
+
+def test_a_transcription_language_and_model_override_the_defaults():
+    stack = audio_stack(
+        {"transcription_language": "fr", "transcription_model": "gpt-4o-transcribe"},
+        conversation={"language": "it"},
+    )
+    r, made = audio_route(stack)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    assert transcription(made[0]) == {"language": "fr", "model": "gpt-4o-transcribe"}
+
+
+def test_a_hot_reload_of_the_language_reaches_the_next_session_update():
+    stack = audio_stack()
+    r, made = audio_route(stack)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    assert transcription(made[0]) == {"language": "it"}
+    stack.set("conversation.language", "en", source="test")
+    r.apply_config(stack.effective())
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    assert transcription(made[0]) == {"language": "en"}
+    stack.set("voice.realtime_route.transcription_language", "de", source="test")
+    stack.set("voice.realtime_route.transcription_model", "m", source="test")
+    r.apply_config(stack.effective())
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    assert transcription(made[0]) == {"language": "de", "model": "m"}
+    assert len(made) == 1  # the same session: a language change needs no reconnect
+
+
+def test_only_an_audio_route_sends_the_transcription_object():
+    audio = audio_stack().effective()
+    text = audio_stack({"input": "text"}).effective()
+    assert session_update(audio, "")["session"]["audio"]["input"]["transcription"] == {
+        "language": "it"
+    }
+    assert "transcription" not in session_update(text, "")["session"]["audio"]["input"]
 
 
 def test_a_burst_is_cut_into_appends_under_the_message_cap():

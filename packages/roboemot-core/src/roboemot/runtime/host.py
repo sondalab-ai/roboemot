@@ -21,6 +21,7 @@ from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, CircadianRunner, IdleLightReader, SystemClock
 from roboemot.conversation import ConversationPhase, ConversationWorker, TranscriptRing
+from roboemot.diag import EventRing, EventSink, no_events
 from roboemot.diagnostics import Diagnostics
 from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
@@ -37,6 +38,7 @@ from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn
+from roboemot.voice.cues import Cues
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
@@ -74,8 +76,9 @@ class RuntimeHost:
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
+    cues: Cues | None = None  # non-verbal cues: listening, offline, not heard (SPEC 8); needs voice
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
-    name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
+    name_source: NameSource | None = None  # the one pseudonym map (SPEC 8, Pseudonyms)
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
     realtime_route: RealtimeRoute | None = None  # the realtime speech route, when enabled
@@ -83,6 +86,8 @@ class RuntimeHost:
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)
     levels: AudioLevels | None = None  # microphone and output levels in dBFS (Live tab)
+    events: EventSink = staticmethod(no_events)  # decision events onto the bus (diag.event)
+    activity: EventRing | None = None  # the last decision events ("What's happening", Live tab)
     names: RobotName | None = None  # the robot's name for the wake word and addressing
     perception: Perception | None = None
     enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)

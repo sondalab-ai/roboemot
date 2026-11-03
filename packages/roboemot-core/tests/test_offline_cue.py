@@ -114,3 +114,40 @@ def test_no_output_does_not_use_up_the_cooldown():
     )
     r.speech_while_offline(1.0, "it")
     assert len(out.said) == 1
+
+
+def test_without_a_local_voice_the_offline_phrase_becomes_the_offline_cue():
+    """SPEC 8, Non-verbal cues (CV-2): the route is down and voice.backend is none."""
+    r, _, _ = responder(language="it")
+    out, cues = FakeSpeech(), []
+    r.cue = SpeechCue(
+        lambda: out,
+        lambda: (CFG.register.params, CFG.circadian.states["awake"], "joy", 0.5),
+        lambda: False,
+        no_voice=lambda: True,
+        cue=lambda: cues.append("offline") or True,
+    )
+    r.on_event("link.network.lost", 0.0)
+    r.speech_while_offline(1.0, "it")  # inside the cooldown: the cue counted as said
+    assert out.said == [] and cues == ["offline"]
+    r.speech_while_offline(COOLDOWN_S, "it")
+    assert cues == ["offline", "offline"]
+    assert r.commands(COOLDOWN_S + 0.5)  # the puzzled gesture still plays
+
+
+def test_an_offline_cue_the_robot_cannot_show_leaves_the_cooldown_free():
+    r, _, _ = responder(language="it")
+    shown = [False]
+    r.cue = SpeechCue(
+        lambda: FakeSpeech(),
+        lambda: (CFG.register.params, CFG.circadian.states["awake"], "joy", 0.5),
+        lambda: False,
+        no_voice=lambda: True,
+        cue=lambda: shown[0],
+    )
+    r.on_event("link.network.lost", 0.0)
+    shown[0] = True
+    calls = []
+    r.cue._cue = lambda: calls.append(1) or True
+    r.speech_while_offline(1.0, "it")
+    assert calls == [1]

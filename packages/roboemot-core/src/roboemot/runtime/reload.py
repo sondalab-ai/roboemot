@@ -47,6 +47,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             scan = p.scan
             out.append(("scan", lambda: scan.apply_config(cfg.world.scan)))
             out.append(("planner", lambda: p.plugin.planner.apply_config(cfg)))
+        out.append(("alone", lambda: p.alone.apply_config(cfg)))
         out += [
             ("perception", lambda: p.perception.apply_config(cfg)),
             ("affect", lambda: p.runner.apply_config(cfg.affect, cfg.appraisal)),
@@ -60,6 +61,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             ("bargein", p.bargein, lambda part: part.apply_config(cfg)),
             ("speech_output", host.speech_output, lambda part: part.apply_config(cfg)),
             ("soothe", host.soothe_runner, lambda part: part.apply_config(cfg.soothe)),
+            ("cues", host.cues, lambda part: part.apply_config(cfg.voice.cues)),
             ("conversation", host.conversation, lambda part: part.apply_config(cfg)),
             ("realtime_route", host.realtime_route, lambda part: part.apply_config(cfg)),
             ("transcript", host.transcript, lambda part: part.apply_config(cfg.webui.live)),

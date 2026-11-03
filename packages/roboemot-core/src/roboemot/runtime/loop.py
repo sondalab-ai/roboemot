@@ -17,6 +17,7 @@ from .host import RuntimeHost
 from .ticks import (
     attention_tick,
     circadian_vision_scale,
+    company,
     conversation_vision_scale,
     conversing,
     feed_idle,
@@ -56,6 +57,8 @@ def run_loop(
         if host.live_video is not None:
             host.live_video.expire()  # the same for the preview's frame and JPEG
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
+            if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
+                host.cues.release_listening("asleep")
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
@@ -92,6 +95,7 @@ def run_loop(
             governor.set_scale(CIRCADIAN, circadian_vision_scale(live, host.circadian))
             others = governor.scale_of(CIRCADIAN) * governor.scale_of(LOAD)
             governor.set_scale(CONVERSATION, conversation_vision_scale(live, host.phase, others))
+        alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
             ctx = scan_context(
                 now,
@@ -100,6 +104,7 @@ def run_loop(
                 effects=fx,
                 hour=p.clock.hour(),
                 circadian=host.circadian,
+                alone=alone,
             )
             scan_tick(ctx, p.scan, p.loop, live)
         if host.soothe_runner is not None and host.speech_output is not None:
@@ -142,6 +147,9 @@ def run_loop(
             p.loop.feed(cmd)
         for cmd in p.responder.commands(now):
             p.loop.feed(cmd)
+        if host.cues is not None:  # the non-verbal cues' gestures (SPEC 8)
+            for cmd in host.cues.commands(now):
+                p.loop.feed(cmd)
         for cmd in p.expression.commands(now):
             p.loop.feed(cmd)
         for cmd in p.speaking.commands(now):  # after the expression: it ducks under it

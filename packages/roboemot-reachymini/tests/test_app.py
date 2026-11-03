@@ -70,6 +70,11 @@ def test_run_fills_a_json_ready_diagnostics_registry(tmp_path, monkeypatch):
     assert network["realtime"]["counted"] is False  # realtime mode is off (SPEC 12A, Links)
     assert sections["roboemot.app"]["data"]["manifest"] == "reachy-mini-wireless"
     assert sections["process"]["data"]["processes"][0]["pid"] > 0
+    alone = sections["roboemot.alone"]["data"]  # SPEC 5A, Alone stillness
+    assert alone["alone"] is False and alone["alone_after_s"] == 120.0
+    circadian = sections["roboemot.circadian"]["data"]  # SPEC 7A, Day nap
+    assert circadian["reason"] is None and circadian["nap"]["napping"] is False
+    assert circadian["nap"]["after_s"] == 1800.0
 
 
 def test_attention_tick_turns_the_head_then_releases_to_idle():

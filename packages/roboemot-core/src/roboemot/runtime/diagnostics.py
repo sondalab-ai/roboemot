@@ -38,6 +38,7 @@ def build_diagnostics(
         FnSource("roboemot.registry", p.perception.registry_snapshot),
         FnSource("roboemot.register", lambda: register_report(p.tracker)),
         FnSource("roboemot.circadian", p.circ.snapshot),
+        FnSource("roboemot.alone", lambda: p.alone.snapshot(time.monotonic())),
         FnSource("roboemot.reflexes", p.reflexes.snapshot),
         FnSource(
             "roboemot.voice",
@@ -47,6 +48,7 @@ def build_diagnostics(
                     **({"conversation": c.snapshot()} if (c := host.conversation) else {}),
                     **({"bargein": bargein.snapshot()} if bargein is not None else {}),
                     **({"speech": o.snapshot()} if (o := host.speech_output) else {}),
+                    **({"cues": q.snapshot()} if (q := host.cues) else {}),
                     "speaking": p.speaking.snapshot(),
                 }
                 if listener is not None

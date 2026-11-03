@@ -166,7 +166,11 @@ def test_startup_binds_the_input_to_the_listener_and_closes_it_before_the_route(
     sleep = SimpleNamespace(asleep=False)
     with ExitStack() as cleanup:
         bind_realtime_input(
-            host, route, SimpleNamespace(bind_realtime=bound.append), cleanup, sleep
+            host,
+            route,
+            SimpleNamespace(bind_realtime=lambda audio_in, on_audio=None: bound.append(audio_in)),
+            cleanup,
+            sleep,
         )
         (audio_in,) = bound
         assert route.input is audio_in

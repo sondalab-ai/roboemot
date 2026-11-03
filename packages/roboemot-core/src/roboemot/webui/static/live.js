@@ -11,6 +11,11 @@
 // Banner: while logged in, every page polls GET /api/live/viewers and shows the kit callout
 // #live-video-banner while someone is watching the video (any tab, any browser).
 //
+// "What's happening" (#live-activity, above the cards): the state's `activity` block (null while
+// webui.live.activity is off) gives a status code, the conditions that hold and the last decision
+// events (codes and numbers, newest first). The sentences are built here from the page strings
+// (`live_ev_<kind>_<reason>`, `live_why_<reason>`...), so the server stays language-free.
+//
 // Polling: the state timer is `state.timer` and the audio timer `liveState.audioTimer` (stopPolling
 // clears both, so leaving the tab, logging out and showTab stop them), only while the document is
 // visible. `liveState.serial` retires a request that was in flight when the
@@ -60,13 +65,15 @@ function liveNumber(value) {
 function liveMoodCard(d) {
   const m = d.mood;
   const parts = [
-    el("p", {}, badge(m.label, "info")),
+    el("p", {}, badge(word("affect_label_", m.label), "info")),
     liveRow(t("live_valence"), liveNumber(m.valence)),
     liveRow(t("live_arousal"), liveNumber(m.arousal)),
     liveRow(t("live_intensity"), liveNumber(m.intensity)),
   ];
   if (m.circadian) {
-    const name = state.strings["live_circ_" + m.circadian.state] || m.circadian.state;
+    let name = state.strings["live_circ_" + m.circadian.state] || m.circadian.state;
+    const why = m.circadian.reason ? state.strings["live_circ_reason_" + m.circadian.reason] : null;
+    if (why) name += " (" + why + ")";
     parts.push(liveRow(t("live_energy"), name));
     if (m.circadian.sleepiness !== null) {
       parts.push(progress(t("live_energy"), Math.round((1 - m.circadian.sleepiness) * LIVE_PERCENT), LIVE_PERCENT));
@@ -94,6 +101,7 @@ function liveModesCard(d) {
   return card(t("tab_live"), t("live_modes"),
     el("div", { class: "row" },
       badge(t(m.asleep ? "live_asleep" : "live_awake"), m.asleep ? "warning" : "success"),
+      m.alone ? [badge(t("live_alone"), "info")] : [],
       badge(t(m.online ? "live_online" : "live_offline"), m.online ? "success" : "danger"),
       d.audio_egress ? [badge(t("live_audio_egress"), "warning")] : []),
     liveRow(t("live_paused"), paused || t("live_paused_none")),
@@ -116,7 +124,7 @@ function liveAttentionCard(d) {
 function liveReflexesCard(d) {
   const last = d.reflexes.last;
   return card(t("tab_live"), t("live_reflexes"), el("p", {},
-    last ? t("live_reflex_last", { name: last.name, n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
+    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
 }
 
 function liveMotionCard(d) {
@@ -132,11 +140,98 @@ function liveSystemCard(d) {
 }
 
 function liveDisabledView(box) {
+  liveActivityBox().replaceChildren();
   box.replaceChildren(card(t("tab_live"), t("live_disabled_title"), el("p", {}, t("live_disabled_body"))));
 }
 
 function liveRender(box, data) {
+  liveRenderActivity(data.activity || null);
   box.replaceChildren(...LIVE_CARDS.map((c) => c.render(data)));
+}
+
+// ---------------------------------------------------------------- what's happening
+
+const LIVE_STATUS_TONE = {
+  asleep: "warning", answering: "success", cut: "warning", waiting: "info", sending: "info",
+  listening: "info", offline: "danger", cloud_down: "danger", napping: "info",
+  resting: "info", alone: "info", idle: "info",
+};
+
+function liveActivityBox() {
+  return document.getElementById("live-activity") || el("div");
+}
+
+// A field as the sentence shows it: "-" for none, yes / no, a number with at most one decimal,
+// a code worded (`live_code_<code>`, else as it is).
+function liveValue(v) {
+  if (v === null || v === undefined) return t("live_none");
+  if (typeof v === "boolean") return t(v ? "live_yes" : "live_no");
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  return word("live_code_", v);
+}
+
+function liveHas(key) {
+  return Object.prototype.hasOwnProperty.call(state.strings, key);
+}
+
+// `key` filled with every field of the event (a template uses each placeholder once), or the
+// generic "kind: reason" when the page has no sentence for it.
+function liveSentence(key, ev, extra) {
+  const vars = {};
+  for (const [k, v] of Object.entries(ev)) vars[k] = liveValue(v);
+  Object.assign(vars, extra || {});
+  return liveHas(key) ? t(key, vars) : t("live_ev_unknown", { kind: ev.kind, reason: ev.reason });
+}
+
+function liveWord(prefix, value) {
+  return liveHas(prefix + value) ? t(prefix + value) : liveValue(value);
+}
+
+function liveCueText(ev) {
+  const parts = [liveSentence("live_ev_cue_" + ev.cue, ev, { why: liveWord("live_why_", ev.reason) })];
+  if (ev.failure) parts.push(liveSentence("live_fail_" + ev.failure, ev));
+  if (ev.reset) parts.push(t("live_ev_reset_after", { reset: liveWord("live_reset_", ev.reset) }));
+  if (ev.result && ev.result !== "played") parts.push(liveWord("live_res_", ev.result));
+  return parts.join("; ");
+}
+
+function liveEventText(ev) {
+  if (ev.kind === "cue") return liveCueText(ev);
+  let key = "live_ev_" + ev.kind + "_" + ev.reason;
+  const extra = {};
+  if (ev.kind === "bargein" && ev.reason === "released" && ev.ducking === false) key += "_noduck";
+  if (ev.kind === "unanswered" && ev.reason === "not_facing") {
+    if (ev.facing === "cpu_high") key += "_busy";
+    else if (ev.yaw_deg === null || ev.yaw_deg === undefined) key += "_none";
+  }
+  if (ev.conversation !== undefined) extra.conversation = liveWord("live_conv_", ev.conversation);
+  if (ev.kind === "session" && ev.reason === "reset") extra.why = liveWord("live_reset_", ev.why);
+  if (ev.voice !== undefined) extra.voice = liveWord("live_voice_", ev.voice);
+  const text = liveSentence(key, ev, extra);
+  return ev.kind === "turn" && ev.failure ? text + "; " + liveSentence("live_fail_" + ev.failure, ev) : text;
+}
+
+function liveEventRow(ev) {
+  const stamp = when(ev.t * 1000, true);
+  const count = ev.count > 1 ? [" ", badge(t("live_activity_count", { n: ev.count }), "info")] : [];
+  return el("li", { class: "live-event", "data-kind": ev.kind, "data-reason": ev.reason },
+    el("span", { class: "sl-eyebrow" }, stamp), " ", liveEventText(ev), count);
+}
+
+function liveRenderActivity(a) {
+  const box = liveActivityBox();
+  if (a === null) { box.replaceChildren(); return; }
+  const status = el("p", { id: "live-status", role: "status" },
+    badge(liveWord("live_status_", a.status), LIVE_STATUS_TONE[a.status] || "info"));
+  const notes = a.notes.map((n) => el("p", { class: "hint live-note" },
+    t("live_note_" + n.code, { reason: liveValue(n.reason) })));
+  const feed = a.events.length
+    ? el("ul", { class: "sl-list live-events", id: "live-events" }, a.events.map(liveEventRow))
+    : el("p", { class: "hint", id: "live-events-empty" }, t("live_activity_empty"));
+  box.replaceChildren(card(t("tab_live"), t("live_activity"),
+    el("p", { class: "sl-eyebrow" }, t("live_activity_now")), status, notes,
+    el("p", { class: "sl-eyebrow" }, t("live_activity_recent")), feed,
+    el("p", { class: "hint" }, t("live_activity_note"))));
 }
 
 // True while a request started for `serial` may still draw and re-arm the timer.
@@ -159,7 +254,10 @@ async function livePoll(box, serial) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "live_disabled") liveDisabledView(box);
-    else if (err.message === "live_unavailable") box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
+    else if (err.message === "live_unavailable") {
+      liveActivityBox().replaceChildren();
+      box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
+    }
     else notice(explain(err), true);
   }
   state.timer = setTimeout(() => livePoll(box, serial), delay);
@@ -401,7 +499,7 @@ function liveAudioReset(box) {
 
 function liveTurnRow(turn) {
   const who = turn.who === "robot" ? "robot" : "user";
-  const stamp = new Date(turn.t * 1000).toLocaleTimeString();
+  const stamp = when(turn.t * 1000, true);
   const label = stamp + " " + t("live_transcript_" + who);
   const parts = [el("span", { class: "sl-eyebrow" }, label), " ", turn.text];
   if (turn.interrupted) parts.push(" ", badge(t("live_transcript_cut"), "warning"));
@@ -479,7 +577,8 @@ function liveView() {
   view.replaceChildren();
   const box = el("div", { class: "live-grid", id: "live-cards" });
   const audio = el("div", { class: "live-grid", id: "live-audio" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), box, audio));
+  const activity = el("div", { id: "live-activity" });
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), activity, box, audio));
   liveAudioReset(audio);
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);

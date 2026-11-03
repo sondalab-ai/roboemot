@@ -4,6 +4,28 @@ This guide sets up the realtime speech route on the robot. With it, Pollen's ser
 transcription, the answer and the voice (SPEC 8, Realtime speech route). The robot sends the
 audio of addressed utterances to the server. The route is off by default (SPEC 12).
 
+## With the installer: one flag
+
+From the repo checkout, one flag replaces steps 2 to 4 below:
+
+```bash
+python scripts/install_on_robot.py --host 192.168.88.198 --cloud-voice --dry-run   # the plan, writes nothing
+python scripts/install_on_robot.py --host 192.168.88.198 --cloud-voice
+```
+
+The installer writes the `pollen` route and its settings into `app.yaml` (route on with audio
+input, `privacy.realtime_audio`, the skip tool, no local voice, wake policy `never`, the
+voice-at-face and facing checks, a transcript timeout of 10 s), asks for `hf_token` before it
+changes anything when the robot has none (no token: it stops with nothing changed;
+`--secret hf_token` replaces an expired one), and removes Piper and its voice files (SPEC 4A,
+Installer). Settings saved in the web UI win over `app.yaml`: the installer stops when one would
+widen what leaves the robot (for example the facing check off) and names it; reset it in the
+web UI and run again. Read its privacy text before you answer: the audio of every utterance
+spoken while a person faces the robot and looks at it leaves the robot for Pollen's server,
+phone calls included. `-y` does not turn it on. A reinstall with `--no-cloud-voice` removes
+exactly these keys; local voice then needs Piper again (`--piper`). Then start RoboEmot (step 5)
+and check the route (step 6). The manual steps below stay for a robot set up by hand.
+
 The server is reached in two hops:
 
 1. The robot asks Pollen's allocator for a session:
@@ -77,7 +99,9 @@ Optional:
   `Serena`, `Sohee`, `Uncle_Fu` and `Vivian` (from Pollen's conversation app); `Serena` and
   `Vivian` are female voices. Their Italian has not been tried on the robot.
 - `voice.realtime_route.transcript_timeout_s`: how long the robot waits for the server's
-  transcript before it decodes the utterance locally (default 4 s). The server took about 3 s on
+  transcript before it decodes the utterance locally (default 4 s; the `--cloud-voice` profile
+  writes 10 s, to drop to the measured p95 plus about 1 s once the listener lag fix, CV-0, is
+  measured on the robot). The server took about 3 s on
   2026-10-29; a larger value avoids falling back to the local pipeline on a slow transcript.
 
 `privacy.realtime_audio` sends the audio of every addressed utterance to the server, whoever

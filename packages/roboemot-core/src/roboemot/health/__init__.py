@@ -77,6 +77,10 @@ class Link:
     def due(self, now: float) -> bool:
         return now >= self.next_check
 
+    def due_in(self, now: float) -> float:
+        """Seconds until the next check is due (0 when it is due now)."""
+        return max(0.0, self.next_check - now)
+
     def _schedule(self, now: float, ok: bool) -> None:
         p = self.policy
         if self.online:

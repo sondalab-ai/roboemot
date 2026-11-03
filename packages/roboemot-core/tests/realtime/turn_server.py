@@ -9,13 +9,27 @@ Scripts (``scripts``, used in order; the last one repeats):
   with usage ``usage`` (None leaves usage out);
 - ``tool``: ``response.created``, one ``response.function_call_arguments.done`` (``tool_name``,
   ``tool_args``) and ``response.done``;
+- ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
+- ``tool_then_audio``: the ``tool`` call, then the ``reply`` audio (both stop at a cancel);
+- ``tools``: one call per name of ``tool_names`` in one response, then ``response.done``;
+- ``tool_close``: the ``tool`` call, then the socket is closed;
+- ``tool_stall``: the ``tool`` call, then ``response.done`` only after ``stall_s``;
 - ``close_before``: the socket is closed on ``response.create``;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
 - ``error``: an ``error`` instead of ``response.created``;
 - ``updated_then_refused``: ``session.updated``, then the ``error`` that echoes the request;
 - ``unrelated_error``: ``session.updated``, then an ``error`` about another event;
 - ``empty``: ``response.created`` and ``response.done``, no audio;
-- ``silent``: nothing at all.
+- ``silent``: nothing at all;
+- ``pending``: the ``error`` ``function_call_output_pending`` that echoes the request;
+- ``cancel_then_tool``: the ``reply`` audio; at a cancel, the ``tool`` call, then
+  ``response.done`` ``cancelled`` (a call that arrives after the cut).
+
+``strict_calls`` refuses a ``response.create`` with ``function_call_output_pending`` (echoing it,
+no script used) while a call it sent has neither a ``function_call_output`` nor a delete of its
+item, as the platform's server does (robot run 2026-11-02); each connection starts with none.
+``reject_outputs`` answers every ``function_call_output`` with an ``error`` echoing it and
+keeps its call open (a call item the cancel left missing, or a response still active).
 
 ``unrequested`` sends a ``response.created`` nobody asked for right after ``session.updated``.
 A ``response.cancel`` stops the reply in progress with ``response.done`` ``cancelled``.
@@ -35,7 +49,8 @@ audio. ``end_positions`` off leaves ``audio_end_ms`` out (start positions only).
 ``segment_gap_s`` (when set) sends a burst's items one at a time, each with its transcript,
 that long apart: a late second segment. ``ids`` off leaves every ``item_id`` out (a server
 that does not send them); ``ids_per_session`` numbers the items per connection, so an id
-repeats across sessions. ``sent`` records every event the server sent.
+repeats across sessions. ``tool_names`` (when set) names the call of each response in turn
+(the last repeats) instead of ``tool_name``. ``sent`` records every event the server sent.
 """
 
 from __future__ import annotations
@@ -51,6 +66,7 @@ from websockets.asyncio.server import ServerConnection
 
 RATE = 16000
 REPLY = "Ecco la mia risposta per te"
+PENDING = "function_call_output_pending"
 
 
 def pcm(ms: float, level: float = 0.25) -> bytes:
@@ -84,6 +100,10 @@ class TurnServer(FakeServer):
         end_positions: bool = True,
         segment_gap_s: float = 0.0,
         ids_per_session: bool = False,
+        tool_names: list[str] | None = None,
+        stall_s: float = 1.5,
+        strict_calls: bool = False,
+        reject_outputs: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -91,6 +111,11 @@ class TurnServer(FakeServer):
         self.deltas, self.delta_ms, self.gap_s = deltas, delta_ms, gap_s
         self.transcript, self.usage = transcript, usage
         self.tool_name, self.tool_args = tool_name, tool_args
+        self.tool_names, self.stall_s = tool_names, stall_s
+        self.strict_calls = strict_calls
+        self.reject_outputs = reject_outputs
+        self.open_calls: dict[str, str] = {}  # call id -> its item id, on this connection
+        self.pending_refusals = 0  # response.create refused for an open call (strict_calls)
         self.unrequested = unrequested
         self.heard = heard if heard is not None else [["ciao Neve come stai"]]
         self.transcript_delay_s = transcript_delay_s
@@ -130,6 +155,7 @@ class TurnServer(FakeServer):
         self.connections.append(ws)
         self.buffer_ms = self._burst_start = 0.0  # a new session's input buffer
         self.session_bursts = 0
+        self.open_calls = {}  # a new session holds no call
         await self._send(ws, {"type": "session.created", "session": {}})
         async for frame in ws:
             event = json.loads(frame)
@@ -139,6 +165,20 @@ class TurnServer(FakeServer):
                 await self._on_session_update(ws, event)
                 if self.unrequested and len(self.of("session.update")) == 1:
                     await self._send(ws, {"type": "response.created", "response": {"id": "x"}})
+            elif kind == "conversation.item.create":
+                item = event.get("item", {})
+                if item.get("type") == "function_call_output" and self.reject_outputs:
+                    error = {"code": "invalid_value", "event_id": event.get("event_id")}
+                    await self._send(ws, {"type": "error", "error": error})
+                elif item.get("type") == "function_call_output":
+                    self.open_calls.pop(item.get("call_id"), None)
+            elif kind == "conversation.item.delete":
+                gone = event.get("item_id")
+                self.open_calls = {c: i for c, i in self.open_calls.items() if i != gone}
+            elif kind == "response.create" and self.strict_calls and self.open_calls:
+                self.pending_refusals += 1
+                error = {"code": PENDING, "event_id": event.get("event_id")}
+                await self._send(ws, {"type": "error", "error": error})
             elif kind == "response.create":
                 script = self.scripts[min(self.responses, len(self.scripts) - 1)]
                 self.responses += 1
@@ -229,8 +269,9 @@ class TurnServer(FakeServer):
             about = event_id if script == "updated_then_refused" else "ev_someone_else"
             await self._send(ws, {"type": "error", "error": {"code": "x", "event_id": about}})
             return
-        if script == "error":  # refused before it began
-            error = {"code": "refused", "event_id": event_id}  # echoes the request
+        if script in ("error", "pending"):  # refused before it began
+            code = PENDING if script == "pending" else "refused"
+            error = {"code": code, "event_id": event_id}  # echoes the request
             await self._send(ws, {"type": "error", "error": error})
             return
         await self._send(ws, {"type": "response.created", "response": {"id": rid}})
@@ -238,22 +279,30 @@ class TurnServer(FakeServer):
             await self._done(ws, rid, "completed")
             return
         if script == "tool":
-            await self._send(
-                ws,
-                {
-                    "type": "response.function_call_arguments.done",
-                    "response_id": rid,
-                    "item_id": f"fc_{self.responses}",
-                    "call_id": f"call_{self.responses}",
-                    "name": self.tool_name,
-                    "arguments": self.tool_args,
-                },
-            )
+            await self._call(ws, rid)
             await self._done(ws, rid, "completed")
             return
+        if script == "tools":
+            for i, name in enumerate(self.tool_names or [self.tool_name]):
+                await self._call(ws, rid, name, i)
+            await self._done(ws, rid, "completed")
+            return
+        if script == "tool_close":
+            await self._call(ws, rid)
+            await ws.close()
+            return
+        if script == "tool_stall":
+            await self._call(ws, rid)
+            await asyncio.sleep(self.stall_s)
+            await self._done(ws, rid, "cancelled" if cancel.is_set() else "completed")
+            return
+        if script == "tool_then_audio":
+            await self._call(ws, rid)
         delta = base64.b64encode(pcm(self.delta_ms)).decode()
         for i in range(1 if script == "close_mid" else self.deltas):
             if cancel.is_set():
+                if script == "cancel_then_tool":
+                    await self._call(ws, rid)
                 await self._done(ws, rid, "cancelled")
                 return
             await self._send(
@@ -280,10 +329,31 @@ class TurnServer(FakeServer):
         if script == "close_mid":
             await ws.close()
             return
+        if script == "audio_then_tool":
+            await self._call(ws, rid)
         await self._send(
             ws, {"type": "response.output_audio.done", "response_id": rid, "item_id": item}
         )
         await self._done(ws, rid, "cancelled" if cancel.is_set() else "completed")
+
+    async def _call(
+        self, ws: ServerConnection, rid: str, name: str | None = None, index: int = 0
+    ) -> None:
+        if name is None and self.tool_names:
+            name = self.tool_names[min(self.responses - 1, len(self.tool_names) - 1)]
+        suffix = f"_{index}" if index else ""
+        self.open_calls[f"call_{self.responses}{suffix}"] = f"fc_{self.responses}{suffix}"
+        await self._send(
+            ws,
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": rid,
+                "item_id": f"fc_{self.responses}{suffix}",
+                "call_id": f"call_{self.responses}{suffix}",
+                "name": name or self.tool_name,
+                "arguments": self.tool_args,
+            },
+        )
 
     async def _done(self, ws: ServerConnection, rid: str, status: str) -> None:
         response: dict[str, Any] = {"id": rid, "status": status}

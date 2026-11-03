@@ -115,10 +115,12 @@ def scan_context(
     hour: float,
     effects: Any = None,
     circadian: CircadianModel | None = None,
+    alone: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
-    quiet hours (SPEC 7A) from the local ``hour``, the persona's energy effects (``effects``,
-    computed from the persona when the caller has not cached them)."""
+    quiet hours (SPEC 7A) from the local ``hour``, whether the robot is alone (SPEC 5A,
+    ``AloneWatch``), the persona's energy effects (``effects``, computed from the persona when
+    the caller has not cached them)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     return ScanContext(
@@ -128,6 +130,7 @@ def scan_context(
         object_max_hold_s=cfg.attention.object_max_hold_s,
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
+        alone=alone,
         effects=effects if effects is not None else persona_effects(cfg.persona),
     )
 
@@ -159,6 +162,29 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
         scan.reset()
         loop.clear(SCAN_SOURCE)
         return False
+
+
+def in_conversation(
+    phase: ConversationPhase | None, conversation: Any = None, *, hearing: bool = True
+) -> bool:
+    """Whether someone is talking with the robot: the robot thinking about an answer, a
+    conversation session open, or (with ``hearing``) an utterance being heard (the VAD, which a
+    television triggers too). The robot speaking does not count on its own: a self-soothing sound
+    is speech too and plays exactly when nobody is around."""
+    if conversation is not None and conversation.in_session():
+        return True
+    if phase is None:
+        return False
+    name, listening = phase.current()
+    return (hearing and listening) or name == THINKING
+
+
+def company(
+    now: float, selector: AttentionSelector, phase: ConversationPhase | None, conversation: Any
+) -> bool:
+    """The alone watch's ``busy`` flag (SPEC 5A, Alone stillness): attention on a person, a valid
+    speaker hint, or someone talking with the robot (``in_conversation``, the VAD included)."""
+    return selector.engaged or selector.speaker_active(now) or in_conversation(phase, conversation)
 
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
