@@ -65,9 +65,10 @@ REASONS: dict[str, tuple[str, ...]] = {
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw
     "alone": ("start", "face", "sound"),  # the robot holds still, or what ended it (SPEC 5A)
     "nap": ("start", "face", "speech"),  # a day nap began, or what woke it (SPEC 7A)
-    "turn": (  # a turn ended (its outcome), or the model's skip was refused
+    "turn": (  # a turn ended (its outcome), the model's skip was refused or its tone was invalid
         "ok",
         "skip_refused",
+        "tone_invalid",
         "not_heard",
         "offline",
         "no_voice",

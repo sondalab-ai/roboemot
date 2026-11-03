@@ -279,6 +279,9 @@ class RealtimeRoute:
         self._retry_thread: threading.Thread | None = None  # the last worker (tests join it)
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.base_instructions: Callable[[], str] = lambda: ""
+        # the function tools the current session was last given (session.update), by name: the
+        # instructions carry a tool's rule only while the session holds the tool (SPEC 8)
+        self.tools_offered: frozenset[str] = frozenset()
         self._counts: collections.Counter[str] = collections.Counter()
         self._statuses: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
@@ -576,6 +579,7 @@ class RealtimeRoute:
                     return False
                 self._connecting, self._connecting_token = client, token
                 self.state, self.reason = "connecting", None
+            self.tools_offered = frozenset()  # a new session holds no tool
             update = self.session_update(cfg, self.base_instructions())
             try:
                 ok = client.connect(update)
@@ -673,7 +677,10 @@ class RealtimeRoute:
         return client
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
-        """``session.update`` for this route (:func:`session_update`)."""
+        """``session.update`` for this route (:func:`session_update`); with ``tools`` it records
+        their names (``tools_offered``), None leaves the session's tools as they are."""
+        if tools is not None:
+            self.tools_offered = frozenset(t["name"] for t in tools)
         return session_update(cfg, instructions, tools)
 
     def _set_state(self, state: str, reason: str | None) -> None:
