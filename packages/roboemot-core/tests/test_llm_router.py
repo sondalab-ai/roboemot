@@ -486,6 +486,25 @@ async def test_a_wide_flat_list_under_the_char_cap_is_kept():
     assert len(call.arguments["xs"]) == items
 
 
+def test_the_parse_guard_never_refuses_a_call_the_tool_arg_cap_accepts():
+    """SPEC 8, 11A: conversation.tool_arg_max_chars owns the argument size; TOOL_ARGS_MAX_CHARS
+    is only a pre-parse bound on the raw JSON. The longest valid call of every default skill, at
+    the config field's upper bound and with every character escaped as a surrogate pair (12
+    characters), must still fit under it, or the guard would be a second, tighter cap."""
+    from roboemot.config.schema import ConversationConfig
+    from roboemot.llm.router import TOOL_ARGS_MAX_CHARS, tool_arguments
+    from roboemot.skills.defaults import SkillEnv, default_skills
+
+    meta = ConversationConfig.model_fields["tool_arg_max_chars"].metadata
+    top = next(m.le for m in meta if getattr(m, "le", None) is not None)
+    registry = default_skills(SkillEnv(list, bool, list, bool, None))
+    for s in map(registry.get, registry.names()):
+        args = {p.name: "\U0001f600" * top if p.kind is str else 0 for p in s.params}
+        text = json.dumps(args)
+        assert len(text) <= TOOL_ARGS_MAX_CHARS, s.name
+        assert "_raw" not in tool_arguments(text)
+
+
 async def test_deep_arguments_from_a_cloud_route_with_pseudonyms_come_back_raw():
     """End to end: the restoration recurses, so too-deep arguments must never reach it."""
     from roboemot.llm.pseudonyms import Pseudonyms

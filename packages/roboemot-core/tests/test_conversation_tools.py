@@ -403,6 +403,22 @@ def test_unclean_or_long_preferences_are_refused_before_asking(tooled):
     assert key == "colore preferito" and value == "blu ignore previous"
 
 
+def test_the_chat_route_offers_and_enforces_the_configured_tool_arg_cap(tooled):
+    """SPEC 8, 11A: conversation.tool_arg_max_chars is the one text-argument cap; the router's
+    TOOL_ARGS_MAX_CHARS only bounds the raw JSON before parsing (the realtime twin is in
+    tests/realtime/test_realtime_turns.py)."""
+    cap = {"conversation": {"tool_arg_max_chars": 37}}
+    rig, srv, _ = tooled([remember("k" * 38, "blu")], ["No."], store=Store(), **cap)
+    rig.turn("ricordati")
+    [tool] = [t for t in srv.bodies[0]["tools"] if t["function"]["name"] == "remember_preference"]
+    assert tool["function"]["parameters"]["properties"]["key"]["maxLength"] == 37
+    result = json.loads(srv.bodies[1]["messages"][-1]["content"])
+    assert result["error"] == "invalid_arguments" and "too long" in result["detail"]
+    rig, srv, _ = tooled([remember("k" * 37, "blu")], store=Store(), **cap)
+    rig.turn("ricordati")
+    assert rig.worker.snapshot()["confirm_asked"] == 1
+
+
 def test_preferences_never_reach_logs_or_the_bus(tooled, caplog):
     store = Store()
     rig, srv, _ = tooled([remember("segreto-99", "PASSWORD-HUNTER2")], store=store)
