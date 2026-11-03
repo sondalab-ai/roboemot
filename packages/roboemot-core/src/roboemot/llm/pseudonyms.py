@@ -592,6 +592,17 @@ class Pseudonyms:
         with self._lock:
             return bool(self._alias)
 
+    def snapshot(self, structural_keys: Iterable[str] = ()) -> Pseudonyms:
+        """A frozen copy of the map for one request, with ``structural_keys`` for its leak
+        check (see :meth:`leaks`). It is never synced: a sync of this map does not reach it."""
+        out = Pseudonyms()
+        with self._lock:
+            out._alias, out._real = dict(self._alias), dict(self._real)
+            out._variants, out._pattern = dict(self._variants), self._pattern
+            out._used, out.refused = self._used, self.refused
+        out._structural = frozenset(structural_keys)
+        return out
+
     def sync(
         self,
         names: Iterable[str],
@@ -882,25 +893,45 @@ class Restorer:
 
 
 class NameSource:
-    """The pseudonym map for callers of the router outside the conversation (persona traits,
-    route checks). They run strict: they send no tool history, so no structural keys are
-    declared and a name used as a JSON key blocks the request (fail closed). ``names`` lists
-    the registry's display names; ``for_config`` builds a map from them and returns it, or None
-    when ``privacy.pseudonyms_to_cloud`` is off. Each call gets its own map (callers run on
-    different threads and need no stable aliases). An error from ``names`` propagates, so
-    nothing is sent without the names it should replace."""
+    """The one pseudonym map of the process (SPEC 8, Pseudonyms): the conversation, the persona
+    traits rating and the route checks all take their aliases from it, so a registry name has
+    the same alias everywhere. ``names`` lists the registry's display names. The map lives in
+    RAM only (an app restart hands out new aliases) and follows the registry: a deleted or
+    renamed name is dropped at the next sync, and a name registered again gets a new label.
+
+    ``for_config`` reads the names and syncs the map under one lock, then returns a frozen
+    :meth:`Pseudonyms.snapshot` for that request (the callers run on different threads and
+    loops; a later sync never changes a request in flight). The snapshot carries the caller's
+    own structural keys: none for the traits rating and the route checks (they send no tool
+    history, so a name used as a JSON key blocks the request), the skills' keys for the
+    conversation. An error from ``names`` propagates, so nothing is sent without the names it
+    should replace."""
 
     def __init__(self, names: Callable[[], Iterable[str]]) -> None:
         self._names = names
+        self._lock = threading.Lock()
+        self.pseudonyms = Pseudonyms()  # the shared map; only ``for_config`` syncs it
 
-    def for_config(self, cfg: RoboEmotConfig) -> Pseudonyms | None:
-        """A synced map for ``cfg``, in the configured conversation language."""
+    def __repr__(self) -> str:
+        return "NameSource(<map not shown>)"
+
+    def for_config(
+        self,
+        cfg: RoboEmotConfig,
+        language: str | None = None,
+        structural_keys: Iterable[str] = (),
+    ) -> Pseudonyms | None:
+        """A snapshot of the map synced with the registry as it is now, or None when
+        ``privacy.pseudonyms_to_cloud`` is off. A new name takes the template of ``language``
+        (default: the conversation language); a name with an alias keeps it."""
         if not cfg.privacy.pseudonyms_to_cloud:
             return None
-        language = cfg.conversation.language
-        mapping = Pseudonyms()
-        mapping.sync(self._names(), cfg.privacy.pseudonym_templates, language, language)
-        return mapping
+        default = cfg.conversation.language
+        with self._lock:  # read and sync together: a stale list must not drop a newer name
+            self.pseudonyms.sync(
+                self._names(), cfg.privacy.pseudonym_templates, language or default, default
+            )
+            return self.pseudonyms.snapshot(structural_keys)
 
     def refused_names(self, cfg: RoboEmotConfig) -> list[str]:
         """The registry names that cannot be aliased under ``cfg``'s templates, sorted, for the
