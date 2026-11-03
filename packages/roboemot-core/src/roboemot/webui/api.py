@@ -43,7 +43,9 @@ from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
+from .descriptions import localize
 from .guard import same_origin
+from .robot_section import PATH_ROOT
 from .routes import RouteBusy
 from .secrets_admin import SecretInUse, secret_name, secret_value
 from .settings import SettingNotAllowed
@@ -56,9 +58,19 @@ LIVE_VIEWERS = "/api/live/viewers"  # polled by every page
 # Polls that never extend the idle session on their own (SPEC 11A, 12): an unattended Live tab
 # still times out after ``webui.session_ttl_s``. The page marks a poll with ``ACTIVE_HEADER``
 # when it saw a click, key or touch since its previous poll; only that poll counts as activity.
+EMOTIONS_STATE = "/api/emotions/state"
 PASSIVE_POLLS = frozenset(
-    {"/api/live/state", "/api/live/audio", "/api/live/frame.jpg", LIVE_VIEWERS}
+    {"/api/live/state", "/api/live/audio", "/api/live/frame.jpg", LIVE_VIEWERS, EMOTIONS_STATE}
 )
+# A refused Emotions control (``runtime.emotions``): its status; the code is the error name.
+EMOTIONS_STATUS = {
+    "emotions_disabled": HTTPStatus.NOT_FOUND,
+    "robot_asleep": HTTPStatus.CONFLICT,
+    "motors_off": HTTPStatus.CONFLICT,
+    "external_control": HTTPStatus.CONFLICT,
+    "unknown_expression": HTTPStatus.UNPROCESSABLE_ENTITY,
+    "unknown_rule": HTTPStatus.UNPROCESSABLE_ENTITY,
+}
 ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
@@ -200,6 +212,17 @@ class LivePort(Protocol):
         ...
 
 
+class EmotionsPort(Protocol):
+    """``roboemot.runtime.emotions.EmotionsState`` (SPEC 11A, 12): ``state()`` is the Emotions
+    tab's payload, or None while ``webui.emotions.enabled`` is off (codes and numbers, no person);
+    ``play`` and ``inject`` are its test controls and raise an error with a ``code`` when
+    refused."""
+
+    def state(self) -> dict[str, Any] | None: ...
+    def play(self, label: str) -> bool: ...
+    def inject(self, index: int) -> bool: ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -299,8 +322,10 @@ class WebApi:
         pseudonyms: PseudonymsPort | None = None,
         secrets: SecretsPort | None = None,
         live: LivePort | None = None,
+        emotions: EmotionsPort | None = None,
     ) -> None:
         self.live = live
+        self.emotions = emotions
         self.service = service
         self.settings = settings
         self.secrets = secrets
@@ -412,6 +437,9 @@ class WebApi:
             ("GET", "/api/live/frame.jpg"): self._live_frame,
             ("GET", LIVE_VIEWERS): self._live_viewers,
             ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
+            ("GET", EMOTIONS_STATE): self._emotions_state,
+            ("POST", "/api/emotions/play"): self._emotions_play,
+            ("POST", "/api/emotions/inject"): self._emotions_inject,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
@@ -493,8 +521,12 @@ class WebApi:
 
     # ------------------------------------------------------------------ open routes
 
+    def _language(self) -> str:
+        """The page language (``conversation.language``): the strings and the descriptions."""
+        return language_for(self.config.conversation.language)
+
     def _strings(self, req: Request) -> Response:
-        lang = language_for(self.config.conversation.language)
+        lang = self._language()
         strings = dict(STRINGS[lang])
         cloud = (
             "consent_cloud_pseudonyms"
@@ -779,6 +811,55 @@ class WebApi:
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
         return Response(HTTPStatus.OK, {"ok": True})
 
+    # ------------------------------------------------------------------ emotions
+
+    def _emotions_source(self) -> EmotionsPort:
+        if self.emotions is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "emotions_unavailable")
+        return self.emotions
+
+    def _emotions_state(self, req: Request) -> Response:
+        """The Emotions tab's state: ``emotions_disabled`` (404) while off,
+        ``emotions_unavailable`` (503) when the host built no source. Read-only."""
+        data = self._emotions_source().state()
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "emotions_disabled")
+        return Response(HTTPStatus.OK, data)
+
+    def _emotions_play(self, req: Request) -> Response:
+        """Play an expression or gesture through the ``play`` skill's path (SPEC 7, 11). A write:
+        PIN session and CSRF were checked, and the body re-enters the PIN."""
+        source = self._emotions_source()
+        body = self._json_body(req)
+        v.only_keys(body, {"label", "pin"})
+        label = body.get("label")
+        if not isinstance(label, str):  # any name the robot lacks is unknown_expression
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"queued": self._emotions_call(source.play, label)})
+
+    def _emotions_inject(self, req: Request) -> Response:
+        """Fire one appraisal rule as if its event happened (SPEC 7). A write, as above."""
+        source = self._emotions_source()
+        body = self._json_body(req)
+        v.only_keys(body, {"rule", "pin"})
+        rule = body.get("rule")
+        if not isinstance(rule, int) or isinstance(rule, bool):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"fired": self._emotions_call(source.inject, rule)})
+
+    @staticmethod
+    def _emotions_call(fn: Callable[[Any], bool], arg: Any) -> bool:
+        """Run a control; a refusal with a known ``code`` becomes that error."""
+        try:
+            return bool(fn(arg))
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code in EMOTIONS_STATUS:
+                raise ApiError(EMOTIONS_STATUS[code], code) from exc
+            raise
+
     # ------------------------------------------------------------------ settings
 
     def _settings_port(self) -> SettingsPort:
@@ -793,6 +874,12 @@ class WebApi:
         every write re-enters the PIN."""
         port = self._settings_port()
         fields, robot = port.robot_split(port.fields())
+        lang = self._language()
+        if robot is not None:
+            prefix = f"{PATH_ROOT}.{robot['id']}."
+            own = frozenset(f["path"] for f in robot["fields"] if f["path"].startswith(prefix))
+            robot = {**robot, "fields": localize(robot["fields"], lang, own)}
+        fields = localize(fields, lang)
         return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
@@ -803,7 +890,7 @@ class WebApi:
         body = self._json_body(req)
         v.only_keys(body, {"pin"})
         self._check_pin(req, body.get("pin"))
-        return Response(HTTPStatus.OK, {"fields": port.reveal()})
+        return Response(HTTPStatus.OK, {"fields": localize(port.reveal(), self._language())})
 
     def _settings_change(self, req: Request) -> Response:
         """Change one catalogue field (SPEC 11A). The body holds exactly ``path``, ``value``

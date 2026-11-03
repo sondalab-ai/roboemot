@@ -124,6 +124,8 @@ def test_check_runs_in_the_background_and_the_list_shows_the_report(served, tmp_
     saved = (tmp_path / "route_checks.json").read_text()
     assert SECRET_KEY not in saved and "lan" in saved
     assert SECRET_KEY not in json.dumps(entry)
+    # the page words each reason from its code (SPEC 11A, 12): it reaches the list
+    assert all(c["code"] and isinstance(c["params"], dict) for c in report["checks"])
 
 
 def test_check_slower_than_the_request_deadline_still_reports(tmp_path):
@@ -243,6 +245,7 @@ def test_report_survives_a_restart_and_goes_stale_when_the_route_changes(tmp_pat
 
     reborn = RouteChecker(lambda: cfg, store)
     assert reborn.list_routes()[0]["last_check"]["ok"] is True
+    assert all(c["code"] for c in reborn.list_routes()[0]["last_check"]["checks"])
     for change in ({"model": "other"}, {"base_url": "https://lan.local:9000/v1"}):
         moved = make_cfg(route=ROUTE | change)
         reader = RouteChecker(lambda cfg=moved: cfg, store)

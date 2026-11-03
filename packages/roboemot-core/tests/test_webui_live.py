@@ -32,10 +32,10 @@ def pipeline():
         azimuth_rad=0.31, elevation_rad=0.0, distance_m=1.4, uncertainty_rad=0.1,
         confidence=0.9, first_seen=0.0, last_seen=NOW, embedding=np.full(64, 0.5),
     )  # fmt: skip
+    engine = SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5), history_cap=None)
+    engine.keep_history = lambda cap: setattr(engine, "history_cap", cap)
     return SimpleNamespace(
-        runner=SimpleNamespace(
-            engine=SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5))
-        ),
+        runner=SimpleNamespace(engine=engine),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
         network=SimpleNamespace(online=True),
@@ -234,15 +234,22 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         webui=None,
         bus=None,
     )
+    p = pipeline()
+    before = len(stack._listeners)
     with ExitStack() as cleanup:
-        server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
+        server = start_webui(host, stack, stack.effective(), manifest, cleanup, p)
         assert server is not None
         live = server._httpd.api.live
+        assert server._httpd.api.emotions is not None  # the Emotions tab is wired too
+        assert p.runner.engine.history_cap == stack.effective().webui.emotions.events
         assert live.state() is None
         stack.set("webui.live.enabled", True, source="test", admin=True)
         assert live.state() is not None
         stack.set("webui.live.enabled", False, source="test", admin=True)
         assert live.state() is None
+    # the page stopped: no listener is left and the engine keeps no history
+    assert len(stack._listeners) == before
+    assert p.runner.engine.history_cap == 0
 
 
 def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
@@ -259,14 +266,16 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
         perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
         name_source=None, route_check_router=lambda: None, circadian=None,
         phase=ConversationPhase(), activity=None, realtime_route=None, voice_listener=None,
-        webui=None,
+        webui=None, bus=None,  # gets as far as make_server, which fails
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
+    p = pipeline()
     with ExitStack() as cleanup:
         assert (
-            webui_module.start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
-            is None
+            webui_module.start_webui(host, stack, stack.effective(), manifest, cleanup, p) is None
         )
+        assert len(stack._listeners) == before  # undone at once, not only at the cleanup
+        assert p.runner.engine.history_cap == 0
     assert len(stack._listeners) == before
 
 

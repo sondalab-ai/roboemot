@@ -65,7 +65,7 @@ function liveNumber(value) {
 function liveMoodCard(d) {
   const m = d.mood;
   const parts = [
-    el("p", {}, badge(m.label, "info")),
+    el("p", {}, badge(word("affect_label_", m.label), "info")),
     liveRow(t("live_valence"), liveNumber(m.valence)),
     liveRow(t("live_arousal"), liveNumber(m.arousal)),
     liveRow(t("live_intensity"), liveNumber(m.intensity)),
@@ -121,7 +121,7 @@ function liveAttentionCard(d) {
 function liveReflexesCard(d) {
   const last = d.reflexes.last;
   return card(t("tab_live"), t("live_reflexes"), el("p", {},
-    last ? t("live_reflex_last", { name: last.name, n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
+    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
 }
 
 function liveMotionCard(d) {
@@ -157,12 +157,13 @@ function liveActivityBox() {
   return document.getElementById("live-activity") || el("div");
 }
 
-// A field as the sentence shows it: "-" for none, yes / no, a number with at most one decimal.
+// A field as the sentence shows it: "-" for none, yes / no, a number with at most one decimal,
+// a code worded (`live_code_<code>`, else as it is).
 function liveValue(v) {
   if (v === null || v === undefined) return t("live_none");
   if (typeof v === "boolean") return t(v ? "live_yes" : "live_no");
   if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(1);
-  return String(v);
+  return word("live_code_", v);
 }
 
 function liveHas(key) {
@@ -207,7 +208,7 @@ function liveEventText(ev) {
 }
 
 function liveEventRow(ev) {
-  const stamp = new Date(ev.t * 1000).toLocaleTimeString();
+  const stamp = when(ev.t * 1000, true);
   const count = ev.count > 1 ? [" ", badge(t("live_activity_count", { n: ev.count }), "info")] : [];
   return el("li", { class: "live-event", "data-kind": ev.kind, "data-reason": ev.reason },
     el("span", { class: "sl-eyebrow" }, stamp), " ", liveEventText(ev), count);
@@ -494,7 +495,7 @@ function liveAudioReset(box) {
 
 function liveTurnRow(turn) {
   const who = turn.who === "robot" ? "robot" : "user";
-  const stamp = new Date(turn.t * 1000).toLocaleTimeString();
+  const stamp = when(turn.t * 1000, true);
   const label = stamp + " " + t("live_transcript_" + who);
   const parts = [el("span", { class: "sl-eyebrow" }, label), " ", turn.text];
   if (turn.interrupted) parts.push(" ", badge(t("live_transcript_cut"), "warning"));

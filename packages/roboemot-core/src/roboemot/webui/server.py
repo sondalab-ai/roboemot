@@ -29,6 +29,7 @@ from .. import shutdown
 from .api import (
     CataloguePort,
     DebugReport,
+    EmotionsPort,
     EnrollmentPort,
     LivePort,
     PseudonymsPort,
@@ -51,6 +52,7 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
     "/static/live.js": ("live.js", "text/javascript; charset=utf-8"),
+    "/static/emotions.js": ("emotions.js", "text/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
     "/static/fx.js": ("fx.js", "text/javascript; charset=utf-8"),
@@ -409,6 +411,7 @@ def make_server(
     pseudonyms: PseudonymsPort | None = None,
     secrets: SecretsPort | None = None,
     live: LivePort | None = None,
+    emotions: EmotionsPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -433,6 +436,7 @@ def make_server(
         pseudonyms=pseudonyms,
         secrets=secrets,
         live=live,
+        emotions=emotions,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)

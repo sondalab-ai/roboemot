@@ -85,6 +85,7 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
         "/static/theme.js": None,
         "/static/settings.js": None,
         "/static/live.js": None,
+        "/static/emotions.js": None,
         "/static/app.js": None,
         "/static/fx.js": "module",
     }
@@ -178,7 +179,16 @@ def test_tabs_are_the_strings_that_exist():
     js = (STATIC / "app.js").read_text()
     block = js[js.index("const TABS = {") :]
     names = re.findall(r"^\s+([a-z]+): [a-zA-Z]+View,", block, re.M)
-    assert names == ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]
+    assert names == [
+        "enroll",
+        "registry",
+        "catalogue",
+        "routes",
+        "settings",
+        "live",
+        "emotions",
+        "debug",
+    ]
     for name in names:
         assert EN["tab_" + name] and IT["tab_" + name]
 
