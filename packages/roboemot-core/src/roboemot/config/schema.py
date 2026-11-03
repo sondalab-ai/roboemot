@@ -653,9 +653,10 @@ class CircadianConfig(Strict):
         "reflexes.enabled and reflexes.audio.enabled); never a night rest",
     )
     nap_light_grace_s: float = param(
-        120.0,
+        300.0,
         "A light rise confirmed this soon after a day nap starts does not wake it: the rest "
-        "posture moves the camera, and the new view can read brighter (light.confirm_s later)",
+        "posture moves the camera, and the new view can read brighter (light.confirm_s later, "
+        "or after light.noise_smooth_s when its image noise differs)",
         unit="s",
         ge=0,
         le=1800,

@@ -382,7 +382,7 @@ def woke(x, reason: str) -> None:
 def test_new_wake_switches_default_on():
     c = config()
     assert c.circadian.nap_wake_on_light and c.circadian.nap_wake_on_motion
-    assert c.circadian.nap_wake_on_loud and c.circadian.nap_light_grace_s == 120.0
+    assert c.circadian.nap_wake_on_loud and c.circadian.nap_light_grace_s == 300.0
 
 
 def test_light_rising_from_dim_to_bright_wakes_the_nap():

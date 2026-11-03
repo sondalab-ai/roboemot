@@ -210,6 +210,7 @@ class CircadianRunner:
         self._on_stimulus("motion")
 
     def _on_stimulus(self, reason: str) -> None:
+        """A stimulus from another thread: wake a day nap and publish its decision event."""
         with self._lock:
             woke = self._stimulus(self.clock.monotonic(), reason)
         if woke:
