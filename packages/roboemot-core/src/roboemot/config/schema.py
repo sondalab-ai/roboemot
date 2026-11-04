@@ -21,6 +21,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..timezones import zone
+
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 ROUTE_NAME_MAX_CHARS = 64
 ROUTE_SCHEMES = ("http", "https")  # the OpenAI-compatible client speaks only these (SPEC 8)
@@ -633,6 +635,11 @@ class CircadianConfig(Strict):
     )
     location: dict[str, float] | None = param(None, "Optional {lat, lon} for clock-only mode")
     quiet_hours: tuple[str, str] = param(("22:30", "07:00"), "Window in which resting is forced")
+    timezone: str | None = param(
+        None,
+        "IANA timezone of the robot's wall clock for quiet hours and the rhythm (Europe/Rome); "
+        "null: the system's local time. Leaves the system clock alone",
+    )
     presence_keeps_awake: bool = param(True, "People present and active prevent resting")
     initial_sleep_pressure: float = param(0.3, "Process S value at start-up", ge=0, le=1)
     wake_hold_s: float = param(
@@ -769,6 +776,11 @@ class CircadianConfig(Strict):
             h, _, m = t.partition(":")
             if not (h.isdigit() and m.isdigit() and int(h) < 24 and int(m) < 60):
                 raise ValueError(f"circadian.quiet_hours: bad time {t!r}, use HH:MM")
+        if self.timezone is not None:
+            try:
+                zone(self.timezone)
+            except ValueError as e:
+                raise ValueError(f"circadian.timezone: {e}") from None
         return self
 
 

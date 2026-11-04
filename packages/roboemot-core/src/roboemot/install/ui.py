@@ -35,11 +35,11 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import TextIO
 
 try:
-    from sondalab_palette import LAYOUT, SPINNER
+    from sondalab_palette import LAYOUT, ROBUSTNESS, SPINNER
     from sondalab_palette import term as _term
 except ImportError:  # pragma: no cover - the robot, which never runs the installer
     _term = None
-    LAYOUT = SPINNER = {}
+    LAYOUT = ROBUSTNESS = SPINNER = {}
 
 NAME = "roboemot"
 TAGLINE = "Social and emotional behaviour for robots."
@@ -451,6 +451,28 @@ class Ui:
             raise self._with_fix(ended, flag)
         return line.strip() or default
 
+    def ask_completed(
+        self, question: str, default: str, choices: Sequence[str], *, flag: str
+    ) -> str:
+        """A free-text answer that must be one of ``choices`` (case ignored; the listed spelling
+        is returned). Enter takes ``default``. On a terminal, Tab completes from ``choices``
+        (``readline``). An unknown answer asks again, three times in all; then, or at end of
+        input, :class:`NoValidAnswer`. Without a terminal it raises :class:`MissingFlag`."""
+        known = {c.lower(): c for c in choices}
+        tries = ROBUSTNESS.get("promptRetries", 3)
+        with _completion(choices, self.read is None and self.interactive) as read:
+            saved, self.read = self.read, read or self.read
+            try:
+                for _ in range(tries):
+                    answer = known.get(self.ask(question, default, flag=flag).lower())
+                    if answer is not None:
+                        return answer
+                    self.warn("Not a known name", "Tab lists the names that start as typed")
+            finally:
+                self.read = saved
+        error = _term.NoValidAnswer(question, f"no recognised answer in {tries} tries")
+        raise self._with_fix(error, flag)
+
     def _with_fix(self, error: Exception, flag: str) -> Exception:
         """``error`` (a NoValidAnswer) with the ``Try:`` line that answers without a prompt."""
         error.fix = f"{self.command} {flag}"
@@ -491,6 +513,37 @@ class Ui:
             )
         except _term.NoValidAnswer as e:
             raise self._with_fix(e, flag) from None
+
+
+@contextmanager
+def _completion(choices: Sequence[str], enabled: bool) -> Iterator[Callable[[], str] | None]:
+    """Tab completion over ``choices`` for the lines read inside the block: yields a reader
+    (``input`` through ``readline``, prompt already on stderr) or None when not ``enabled`` or
+    ``readline`` is missing. The previous completer and delimiters come back on exit."""
+    try:
+        import readline
+    except ImportError:  # pragma: no cover - Windows without pyreadline
+        readline = None
+    if not enabled or readline is None:
+        yield None
+        return
+    ordered = sorted(choices)
+
+    def complete(text: str, state: int) -> str | None:
+        low = text.lower()
+        hits = [c for c in ordered if c.lower().startswith(low)]
+        return hits[state] if state < len(hits) else None
+
+    old_completer, old_delims = readline.get_completer(), readline.get_completer_delims()
+    readline.set_completer(complete)
+    readline.set_completer_delims(" \t\n")
+    libedit = "libedit" in (readline.__doc__ or "")
+    readline.parse_and_bind("bind ^I rl_complete" if libedit else "tab: complete")
+    try:
+        yield lambda: input() + "\n"
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
 
 
 class _Spinner:

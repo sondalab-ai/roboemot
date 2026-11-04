@@ -15,7 +15,9 @@ only reports it and skips the dependency check. It also creates the private app 
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. It sets its own keys in the app config (``app.yaml`` in the data folder, kept across
 reinstalls): ``voice.enabled: true`` unless ``--no-voice`` (which also makes Piper and the models
-default to off) and the dev content with ``--dev``; every other key stays. Unless declined
+default to off), ``circadian.timezone`` (``--timezone``, else asked with Tab completion; the PC's
+zone is the default and what ``-y`` takes: quiet hours follow it, the robot's system clock stays
+as it is) and the dev content with ``--dev``; every other key stays. Unless declined
 (`--no-piper`) it also creates a Piper virtualenv in the data folder (`piper-tts` is GPL-3.0 and
 runs as its own process, SPEC 8), recorded for uninstall.
 The platform's ``extras`` (``voice`` for a robot that listens, so vosk; ``realtime``, websockets,
@@ -70,7 +72,7 @@ from typing import Protocol, runtime_checkable
 
 import yaml
 
-from .. import paths
+from .. import paths, timezones
 from ..secret_store import NAME as SECRET_NAME
 from .build import (
     build_wheels,
@@ -168,13 +170,15 @@ INSTALL_STEPS = 6
 DEV_CONFIG = "configs/dev-unmeasured.yaml"
 APP_CONFIG_SCHEMA = 1
 APP_CONFIG_HEADER = (
-    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled, in dev\n"
-    "# mode safety.allow_unmeasured_dynamics and, with --cloud-voice, the cloud-voice route and\n"
-    "# settings; every other key is kept on reinstall (comments are not). Uninstall removes this\n"
-    "# whole file, settings saved from the web UI included.\n"
+    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled,\n"
+    "# circadian.timezone, in dev mode safety.allow_unmeasured_dynamics and, with --cloud-voice,\n"
+    "# the cloud-voice route and settings; every other key is kept on reinstall (comments are\n"
+    "# not). Uninstall removes this whole file, settings saved from the web UI included.\n"
 )
 ROUTES_KEY = "llm_routes"  # a list keyed by route name: merged per entry, never whole
 CLOUD_VOICE_FLAG = "--cloud-voice"
+TIMEZONE_FLAG = "--timezone"
+TIMEZONE_KEY = ("circadian", "timezone")
 UNINSTALL_STEPS = 6
 SHARED_NEEDS_YES = "Shared packages must change, and only --yes allows it"
 
@@ -273,6 +277,7 @@ class Options:
     debug: bool = False
     version: bool = False
     cloud_voice: bool | None = None  # the cloud-voice profile; None: not answered yet
+    timezone: str | None = None  # circadian.timezone (IANA name); None: not answered yet
 
 
 # ---------------------------------------------------------------- app config
@@ -307,17 +312,20 @@ def leaves(tree: dict, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], ob
 
 
 def owned_app_config(
-    root: Path, dev: bool, voice: bool
+    root: Path, dev: bool, voice: bool, timezone: str | None = None
 ) -> tuple[dict[tuple[str, ...], object], set[tuple[str, ...]]]:
     """The installer's keys in the app config: (the values asked for this run, every key it
-    owns). It owns the voice switch and the dev content's keys; a key it owns but was not asked
-    for this run (``--no-voice``, ``--no-dev``) is removed from the file."""
+    owns). It owns the voice switch, ``circadian.timezone`` and the dev content's keys; a key it
+    owns but was not asked for this run (``--no-voice``, ``--no-dev``, no timezone) is removed
+    from the file."""
     dev_leaves = leaves(dev_config(root))
     if dev and not dev_leaves:
         raise WizardError("Dev mode needs its config", f"{DEV_CONFIG} is missing in {root}")
     voice_leaves = leaves(app_config_overrides(True))
     wanted = {**(dev_leaves if dev else {}), **(voice_leaves if voice else {})}
-    return wanted, set(dev_leaves) | set(voice_leaves)
+    if timezone:
+        wanted[TIMEZONE_KEY] = timezone
+    return wanted, set(dev_leaves) | set(voice_leaves) | {TIMEZONE_KEY}
 
 
 def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
@@ -356,7 +364,7 @@ def key_text(path: tuple[str, ...], value: object) -> str:
     """One app config key with its value: ``a.b=value`` (a route entry: its name only)."""
     if path[0] == ROUTES_KEY:
         return key_name(path)
-    return f"{key_name(path)}={str(value).lower()}"
+    return f"{key_name(path)}={value if isinstance(value, str) else str(value).lower()}"
 
 
 def config_value(config: dict, path: tuple[str, ...]) -> object:
@@ -1827,6 +1835,8 @@ def preflight(opts: Options, ui: Ui) -> None:
     for flag, value in answered:
         given = value is not None or opts.yes or ui.assume_yes
         ui.require(flag, given, f"Missing {flag} or --no-{flag[2:]}")
+    pc_zone = (opts.yes or ui.assume_yes) and timezones.local_name() is not None
+    ui.require(TIMEZONE_FLAG, opts.timezone is not None or pc_zone, "Missing --timezone NAME")
 
 
 def check_shared_packages(
@@ -1867,7 +1877,12 @@ def _rerun(opts: Options) -> str:
     """The installer command line for ``opts`` without ``--dry-run``: every flag that was set,
     so the dry run's ``Next:`` line runs the same choices for real."""
     args = []
-    for flag, value in (("--host", opts.host), ("--user", opts.user), ("--robot", opts.robot)):
+    for flag, value in (
+        ("--host", opts.host),
+        ("--user", opts.user),
+        ("--robot", opts.robot),
+        (TIMEZONE_FLAG, opts.timezone),
+    ):
         if value:
             args += [flag, value]
     for flag, value in (
@@ -2054,6 +2069,33 @@ def choose_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
         ui.ok("Chose cloud voice", f"{route.name} route to {route.provider}; no Piper")
 
 
+def choose_timezone(ui: Ui, opts: Options) -> None:
+    """Settle ``circadian.timezone`` (SPEC 7A): the flag, else the PC's zone with ``-y``, else
+    the question on the terminal with Tab completion over the IANA names, the PC's zone (UTC
+    when it has none) the default. An unknown name stops the run (WizardError)."""
+    if opts.timezone is None:
+        local = timezones.local_name()
+        if ui.assume_yes and local:
+            opts.timezone = local
+        else:
+            ui.info(
+                "Quiet hours and the rhythm follow this timezone. The robot's system clock is "
+                "not changed. Tab completes a name."
+            )
+            opts.timezone = ui.ask_completed(
+                "Timezone of the robot's home?",
+                local or "UTC",
+                timezones.names(),
+                flag=TIMEZONE_FLAG,
+            )
+    try:
+        timezones.zone(opts.timezone)
+    except ValueError as e:
+        fix = f"{COMMAND} {TIMEZONE_FLAG} Europe/Rome"
+        raise WizardError("Unknown timezone", str(e), fix) from None
+    ui.ok("Chose the timezone", f"{opts.timezone}; the robot's system clock is not changed")
+
+
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = INSTALL_STEPS
     check_secret_names(opts.secrets or [])
@@ -2083,6 +2125,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 ui.ok("Chose dev mode", "configs/dev-unmeasured.yaml")
             else:
                 ui.ok("Chose the production config")
+            choose_timezone(ui, opts)
             choose_cloud_voice(ui, opts, platform)
             cloud = cloud_voice_config(platform.cloud_voice) if opts.cloud_voice else {}
             content = ", ".join(
@@ -2090,6 +2133,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     None,
                     [
                         describe_app_config(dev, app_config_overrides(opts.voice)),
+                        key_text(TIMEZONE_KEY, opts.timezone),
                         ", ".join(key_text(k, v) for k, v in cloud.items()),
                     ],
                 )
@@ -2098,7 +2142,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 "Chose the app config",
                 f"app.yaml in the data folder: {content or 'no installer keys'}",
             )
-            wanted, owned = owned_app_config(root, dev, opts.voice)
+            wanted, owned = owned_app_config(root, dev, opts.voice, opts.timezone)
             dirs = platform.stage(root, Path(tmp) / "src")
 
             ui.step("SSH access")
@@ -2494,6 +2538,13 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         "(--models still defaults to on with vision, whose weights it fetches)",
     )
     p.add_argument(
+        TIMEZONE_FLAG,
+        metavar="NAME",
+        help="IANA timezone of the robot's home (Europe/Rome) for quiet hours and the rhythm "
+        "(circadian.timezone); the robot's system clock is not changed "
+        "(default: ask, the PC's zone; -y takes the PC's zone)",
+    )
+    p.add_argument(
         "--piper",
         action=argparse.BooleanOptionalAction,
         help="install Piper (on-board speech) in its own virtualenv in the data folder "
@@ -2568,6 +2619,7 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         debug=a.debug,
         version=a.version,
         cloud_voice=a.cloud_voice,
+        timezone=a.timezone,
     )
 
 

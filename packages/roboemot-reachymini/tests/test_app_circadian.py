@@ -304,7 +304,7 @@ def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F81
     hours) puts the robot to rest, with nothing else faked."""
     import datetime as dt
 
-    from roboemot.circadian import runner as runner_module
+    from roboemot import timezones
 
     class Late(dt.datetime):
         @classmethod
@@ -312,7 +312,7 @@ def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F81
             return cls(2026, 3, 2, 23, 10, 0)
 
     monkeypatch.setattr(app_module.RoboEmotApp, "make_circadian_clock", REAL_CLOCK)
-    monkeypatch.setattr(runner_module, "datetime", Late)
+    monkeypatch.setattr(timezones, "datetime", Late)
     app = new_app(app_module.RoboEmotApp)
     stop, thread, errors = start(app)
     try:
