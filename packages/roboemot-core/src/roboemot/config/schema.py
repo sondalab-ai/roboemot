@@ -2281,8 +2281,18 @@ class VisionConfig(Strict):
     )
     object_score_min: float = param(
         0.4,
-        "Object detections below this score are dropped; it also replaces tracker.high_score "
-        "for the animal and object tracker, so a 0.4 detection starts a track",
+        "An animal or object detection at or above this score starts a track; it replaces "
+        "tracker.high_score for the animal and object tracker",
+        ge=0,
+        le=1,
+        restart=True,
+    )
+    object_low_score: float = param(
+        0.2,
+        "Animal and object detections below this score are dropped. One between this and "
+        "object_score_min only continues a confirmed track matched at the object frame before "
+        "(the low-score pass of the tracker): it never starts a track and never confirms one. "
+        "Must not exceed object_score_min",
         ge=0,
         le=1,
         restart=True,
@@ -2373,6 +2383,12 @@ class VisionConfig(Strict):
                 "vision.object_crop.full_interval_s must stay below vision.object_lost_s, or "
                 "tracks away from people expire between two full-frame runs"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _object_scores_ordered(self) -> VisionConfig:
+        if self.object_low_score > self.object_score_min:
+            raise ValueError("vision.object_low_score must not exceed vision.object_score_min")
         return self
 
     @model_validator(mode="after")

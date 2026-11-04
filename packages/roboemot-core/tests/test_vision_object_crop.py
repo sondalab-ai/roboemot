@@ -534,3 +534,24 @@ def test_pipeline_look_down_crops_around_the_shown_thing(tmp_path):
     assert snap["crop_by"]["shown"] >= 1 and snap["crop_by"]["face"] == 0
     assert len(pipe.object_tracker._tracks) == 1
     pipe.governor.set_active("objects", False)
+
+
+def test_aside_tracks_take_no_part_in_the_low_score_pass_or_the_pickup():
+    cfg = TrackerConfig(high_score=0.4, low_score=0.2, confirm_hits=2, lost_s=5.0)
+    t = Tracker(cfg, low_confirms=False)
+    t.update([obj(100, "cup")], 0.0)
+    t.update([obj(100, "cup")], 1.0)
+    (cup,) = t._tracks
+    region = (200.0, -math.inf, 440.0, math.inf)
+    weak_near = Detection((240, 60, 280, 100), 0.3, "cup")  # within the pickup gate, but weak
+    res = t.update([weak_near], 2.0, region, pickup_heights=4.0)
+    assert res.aside == [cup] and cup.last_stamp == 1.0 and len(t._tracks) == 1
+
+
+def test_weak_detections_from_a_crop_are_mapped_and_edge_checked():
+    crop = Crop(200, 100, 440, 340, FW, FH, edge_px=4.8)
+    weak = [
+        Detection((40.0, 60.0, 100.0, 150.0), 0.25, "cup"),
+        Detection((0.0, 60.0, 30.0, 150.0), 0.25, "cup"),  # cut by the left edge
+    ]
+    assert [d.box for d in crop.to_frame(weak)] == [(240.0, 160.0, 300.0, 250.0)]

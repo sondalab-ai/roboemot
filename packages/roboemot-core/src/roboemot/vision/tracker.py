@@ -3,15 +3,17 @@
 Each track follows its box with a constant-velocity Kalman filter. An update associates in two
 passes, as ByteTrack does: high-score detections against all tracks, then low-score detections
 against the tracks still unmatched that were matched at the previous update (this keeps a track
-alive through a weak detection, such as a partly turned face). A pair matches when its IoU
-reaches the pass's IoU gate or, failing that, when the detection's box centre lies within the
-pass's distance gate, in heights of the track's predicted box (``match_distance_heights``,
-``low_match_distance_heights``), and the two box heights differ by at most
-``match_height_ratio``: a face seen side-on changes its box shape, so the IoU with its own
-track drops below the gate (robot, 2026-10-23), but keeps its size, while a smaller face beside
-or behind it does not. Association is greedy: IoU pairs first by descending IoU (for the few,
-well separated faces of a home scene this matches the optimal assignment), then distance pairs
-by ascending distance.
+alive through a weak detection, such as a partly turned face). With ``low_confirms`` off (the
+animal and object tracker), only confirmed tracks take part in the low pass, as in ByteTrack: a
+weak detection never confirms a tentative track, which then misses and is dropped. A pair
+matches when its IoU reaches the pass's IoU gate or, failing that, when the detection's box
+centre lies within the pass's distance gate, in heights of the track's predicted box
+(``match_distance_heights``, ``low_match_distance_heights``), and the two box heights differ
+by at most ``match_height_ratio``: a face seen side-on changes its box shape, so the IoU with
+its own track drops below the gate (robot, 2026-10-23), but keeps its size, while a smaller
+face beside or behind it does not. Association is greedy: IoU pairs first by descending IoU
+(for the few, well separated faces of a home scene this matches the optimal assignment), then
+distance pairs by ascending distance.
 
 Unmatched high-score detections start tracks, except a duplicate: one whose centre lies within
 ``match_distance_heights`` of the corrected box of a confirmed track matched in this update,
@@ -208,8 +210,15 @@ class TrackerResult:
 class Tracker:
     """Multi-object tracker; see the module docstring."""
 
-    def __init__(self, cfg: TrackerConfig, ids: Iterator[int] | None = None):
+    def __init__(
+        self, cfg: TrackerConfig, ids: Iterator[int] | None = None, *, low_confirms: bool = True
+    ):
+        """``low_confirms`` false keeps tentative tracks out of the low-score pass, so only
+        detections at ``high_score`` count towards ``confirm_hits``; low-score ones then only
+        continue confirmed tracks. The face tracker keeps it on, the object tracker turns it
+        off (SPEC 5)."""
         self.cfg = cfg
+        self.low_confirms = low_confirms
         self._ids = ids if ids is not None else itertools.count(1)
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
@@ -322,12 +331,13 @@ class Tracker:
             active, high, cfg.match_iou, cfg.match_distance_heights
         )
         recent = [t for t in rest_t if t._matched_last]
+        eligible = [t for t in recent if t.confirmed or self.low_confirms]
         matched_low, rest_t2, rest_low = self._greedy(
-            recent, low, cfg.low_match_iou, cfg.low_match_distance_heights
+            eligible, low, cfg.low_match_iou, cfg.low_match_distance_heights
         )
         low_tracks = {id(m[0]) for m in matched_low}
         stale = [t for t in rest_t if t not in recent]
-        missed = stale + rest_t2
+        missed = stale + rest_t2 + [t for t in recent if t not in eligible]
         picked, rest_d = self._pick_up(aside, rest_d, pickup_heights)
         matched += picked
         aside = [t for t in aside if all(t is not p[0] for p in picked)]
