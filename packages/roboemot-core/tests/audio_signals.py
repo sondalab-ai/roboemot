@@ -46,9 +46,12 @@ def click_track(bpm: float, seconds: float, rate: int, seed: int = 0) -> np.ndar
     return _out(x)
 
 
-def drum_loop(bpm: float, seconds: float, rate: int, seed: int = 0) -> np.ndarray:
+def drum_loop(
+    bpm: float, seconds: float, rate: int, seed: int = 0, jitter_s: float = 0.0
+) -> np.ndarray:
     """Kick (a 120 to 50 Hz sweep, low band) on every beat, a hat (differenced noise, high band)
-    on every eighth note and a snare (mid-band noise burst) on beats 2 and 4."""
+    on every eighth note and a snare (mid-band noise burst) on beats 2 and 4. ``jitter_s`` moves
+    each hit by a seeded uniform offset in [-jitter_s, jitter_s], as a human drummer."""
     rng = np.random.default_rng(seed)
     n = round(seconds * rate)
     x = _floor(n, rng)
@@ -61,14 +64,35 @@ def drum_loop(bpm: float, seconds: float, rate: int, seed: int = 0) -> np.ndarra
     snare_n = round(0.12 * rate)
     snare_kernel = np.ones(4) / 4
     for k in range(int(seconds / beat) + 1):
-        at = round(k * beat * rate)
-        _place(x, at, kick)
+
+        def hit(offset_s: float, k: int = k) -> int:
+            moved = k * beat + offset_s + rng.uniform(-jitter_s, jitter_s)
+            return max(0, round(moved * rate))
+
+        _place(x, hit(0.0), kick)
         if k % 4 in (1, 3):
             noise = np.convolve(rng.standard_normal(snare_n), snare_kernel, "same")
-            _place(x, at, noise * _decay(snare_n, rate, 0.04) * 0.25)
+            _place(x, hit(0.0), noise * _decay(snare_n, rate, 0.04) * 0.25)
         for half in (0.0, 0.5):
             hat = np.diff(rng.standard_normal(hat_n + 1)) * _decay(hat_n, rate, 0.01) * 0.08
-            _place(x, at + round(half * beat * rate), hat)
+            _place(x, hit(half * beat), hat)
+    return _out(x)
+
+
+def low_thump(bpm: float, seconds: float, rate: int, seed: int = 0) -> np.ndarray:
+    """A 60 Hz tone with a soft attack and a 60 ms decay on every beat: periodic in the low band
+    only (a neighbour's bass through the wall, a washing machine)."""
+    rng = np.random.default_rng(seed)
+    n = round(seconds * rate)
+    x = _floor(n, rng)
+    length = round(0.3 * rate)
+    t = np.arange(length) / rate
+    attack = np.minimum(1.0, t / 0.02)
+    envelope = 0.5 - 0.5 * np.cos(np.pi * attack)
+    thump = np.sin(2 * np.pi * 60.0 * t) * envelope * _decay(length, rate, 0.06) * 0.5
+    period = 60.0 / bpm
+    for k in range(int(seconds / period) + 1):
+        _place(x, round(k * period * rate), thump)
     return _out(x)
 
 

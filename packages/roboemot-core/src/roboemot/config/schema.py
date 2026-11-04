@@ -3308,17 +3308,27 @@ class MusicConfig(Strict):
         unit="dBFS", ge=-100, le=0,
     )  # fmt: skip
     tempo_bpm: tuple[float, float] = param(
-        (60.0, 180.0), "Tempo range searched, [min, max] in beats per minute"
+        (60.0, 180.0),
+        "Tempo range searched, [min, max] in beats per minute, within 30 to 300",
+        unit="bpm",
     )
     prior_bpm: tuple[float, float] = param(
         (100.0, 130.0),
-        "Preferred tempo range against octave errors: a tempo found at twice or half a tempo in "
-        "this range, with that tempo periodic enough on its own, is folded into it",
+        "Preferred tempo range against octave errors, within tempo_bpm: a tempo found at twice "
+        "or half a tempo in this range, with that tempo periodic enough on its own, is folded "
+        "into it",
+        unit="bpm",
     )
     min_periodicity: float = param(
         0.5,
-        "Least normalised autocorrelation of the onset envelope at the tempo; also what a band's "
-        "own envelope needs at that tempo to count as carrying the beat",
+        "Least normalised autocorrelation of the onset envelope at the tempo",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_band_periodicity: float = param(
+        0.35,
+        "Least normalised autocorrelation of one band's own onset envelope at the tempo for the "
+        "band to count as carrying the beat; lower than min_periodicity, since speech or noise in "
+        "a band dilutes its beat",
         ge=0, le=1,
     )  # fmt: skip
     tempo_tolerance: float = param(
@@ -3392,6 +3402,8 @@ class MusicConfig(Strict):
     def _consistent(self) -> MusicConfig:
         if self.min_bands_active > len(self.bands_hz):
             raise ValueError("music.min_bands_active must not exceed the number of bands")
+        if self.prior_bpm[0] < self.tempo_bpm[0] or self.prior_bpm[1] > self.tempo_bpm[1]:
+            raise ValueError("music.prior_bpm must lie within music.tempo_bpm")
         slowest_period_s = SECONDS_PER_MINUTE / self.tempo_bpm[0]
         if self.window_s < 2 * slowest_period_s:
             raise ValueError("music.window_s must hold two periods of the slowest tempo")

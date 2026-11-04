@@ -11,9 +11,11 @@ and when the last interval's level is above ``music.min_level_db``, the mean-rem
 autocorrelated over the lags of ``music.tempo_bpm``; the peak (refined between lags) is the
 tempo, folded into ``music.prior_bpm`` when its double or half there is periodic enough. An
 estimate is *periodic* when the peak reaches ``music.min_periodicity``, at least
-``music.min_bands_active`` bands reach it on their own envelope at that lag (a ticking clock is
-one narrow band) and the window was heard for ``music.min_active_share``. It *holds* when it is
-periodic and its tempo is within ``music.tempo_tolerance`` of the previous periodic estimate's.
+``music.min_bands_active`` bands reach ``music.min_band_periodicity`` on their own envelope at
+that lag (a ticking clock is one narrow band) and the window was heard for
+``music.min_active_share``. It *holds* when it is periodic and its tempo is within
+``music.tempo_tolerance`` of the previous periodic estimate's, or is twice or half that tempo
+with the new envelope still periodic at the previous lag (an octave flip of real music).
 The beat phase is the offset whose beat grid sums the most envelope (a comb).
 
 Music starts when an estimate holds and the evidence (back-dated to the first heard hop of the
@@ -23,9 +25,10 @@ estimate. A hole in the audio longer than ``music.max_gap_s`` clears the envelop
 and phase run on (a flywheel) and the hole does not count toward the release. Nothing heard for
 longer than ``music.blind_hold_s`` ends it.
 
-``state`` and ``during`` read one immutable view and one immutable tuple of intervals, each
-replaced by one assignment: no lock. ``snapshot`` has counts, tempo, confidence and cost (ms of
-the feeding thread per second of audio) only: no audio, no spectrum, no envelope (SPEC 12).
+``state`` and ``during`` read one immutable view (state and intervals together), replaced by
+one assignment: no lock. ``snapshot`` has counts, tempo, confidence and cost (CPU ms of the
+feeding thread per second of audio, ``time.thread_time`` by default) only: no audio, no
+spectrum, no envelope (SPEC 12).
 """
 
 from __future__ import annotations
@@ -36,18 +39,17 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
 
-from ..config.schema import MusicConfig
+from ..config.schema import SECONDS_PER_MINUTE, MusicConfig
 from ..stats import P90, quantile
 
 MS_PER_S = 1000.0
-SECONDS_PER_MINUTE = 60.0
 DB_PER_DECADE = 10.0
-COST_SAMPLES = 600  # one per estimate interval: ten minutes at the default
+COST_SAMPLES = 600  # report only, not behaviour: one per estimate interval, ten minutes
 STARTED, STOPPED = "started", "stopped"
 
 
@@ -64,13 +66,20 @@ class MusicState:
     stamp: float
 
 
+Interval = tuple[float, float | None]  # (start, end); end None while the music plays
+
+
 @dataclass(frozen=True)
 class _View:
+    """Everything another thread reads, swapped as one object: the state and the intervals
+    can never be seen out of step."""
+
     playing: bool
     period_s: float | None
     anchor_s: float | None  # the stamp of one beat; the phase runs from it
     confidence: float
     heard_until: float  # end of the last audio fed
+    intervals: tuple[Interval, ...] = ()
 
 
 _SILENT = _View(False, None, None, 0.0, -math.inf)
@@ -82,6 +91,7 @@ class _Estimate:
     anchor_s: float
     periodicity: float
     periodic: bool  # periodicity, bands and heard share pass; stability is checked apart
+    corr: np.ndarray = field(compare=False, repr=False)  # the envelope's autocorrelation by lag
 
 
 class _Bands:
@@ -114,7 +124,7 @@ class MusicDetector:
         self,
         cfg: MusicConfig,
         rate_hz: int,
-        timer: Callable[[], float] = time.perf_counter,
+        timer: Callable[[], float] = time.thread_time,
     ) -> None:
         self._rate = rate_hz
         self._timer = timer
@@ -125,7 +135,6 @@ class MusicDetector:
         self._cost_audio_s = 0.0
         self._pending: MusicConfig | None = None
         self._view = _SILENT
-        self._intervals: tuple[tuple[float, float | None], ...] = ()
         self._last_hold_s = -math.inf
         self._blind_from: float | None = None
         self._configure(cfg)
@@ -185,10 +194,11 @@ class MusicDetector:
         ``"started"`` or ``"stopped"`` when the music state changed with it, else None. A chunk
         after more than ``music.blind_hold_s`` of nothing ends music first."""
         t0 = self._timer()
+        audio = np.asarray(samples, dtype=np.float32)
         try:
-            return self._feed(np.asarray(samples, dtype=np.float32), start)
+            return self._feed(audio, start)
         finally:
-            self._account(self._timer() - t0, samples.size / self._rate)
+            self._account(self._timer() - t0, audio.size / self._rate)
 
     def _feed(self, samples: np.ndarray, start: float) -> str | None:
         """``feed`` without the cost account: a pending reload first, then the hole before
@@ -208,13 +218,7 @@ class MusicDetector:
             if self._since_estimate >= self._interval_hops and self._filled >= self._min_fill:
                 self._since_estimate = 0
                 event = self._estimate(stamp + self._hop_s) or event
-        self._view = _View(
-            self._view.playing,
-            self._view.period_s,
-            self._view.anchor_s,
-            self._view.confidence,
-            end,
-        )
+        self._view = replace(self._view, heard_until=end)
         if self._view.playing and end - self._last_hold_s >= cfg.release_s:
             event = self._stop(end)
         return event
@@ -303,7 +307,7 @@ class MusicDetector:
             self._evidence_from = None
             self._publish(result)
             return None
-        stable = previous is not None and previous.periodic and self._same_tempo(previous, result)
+        stable = previous is not None and previous.periodic and self._stable(previous, result)
         if not stable:
             self._evidence_from = self._first_heard()
             self._publish(result)
@@ -330,13 +334,14 @@ class MusicDetector:
         lag = self._fold(corr, _refine(corr, peak))
         periodicity = float(_at(corr, lag))
         per_band = [_at(_autocorr(band, self._lag_hi + 1), lag) for band in onsets.T]
-        bands = sum(1 for value in per_band if value >= cfg.min_periodicity)
+        bands = sum(1 for value in per_band if value >= cfg.min_band_periodicity)
         periodic = (
             periodicity >= cfg.min_periodicity
             and bands >= cfg.min_bands_active
             and float(np.mean(heard)) >= cfg.min_active_share
         )
-        return _Estimate(lag * self._hop_s, _comb(envelope, stamps, lag), periodicity, periodic)
+        anchor = _comb(envelope, stamps, lag)
+        return _Estimate(lag * self._hop_s, anchor, periodicity, periodic, corr)
 
     def _fold(self, corr: np.ndarray, lag: float) -> float:
         """Fold ``lag`` into the prior tempo range when its half or double lies there and is
@@ -351,10 +356,17 @@ class MusicDetector:
                     return refined
         return lag
 
-    def _same_tempo(self, a: _Estimate, b: _Estimate) -> bool:
-        """Whether ``b``'s period is within ``music.tempo_tolerance`` of ``a``'s (relative)."""
+    def _stable(self, a: _Estimate, b: _Estimate) -> bool:
+        """Whether ``b`` keeps ``a``'s tempo: its period within ``music.tempo_tolerance`` of
+        ``a``'s, or an octave flip (twice or half) that ``b``'s own envelope backs, its
+        autocorrelation at ``a``'s lag reaching ``music.min_periodicity``. Speech that peaks at
+        unrelated lags from one estimate to the next does not chain this way."""
         tol = self._cfg.tempo_tolerance
-        return abs(b.period_s - a.period_s) <= tol * a.period_s
+        if abs(b.period_s - a.period_s) <= tol * a.period_s:
+            return True
+        flipped = any(abs(b.period_s * k - a.period_s) <= tol * a.period_s for k in (0.5, 2))
+        backed = _at(b.corr, a.period_s / self._hop_s) >= self._cfg.min_periodicity
+        return flipped and backed
 
     def _first_heard(self) -> float:
         """Stamp of the first heard hop in the window: where the evidence starts."""
@@ -372,19 +384,17 @@ class MusicDetector:
         period, anchor = view.period_s, view.anchor_s
         if result is not None and result.periodic:
             period, anchor = result.period_s, result.anchor_s
-        self._view = _View(view.playing, period, anchor, confidence, view.heard_until)
+        self._view = replace(view, period_s=period, anchor_s=anchor, confidence=confidence)
 
     def _start(self, since: float, now: float) -> str:
         """Music starts: open an interval back-dated to ``since`` (merged with a closed one that
         reaches it), drop intervals older than ``music.history_s`` before ``now``."""
-        view = self._view
-        self._view = _View(True, view.period_s, view.anchor_s, view.confidence, view.heard_until)
         kept = self._pruned(now)
         if kept and kept[-1][1] is not None and kept[-1][1] >= since:
             kept = kept[:-1] + ((min(kept[-1][0], since), None),)
         else:
             kept = kept + ((since, None),)
-        self._intervals = kept
+        self._view = replace(self._view, playing=True, intervals=kept)
         with self._lock:
             self._counts["starts"] += 1
         return STARTED
@@ -392,20 +402,21 @@ class MusicDetector:
     def _stop(self, stamp: float) -> str:
         """Music ends at ``stamp``: close the open interval there and forget tempo and phase;
         the confidence stays for the report."""
-        view = self._view
-        self._view = _View(False, None, None, view.confidence, view.heard_until)
-        if self._intervals and self._intervals[-1][1] is None:
-            begin = self._intervals[-1][0]
-            self._intervals = self._intervals[:-1] + ((begin, stamp),)
+        kept = self._view.intervals
+        if kept and kept[-1][1] is None:
+            kept = kept[:-1] + ((kept[-1][0], stamp),)
+        self._view = replace(
+            self._view, playing=False, period_s=None, anchor_s=None, intervals=kept
+        )
         self._last_hold_s = -math.inf
         with self._lock:
             self._counts["stops"] += 1
         return STOPPED
 
-    def _pruned(self, now: float) -> tuple[tuple[float, float | None], ...]:
+    def _pruned(self, now: float) -> tuple[Interval, ...]:
         """The intervals still open or ended within ``music.history_s`` before ``now``."""
         oldest = now - self._cfg.history_s
-        return tuple(iv for iv in self._intervals if iv[1] is None or iv[1] >= oldest)
+        return tuple(iv for iv in self._view.intervals if iv[1] is None or iv[1] >= oldest)
 
     def _account(self, busy_s: float, audio_s: float) -> None:
         """Add one feed's time; close a cost sample once an estimate interval of audio is in."""
@@ -434,7 +445,7 @@ class MusicDetector:
         """Whether music played at any time in [start, end] (lock-free), over the back-dated
         interval history; an open interval lasts while ``state`` says playing."""
         view = self._view
-        for begin, finish in self._intervals:
+        for begin, finish in view.intervals:
             if finish is None:
                 finish = view.heard_until + self._cfg.blind_hold_s if view.playing else begin
             if begin <= end and start <= finish:

@@ -7,10 +7,19 @@ import math
 
 import numpy as np
 import pytest
-from audio_signals import click_track, clock_tick, drum_loop, fan_noise, silence, speech_like
+from audio_signals import (
+    click_track,
+    clock_tick,
+    drum_loop,
+    fan_noise,
+    low_thump,
+    mix,
+    silence,
+    speech_like,
+)
 from pydantic import ValidationError
 from roboemot.config.schema import MusicConfig, RoboEmotConfig
-from roboemot.voice.music import MusicDetector
+from roboemot.voice.music import MusicDetector, _Estimate
 
 RATE = 16000
 CHUNK = 320  # 20 ms: not a multiple of the hop, so hops span chunks
@@ -123,6 +132,81 @@ def test_gap_clears_envelope_keeps_state():
     assert near_tempo(state.tempo_bpm, 140), state.tempo_bpm  # from the fresh audio only
 
 
+def test_hole_does_not_count_toward_the_release():
+    det = detector()
+    cfg = MusicConfig()
+    run(det, drum_loop(120, 8.0, RATE))
+    assert det.state(8.0).playing
+    det.gap(8.0)
+    resume = 8.0 + cfg.release_s + 2.0  # longer than the release, shorter than the blind hold
+    assert resume - 8.0 < cfg.blind_hold_s
+    events, _ = run(det, drum_loop(120, 6.0, RATE, seed=4), t0=resume)
+    assert events == []
+    assert det.state(resume + 6.0).playing
+    assert det.snapshot()["resets"] == 1
+
+
+def test_short_hole_keeps_the_envelope():
+    det = detector()
+    cfg = MusicConfig()
+    run(det, drum_loop(120, 8.0, RATE))
+    det.gap(8.0)
+    events, _ = run(det, drum_loop(120, 2.0, RATE, seed=5), t0=8.0 + cfg.max_gap_s / 2)
+    assert events == [] and det.snapshot()["resets"] == 0
+
+
+@pytest.mark.parametrize(
+    "noise",
+    [
+        pytest.param(lambda: speech_like(12.0, RATE, pauses=True, seed=2), id="speech"),
+        pytest.param(lambda: fan_noise(12.0, RATE, seed=2), id="fan"),
+    ],
+)
+def test_music_under_noise_still_confirms(noise):
+    cfg = MusicConfig()
+    music = mix(drum_loop(120, 12.0, RATE), noise(), 0.0)
+    events, first = run(detector(), music)
+    assert first is not None and first <= cfg.confirm_s + cfg.estimate_interval_s
+    assert [e for _, e in events] == ["started"]
+
+
+@pytest.mark.parametrize("bpm", [70, 100, 140, 170])
+def test_jittered_drums_confirm(bpm):
+    det = detector()
+    events, first = run(det, drum_loop(bpm, 12.0, RATE, seed=7, jitter_s=0.010))
+    assert first is not None and [e for _, e in events] == ["started"]
+    assert near_tempo(det.state(12.0).tempo_bpm, bpm)
+
+
+def _estimate(det, bpm, corr_at_lags=None):
+    """An estimate at ``bpm`` whose autocorrelation is ``corr_at_lags`` ({lag: value}, else 0)."""
+    corr = np.zeros(det._lag_hi * 2 + 2)
+    for lag, value in (corr_at_lags or {}).items():
+        corr[lag] = value
+    return _Estimate(60.0 / bpm, 0.0, 0.9, True, corr)
+
+
+def test_octave_flip_backed_by_the_envelope_is_stable():
+    det = detector()
+    lag = 0.5 / det._hop_s  # 120 bpm: about 15.6 lags at the default hop
+    at_120 = {math.floor(lag): 0.8, math.ceil(lag): 0.8}
+    before = _estimate(det, 120.0)
+    assert det._stable(before, _estimate(det, 120.0 * 1.01))
+    assert det._stable(before, _estimate(det, 60.0, at_120))  # still periodic at 120
+    assert not det._stable(before, _estimate(det, 60.0))  # a flip the envelope does not back
+    assert not det._stable(before, _estimate(det, 90.0, at_120))  # not an octave
+
+
+def test_one_band_beat_is_not_music():
+    events, first = run(detector(), low_thump(120, 20.0, RATE))
+    assert first is None and events == []
+
+
+def test_band_rule_is_what_rejects_the_clock():
+    events, first = run(detector(min_bands_active=1), clock_tick(1.0, 20.0, RATE))
+    assert first is not None and events[0][1] == "started"
+
+
 def test_blind_hold():
     det = detector()
     cfg = MusicConfig()
@@ -228,6 +312,8 @@ def test_band_above_nyquist_is_rejected():
         {"tempo_bpm": (180.0, 60.0)},
         {"prior_bpm": (130.0, 100.0)},
         {"window_s": 2.0, "tempo_bpm": (40.0, 180.0)},
+        {"prior_bpm": (50.0, 100.0)},
+        {"tempo_bpm": (60.0, 120.0)},
     ],
 )
 def test_invalid_music_config_is_rejected(fields):

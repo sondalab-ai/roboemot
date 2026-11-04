@@ -795,9 +795,9 @@
  "Onset envelope kept for the tempo estimate; must hold two periods of the slowest tempo": "Inviluppo degli attacchi tenuto per la stima del tempo; deve contenere due periodi del tempo più lento",
  "Time between two tempo estimates": "Tempo tra due stime del tempo musicale",
  "Least mean level over the last estimate interval for audio to count as heard (below it a band's energy rises are ignored and no estimate runs)": "Livello medio minimo nell'ultimo intervallo di stima perché l'audio conti come sentito (sotto, gli aumenti di energia di una banda sono ignorati e nessuna stima viene eseguita)",
- "Tempo range searched, [min, max] in beats per minute": "Intervallo di tempo cercato, [min, max] in battiti al minuto",
- "Preferred tempo range against octave errors: a tempo found at twice or half a tempo in this range, with that tempo periodic enough on its own, is folded into it": "Intervallo di tempo preferito contro gli errori di ottava: un tempo trovato al doppio o alla metà di un tempo in questo intervallo, se quel tempo è abbastanza periodico da solo, viene ricondotto a esso",
- "Least normalised autocorrelation of the onset envelope at the tempo; also what a band's own envelope needs at that tempo to count as carrying the beat": "Autocorrelazione normalizzata minima dell'inviluppo degli attacchi al tempo trovato; è anche quanto serve all'inviluppo di una banda a quel tempo perché porti il battito",
+ "Tempo range searched, [min, max] in beats per minute, within 30 to 300": "Intervallo di tempo cercato, [min, max] in battiti al minuto, tra 30 e 300",
+ "Preferred tempo range against octave errors, within tempo_bpm: a tempo found at twice or half a tempo in this range, with that tempo periodic enough on its own, is folded into it": "Intervallo di tempo preferito contro gli errori di ottava, dentro tempo_bpm: un tempo trovato al doppio o alla metà di un tempo in questo intervallo, se quel tempo è abbastanza periodico da solo, viene ricondotto a esso",
+ "Least normalised autocorrelation of the onset envelope at the tempo": "Autocorrelazione normalizzata minima dell'inviluppo degli attacchi al tempo trovato",
  "Largest relative change of the tempo between two estimates for it to count as stable": "Massima variazione relativa del tempo tra due stime perché conti come stabile",
  "Least share of the envelope window whose level was above min_level_db": "Frazione minima della finestra dell'inviluppo con livello sopra min_level_db",
  "Least bands that carry the beat on their own; a ticking clock is one narrow band": "Numero minimo di bande che portano il battito da sole; un orologio che ticchetta è una sola banda stretta",
@@ -807,5 +807,6 @@
  "While nothing is heard (the robot speaks) music stays on for at most this long after the last heard audio": "Mentre non si sente nulla (il robot parla) la musica resta attiva al massimo per questo tempo dopo l'ultimo audio sentito",
  "Music intervals kept to answer whether music played during an utterance": "Intervalli di musica tenuti per rispondere se la musica suonava durante un enunciato",
  "Beats in one bar, for the dance's bar grid": "Battiti in una battuta, per la griglia delle battute del ballo",
- "SPEC 8: music in the room, the wake word over it": "SPEC 8: musica nella stanza, la parola di attivazione sopra di essa"
+ "SPEC 8: music in the room, the wake word over it": "SPEC 8: musica nella stanza, la parola di attivazione sopra di essa",
+ "Least normalised autocorrelation of one band's own onset envelope at the tempo for the band to count as carrying the beat; lower than min_periodicity, since speech or noise in a band dilutes its beat": "Autocorrelazione normalizzata minima dell'inviluppo degli attacchi di una sola banda al tempo trovato perché la banda porti il battito; più bassa di min_periodicity, perché voci o rumore in una banda ne diluiscono il battito"
 }
