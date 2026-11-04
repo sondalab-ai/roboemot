@@ -23,6 +23,8 @@ TOPICS = (
     "percept.entity",
     "percept.scene_motion",
     "sound.loud",
+    "music.started",
+    "music.stopped",
     "world.entity_appeared",
     "world.entity_moved",
     "world.entity_gone",

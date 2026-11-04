@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from audio_signals import drum_loop
 from reachy_config import reachy_config
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
@@ -1122,3 +1123,144 @@ def test_voice_active_does_not_stick_once_the_listener_mutes_for_the_robots_soun
     r.feed(voice(seconds=0.3))
     assert r.listener.snapshot()["dropped_speaking"] > 0
     assert not r.listener.voice_active() and not r.listener.hearing()
+
+
+# ------------------------------------------------------------------ music (SPEC 8, 11A, 12A)
+
+
+class SpyMusic:
+    """A music detector stand-in: ``playing`` answers ``during``; it records what it was fed,
+    the holes it was told about and the intervals it was asked about."""
+
+    def __init__(self, playing=False):
+        self.playing = playing
+        self.fed: list[tuple[float, int]] = []
+        self.gaps: list[float] = []
+        self.asked: list[tuple[float, float]] = []
+
+    def feed(self, samples, start):
+        self.fed.append((start, samples.size))
+
+    def gap(self, stamp):
+        self.gaps.append(stamp)
+
+    def during(self, start, end):
+        self.asked.append((start, end))
+        return self.playing
+
+    def apply_config(self, cfg):
+        pass
+
+    def snapshot(self):
+        return {}
+
+
+def music_rig(script, final=None, policy="never", playing=True, **kw):
+    """A rig with ``policy`` whose listener hears music (or not) through a ``SpyMusic``."""
+    cfg = RoboEmotConfig.model_validate({"voice": {"wake_word_policy": policy}})
+    r = Rig(script, final=final, cfg=cfg, **kw)
+    r.listener.music = SpyMusic(playing)
+    return r
+
+
+def test_detector_gets_no_chunk_while_speaking():
+    """The robot's own voice or hum never reaches the music detector (SPEC 8)."""
+    r = Rig(["ciao"])
+    spy = r.listener.music = SpyMusic()
+    r.feed(silence(0.5))
+    fed = len(spy.fed)
+    assert fed > 0
+    speaking_from = r.t
+    r.speech.extend(r.t + 2.0)
+    r.feed(silence(1.0))
+    assert len(spy.fed) == fed
+    assert spy.gaps and spy.gaps[0] == pytest.approx(speaking_from)
+
+
+def test_resume_audio_skips_detector():
+    """Barge-in audio replayed by ``resume`` and the echo tail it leaves open are the user's
+    voice after a cut, inside the robot's speaking window: the detector hears neither."""
+    r = Rig(["aspetta"])
+    spy = r.listener.music = SpyMusic()
+    r.speech.extend(r.t + 2.0)
+    r.listener.resume(voice(seconds=1.0), r.t)
+    r.t += 1.0
+    r.feed(silence(0.5))
+    assert spy.fed == []
+
+
+def test_a_chunk_gap_tells_the_detector_where_the_hole_began():
+    """Regression: a gap stamped at the gapped chunk's own start measures no hole, so the
+    envelope would never clear after more than ``music.max_gap_s`` of lost audio."""
+    r = Rig(["ciao"])
+    r.feed(silence(0.5))
+    r.t += r.cfg.music.max_gap_s + 1.0
+    r.feed(silence(0.5), gap=True)
+    assert r.listener.music.snapshot()["resets"] == 1
+    spy = r.listener.music = SpyMusic()
+    hole_from = r.t
+    r.t += 1.0
+    r.feed(silence(0.1), gap=True)
+    assert spy.gaps == [pytest.approx(hole_from)]
+
+
+def test_music_stage_in_load():
+    r = Rig(["ciao"])
+    r.feed(drum_loop(120, 8.0, RATE))
+    assert r.listener.load.snapshot()["total"]["ms_per_audio_s"]["music"] > 0
+    assert r.listener.snapshot()["music"]["estimates"] > 0
+
+
+def test_music_events_published():
+    r = Rig(["ciao"])
+    got: list[tuple[str, object]] = []
+    for topic in ("music.started", "music.stopped"):
+        r.bus.subscribe(topic, lambda m: got.append((m.topic, m.payload)))
+    r.feed(drum_loop(120, 10.0, RATE))
+    r.feed(silence(r.cfg.music.release_s * 2))
+    assert [t for t, _ in got] == ["music.started", "music.stopped"]
+    (_, started), (_, stopped) = got
+    assert set(started) == {"tempo_bpm"} and set(stopped) == {"tempo_bpm"}  # tempo only
+    assert isinstance(started["tempo_bpm"], float) and started["tempo_bpm"] > 0
+    assert stopped["tempo_bpm"] is None
+    snap = r.listener.snapshot()["music"]
+    assert snap["starts"] == 1 and snap["stops"] == 1
+    assert json.loads(json.dumps(snap)) == snap
+
+
+def test_music_off_builds_no_detector_until_a_reload_turns_it_on():
+    r = Rig(["ciao"], cfg=RoboEmotConfig.model_validate({"music": {"enabled": False}}))
+    assert r.listener.music is None and "music" not in r.listener.snapshot()
+    r.listener.apply_config(RoboEmotConfig.model_validate({"music": {"enabled": True}}))
+    assert r.listener.music is not None
+
+
+def test_wake_word_over_music_is_addressed():
+    r = music_rig(["ehi"], final="ehi robot che ore sono")
+    r.say()
+    (u,) = r.utterances
+    assert u.wake_word and u.addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["wake_word"] == 1
+
+
+def test_no_wake_word_over_music_is_rejected_music():
+    seen = []
+    r = music_rig(["come stai"])
+    r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason))
+    r.say()
+    (u,) = r.utterances
+    assert not u.addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["rejected_music"] == 1
+    assert ("unanswered", "music") in seen
+    start, end = r.listener.music.asked[-1]  # asked over the whole utterance
+    assert start == pytest.approx(u.start_stamp) and end == pytest.approx(u.last_speech_stamp)
+
+
+def test_music_wins_over_the_voice_at_face_check():
+    r, _, _ = direction_rig("la la la amore mio", OFF_FACE_RAD)
+    r.listener.music = SpyMusic(True)
+    r.say()
+    snap = r.listener.snapshot()
+    assert not r.utterances[0].addressed
+    assert snap["wake"]["decisions"]["rejected_music"] == 1
+    assert sum(snap["direction"]["checks"].values()) == 0  # the gate never ran the check
