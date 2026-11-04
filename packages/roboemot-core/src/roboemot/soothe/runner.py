@@ -6,8 +6,16 @@ continuous idle time, schedules a sound lazily, picks a variant eligible in the 
 synthesizes it, queues it on the speech output and publishes the appraisal event ``self.soothe``.
 When idle ends while the sound plays it cancels exactly that sound.
 
+Someone speaking is never sung over (SPEC 7B, owner decision 2026-11-04): while the listener
+hears speech, or speech may be starting (``tick``'s ``speech``), no sound starts and the idle
+clock restarts (counted ``held_by_speech``, once per stretch of speech that ended an idle
+stretch with no sound playing), and a sound playing is cut (``cut_by_speech``). Speech that
+starts while the sound plays reaches the runner through ``cut_by_speech``, which the listener
+(speech already in progress as the sound starts) and barge-in (speech over the sound) call.
+
 Threads: ``tick`` runs on the app tick thread, ``apply_config`` on the config watcher's thread
-(``ConfigStack.start_watcher``), so both take one lock; ``sounding`` and ``job`` only read.
+(``ConfigStack.start_watcher``) and ``cut_by_speech`` on the listener thread, so they take one
+lock (then the output's, never the other way round); ``sounding`` and ``job`` only read.
 """
 
 from __future__ import annotations
@@ -61,6 +69,8 @@ class SootheRunner:
         self._job: int | None = None  # id of the sound queued or playing
         self._sound_end = -math.inf  # estimate of the end of the sound from its start
         self._ended = -math.inf  # when the last sound was seen to be over (or was cut)
+        self._held = False  # speech holds the sound back now (counted once per stretch)
+        self._counts = {"played": 0, "held_by_speech": 0, "cut_by_speech": 0}
 
     def apply_config(self, cfg: SootheConfig) -> None:
         """Hot reload: new parameters and variants, schedule redrawn from now. A sound in flight
@@ -80,13 +90,35 @@ class SootheRunner:
         its end, do not count as somebody else's audio and cancel it or reset the idle clock."""
         return self._job is not None or now < self._ended + tail_s
 
-    def tick(self, now: float, idle: bool, circadian_state: str, quiet: bool) -> None:
-        """One app tick. ``idle`` is the app's predicate (SPEC 7B), ``quiet`` the quiet hours.
-        A non-idle tick (or a disabled runner) resets the idle clock, clears the schedule and
-        cuts a sound still playing. A sound that stopped before its estimated end was cut by a
+    def snapshot(self) -> dict[str, Any]:
+        """Counts for the debug report (SPEC 12A): sounds played, held back and cut by speech."""
+        with self._lock:
+            return {"enabled": self.cfg.enabled, "playing": self._job is not None, **self._counts}
+
+    def cut_by_speech(self, now: float) -> bool:
+        """Someone speaks over our sound: cut it if it is queued or playing (counted
+        ``cut_by_speech``; the cooldown starts from the cut). True when there was one."""
+        with self._lock:
+            if self._job is None:
+                return False
+            self._counts["cut_by_speech"] += 1
+            self._lose_idle(now)
+            return True
+
+    def tick(
+        self, now: float, idle: bool, circadian_state: str, quiet: bool, speech: bool = False
+    ) -> None:
+        """One app tick. ``idle`` is the app's predicate (SPEC 7B), ``quiet`` the quiet hours,
+        ``speech`` whether the listener hears speech now or speech may be starting. A non-idle
+        tick, speech or a disabled runner resets the idle clock, clears the schedule and cuts a
+        sound still playing. A sound that stopped before its estimated end was cut by a
         barge-in: the cooldown starts from the cut."""
         with self._lock:
             self._check_job(now)
+            if speech and idle and self.cfg.enabled:
+                self._hold(now)
+                return
+            self._held = False
             if not (idle and self.cfg.enabled):
                 self._lose_idle(now)
                 return
@@ -106,6 +138,16 @@ class SootheRunner:
             if self._job is not None:
                 self.output.cancel(self._job)
                 self._job = None
+
+    def _hold(self, now: float) -> None:
+        """Speech in an idle stretch: cut our sound (``cut_by_speech``) or hold the next one back
+        (``held_by_speech``, once per stretch of speech); idle is lost either way."""
+        if self._job is not None:
+            self._counts["cut_by_speech"] += 1
+        elif not self._held and self._idle_since is not None:
+            self._counts["held_by_speech"] += 1
+        self._held = True
+        self._lose_idle(now)
 
     def _check_job(self, now: float) -> None:
         """Forget our job once the output no longer has it: played out, or (before the
@@ -155,4 +197,5 @@ class SootheRunner:
         self._sound_end = now + samples.size / self.cfg.rate_hz
         self._cooldown_until = self._sound_end + self.cfg.cooldown_s
         self._schedule(self._sound_end)
+        self._counts["played"] += 1
         self.on_event(EVENT, now, {"label": variant.label, "sound": variant.sound})

@@ -223,6 +223,12 @@ class Endpointer:
         """True between ``SpeechStart`` and ``SpeechEnd``."""
         return self._speaking
 
+    @property
+    def onset(self) -> bool:
+        """True while frames above the threshold are being counted towards a ``SpeechStart``
+        (speech may be starting), and between ``SpeechStart`` and ``SpeechEnd``."""
+        return self._speaking or self._run > 0
+
     def reset(self) -> None:
         """Drop the utterance in progress, buffered audio, the backend state and any speech
         burst being watched (not recorded); the report counters and finished bursts stay."""

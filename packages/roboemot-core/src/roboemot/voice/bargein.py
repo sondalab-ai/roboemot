@@ -74,6 +74,15 @@ per confirming path. Numbers, short labels and two group-to-speed maps only. Eac
 closes also publishes a ``bargein`` decision event (``roboemot.diag``, SPEC 12A) with its outcome
 (``cut``, ``released``) and its main fields, for the Live tab.
 
+A sound of the robot's own that is not speech (a self-soothing hum, SPEC 7B) is not the robot's
+voice: when only such sounds play, a speech cut-off (the ``vad`` or ``onset`` path) calls
+``cut_own`` instead (``bind``), which cuts them, and skips ``prepare`` and ``interrupt``: there is
+no answer to cancel or trim. The listener still restarts on the user's audio, and the cut is
+counted ``own_sound_cuts`` (not ``triggers``); its record and decision event have the outcome
+``cut_own``, so the Live tab does not show the person cutting the robot off. The stop keyword
+cuts the robot as always. With
+barge-in off (``enabled``) speech over such a sound does not cut it.
+
 Audio and text are never logged or published.
 """
 
@@ -254,6 +263,7 @@ class BargeIn:
         self._interrupt: Callable[[], Any] = lambda: None
         self._resume: Callable[[np.ndarray, float], None] | None = None
         self._prepare: Callable[[], Any] = lambda: None
+        self._cut_own: Callable[[], bool] = lambda: False
         self.duck = DuckGain(cfg.voice.barge_in.duck)
         self._duck_start: float | None = None  # frame stamp of the episode's first candidate
         self._duck_quiet = 0
@@ -273,6 +283,7 @@ class BargeIn:
             "onset_echo_frames": 0,
             "errors": 0,
             "record_errors": 0,
+            "own_sound_cuts": 0,
         }
         self._keyword_s = 0.0  # audio fed to the keyword recognizer, a CPU proxy for the cm4
         self._last_corr: float | None = None
@@ -345,13 +356,16 @@ class BargeIn:
         interrupt: Callable[[], Any],
         resume: Callable[[np.ndarray, float], None] | None = None,
         prepare: Callable[[], Any] | None = None,
+        cut_own: Callable[[], bool] | None = None,
     ) -> None:
         """Connect the actions: ``stop`` the speech output, ``interrupt`` the conversation,
         ``resume`` the listener on the barge-in audio. ``prepare`` runs before ``stop``: it
         tells the conversation to say nothing more, so a sentence queued between the stop and
-        ``interrupt`` cannot play."""
+        ``interrupt`` cannot play. ``cut_own`` cuts the robot's own sounds when nothing but
+        sounds that are not speech plays, and says whether it did (module docstring)."""
         self._stop, self._interrupt, self._resume = stop, interrupt, resume
         self._prepare = prepare or (lambda: None)
+        self._cut_own = cut_own or (lambda: False)
 
     @property
     def bound(self) -> bool:
@@ -629,13 +643,16 @@ class BargeIn:
         self._rec, self._rec_quiet = None, 0
         self._finish(rec, outcome, confirmed, end, by)
 
-    def _record_cut(self, rec: dict[str, Any] | None, path: str, detected: float) -> None:
+    def _record_cut(
+        self, rec: dict[str, Any] | None, path: str, detected: float, outcome: str = "cut"
+    ) -> None:
         """After a cut (``interrupt``, ``reset`` and the hand-off are done): end the episode's
-        record as cut by ``path``, or make one for a keyword stop with no episode open."""
+        record as cut by ``path``, or make one for a keyword stop with no episode open.
+        ``outcome`` is ``cut_own`` when only the robot's own sounds were cut."""
         if rec is None:
             rec = self._open_record(path, detected)
             self._rec = None
-        self._finish(rec, "cut", path, detected, None)
+        self._finish(rec, outcome, path, detected, None)
 
     def _finish(
         self,
@@ -834,6 +851,14 @@ class BargeIn:
             self._end_session()
         return False
 
+    def _own_cut(self) -> bool:
+        """``cut_own``, guarded: a failure is a normal cut-off."""
+        try:
+            return bool(self._cut_own())
+        except Exception as exc:
+            log.warning("barge-in: own-sound cut: %s", type(exc).__name__)
+            return False
+
     def _end_session(self, *, block: bool = False) -> None:
         """Drop the keyword session. ``block`` also waits for the worker and resets the
         recognizer, which the listener may use next (``reset``, after a cut-off)."""
@@ -860,16 +885,25 @@ class BargeIn:
         stop = self._stop
         if stop is None:  # unbound: on_chunk never gets here, but a caller may
             return
-        try:
-            self._prepare()
-        except Exception as exc:
-            log.warning("barge-in: prepare: %s", type(exc).__name__)
-        stop()
+        own = kind == "speech" and self._own_cut()
+        if not own:
+            try:
+                self._prepare()
+            except Exception as exc:
+                log.warning("barge-in: prepare: %s", type(exc).__name__)
+            stop()
         stopped = self._clock()
         self._deaf_until = stopped + self._tail_s  # the speaking window the stop leaves behind
         self.stats.record("stop_call", time.perf_counter() - t0)
         self.stats.record("onset_to_stop", stopped - onset)  # until ``stop()`` returned
         self.stats.record("detect_to_stop", stopped - detected)
+        if own:  # a sound that is not speech: no answer to cancel or trim
+            self._counts["own_sound_cuts"] += 1
+            self.reset()
+            if self._resume is not None:
+                self._resume(samples, audio_stamp)
+            self._safe(self._record_cut, rec, path, detected, "cut_own")
+            return
         self._counts["keyword_triggers" if kind == "keyword" else "triggers"] += 1
         self._cuts_by_path[path] += 1
         if kind == "keyword" and self._emit is not None:

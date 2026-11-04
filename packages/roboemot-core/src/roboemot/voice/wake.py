@@ -15,6 +15,11 @@ When required, an utterance is addressed if it contains the wake word, or it sta
 ``voice.fastpath.addressed_window_s`` after the last speech of an addressed one. A follow-up
 extends the window from its own last speech, but never past ``window_max_s`` from the wake word
 that opened it, and when both utterances' speakers are known people they must be the same person.
+
+While music plays at any time in the utterance (``music(start, end)``, the music detector,
+SPEC 8) the wake word is required whatever the policy, and the open window does not count:
+without the wake word the outcome is ``rejected_music``, before any other rule and without the
+voice-at-face check. An utterance with the wake word is addressed over music as without it.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ DECISIONS = (
     "rejected_no_face_at_voice",
     "rejected_not_facing",
     "rejected_no_facing_data",
+    "rejected_music",
 )
 # The voice-at-face check's verdicts (``at_face``); a rejection is counted ``rejected_<verdict>``.
 AT_FACE = "at_face"
@@ -40,13 +46,23 @@ NO_FACE_AT_VOICE = "no_face_at_voice"
 NOT_FACING = "not_facing"
 NO_FACING_DATA = "no_facing_data"
 AtFace = Callable[[], str]
+Music = Callable[[float, float], bool]  # music at any time in [start, end] (audio clock)
 
 
 class WakeGate:
     """Thread-safe addressed-window state machine; stamps are in the audio clock (seconds)."""
 
-    def __init__(self, policy: str, window_s: float, max_s: float = math.inf) -> None:
+    def __init__(
+        self,
+        policy: str,
+        window_s: float,
+        max_s: float = math.inf,
+        music: Music | None = None,
+    ) -> None:
+        """``music`` says whether music played in [start, end] (None: never). It runs under
+        this gate's lock, like ``at_face``, so it may take only leaf locks."""
         self._lock = threading.Lock()
+        self._music = music
         self._policy = policy
         self._window = window_s
         self._max = max_s
@@ -96,9 +112,8 @@ class WakeGate:
         """``decide`` with its outcome (one of ``DECISIONS``): a ``rejected_*`` one is not
         addressed, and says which rule rejected it (the Live tab's decision event)."""
         with self._lock:
-            required = self._policy == "always" or (
-                self._policy == "unless_enrolled_in_view" and not enrolled_in_view
-            )
+            music = self._music_in(start, last_speech)
+            required = self._required(enrolled_in_view) or music
             if not required:
                 outcome = "not_required"
                 if not wake_word:
@@ -109,7 +124,7 @@ class WakeGate:
                 self._opened, self._speaker = last_speech, speaker
                 outcome = "wake_word"
             else:
-                outcome = self._follow(start, speaker)
+                outcome = self._follow(start, speaker, music)
                 if outcome == "window":
                     outcome = _face_outcome(outcome, at_face)
             self._decisions[outcome] += 1
@@ -119,21 +134,42 @@ class WakeGate:
             return outcome
 
     def addressable(
-        self, *, enrolled_in_view: bool, start: float, speaker: str | None = None
+        self,
+        *,
+        enrolled_in_view: bool,
+        start: float,
+        speaker: str | None = None,
+        end: float | None = None,
     ) -> bool:
-        """Whether an utterance starting at ``start`` would be addressed without the wake word,
-        its voice-at-face check aside: the wake word is not required, or it falls in the open
-        window (the same person if both are known). Nothing is counted or changed: the listener
-        asks it when speech starts (SPEC 8, Realtime speech route), ``decide`` still decides."""
+        """Whether an utterance from ``start`` to ``end`` (None: ``start``) would be addressed
+        without the wake word, its voice-at-face check aside: no music in it, and the wake word
+        is not required or it falls in the open window (the same person if both are known).
+        Nothing is counted or changed: the listener asks it when speech starts and when it ends
+        (SPEC 8, Realtime speech route), ``decide`` still decides."""
         with self._lock:
-            required = self._policy == "always" or (
-                self._policy == "unless_enrolled_in_view" and not enrolled_in_view
-            )
-            return not required or self._follow(start, speaker) == "window"
+            music = self._music_in(start, start if end is None else end)
+            required = self._required(enrolled_in_view) or music
+            return not required or self._follow(start, speaker, music) == "window"
 
-    def _follow(self, start: float, speaker: str | None) -> str:
-        """Outcome of an utterance without the wake word: ``window`` when it falls in the open
-        window (same person if both are known), else the ``rejected_*`` reason (lock held)."""
+    def _required(self, enrolled_in_view: bool) -> bool:
+        """Whether the policy requires the wake word: always with ``always``, never with
+        ``never``, and with ``unless_enrolled_in_view`` only while no enrolled person is in
+        view (lock held). The one place both ``outcome`` and ``addressable`` ask it."""
+        return self._policy == "always" or (
+            self._policy == "unless_enrolled_in_view" and not enrolled_in_view
+        )
+
+    def _music_in(self, start: float, end: float) -> bool:
+        """Whether music played at any time in [start, end] (lock held); False without a
+        music predicate. Asked once per decision, so the rule and its reason agree."""
+        return self._music is not None and self._music(start, end)
+
+    def _follow(self, start: float, speaker: str | None, music: bool = False) -> str:
+        """Outcome of an utterance without the wake word: ``rejected_music`` while music
+        plays, ``window`` when it falls in the open window (same person if both are known),
+        else the ``rejected_*`` reason (lock held)."""
+        if music:
+            return "rejected_music"
         if start > self._until:
             return "rejected_no_window"
         if speaker is None or self._speaker is None or speaker == self._speaker:

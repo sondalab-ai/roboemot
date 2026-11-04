@@ -269,6 +269,7 @@ class SootheContext:
     other_queued: int  # speech jobs queued besides our own sound
     speaking: bool  # the speaker is in its speaking window (our own sound included)
     ours: bool  # our sound is queued or playing, or ended within the echo tail
+    hearing: bool = False  # the listener hears speech now, or speech may be starting
 
 
 def soothe_context(
@@ -281,17 +282,20 @@ def soothe_context(
     in_session: bool,
     last_voice: float,
     echo_tail_s: float,
+    hearing: bool = False,
 ) -> SootheContext:
     """Gather the idle inputs: only interaction counts, a person who is merely in view does not
     (``selector.target``, attention, presence and scans are deliberately not read). A voice is
     recent when the selector holds an active speaker hint or an utterance was heard less than
-    ``soothe.speech_quiet_s`` ago; ``last_voice`` is that utterance's time."""
+    ``soothe.speech_quiet_s`` ago; ``last_voice`` is that utterance's time. ``hearing``: the
+    listener's ``voice_active`` (speech in progress or starting)."""
     return SootheContext(
         in_session=in_session,
         voice_recent=selector.speaker_active(now) or now - last_voice < soothe.cfg.speech_quiet_s,
         other_queued=output.waiting(exclude=soothe.job),
         speaking=speech.speaking(now),
         ours=soothe.sounding(now, echo_tail_s),
+        hearing=hearing,
     )
 
 
@@ -312,10 +316,12 @@ def soothe_tick(
     circadian_state: str,
     quiet: bool,
 ) -> None:
-    """One step of the self-soothing runner, run after ``scan_tick``. A failure (type and message
-    only, never audio) is logged, the sound is cut and the runtime keeps running."""
+    """One step of the self-soothing runner, run after ``scan_tick``. Speech the listener hears
+    holds the sound back and cuts one playing (SPEC 7B). A failure (type and message only, never
+    audio) is logged, the sound is cut and the runtime keeps running."""
     try:
-        soothe.tick(now, soothe_idle(context()), circadian_state, quiet)
+        ctx = context()
+        soothe.tick(now, soothe_idle(ctx), circadian_state, quiet, speech=ctx.hearing)
     except Exception as exc:
         log.warning("soothe: %s: %s", type(exc).__name__, exc)
         try:

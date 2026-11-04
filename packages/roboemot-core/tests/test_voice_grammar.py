@@ -262,7 +262,8 @@ def test_rescue_wake_off_adds_no_wake_but_keeps_keywords():
 
 
 def test_phrase_words_too_far_apart_in_the_audio_do_not_match():
-    dec = Decoder([("ciao", 1.0), ("neve", 1.0)], gaps={0: 0.4})
+    # "per" first: the name does not open the utterance (a greeting alone before it would)
+    dec = Decoder([("per", 1.0), ("ciao", 1.0), ("neve", 1.0)], gaps={1: 0.4})
     fast, grammar, _ = build(config(max_word_gap_s=0.15), dec, platform="Neve")
     text = "cadeva per favore dimmi adesso"  # long: the bare name alone does not wake
     result = end(fast, text)

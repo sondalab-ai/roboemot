@@ -83,9 +83,9 @@ class Rig:
             volume_db=lambda: volume_db,
         )
 
-    def run(self, seconds, idle=True, state="awake", quiet=False):
+    def run(self, seconds, idle=True, state="awake", quiet=False, speech=False):
         for _ in range(int(seconds / STEP)):
-            self.runner.tick(self.now, idle, state, quiet)
+            self.runner.tick(self.now, idle, state, quiet, speech=speech)
             self.now += STEP
 
     def run_until_sound(self, limit=10_000.0, **kw):
@@ -394,3 +394,55 @@ def test_a_sentence_queued_behind_the_sound_ends_idle_and_cancels_only_the_sound
         assert rig.cancelled == [job]
     finally:
         rig.out.close()
+
+
+# ------------------------------------------------------------------ someone speaking (2026-11-04)
+
+
+def test_no_sound_starts_while_someone_speaks_and_the_hold_is_counted_once():
+    """Regression, robot run 2026-11-04: a hum started as the owner began speaking. Speech the
+    listener hears holds the sound back and restarts the idle clock."""
+    rig = Rig(config(interval_s=30, jitter=0, idle_min_s=0))
+    rig.run(30 - STEP)  # the sound is due at the next tick
+    rig.run(5.0, speech=True)
+    assert not rig.out.played
+    rig.run(30 - STEP)  # the idle clock restarted when the speech ended
+    assert not rig.out.played
+    assert rig.run_until_sound()
+    snap = rig.runner.snapshot()
+    assert snap["held_by_speech"] == 1 and snap["played"] == 1 and snap["cut_by_speech"] == 0
+
+
+def test_speech_cuts_a_sound_in_progress_and_starts_the_cooldown():
+    rig = Rig(config(interval_s=30, jitter=0, idle_min_s=0, cooldown_s=COOLDOWN))
+    assert rig.run_until_sound()
+    job = rig.runner.job
+    rig.run(STEP, speech=True)
+    assert rig.out.cancelled == [job] and rig.runner.job is None
+    cut_at = rig.now - STEP
+    assert rig.runner.snapshot()["cut_by_speech"] == 1
+    assert rig.run_until_sound()
+    assert rig.now - STEP >= cut_at + COOLDOWN
+
+
+def test_cut_by_speech_cuts_only_a_sound_in_progress():
+    """The listener and barge-in call it when speech meets the sound (SPEC 7B, 8)."""
+    rig = Rig(config(interval_s=30, jitter=0, idle_min_s=0))
+    assert not rig.runner.cut_by_speech(rig.now)
+    assert rig.run_until_sound()
+    job = rig.runner.job
+    assert rig.runner.cut_by_speech(rig.now)
+    assert rig.out.cancelled == [job] and not rig.runner.sounding(rig.now)
+    assert rig.runner.snapshot() == {
+        "enabled": True,
+        "playing": False,
+        "played": 1,
+        "held_by_speech": 0,
+        "cut_by_speech": 1,
+    }
+
+
+def test_speech_outside_an_idle_stretch_holds_nothing():
+    rig = Rig()
+    rig.run(5.0, idle=False, speech=True)
+    assert rig.runner.snapshot()["held_by_speech"] == 0

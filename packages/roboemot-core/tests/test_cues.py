@@ -76,7 +76,7 @@ def sound(seconds: float = 0.2) -> CueSound:
 
 def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=None, **cfg):
     clock, out = Clock(), LockCheckingOutput()
-    speaking = SimpleNamespace(on=False, muted=False, quiet=True)
+    speaking = SimpleNamespace(on=False, muted=False, quiet=True, hearing=False)
     cues = Cues(
         CueConfig(**cfg),
         gesture=lambda name: prim(name) if name in gestures else None,
@@ -86,6 +86,7 @@ def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=Non
         muted=lambda: speaking.muted,
         speaking=lambda now: speaking.on,
         quiet=lambda: speaking.quiet,
+        hearing=lambda: speaking.hearing,
         clock=clock,
     )
     out.cues = cues
@@ -296,3 +297,28 @@ def test_a_second_end_of_the_same_utterance_is_ignored():
     cues.listening_end(1)
     cues.listening_end(1)
     assert cues.snapshot()["listening"]["holding"]
+
+
+def test_a_one_shot_cue_sound_never_starts_while_someone_speaks():
+    """SPEC 8 (owner decision 2026-11-04): a raw sound opens the speaking window and the
+    listener drops what it hears then, so a cue for an utterance that ended must not cut the
+    next one. The gesture shows; the sound is skipped and counted."""
+    cues, clock, out, state = make()
+    events = []
+    cues.events = lambda kind, reason, **f: events.append((kind, reason, f["result"]))
+    state.hearing = True
+    assert cues.play("fallback", "no_route")
+    assert out.played == []
+    assert [c.source for c in cues.commands(clock.t + PEAK)] == ["cue:fallback"]
+    assert cues.snapshot()["counts"]["fallback"] == {"played": 1, "sound_skipped": 1}
+    assert events == [("cue", "no_route", "sound_skipped")]
+    state.hearing = False
+    assert cues.play("fallback", "no_route")
+    assert len(out.played) == 1
+
+
+def test_a_cue_without_a_sound_is_not_held_by_speech():
+    cues, _, out, state = make(sounds={})
+    state.hearing = True
+    assert cues.play("fallback")
+    assert cues.snapshot()["counts"]["fallback"] == {"played": 1}

@@ -121,6 +121,7 @@ EN: dict[str, str] = {
     "live_res_muted": "not played: asleep or paused",
     "live_res_unsupported": "not played: this robot has no such cue",
     "live_res_sound_dropped": "gesture only: the speaker dropped the sound",
+    "live_res_sound_skipped": "gesture only: someone was speaking",
     "live_res_skipped": "not played: someone was speaking",
     "live_res_dropped": "not played: the speaker was busy",
     "live_ev_unanswered_no_window": "Not answered: no wake word",
@@ -134,6 +135,7 @@ EN: dict[str, str] = {
         "Not answered: not facing the robot (no head turn measured)"
     ),
     "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
+    "live_ev_unanswered_music": "Not answered: music is playing, the wake word is needed",
     "live_ev_unanswered_skipped": (
         "Not answered: the cloud model skipped it (conversation: {conversation})"
     ),
@@ -150,6 +152,10 @@ EN: dict[str, str] = {
     "live_ev_bargein_cut": (
         "Cut by a barge-in (confirmed by {confirmed}): level {level_db} dB, robot playing "
         "{robot_playing}, head moving {moving}, echo {echo_corr}"
+    ),
+    "live_ev_bargein_cut_own": (
+        "Speech over the robot's own sound (a hum or a cue) cut that sound (confirmed by "
+        "{confirmed}): level {level_db} dB, echo {echo_corr}"
     ),
     "live_ev_bargein_released": (
         "Voice lowered, then released ({released_by}): level {level_db} dB, robot playing "
@@ -1031,6 +1037,7 @@ IT: dict[str, str] = {
     "live_res_muted": "non suonato: dorme o è in pausa",
     "live_res_unsupported": "non suonato: questo robot non ha il segnale",
     "live_res_sound_dropped": "solo il gesto: l'altoparlante ha scartato il suono",
+    "live_res_sound_skipped": "solo il gesto: qualcuno stava parlando",
     "live_res_skipped": "non suonato: qualcuno stava parlando",
     "live_res_dropped": "non suonato: l'altoparlante era occupato",
     "live_ev_unanswered_no_window": "Senza risposta: manca la parola di attivazione",
@@ -1051,6 +1058,7 @@ IT: dict[str, str] = {
     "live_ev_unanswered_no_facing_data": (
         "Senza risposta: nessun dato sullo sguardo (nessuna rotazione della testa misurata)"
     ),
+    "live_ev_unanswered_music": "Senza risposta: c'è musica, serve la parola di attivazione",
     "live_ev_unanswered_skipped": (
         "Senza risposta: il modello cloud l'ha ignorata (conversazione: {conversation})"
     ),
@@ -1068,6 +1076,10 @@ IT: dict[str, str] = {
     "live_ev_bargein_cut": (
         "Interrotto da chi parlava (confermato da {confirmed}): livello {level_db} dB, robot "
         "in riproduzione {robot_playing}, testa in movimento {moving}, eco {echo_corr}"
+    ),
+    "live_ev_bargein_cut_own": (
+        "Chi parlava ha interrotto un suono del robot (un canticchiare o un segnale; confermato "
+        "da {confirmed}): livello {level_db} dB, eco {echo_corr}"
     ),
     "live_ev_bargein_released": (
         "Voce abbassata, poi ripristinata ({released_by}): livello {level_db} dB, robot in "
