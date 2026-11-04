@@ -166,6 +166,22 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Startle on the robot under load: the audio hub gives the reflex only the newest chunk of a pass, so a
       bang shorter than one chunk (10 ms) can be missed when the hub runs late. Owner decision pending:
       keep, or pass the loudest chunk of the pass (SPEC change) (found in CV-15, 2026-11-03).
-- [ ] Realtime tests flaked once each on CI after CV-12 (`test_realtime_turns.py` pending-call reset,
-      `test_realtime_response_run.py:274` 0.2 s bound, `test_realtime_input.py` cancel/delete). If they
-      recur, check for reconnect threads outliving a test and compare the rate before CV-12.
+- [x] Realtime tests flaked once each on CI after CV-12 (`test_realtime_turns.py` pending-call reset,
+      `test_realtime_response_run.py:274` wall-clock bound, `test_realtime_input.py` cancel/delete). Not the
+      reconnect threads. Pending-call reset: the turn count went up before the turn record (fixed by PR 166,
+      `e311731`). Reload bound (0.2 s, 0.5 s since PR 169): gone, the stall is now 60 s, so only the
+      reload can end the run. Input cancel/delete: the server's VAD and transcripts wait on a
+      `TurnServer(hold=...)` event the test sets after its cancel.
+- [x] `test_app_soothe.py::test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it`: the
+      face's curiosity impulse in the same affect update as the sound's took its label, and `last_label`
+      read late showed a later label. The sound now waits until the renderer took the face's impulse, and
+      the test records every expression start.
+- [x] `test_realtime_turns.py::test_a_late_calls_items_are_deleted_with_its_turn` failed on Python 3.11 only:
+      a production race. 3.11's `asyncio.wait_for` returned a queued event and swallowed a barge-in's
+      cancel in the same loop iteration (no `response.cancel`, the turn ended `ok`). `ResponseRun.run`,
+      the chat stream, skill calls and the TTS backends now use `asyncio.timeout` (SPEC 8).
+- [x] `test_realtime_turns.py::test_a_barge_in_while_a_skill_runs_answers_the_queued_calls`: it barged in once
+      the server had sent `response.done`, before the route took it, so the cut cancelled a response still
+      live on the route. It now waits for the route's `responses` count.
+- [x] `test_realtime_tone.py::test_an_invalid_only_tone_round_gets_its_output_and_no_extra_response`: both CI
+      failures predate PR 168 (`7ba46ee`), which waits for the output to cross the socket. No change.

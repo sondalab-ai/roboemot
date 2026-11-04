@@ -53,6 +53,14 @@ that does not send them); ``ids_per_session`` numbers the items per connection, 
 repeats across sessions. ``tool_names`` (when set) names the call of each response in turn
 (the last repeats) instead of ``tool_name``; ``call_args`` (call id -> arguments) overrides
 ``tool_args`` for one call. ``sent`` records every event the server sent.
+
+``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
+``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
+events) or ``segment`` (every segment after a burst's first, with ``segment_gap_s``). A test
+that cancels a burst before the server's next word sets it after the cancel, so the order
+does not depend on how fast the test runs. A hold nobody released fails the test when the
+server closes (``__exit__`` raises): one that ran past ``hold_max_s`` (the server went on and
+counted it in ``hold_timeouts``) or one still waiting.
 """
 
 from __future__ import annotations
@@ -60,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import threading
 from typing import Any
 
 import numpy as np
@@ -69,6 +78,9 @@ from websockets.asyncio.server import ServerConnection
 RATE = 16000
 REPLY = "Ecco la mia risposta per te"
 PENDING = "function_call_output_pending"
+HOLD_MAX_S = 10.0  # default bound of a hold nobody releases (hold_timeouts)
+HOLD_POLL_S = 0.005
+HOLD_POINTS = ("speech", "transcript", "segment")
 
 
 def pcm(ms: float, level: float = 0.25) -> bytes:
@@ -107,9 +119,16 @@ class TurnServer(FakeServer):
         strict_calls: bool = False,
         reject_outputs: bool = False,
         call_args: dict[str, str] | None = None,
+        hold: threading.Event | None = None,
+        hold_at: str = "transcript",
+        hold_max_s: float = HOLD_MAX_S,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
+        assert hold_at in HOLD_POINTS
+        self.hold, self.hold_at, self.hold_max_s = hold, hold_at, hold_max_s
+        self.hold_timeouts = 0
+        self.holding = 0  # tasks waiting at the hold now
         self.scripts = list(scripts or ["reply"])
         self.deltas, self.delta_ms, self.gap_s = deltas, delta_ms, gap_s
         self.transcript, self.usage = transcript, usage
@@ -224,6 +243,7 @@ class TurnServer(FakeServer):
         items = [f"in_{burst}_{i}" for i in range(len(texts))]
         if delay:
             await asyncio.sleep(delay)
+        await self._held("speech")
         events = []
         for i, item in enumerate(items):
             started: dict[str, Any] = {"type": "input_audio_buffer.speech_started"}
@@ -244,10 +264,12 @@ class TurnServer(FakeServer):
             for i, (started, stopped, done) in enumerate(events):
                 if i:
                     await asyncio.sleep(self.segment_gap_s)
+                    await self._held("segment")
                 await self._send(ws, started)
                 await self._send(ws, stopped)
                 if self.transcript_delay_s:
                     await asyncio.sleep(self.transcript_delay_s)
+                await self._held("transcript")
                 await self._send(ws, done)
             return
         for started, stopped, _ in events:
@@ -257,8 +279,36 @@ class TurnServer(FakeServer):
             await self._send(ws, {"type": "response.created", "response": {"id": f"auto_{burst}"}})
         if self.transcript_delay_s:
             await asyncio.sleep(self.transcript_delay_s)
+        await self._held("transcript")
         for _, _, done in events:
             await self._send(ws, done)
+
+    async def _held(self, point: str) -> None:
+        """Wait at ``point`` while ``hold`` is unset (at most ``hold_max_s``)."""
+        if self.hold is None or self.hold_at != point:
+            return
+        loop = asyncio.get_running_loop()
+        end = loop.time() + self.hold_max_s
+        self.holding += 1
+        try:
+            while not self.hold.is_set():
+                if loop.time() >= end:
+                    self.hold_timeouts += 1
+                    return
+                await asyncio.sleep(HOLD_POLL_S)
+        finally:
+            self.holding -= 1
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the server; a hold nobody released (timed out, or still waiting) fails."""
+        # read before the close ends the waiting tasks; a set hold's waiters are on their way
+        holding = self.holding if self.hold is not None and not self.hold.is_set() else 0
+        super().__exit__(*exc)
+        if self.hold_timeouts or holding:
+            raise AssertionError(
+                f"TurnServer hold at {self.hold_at!r} never released: "
+                f"{self.hold_timeouts} timed out, {holding} still waiting"
+            )
 
     async def _respond(
         self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None

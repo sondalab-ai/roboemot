@@ -96,9 +96,9 @@ class OpenAISpeechBackend:
         got_audio = False
         try:
             try:
-                response = await asyncio.wait_for(
-                    response_cm.__aenter__(), max(0.0, deadline - loop.time())
-                )
+                # asyncio.timeout, not wait_for: a stop's cancel is never swallowed on 3.11
+                async with asyncio.timeout(max(0.0, deadline - loop.time())):
+                    response = await response_cm.__aenter__()
                 entered = True
                 if not response.is_success:  # an error, or a redirect (never followed)
                     self._report(router, route, True)
@@ -108,7 +108,8 @@ class OpenAISpeechBackend:
                 while True:
                     timeout = route.stall_timeout_s if got_audio else deadline - loop.time()
                     try:
-                        data = await asyncio.wait_for(chunks.__anext__(), max(0.0, timeout))
+                        async with asyncio.timeout(max(0.0, timeout)):
+                            data = await chunks.__anext__()
                     except StopAsyncIteration:
                         break
                     data = carry + data

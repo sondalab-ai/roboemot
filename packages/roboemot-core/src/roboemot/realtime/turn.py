@@ -191,7 +191,10 @@ class ResponseRun:
         try:
             while True:
                 try:
-                    event = await asyncio.wait_for(self._queue.get(), stall if created else first)
+                    # not wait_for: on 3.11 it swallows a cancel (barge-in) that lands in the
+                    # same loop iteration as a queued event (SPEC 8)
+                    async with asyncio.timeout(stall if created else first):
+                        event = await self._queue.get()
                 except TimeoutError:
                     self.reply.closed = "stall"  # bounded: never hangs holding the turn
                     self._abandon()

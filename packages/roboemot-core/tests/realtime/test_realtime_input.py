@@ -4,6 +4,8 @@ and the items of an utterance the robot does not answer through the route delete
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 from roboemot.realtime.input import RealtimeInput
@@ -80,12 +82,20 @@ def test_no_transcript_leaves_the_job_open_and_a_cancel_sends_nothing_more(rig_f
         assert rig.route.snapshot()["input_resets"] == 1
 
 
+def covered(rig) -> bool:
+    """The burst in flight has its whole speech reported (the input took ``speech_stopped``)."""
+    burst = rig.input._burst
+    return burst is not None and burst.covered()
+
+
 def test_a_transcript_after_the_cancel_has_its_item_deleted(rig_for):
-    with TurnServer(heard=[["tardi"]], transcript_delay_s=0.5) as server:
+    hold = threading.Event()  # the transcript comes only after the cancel
+    with TurnServer(heard=[["tardi"]], hold=hold) as server:
         rig = rig_for(server)
         job = rig.input.submit(speech(0.5), RATE)
-        assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
+        assert wait_for(lambda: covered(rig))  # else the cancel resets the session instead
         rig.input.cancel(job)
+        hold.set()
         assert wait_for(lambda: len(server.of("conversation.item.delete")) == 1)
         assert server.of("conversation.item.delete")[0]["item_id"] == "in_1_0"
         assert rig.route.snapshot()["audio_items_deleted"] == 1
@@ -278,12 +288,14 @@ def test_a_server_without_item_ids_still_joins_and_counts_what_it_cannot_delete(
 def test_an_item_without_id_that_must_go_is_counted_as_undeletable(rig_for):
     """The burst is covered (its speech reported) but cancelled before its transcript: the
     id-less transcript that comes later cannot be deleted, it is counted."""
-    with TurnServer(heard=[["tardi"]], ids=False, transcript_delay_s=1.0) as server:
+    hold = threading.Event()
+    with TurnServer(heard=[["tardi"]], ids=False, hold=hold) as server:
         rig = rig_for(server)
         job = rig.input.submit(speech(0.5), RATE)
-        assert wait_for(lambda: rig.input._burst is not None and rig.input._burst.covered())
+        assert wait_for(lambda: covered(rig))
         rig.input.cancel(job)
         assert rig.input._dead_anon == 1  # its transcript is still to come
+        hold.set()
         assert wait_for(lambda: rig.route.snapshot()["audio_items_undeletable"] == 1)
         assert rig.input._dead_anon == 0
         assert server.of("conversation.item.delete") == []
@@ -291,11 +303,13 @@ def test_an_item_without_id_that_must_go_is_counted_as_undeletable(rig_for):
 
 
 def test_an_id_less_burst_cancelled_before_the_server_reports_resets_the_session(rig_for):
-    with TurnServer(heard=[["tardi"]], ids=False, speech_delay_s=[1.0]) as server:
+    hold = threading.Event()
+    with TurnServer(heard=[["tardi"]], ids=False, hold=hold, hold_at="speech") as server:
         rig = rig_for(server)
         job = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
-        rig.input.cancel(job)  # well before the server's VAD speaks
+        rig.input.cancel(job)  # before the server's VAD speaks
+        hold.set()
         assert rig.input._dead_anon == 0  # nothing of it heard yet
         # nothing of it reported: the session resets, so its late item is stale, never joined
         assert wait_for(lambda: rig.route.snapshot()["input_resets"] == 1)
@@ -306,11 +320,16 @@ def test_an_id_less_burst_cancelled_before_the_server_reports_resets_the_session
 def test_a_late_item_of_a_cancelled_burst_never_joins_the_next_one(rig_for):
     """I-7: a cancelled burst the server had not reported resets the session; its late item is
     stale, and the next burst waits for the new session."""
-    with TurnServer(heard=[["uno"], ["due"]], speech_delay_s=[0.3, 0.8]) as server:
+    hold = threading.Event()  # the first burst's VAD speaks only after its cancel
+    # the second burst's 0.8 s only widens the window in which the first one's late item can
+    # arrive before the second's; it is not used as sync (the test passes either way)
+    kw = {"speech_delay_s": [0.0, 0.8], "hold": hold, "hold_at": "speech"}
+    with TurnServer(heard=[["uno"], ["due"]], **kw) as server:
         rig = rig_for(server)
         first = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
         rig.input.cancel(first)
+        hold.set()
         second = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: second.done)
         assert second.result is not None and second.result.text == "due"
@@ -517,12 +536,14 @@ def test_every_burst_gets_its_transcript_when_the_server_drops_the_closing_silen
 def test_a_cancelled_burst_with_its_speech_reported_needs_no_reset(rig_for):
     """The server reported the cancelled burst's whole speech: its transcript is deleted when it
     comes, the session stays, and the next burst starts at the server's end of speech."""
-    with TurnServer(heard=[["uno"], ["due"]], transcript_delay_s=0.5, **TRIM) as server:
+    hold = threading.Event()  # the first transcript comes only after the cancel
+    with TurnServer(heard=[["uno"], ["due"]], hold=hold, **TRIM) as server:
         rig = rig_for(server)
         first = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.sent_of("input_audio_buffer.speech_stopped")) == 1)
-        assert wait_for(lambda: rig.input._burst is not None and rig.input._burst.covered())
+        assert wait_for(lambda: covered(rig))
         rig.input.cancel(first)
+        hold.set()
         second = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: second.done)
         assert second.result is not None and second.result.text == "due"
@@ -574,13 +595,16 @@ def test_a_cancelled_burst_with_a_late_second_segment_never_joins_the_next(rig_f
     end: a second segment may still come (at the next burst's start or after). Not covered:
     the session resets, the late segment is stale, the next burst hears only its own words."""
     heard = [["uno", "tardi"], ["due"]]
-    with TurnServer(heard=heard, segment_gap_s=1.0, **TRIM) as server:
+    hold = threading.Event()  # "tardi" comes only after the cancel
+    kw = {"segment_gap_s": 0.01, "hold": hold, "hold_at": "segment"}
+    with TurnServer(heard=heard, **kw, **TRIM) as server:
         rig = rig_for(server)
         first = rig.input.submit(speech(1.0), RATE)
         done = "conversation.item.input_audio_transcription.completed"
         assert wait_for(lambda: len(server.sent_of(done)) == 1)  # "uno" in, "tardi" to come
         assert not first.done  # not covered: no result yet
         rig.input.cancel(first)
+        hold.set()
         assert wait_for(lambda: rig.route.snapshot()["input_resets"] == 1)
         second = rig.input.submit(speech(1.0), RATE)
         assert wait_for(lambda: second.done)
@@ -618,13 +642,15 @@ def test_without_item_ids_a_reset_forgets_the_pending_items(rig_for):
     """A reset ends the old session's id-less items with it: the next session's first burst is
     not ambiguous (none of them can reach it)."""
     heard = [["uno"], ["due"]]
-    with TurnServer(heard=heard, ids=False, transcript_delay_s=1.0, trim_ms=10_000.0) as server:
+    hold = threading.Event()  # the first transcript comes only after the cancel
+    with TurnServer(heard=heard, ids=False, hold=hold, trim_ms=10_000.0) as server:
         rig = rig_for(server)
         first = rig.input.submit(speech(1.0), RATE)
         stopped = "input_audio_buffer.speech_stopped"
         assert wait_for(lambda: len(server.sent_of(stopped)) == 1)  # ends at 0: not covered
         server.trim_ms = 0.0  # the next session's burst is reported in full
         rig.input.cancel(first)  # its id-less item's transcript is still to come
+        hold.set()
         assert wait_for(lambda: rig.route.snapshot()["input_resets"] == 1)
         assert rig.input._dead_anon == 0
         second = rig.input.submit(speech(1.0), RATE)
@@ -637,7 +663,8 @@ def test_an_item_id_repeated_by_the_next_session_is_not_taken_for_a_dead_one(rig
     """Ids are per session: a buried id of the reset session must not delete the new
     session's item of the same name."""
     heard = [["uno"], ["due"]]
-    kw = {"ids_per_session": True, "transcript_delay_s": 1.0, "trim_ms": 10_000.0}
+    hold = threading.Event()  # the first transcript comes only after the cancel
+    kw = {"ids_per_session": True, "hold": hold, "trim_ms": 10_000.0}
     with TurnServer(heard=heard, **kw) as server:
         rig = rig_for(server)
         first = rig.input.submit(speech(1.0), RATE)
@@ -645,6 +672,7 @@ def test_an_item_id_repeated_by_the_next_session_is_not_taken_for_a_dead_one(rig
         assert wait_for(lambda: len(server.sent_of(stopped)) == 1)
         server.trim_ms = 0.0
         rig.input.cancel(first)  # "in_1_0" of session 1 is buried
+        hold.set()
         assert wait_for(lambda: rig.route.snapshot()["input_resets"] == 1)
         second = rig.input.submit(speech(1.0), RATE)
         assert wait_for(lambda: second.done)

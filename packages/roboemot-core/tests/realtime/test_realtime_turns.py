@@ -753,7 +753,9 @@ def test_a_barge_in_while_a_skill_runs_answers_the_queued_calls(rigs):
 
         rig.worker._call = slow
         n = rig.say()
-        assert wait_for(lambda: running and srv.sent_of("response.done"))
+        # the route took the response.done (it is no longer live), not only the server sent it:
+        # a barge-in before that cancels a response still in flight on the route
+        assert wait_for(lambda: running and rig.route.snapshot()["responses"].get("completed") == 1)
         assert barge_in(rig)
         assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
         assert wait_for(lambda: len(outputs_by_call(srv)) == 3)
@@ -821,6 +823,53 @@ def test_a_late_calls_items_are_deleted_with_its_turn(rigs):
             return {e["item_id"] for e in srv.of("conversation.item.delete")}
 
         assert wait_for(lambda: {"fc_1", out} <= deleted())
+
+
+def test_a_barge_in_with_the_response_created_event_in_the_same_loop_step_cuts_the_turn(
+    rigs, monkeypatch
+):
+    """Python 3.11's ``asyncio.wait_for`` returned a queued item and swallowed a cancel that
+    came in the same loop iteration (CI flake of the late-call test): the barge-in was lost, no
+    ``response.cancel``, the turn ended ``ok``. Forced here: the run's ``response.created`` is
+    held, then posted together with the barge-in's cancel in one loop callback (SPEC 8)."""
+    from roboemot.realtime import protocol
+    from roboemot.realtime.turn import ResponseRun
+
+    held: list[tuple[ResponseRun, protocol.ResponseCreated]] = []
+    post = ResponseRun._post
+
+    def hold_created(run, item):
+        if isinstance(item, protocol.ResponseCreated) and not held:
+            held.append((run, item))
+            return
+        post(run, item)
+
+    monkeypatch.setattr(ResponseRun, "_post", hold_created)
+    with TurnServer(
+        ["cancel_then_tool", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: held and bool(rig.sink.pushed))
+        run, created = held[0]
+        rig.worker.mark_interrupting()
+        rig.speech.stop()
+
+        def created_and_barge_in() -> None:  # one loop step: the item first, then the cancel
+            run._queue.put_nowait(created)
+            rig.worker.interrupt()
+
+        run._loop.call_soon_threadsafe(created_and_barge_in)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert rig.events[-1]["outcome"] == "interrupted"
+        assert wait_for(lambda: srv.of("response.cancel"))  # the cancel crosses the socket
+        assert len(srv.of("response.cancel")) == 1
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))  # the late call is answered
 
 
 def test_a_pending_refusal_with_no_request_still_resets(rigs):
