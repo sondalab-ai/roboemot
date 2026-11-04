@@ -44,6 +44,9 @@ PRs: https://github.com/sondalab-ai/roboemot/pull/160, plus CV-20/21 https://git
    - The listening/thinking cue.
    - Answers cut at the sentence cap.
    - False barge-in cuts (`bargein.triggers` with nobody talking).
+5. Interrupt the robot while it uses a tool (for example during a long answer with a tool call).
+   - Pass: the next turn answers normally, and the debug report shows no server error after the cut.
+   - Why: nobody has verified that the platform server accepts tool results sent right after `response.cancel` (CV-8, https://github.com/sondalab-ai/roboemot/pull/148).
 
 ## B. Vision: objects, cup, cost (PRs 162, 163, 167, 174, 176, 177, 178)
 
@@ -225,3 +228,76 @@ The realtime HIL suite (`test_realtime_hil.py`, section 2 of `docs/plans/2026-10
 - Proposed, not approved: put the shown object into the conversation context.
 
 These are in `docs/plans/2026-11-03-vision-cost-handoff.md`, section 3.
+
+## Follow-ups from the recent sessions (code, not robot QA)
+
+Sources:
+- the transcripts of the vision/wake/reflex, cloud-voice/nap and music-dance sessions, and of the small design and research sessions;
+- `TODO.md`;
+- the open items in the plans of 2026-10-27 and 2026-10-28.
+
+Status terms:
+- **approved**: the owner said yes.
+- **proposed**: it waits for an owner OK.
+- **decision**: the owner must choose.
+- **limitation**: known and accepted for now.
+- **review**: a review finding that was deferred.
+- **check first**: it may already be fixed, so read the code before you act.
+
+Items marked "after QA X" wait for that QA section.
+
+### Decisions for the owner
+
+| Item | Where | Status |
+| --- | --- | --- |
+| With `voice.enabled` off (the default), the `turn-to-voice` reflex never fires, because it needs the speech detector. Accept, or give it a fallback? https://github.com/sondalab-ai/roboemot/pull/182 | `reflex/engine.py`, SPEC 10 | decision |
+| Startle under load: a bang shorter than one chunk can be missed when the audio hub runs late. Keep this, or pass the loudest chunk of the pass (a SPEC change)? | `TODO.md`, SPEC 10 | decision |
+| CPU headroom: overclock the CM4 to 1.8 GHz (eMMC recovery needs rpiboot), a CM5 swap, an AI accelerator, LAN offload (a SPEC 12 privacy decision), or cooling. | hardware | decision |
+| Let the server start its answer before the robot's transcript round trip, as Pollen's app does. This affects the wake-word check and the skip tool. | SPEC 8, `docs/plans/2026-10-28-cloud-voice-default.md` | decision |
+| Try `voice.mood_source: llm_tagged`, because the owner found the delivery flat. | SPEC 8 | proposed |
+| Put the shown object into the conversation context. | `docs/plans/2026-11-03-vision-cost-handoff.md` section 4 | proposed |
+| LeRobot: adopt nothing now. Import expression clips in the LeRobot dataset format only if the owner starts recording clips. | `scripts/import_pollen_emotions.py` | proposed |
+| Research ideas, not started: voice emotion through the realtime model, a small head-pose net in place of the 5-landmark yaw, a neural echo guard for barge-in, motion flow to predict where a locked face went, a test of the mirror neural net. | `voice/facing.py`, `TODO.md` | proposed |
+
+### Tuning that waits for robot numbers
+
+| Item | Where | Status |
+| --- | --- | --- |
+| Facing check: raise `voice.facing.max_yaw_deg`, recalibrate `vision.facing_nose_depth_ratio`, keep the yaw per face track, or judge the yaw after the speech starts. The choice depends on which steps fail. | `voice/facing.py`, SPEC 8 | after QA C |
+| Set `voice.realtime_route.transcript_timeout_s` to the measured p95 plus about 1 s. The profile writes 10 s, and the code default is 4 s. A 2026-11-03 run measured p95 4273 ms. | `config/schema.py`, installer profile | after QA A |
+| Entity embeds: a detector flicker on an unrecognised track opens a burst of up to 5 embeds (`reacquired`). Add a minimum gap if the counters show many. https://github.com/sondalab-ai/roboemot/pull/177 | `vision/pipeline.py` | after QA B |
+| Reflex motion gate: expressive motion above 60 deg/s (clips, antenna wiggles) suppresses reactions for the motion plus a 500 ms tail. Watch `gate.suppressed.motion`. https://github.com/sondalab-ai/roboemot/pull/182 | `reflex/engine.py` | after QA D |
+| Tone tool: many `tone_retry` against `tones` means extra server rounds. The appraisal rules for the five tone labels are guesses. https://github.com/sondalab-ai/roboemot/pull/165 | installer profile, SPEC 8 | after QA A |
+| Local Vosk decode cap over music: add the cap if `decode` plus `asr_*` is above 15 % of one core with a song playing. | `docs/plans/2026-11-04-music-dance.md` | after QA G |
+| A soothe hum opened the speaking window and dropped the start of a sentence (`dropped_speaking` 44 on 2026-11-04). PR 180 holds the hum while someone speaks. Confirm that the drop is gone. | `voice/speech.py` | after QA C/E |
+| Face tracking: the rebirth distance p50 is 0.66 against the 0.6 gate. | `vision/tracker.py` | after QA B |
+| Barge-in onset-to-stop: 313 ms against the 200 ms budget (2026-10-28). Answers were also cut at the sentence cap (3 of 5 turns, local mode). Recheck both under the realtime route. | SPEC 8, 13 | after QA A |
+| A false barge-in on 2026-10-28 has no known cause. CV-9 added per-trigger records. https://github.com/sondalab-ai/roboemot/pull/149 | `voice/bargein.py` | after QA A |
+
+### Code follow-ups
+
+| Item | Where | Status |
+| --- | --- | --- |
+| Sticky identity for still objects. Design note from the V-4 review: the fix needs denser object runs or a re-embed from the stored crop. | `vision/pipeline.py`, `attention/interest.py` | approved |
+| Make the flaky tests timing-independent. The list also has the realtime flakes in `TODO.md`. | tests | proposed |
+| `reflexes.rules` and `soothe.variants` are missing from `KEYED_LISTS`, so every config layer replaces them whole. | `config/stack.py` | proposed |
+| Driver angle contract: every driver reports each angle on the commands' continuous scale, never wrapped. Add a contract test over every registered driver. | SPEC 4A, `PoseGroupDriver` | approved (owner, 2026-10-28) |
+| After a cut in a response that called a tool, the history has no interrupted assistant entry. https://github.com/sondalab-ai/roboemot/pull/148 | `conversation/worker.py` | limitation |
+| The transcription language follows `conversation.language`, so a speaker whose `preferences.language` differs is transcribed in the wrong language on the server. Document this in SPEC 8, or fix it. https://github.com/sondalab-ai/roboemot/pull/139 | `realtime/route.py` | review |
+| A text turn already queued can reopen the realtime session while the robot sleeps (with `runtime.pause_when_asleep`). | `realtime/` | limitation |
+| The barge-in echo buffer may drop the playing audio for sentences over 2 s. | `voice/bargein.py` | check first |
+| Object low-score pass: one frame with nothing at a score of 0.2 or more breaks the track chain until a 0.4 detection arrives. https://github.com/sondalab-ai/roboemot/pull/176 | `vision/tracker.py` | limitation |
+| Object gate: the 80x60 motion test can miss a small moving object, such as a 40 px ball. Gate gaps can also expire tracks and churn track IDs. https://github.com/sondalab-ai/roboemot/pull/163 | `vision/object_gate.py`, `vision/tracker.py` | check first |
+| Object gate review nits: a 3-channel assumption, state written without the lock, and a float32 full-frame copy on each granted tick. Some of the code may have moved since. https://github.com/sondalab-ai/roboemot/pull/163 | `vision/object_gate.py` | check first |
+| Crop near faces: the validator checks only `full_interval_s < object_lost_s`. Far tentative tracks hold the gate in `live_track`. https://github.com/sondalab-ai/roboemot/pull/178 | `vision/object_crop.py` | check first |
+| Day nap review items. A nap in progress may keep `nap.napping` true when `robot.asleep` fires. The motion streak has no time-gap limit. A light rise inside `nap_light_grace_s` is dropped (SPEC should say so). The posture change after `settle_s` may read as motion. https://github.com/sondalab-ai/roboemot/pull/171 | `circadian/runner.py`, `vision/scene_motion.py` | check first |
+| Music: on the realtime path the voice-at-face check still runs over music (review M2). A broadband tick reads as music. One very large chunk can turn `stopped` into `started` in the same feed. https://github.com/sondalab-ai/roboemot/pull/183 | `voice/wake.py`, `voice/music.py` | review |
+| Music test and doc gaps: no test of rhythmic speech through the octave rule, of the clock rejection against `music.min_band_periodicity`, of `music.stopped` on a reload that turns music off, or of the Vosk path with the real detector. The full list is in the plan's "Deferred minor findings". https://github.com/sondalab-ai/roboemot/pull/181 | `tests/test_music_detector.py`, `docs/plans/2026-11-04-music-dance.md` | review |
+| Pin the YuNet and SFace model URLs to commit `f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3` (tag 4.10.0) instead of `raw/main`. The sha256 check still protects the download. | `vision/models.yaml:22,31` | proposed |
+| Simplify the configuration (owner TODO). | `TODO.md` | proposed |
+| Installer: check that the main-flow pip steps no longer print a timed ✓ before the final "installed" line. Update the README status rows. | installer, `README.md` | check first |
+
+### Robot environment (not code)
+
+- The daemon 1.13.0 can get stuck in the `stopping` state. Only a reboot clears it.
+- The robot's Wi-Fi is weak: -66 to -82 dBm on a DFS 5 GHz channel. Move the robot closer to the access point, or use 2.4 GHz.
