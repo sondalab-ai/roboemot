@@ -18,7 +18,6 @@ const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
-  render: 0, // the latest settingsView call; an older one still waiting for the catalogue draws nothing
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -31,7 +30,7 @@ function resetSettingsState() {
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
-  settingsState.render++; // a render in flight must not draw the catalogue after a logout
+  newView(); // a render or reload in flight must not draw or apply the catalogue after a logout
   const view = document.getElementById("view");
   if (view) view.replaceChildren();
 }
@@ -744,8 +743,11 @@ async function revealSettings() {
 }
 
 async function settingsReload(changedPath) {
+  const current = viewToken();
   if (changedPath) settingsState.leaves.delete(changedPath);
-  settingsState.data = await api("GET", "/api/settings");
+  const data = await api("GET", "/api/settings");
+  if (!current()) return; // a new settings view or a logout replaced the groups this answer was for
+  settingsState.data = data;
   settingsApplyModel(settingsState.data);
   refreshSettings();
   if (!changedPath) return;
@@ -875,15 +877,15 @@ function settingsToolbar() {
       el("p", { class: "hint", id: "settings-count", role: "status", "aria-live": "polite" })));
 }
 
-// Draws the Settings tab. Only the latest call draws: two overlapping calls (the tab clicked twice, or
-// left and reopened while the catalogue loads) would each append a full view, and the second would move
-// the cached leaf rows out of the first, leaving its group bodies with bare separators.
+// Draws the Settings tab. Only the latest view draws (`newView`, app.js): two overlapping calls (the tab
+// clicked twice, or left and reopened while the catalogue loads) would each append a full view, and the
+// second would move the cached leaf rows out of the first, leaving its group bodies with bare separators.
 async function settingsView() {
-  const mine = ++settingsState.render;
+  const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   const data = await api("GET", "/api/settings");
-  if (mine !== settingsState.render) return;
+  if (!current()) return;
   view.replaceChildren();
   settingsState.data = data;
   const robot = data.robot || null;

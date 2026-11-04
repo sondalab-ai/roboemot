@@ -3,7 +3,20 @@
 // registry are never HTML. Styles are set through the CSSOM only (the CSP forbids style attributes).
 
 const ROUTES_POLL_MS = 2000;
-const state = { strings: {}, lang: undefined, csrf: null, session: {}, tab: "enroll", timer: null, form: null };
+const state = { strings: {}, lang: undefined, csrf: null, session: {}, tab: "enroll", timer: null, form: null, view: 0 };
+
+// #view has one owner: the latest view. A view takes `newView()` before its first await and draws
+// nothing once a later view, a tab switch, login or logout took #view (`current()` is false); an action
+// inside a view takes `viewToken()`, which does not take #view from the view it acts in.
+function newView() {
+  state.view += 1;
+  return viewToken();
+}
+
+function viewToken() {
+  const mine = state.view;
+  return () => mine === state.view;
+}
 
 const t = (key, vars) => {
   let text = state.strings[key] || key;
@@ -281,6 +294,7 @@ function loginCard(body) {
 }
 
 function loginView() {
+  newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   if (!state.session.pin_set) {
@@ -308,19 +322,23 @@ function loginView() {
 // ---------------------------------------------------------------- enrollment
 
 function enrollmentView() {
+  const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   const box = el("div", { class: "stack" });
   view.append(box);
   const poll = async () => {
+    if (!current()) return;
     stopPolling();
     try {
       const s = await api("GET", "/api/enrollment/status");
+      if (!current()) return;
       await renderEnrollment(box, s);
-      if (state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
+      if (current() && state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
     } catch (err) {
+      if (!current()) return;
       if (err.status === 401) { await boot(); return; }
       notice(explain(err), true);
     }
@@ -407,11 +425,13 @@ function consentForm(pendingPeople) {
 const STATUS_TONE = { pending: "warning", active: "success" };
 
 async function registryView() {
+  const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   const [list, quarantined] = await Promise.all([
     api("GET", "/api/registry"), api("GET", "/api/registry/quarantined"),
   ]);
+  if (!current()) return;
   const rows = list.records;
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
@@ -500,9 +520,11 @@ function importReport(report) {
 }
 
 async function catalogueView() {
+  const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   const data = await api("GET", "/api/catalogue");
+  if (!current()) return;
   const xmp = el("input", { type: "file", id: "xmp_file", class: "sl-field__input", accept: ".xmp,application/rdf+xml,text/xml" });
   const photo = el("input", { type: "file", id: "photo_file", class: "sl-field__input", accept: "image/jpeg,image/png" });
   const result = el("div", { id: "import_result", role: "status" });
@@ -522,7 +544,8 @@ async function catalogueView() {
         const report = await api("POST", "/api/catalogue/import", body);
         notice("");
         await catalogueView();
-        document.getElementById("import_result").replaceChildren(...importReport(report));
+        const shown = document.getElementById("import_result");
+        if (shown) shown.replaceChildren(...importReport(report));
       });
     },
   },
@@ -801,8 +824,10 @@ function checkReason(c) {
 }
 
 async function routesView() {
+  const current = newView();
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
+  if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
   let secrets = null;
   try {
@@ -811,6 +836,7 @@ async function routesView() {
     if (err.message === "secret_store") notice(explain(err), true);
     else if (err.message !== "secrets_unavailable") throw err;
   }
+  if (!current()) return;
   const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + checkReason(c));
@@ -884,9 +910,11 @@ async function refreshRoutes() {
 }
 
 async function debugView() {
+  const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
   const report = await api("GET", "/api/debug");
+  if (!current()) return;
   const sections = report.sections || {};
   const robotOnly = Object.fromEntries(Object.entries(sections).filter(([, s]) => s && s.scope === "robot"));
   const coreOnly = Object.fromEntries(Object.entries(sections).filter(([, s]) => !(s && s.scope === "robot")));
@@ -917,6 +945,7 @@ const TABS = {
 
 function showTab(name) {
   stopPolling();
+  newView();
   state.tab = name;
   document.getElementById("view").setAttribute("aria-labelledby", "tab-" + name);
   notice("");
