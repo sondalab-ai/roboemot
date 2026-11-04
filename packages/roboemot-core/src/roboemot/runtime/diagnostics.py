@@ -50,6 +50,7 @@ def build_diagnostics(
                     **({"bargein": bargein.snapshot()} if bargein is not None else {}),
                     **({"speech": o.snapshot()} if (o := host.speech_output) else {}),
                     **({"cues": q.snapshot()} if (q := host.cues) else {}),
+                    **({"soothe": r.snapshot()} if (r := host.soothe_runner) else {}),
                     "speaking": p.speaking.snapshot(),
                 }
                 if listener is not None

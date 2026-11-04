@@ -28,6 +28,15 @@ phrases, the name and aliases, ``keyword_min_word_conf`` for the others):
   another word, as "i robot"); ``rescue_wake`` off adds none. Stop, yes, no and greetings are
   added on the floor and the gap alone.
 
+A name or alias hit the free text missed that opens the decoded words (nothing before it, or one
+lead-in phrase of the language, ``KeywordSpotter.lead_in``; an unknown word before it is not a
+lead-in) and starts at most ``name_first_max_start_s`` into the decoded audio (a long pause or a
+lost stretch before it is not "first") adds the ``NAME_FIRST`` flag to the result: the name as
+the first word wakes the robot at any length (SPEC 8, owner decision 2026-11-04). Counted
+``name_first``. When the free text has
+the name, its position there decides: a decode that lost the words before it must not move it to
+the front.
+
 An utterance gets no pass when its free text has no usable word, more distinct words than
 ``max_competitor_words`` (cutting the list would leave part of the audio to the keywords alone),
 or lasts longer than ``max_audio_s`` (the hand-off to the conversation waits for the pass), or
@@ -40,6 +49,7 @@ No transcript, phrase or word leaves this module: the report has counts and conf
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -51,7 +61,7 @@ import numpy as np
 
 from ..config.schema import GrammarConfig
 from .asr import VOSK_UNKNOWN, GrammarUnsupported, HeardWord
-from .keywords import CATEGORIES, KeywordSpotter, fold
+from .keywords import CATEGORIES, NAME_FIRST, KeywordSpotter, fold
 from .robot_name import MissingWords
 
 log = logging.getLogger(__name__)
@@ -110,11 +120,13 @@ class _Match:
     rejected: dict[str, float] = field(default_factory=dict)
     guarded: set[str] = field(default_factory=set)
     gapped: set[str] = field(default_factory=set)
+    name_first: bool = False  # an accepted name or alias opened the decoded words
 
 
 @dataclass
 class _Stats:
     passes: int = 0
+    name_first: int = 0
     builds: int = 0
     skipped: dict[str, int] = field(default_factory=lambda: dict.fromkeys(SKIPS, 0))
     hits: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
@@ -193,9 +205,10 @@ class GrammarSpotter:
         if words is None:
             return self._skip("no_model")
         found = set(found)
-        result = self._match(built.targets, words, set(free), found, cfg)
+        lead = functools.partial(spotter.lead_in, language=language)
+        result = self._match(built.targets, words, set(free), found, cfg, lead)
         self._record(spent, audio.size, result, found)
-        return frozenset(result.hits)
+        return frozenset(result.hits) | ({NAME_FIRST} if result.name_first else frozenset())
 
     def snapshot(self) -> dict[str, Any]:
         """Counts, confidences and cost for the debug report (no phrase, word or text)."""
@@ -215,6 +228,7 @@ class GrammarSpotter:
                 "missed": dict(s.missed),
                 "guarded": dict(s.guarded),
                 "gapped": dict(s.gapped),
+                "name_first": s.name_first,
                 "confidence": {
                     "accepted": s.accepted_conf.snapshot(),
                     "rejected": s.rejected_conf.snapshot(),
@@ -270,22 +284,25 @@ class GrammarSpotter:
         free: set[str],
         found: set[str],
         cfg: GrammarConfig,
+        lead: Callable[[str], bool] = lambda prefix: not prefix,
     ) -> _Match:
         """Per category, the best phrase confidence (lowest word confidence of one occurrence
         whose words are adjacent in the audio) that passed its floor, the best of those that did
-        not, and the categories dropped by the gap check or the wake guard (module docstring)."""
+        not, and the categories dropped by the gap check or the wake guard (module docstring).
+        ``lead(words)`` tells whether the words before an accepted name the free text missed may
+        stand before it (``name_first``)."""
         seq = [HeardWord("" if w.word == VOSK_UNKNOWN else fold(w.word), *w[1:]) for w in words]
         out = _Match()
         for category, target in targets:
             n = len(target)
             spans = [
-                seq[i : i + n]
+                (i, seq[i : i + n])
                 for i in range(len(seq) - n + 1)
                 if tuple(w.word for w in seq[i : i + n]) == target
             ]
             if not spans:
                 continue
-            close = [s for s in spans if _adjacent(s, cfg.max_word_gap_s)]
+            close = [(i, s) for i, s in spans if _adjacent(s, cfg.max_word_gap_s)]
             if not close:
                 out.gapped.add(category)
                 continue
@@ -293,10 +310,17 @@ class GrammarSpotter:
             if wake and category not in found and not (cfg.rescue_wake and free.isdisjoint(target)):
                 out.guarded.add(category)
                 continue
-            best = max(min(w.conf for w in span) for span in close)
+            best = max(min(w.conf for w in span) for _, span in close)
             floor = cfg.wake_min_word_conf if wake else cfg.keyword_min_word_conf
             bucket = out.hits if best >= floor else out.rejected
             bucket[category] = max(bucket.get(category, 0.0), best)
+            if category == "name" and "name" not in found and not out.name_first:
+                out.name_first = any(
+                    min(w.conf for w in span) >= floor
+                    and span[0].start_s <= cfg.name_first_max_start_s
+                    and _opens(seq[:i], lead)
+                    for i, span in close
+                )
         for category in out.hits:
             out.rejected.pop(category, None)
             out.guarded.discard(category)
@@ -330,9 +354,18 @@ class GrammarSpotter:
                 s.guarded[category] += 1
             for category in result.gapped:
                 s.gapped[category] += 1
+            s.name_first += result.name_first
             for category in found - result.hits.keys():
                 if category in s.missed:
                     s.missed[category] += 1
+
+
+def _opens(before: list[HeardWord], lead: Callable[[str], bool]) -> bool:
+    """Whether the words ``before`` a name may open the utterance with it: none, or a lead-in
+    (an unknown word is never one)."""
+    if any(not w.word for w in before):
+        return False
+    return lead(" ".join(w.word for w in before))
 
 
 def _adjacent(span: list[HeardWord], max_gap_s: float) -> bool:

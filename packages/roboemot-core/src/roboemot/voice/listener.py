@@ -6,7 +6,11 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
    ``on_speaking_chunk`` (the barge-in detector, SPEC 8 stage 8), and resets the pipeline on that
    transition and on a gap, since the audio is no longer contiguous. ``resume`` is the detector's
    way back: it feeds the audio from the barge-in onset and keeps the gate open until the echo
-   tail is over, so the user's first words are not lost;
+   tail is over, so the user's first words are not lost. When the window opens on a sound of
+   the robot's own that is not speech (a self-soothing hum, SPEC 7B) while someone's speech is
+   in progress or starting (``voice_active``), ``cut_own_sound`` (``bind_own_sound``) cuts that
+   sound and the utterance goes on instead: the gate stays open until the cut's echo tail is
+   over;
 2. runs the VAD endpointer; the ASR only ever sees speech (pre-roll included);
 3. on speech start picks the language, runs the fast path (head turn, ``speech.heard``) and
    starts the recognizer; on each partial runs the keyword spotter;
@@ -73,12 +77,12 @@ from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .decode_worker import DecodeJob, DecodeWorker
 from .direction import VoiceDirection
-from .fastpath import FastPath, GrammarPass, UtteranceState
+from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
-from .wake import AT_FACE, AtFace, WakeGate
+from .wake import AT_FACE, NO_FACE_AT_VOICE, AtFace, WakeGate
 
 log = logging.getLogger(__name__)
 TOPIC = "percept.utterance"
@@ -242,6 +246,7 @@ class VoiceListener:
         # finished utterances waiting for their final, in order (the head goes first)
         self._queue: collections.deque[_Handoff] = collections.deque()
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
+        self._cut_own_sound: Callable[[], bool] | None = None  # bind_own_sound
         self._realtime: Any = None  # the realtime route's audio input (bind_realtime)
         self._on_audio: Callable[[str, float], None] = lambda event, key: None  # bind_realtime
         self._audio = {
@@ -271,6 +276,7 @@ class VoiceListener:
             "dropped_speaking": 0,
             "barge_ins": 0,
             "errors": 0,
+            "name_first_no_face": 0,  # the name opened a long final, no face at the voice
         }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
@@ -293,6 +299,12 @@ class VoiceListener:
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
+
+    def bind_own_sound(self, cut: Callable[[], bool]) -> None:
+        """``cut()`` cuts a sound of the robot's own that is not speech, when only such a sound
+        plays, and says whether it did: someone's speech that is in progress as the sound starts
+        then goes on (SPEC 7B, 8)."""
+        self._cut_own_sound = cut
 
     def bind_realtime(
         self, realtime: Any, on_audio: Callable[[str, float], None] | None = None
@@ -524,6 +536,8 @@ class VoiceListener:
             self._count("gaps")
             self._abort(wait=True)
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
+        if speaking and start >= self._open_until and self._own_sound_cut():
+            self._open_until = self._speech.until()  # the cut's echo tail: the utterance goes on
         if speaking and start >= self._open_until:
             if not self._muted:
                 self._muted = True
@@ -539,6 +553,17 @@ class VoiceListener:
             self._muted = False
             self._speaking_ended()
         self._ingest(chunk.samples, start, chunk.stamp)
+
+    def _own_sound_cut(self) -> bool:
+        """Someone's speech is in progress or starting as the speaking window opens: cut the
+        robot's own sound if only such a sound plays (``bind_own_sound``); True when it did."""
+        if self._muted or self._cut_own_sound is None or not self.voice_active():
+            return False
+        try:
+            return bool(self._cut_own_sound())
+        except Exception as exc:
+            log.warning("voice listener: own-sound cut: %s", type(exc).__name__)
+            return False
 
     def resume(self, audio: np.ndarray, start: float) -> None:
         """Barge-in handoff (SPEC 8 stage 8), called from the speaking-chunk hook after the
@@ -601,6 +626,14 @@ class VoiceListener:
         listening blip waits for a quiet moment (SPEC 8, Non-verbal cues). Safe from any thread
         (a single flag)."""
         return self._hearing
+
+    def voice_active(self) -> bool:
+        """Whether someone's speech is in progress or may be starting (the VAD is counting
+        frames above its threshold towards a start): no self-soothing sound starts then, and no
+        one-shot cue sound plays (SPEC 7B, 8). Safe from any thread: two single-word reads
+        without the listener's lock. A read racing the listener thread can be one chunk stale,
+        which costs at most one tick of hold or one cue sound; it never blocks the audio path."""
+        return self._hearing or self._endpointer.onset
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
         self._hearing = True  # before the hand-offs below: their blip must not cover this speech
@@ -967,15 +1000,21 @@ class VoiceListener:
             return self._deliver_heard(p)
         text = p.text
         if p.addressed is None:
-            wake = self._fast.wakes(text, grammar_pass=p.grammar_pass, heard=heard, state=p.state)
+            kind = self._fast.wake_kind(
+                text, grammar_pass=p.grammar_pass, heard=heard, state=p.state
+            )
             face = p.face
+            at_face = self._checked(p) if face is None else (lambda: face)
+            wake = kind == WAKE
+            if kind == NAME_FIRST:
+                wake, at_face = self._name_first_at_face(at_face)
             outcome = self._gate.outcome(
                 wake_word=wake,
                 enrolled_in_view=self._enrolled(ev.start_stamp),
                 start=ev.start_stamp,
                 last_speech=ev.last_speech_stamp,
                 speaker=self._speaker(),
-                at_face=self._checked(p) if face is None else (lambda: face),
+                at_face=at_face,
             )
             p.addressed = not outcome.startswith("rejected")
             self._decided(p, outcome, text)
@@ -988,6 +1027,19 @@ class VoiceListener:
             return None
         self._finish(p, text, p.grammar_pass, heard, local_only=p.local_only)
         return None
+
+    def _name_first_at_face(self, at_face: AtFace | None) -> tuple[bool, AtFace | None]:
+        """The name opened a long final (``NAME_FIRST``): it wakes the robot only when the
+        voice came from a visible face, whether or not that face looks at the robot (SPEC 8:
+        a television saying "Neve fino a 1000 metri" must not wake it). Runs the voice-at-face
+        check once; returns the wake and the check with its verdict kept for the gate."""
+        if at_face is None:
+            return True, None
+        verdict = at_face()
+        if verdict == NO_FACE_AT_VOICE:
+            self._count("name_first_no_face")
+            return False, lambda: verdict
+        return True, lambda: verdict
 
     def _deliver_heard(self, p: _Handoff) -> _Handoff | None:
         """``p``'s audio went to the realtime route: its final is the server's transcript

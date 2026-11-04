@@ -77,7 +77,8 @@ def build_cues(host: RuntimeHost, stack: ConfigStack, p: Pipeline, output: Any) 
     the robot's cue sounds on ``output``, at the circadian volume, muted while asleep or paused;
     the listening cue ends when the robot's speech plays (not a raw sound). The listening blip
     plays only in a quiet moment: nobody's speech in progress and no answer in progress (a turn
-    in flight or the robot speaking: the gaps between its sentences included)."""
+    in flight or the robot speaking: the gaps between its sentences included). A one-shot cue's
+    sound does not play while someone's speech is in progress or starting (its gesture shows)."""
 
     def quiet() -> bool:
         listener, phase = p.listener, host.phase
@@ -94,6 +95,7 @@ def build_cues(host: RuntimeHost, stack: ConfigStack, p: Pipeline, output: Any) 
         muted=lambda: p.sleep.asleep or p.sleep.paused,
         speaking=lambda now: output.timeline.sentence_at(now) is not None,
         quiet=quiet,
+        hearing=lambda: (listener := p.listener) is not None and listener.voice_active(),
     )
 
 
@@ -128,6 +130,8 @@ def start_voice_output(
     p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
+    cut_own = own_sound_cut(output, soothe)
+    listener.bind_own_sound(cut_own)
     realtime = host.realtime_route = (
         RealtimeRoute(
             stack,
@@ -192,7 +196,22 @@ def start_voice_output(
     if realtime is not None:
         realtime.start()
     if bargein is not None:
-        bind_barge_in(bargein, output, conv, listener)
+        bind_barge_in(bargein, output, conv, listener, cut_own)
+
+
+def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
+    """Someone speaks while only the robot's own sounds that are not speech play (a
+    self-soothing hum, a cue sound): cut them (``SpeechOutput.cut_raw``: checked and cut under
+    the output's lock, so robot speech queued meanwhile is kept), count the hum's cut on its
+    runner (``cut_by_speech``) and say so (SPEC 7B, 8)."""
+
+    def cut() -> bool:
+        if not output.cut_raw():
+            return False
+        soothe.cut_by_speech(time.monotonic())
+        return True
+
+    return cut
 
 
 def bind_realtime_input(
@@ -234,12 +253,20 @@ def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
     return on_audio
 
 
-def bind_barge_in(bargein: Any, output: Any, conv: Any, listener: Any) -> None:
+def bind_barge_in(
+    bargein: Any,
+    output: Any,
+    conv: Any,
+    listener: Any,
+    cut_own: Callable[[], bool] | None = None,
+) -> None:
     """Connect barge-in (SPEC 8 stage 8): its candidate frames duck the speech output's voice,
     and a cut-off stops the speech first, then the stream, then the listener restarts on the
-    user's audio."""
+    user's audio. Over the robot's own sounds alone, ``cut_own`` cuts them instead."""
     output.duck = bargein.duck
-    bargein.bind(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)
+    bargein.bind(
+        output.stop, conv.interrupt, listener.resume, conv.mark_interrupting, cut_own=cut_own
+    )
 
 
 def start_all(

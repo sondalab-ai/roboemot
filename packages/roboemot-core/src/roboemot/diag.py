@@ -59,7 +59,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "stop_consumed",
         "replaced",
     ),
-    "bargein": ("cut", "released"),  # a candidate episode closed
+    "bargein": ("cut", "cut_own", "released"),  # a candidate episode closed (cut_own: a hum)
     "session": ("reset", "reconnected", "connect_failed", "lost", "server_error"),
     "audio": ("transcript_timeout",),  # the server's transcript of sent audio never came
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw
@@ -117,7 +117,8 @@ EXCEPTIONS = {  # exception class name -> the code a turn failure carries
 }
 CUE_KINDS = ("listening", "offline", "not_heard", "fallback")
 CUE_RESULTS = (
-    "played", "disabled", "muted", "unsupported", "sound_dropped", "skipped", "dropped"
+    "played", "disabled", "muted", "unsupported", "sound_dropped", "sound_skipped", "skipped",
+    "dropped",
 )  # fmt: skip
 FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
 PATHS = ("vad", "onset", "keyword")

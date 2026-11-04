@@ -14,7 +14,11 @@ library, registered in the ``roboemot.cue_sounds`` entry-point group under the m
 ``robot.id`` (a factory taking nothing or the manifest, returning kind -> :class:`CueSound`).
 A cue with neither is a no-op, counted (``unsupported``). The one-shot cues' sounds play as raw
 jobs of the speech output (``SpeechOutput.play``, like the self-soothing sound), so barge-in and
-the echo reference treat them as the robot's own audio.
+the echo reference treat them as the robot's own audio. A raw sound opens the speaking window and
+the listener drops what it hears then, so a one-shot cue's sound never starts while someone's
+speech is in progress or starting (``hearing()``, the listener's ``voice_active``): the gesture
+shows alone, counted ``<kind>.sound_skipped`` (SPEC 8, owner decision 2026-11-04). The cue
+answers an utterance that already ended; the next one must not lose its first words to it.
 
 The listening cue's sound is a blip (``voice.cues.listening_sound``, on): played once when the
 cue starts (``listening_begin`` with no utterance open: the utterance's speech has ended and its
@@ -38,7 +42,8 @@ are forgotten, so their late ends cannot release the next turn's cue. It shows o
 
 Every one-shot cue asked for, and every listening blip, publishes a ``cue`` decision event
 (``roboemot.diag``, SPEC 12A) after the lock is released: the caller's reason code and what
-happened (``played``, ``disabled``, ``muted``, ``unsupported``, ``sound_dropped``; the blip:
+happened (``played``, ``disabled``, ``muted``, ``unsupported``, ``sound_dropped``,
+``sound_skipped``; the blip:
 ``played``, ``skipped``, ``dropped``).
 
 Threads: ``play``, ``listening_begin`` and ``listening_end`` come from any thread (the listener,
@@ -198,7 +203,8 @@ class Cues:
     ``output()`` the speech output (None before it exists); ``volume_db()`` the circadian
     offset of the moment; ``muted()`` true while asleep or paused; ``speaking(now)`` whether the
     robot's speech (not a raw sound) plays at ``now``; ``quiet()`` whether the listening blip
-    may play now (nobody speaks, no answer is in progress).
+    may play now (nobody speaks, no answer is in progress); ``hearing()`` whether someone's
+    speech is in progress or starting (no one-shot sound then).
 
     The speech output is never called with the lock held: a method decides under the lock and
     plays a sound after releasing it."""
@@ -214,9 +220,11 @@ class Cues:
         muted: Callable[[], bool] = lambda: False,
         speaking: Callable[[float], bool] = lambda now: False,
         quiet: Callable[[], bool] = lambda: True,
+        hearing: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
+        self._hearing = hearing
         self._gesture, self._sounds = gesture, dict(sounds)
         self._output, self._volume_db = output, volume_db
         self._muted, self._speaking, self._quiet, self.clock = muted, speaking, quiet, clock
@@ -263,10 +271,23 @@ class Cues:
         if blocked is not None:
             self.events("cue", reason, cue=kind, result=blocked, **detail)
             return False
+        if sound is not None and self._speech_on():
+            with self._lock:
+                self._counts[f"{kind}.sound_skipped"] += 1
+            self.events("cue", reason, cue=kind, result="sound_skipped", **detail)
+            return True
         job = self._play_sound(kind, sound, volume)
         result = "sound_dropped" if sound is not None and job is None else "played"
         self.events("cue", reason, cue=kind, result=result, **detail)
         return True
+
+    def _speech_on(self) -> bool:
+        """``hearing()``, guarded (lock not held): a failure lets the sound play."""
+        try:
+            return bool(self._hearing())
+        except Exception as exc:
+            log.warning("cues: hearing: %s", type(exc).__name__)
+            return False
 
     def _blocked(self, kind: str) -> str | None:
         """Why a cue may not show now (lock held), counted; None when it may."""

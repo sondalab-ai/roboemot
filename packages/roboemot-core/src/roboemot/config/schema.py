@@ -2805,7 +2805,8 @@ class KeywordSet(Strict):
         "language, supplied by the robot manifest (SPEC 4A); none in the core defaults. They "
         "apply only when the robot has no name or its name starts with the first word of "
         "`voice.default_name`; a robot renamed to something else ignores them. They emit "
-        "speech.name_called and count as the wake word only in a short final text "
+        "speech.name_called and count as the wake word when they open the final text (alone or "
+        "after one `name_lead_ins` phrase or greeting) or in a short final text "
         "(voice.fastpath.alias_wake_max_words), because an alias can be a real word",
     )
     name_wake_templates: list[str] = param(
@@ -2814,7 +2815,14 @@ class KeywordSet(Strict):
         "(`ciao {name}`). They apply when the robot has a name (`voice.wake_word`, or the one "
         "the platform reports) whose words are all in this language's recognizer vocabulary; "
         "otherwise only `wake_phrases` wake the robot in this language. The bare name is a name "
-        "alias too: it wakes only in a short final text",
+        "alias too: it wakes when it opens the final text or in a short final text",
+    )
+    name_lead_ins: list[str] = param(
+        [],
+        "Words that may come before the robot's name when the name opens the final text "
+        "(`ok Neve, ...`, `senti Neve, ...`): the name then wakes the robot at any length. At "
+        "most one of these phrases, or one `greeting`, before the name. Keep articles and common "
+        "sentence openers out: `la neve ...` must not wake the robot",
     )
 
     @field_validator("name_wake_templates")
@@ -2842,7 +2850,9 @@ class FastpathConfig(Strict):
     )  # fmt: skip
     alias_wake_max_words: int = param(
         4,
-        "A name alias counts as the wake word only in a final text of at most this many words",
+        "The robot's name or a name alias that does not open the final text counts as the wake "
+        "word only in a final text of at most this many words (opening it, it wakes at any "
+        "length)",
         ge=1,
         le=20,
     )
@@ -3221,6 +3231,14 @@ class GrammarConfig(Strict):
         "in the audio (Vosk word timings), so `hello [to the] robot` with the middle words lost "
         "is not `hello robot`",
         unit="s", ge=0, le=2,
+    )  # fmt: skip
+    name_first_max_start_s: float = param(
+        1.5,
+        "A name the grammar pass rescues counts as opening the utterance (it then wakes the robot "
+        "at any length) only when it starts at most this long after the start of the decoded "
+        "audio, which begins with the pre-roll (voice.vad.pre_roll_ms). This leaves room for "
+        "one short lead-in word (`ok`, `senti`) and no long pause before the name",
+        unit="s", gt=0, le=10,
     )  # fmt: skip
     max_competitor_words: int = param(
         64,
@@ -3966,8 +3984,10 @@ class VoiceConfig(Strict):
         "`voice.keywords.<language>.wake_phrases` only. A value set here always wins. The name "
         "can come from outside the robot (the owner's phone): the prompt and the spoken lines "
         "only get a sanitised form. The bare name emits speech.name_called wherever it occurs in "
-        "a text, but wakes the robot only in a short final (a name that is also a word, like "
-        "`Neve`, is not a wake word in a long sentence). Wake detection with a name "
+        "a text. It wakes the robot when it opens the final text (alone or after one "
+        "`name_lead_ins` phrase or greeting), at any length; elsewhere only in a short final (a "
+        "name that is also a word, like `Neve`, is not a wake word in the middle of a long "
+        "sentence). Wake detection with a name "
         "needs the name's words in the recognizer vocabulary of the language (checked when the "
         "recognizer loads, logged when not); a name that is out of vocabulary in the small Vosk "
         "models relies on `wake_phrases` and `name_aliases`",
@@ -4013,6 +4033,7 @@ class VoiceConfig(Strict):
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
                 "name_wake_templates": ["ciao {name}", "ehi {name}"],
+                "name_lead_ins": ["ok", "okay", "senti", "scusa", "ascolta"],
             },
             "en": {
                 "stop": ["stop", "halt", "enough"],
@@ -4021,6 +4042,7 @@ class VoiceConfig(Strict):
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
                 "wake_phrases": ["hey robot", "hello robot"],
                 "name_wake_templates": ["hey {name}", "hello {name}"],
+                "name_lead_ins": ["ok", "okay", "listen", "excuse me"],
             },
         },
         "Fast-path keyword lists per language, matched on whole words in the ASR partials "

@@ -100,6 +100,12 @@ def test_app_builds_the_listener_and_stops_it_cleanly(data, fakes):  # noqa: F81
         assert report["state"] == "running" and "latency" in report
         assert report["direction"]["enabled"] is True
         assert report["direction"]["doa_available"] is True  # the manifest declares doa
+
+        def voice_section():
+            return app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
+
+        assert wait_for(lambda: "soothe" in voice_section())  # SPEC 7B: speech hold counts
+        assert {"held_by_speech", "cut_by_speech"} <= set(voice_section()["soothe"])
         u = SimpleNamespace(text="x")
         app.voice_listener._on_utterance(u)  # slice 5 hooks `on_utterance`
         assert got == [u]
