@@ -68,7 +68,9 @@ PRs:
      - `entity_embeds` (`runs` and `skips` by reason, V-4).
    - Debug key, under `roboemot.attention`: `shown_object` (episodes, how each one ended, and its length).
    - On 2026-11-04 the cup was seen only very close and briefly, with 2 episodes, both `lost`. Episodes should now last while the cup is in view.
-2. **Still cup.** Put the cup on the table in view for 2 minutes. Write down whether the robot gives it a long novelty look again after about 10 s. A repeat look is the known bug that the queued sticky-identity slice fixes, so it is not a fail of this round.
+2. **Still cup.** Use a cup that the robot already knows. Put the cup on the table in view for 2 minutes, then pick it up and show it.
+   - Pass: no second long novelty look, neither after about 10 s on the table nor when you pick it up. PR 185 (https://github.com/sondalab-ai/roboemot/pull/185) keeps a recognised object's identity while it sits still, so a repeat look is now a fail.
+   - Known limit, not a fail: a known cup that is still from the moment it comes into view may never be recognised while the object gate is on (see the follow-ups).
 3. **Cost.** After about 10 minutes with people and objects in view, save the report. Read `roboemot.vision.stage_timing`: the CPU share of YuNet, SFace, DINOv2 and NanoDet. These numbers decide V-3 (lower face detection rate while nobody is in view) in `docs/plans/2026-11-03-vision-cost-handoff.md`.
 4. Optional: run `scripts/bench/run_cm4.py --only nanodet_plus_m_320,yolox_nano_416` on the robot. This is a SPEC 15 item: object detector p50 and p95 on the CM4.
 
@@ -221,13 +223,13 @@ The realtime HIL suite (`test_realtime_hil.py`, section 2 of `docs/plans/2026-10
 - One line per check: pass, fail, or not done, with a note where the result is a judgement.
 - The values you changed in Settings during the round.
 
-## Not robot QA (queued code work)
+## Not robot QA (code work)
 
-- Sticky identity for still objects (approved).
-- Flaky tests: `test_app_soothe.py` queued-sentence and `test_realtime_turns.py` late-calls.
+- Done 2026-11-04: sticky identity for still objects, https://github.com/sondalab-ai/roboemot/pull/185.
+- Done 2026-11-04: flaky tests and the Python 3.11 `asyncio.wait_for` race on a barge-in, https://github.com/sondalab-ai/roboemot/pull/186.
 - Proposed, not approved: put the shown object into the conversation context.
 
-These are in `docs/plans/2026-11-03-vision-cost-handoff.md`, section 3.
+The background is in `docs/plans/2026-11-03-vision-cost-handoff.md`, section 3.
 
 ## Follow-ups from the recent sessions (code, not robot QA)
 
@@ -238,6 +240,7 @@ Sources:
 
 Status terms:
 - **approved**: the owner said yes.
+- **done**: merged on `main`, with the date.
 - **proposed**: it waits for an owner OK.
 - **decision**: the owner must choose.
 - **limitation**: known and accepted for now.
@@ -278,8 +281,11 @@ Items marked "after QA X" wait for that QA section.
 
 | Item | Where | Status |
 | --- | --- | --- |
-| Sticky identity for still objects. Design note from the V-4 review: the fix needs denser object runs or a re-embed from the stored crop. | `vision/pipeline.py`, `attention/interest.py` | approved |
-| Make the flaky tests timing-independent. The list also has the realtime flakes in `TODO.md`. | tests | proposed |
+| Sticky identity for still objects. https://github.com/sondalab-ai/roboemot/pull/185 | `registry/matcher.py` | done (2026-11-04) |
+| Make the flaky tests timing-independent, and fix the Python 3.11 `asyncio.wait_for` race that dropped a barge-in cancel. https://github.com/sondalab-ai/roboemot/pull/186 | tests, `realtime/turn.py` | done (2026-11-04) |
+| A known object that is still from the moment it comes into view is never recognised while the object gate is on: its votes land about 10 s apart, so `votes_required` live votes never exist. Possible fix: hold the gate while a new track's vote burst is open against an active record (the V-4 "denser object runs" note). Found in PR 185. | `vision/object_gate.py`, `vision/pipeline.py` | proposed |
+| An object that moves and then stops can lose its track: the constant-velocity filter carries the old track away across the 10 s gate gap, and a new unknown track is born. Found in PR 185. | `vision/tracker.py` | proposed |
+| `Registry.delete_entity` does not notify the forget listeners. The matcher covers this with a gallery check on each observation. Found in PR 185. | `registry/` | proposed |
 | `reflexes.rules` and `soothe.variants` are missing from `KEYED_LISTS`, so every config layer replaces them whole. | `config/stack.py` | proposed |
 | Driver angle contract: every driver reports each angle on the commands' continuous scale, never wrapped. Add a contract test over every registered driver. | SPEC 4A, `PoseGroupDriver` | approved (owner, 2026-10-28) |
 | After a cut in a response that called a tool, the history has no interrupted assistant entry. https://github.com/sondalab-ai/roboemot/pull/148 | `conversation/worker.py` | limitation |
