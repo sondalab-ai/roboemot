@@ -973,8 +973,8 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
 
     A withdraw rule is protective: every field that affects it is frozen at runtime, in both
     directions (``WITHDRAW_RULE_FIELDS``, and the shared settings in ``WITHDRAW_SHARED_FIELDS``
-    that the engine reads for it, plus ``audio`` when a sound drives it). It can only be changed
-    in the base config.
+    that the engine reads for it, plus ``audio`` and ``motion_gate`` when a sound drives it). It
+    can only be changed in the base config.
     """
     found: list[Violation] = []
 
@@ -991,7 +991,7 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
     if protective:
         shared = list(WITHDRAW_SHARED_FIELDS)
         if any(r.trigger == "loud_onset" for r in protective):
-            shared.append("audio")
+            shared += ["audio", "motion_gate"]
         for attr in shared:
             if getattr(ar, attr) != getattr(cr, attr):
                 refuse(f"reflexes.{attr}", getattr(ar, attr), getattr(cr, attr))

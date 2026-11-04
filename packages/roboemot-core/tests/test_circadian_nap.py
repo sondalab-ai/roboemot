@@ -576,3 +576,25 @@ def test_scene_motion_from_the_pipeline_ends_a_nap_end_to_end(tmp_path):
         pipe.process(Frame(scene(100 if i >= n else None), i * DT, joint()))
     woke(x, "motion")
     assert x.r.wants_scene_motion() is False
+
+
+def test_a_loud_sound_during_the_robots_own_motion_does_not_wake_the_nap():
+    """SPEC 10 (own-motion gate): the reflex engine holds sound.loud back while the robot moves,
+    so its own rattle never ends a nap; the same sound once it is still does."""
+    from roboemot.motion import Command, Priority
+    from test_reflex import LOUD, YAW, Rig, cfg_with, rule
+
+    x = napping(rig())
+    reflexes = Rig(cfg_with(rule(enabled=False)))
+    reflexes.engine.bus = x.bus
+    reflexes.settle_audio()
+    for i in range(10):  # an expression swings the head fast
+        target = 0.6 if i % 2 == 0 else -0.6
+        reflexes.loop.feed(Command("expr", Priority.COMMANDED, {YAW: target}, reflexes.t))
+        reflexes.tick(5)
+    reflexes.engine.offer_audio_level(LOUD, reflexes.t)
+    run(x, STEP)
+    assert x.r.model.reason == "nap"
+    reflexes.settle_audio(2.0)  # still again, past the tail
+    reflexes.engine.offer_audio_level(LOUD, reflexes.t)
+    woke(x, "loud")

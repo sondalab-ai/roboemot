@@ -69,6 +69,27 @@ def test_safety_only_tightens_at_runtime():
     assert stack.get("safety.watchdog_return_factor") == 0.9
 
 
+@pytest.mark.parametrize(
+    ("path", "tighter", "looser"),
+    [
+        ("reflexes.voice_vad_window_s", 0.2, 0.5),
+        ("reflexes.motion_gate.speed_dps", 40.0, 90.0),
+        ("reflexes.motion_gate.tail_ms", 800.0, 200.0),
+        ("reflexes.motion_gate.measured_min_span_ms", 10.0, 40.0),
+        ("reflexes.audio.floor_fall_half_life_s", 4.0, 1.0),
+        ("reflexes.audio.rearm_fraction", 0.2, 0.5),
+        ("reflexes.audio.rearm_hold_s", 1.0, 0.2),
+    ],
+)
+def test_the_own_noise_reflex_settings_only_tighten_at_runtime(path, tighter, looser):
+    """SPEC 10, 11A: each own-noise setting moves at runtime only the way that fires less."""
+    stack = ConfigStack()
+    stack.set(path, tighter)
+    assert stack.get(path) == tighter
+    with pytest.raises(GuardrailError):
+        stack.set(path, looser)
+
+
 def test_privacy_opt_in_needs_admin():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
