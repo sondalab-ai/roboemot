@@ -20,6 +20,13 @@ from that text.
 A short final text with exactly one yes or no keyword, in an addressed utterance, also goes to
 ``on_answer(category, now)`` (the nod / shake handler, ``roboemot.voice.yes_no``); partials do not.
 
+The wake decision (``wake_kind``, ``wakes``, ``end``): a wake phrase anywhere, or the name
+anywhere in a final of at most ``voice.fastpath.alias_wake_max_words`` words (a name such as
+"Neve" is also a word), is ``WAKE``; otherwise the robot's name or an alias opening the final
+text (``KeywordSpotter.name_first``, or the grammar pass's ``NAME_FIRST`` flag), at any length,
+is ``NAME_FIRST``: the wake gate addresses it only when its voice came from a visible face (a
+television's "Neve fino a 1000 metri" must not wake the robot, SPEC 8).
+
 With a ``grammar`` (``roboemot.voice.grammar``), the end of an utterance also gets a grammar pass
 on its audio (``grammar_pass``, run on the grammar worker thread): the categories it hears
 confidently join those of the final text in ``end``, before the wake and answer decisions.
@@ -42,12 +49,13 @@ import numpy as np
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
 from .grammar import GrammarSpotter
-from .keywords import KeywordSpotter
+from .keywords import NAME_FIRST, KeywordSpotter
 from .robot_name import RobotName
 from .speech_features import Prosody, analyse
 
 MS_PER_S = 1000.0
 Emit = Callable[[str, float, dict[str, Any]], None]
+WAKE = "wake"  # a wake phrase, or the name in a short final: wakes on its own
 EVENT_FOR = {
     "stop": "speech.keyword.stop",
     "yes": "speech.keyword.yes",
@@ -117,6 +125,7 @@ class FastResult:
     wake_word: bool
     prosody: Prosody
     answer: str | None = None  # "yes" or "no": the one such keyword of a short final text
+    wake: str | None = None  # WAKE, NAME_FIRST (the name opening a long final) or None
 
 
 @dataclass
@@ -257,15 +266,55 @@ class FastPath:
         heard: frozenset[str] = frozenset(),
         state: UtteranceState | None = None,
     ) -> bool:
-        """Whether final ``text`` (with what the grammar pass ``heard``) wakes the robot, as
-        ``end`` decides it, with no event sent and nothing recorded."""
+        """Whether final ``text`` (with what the grammar pass ``heard``) wakes the robot by
+        either rule (``wake_kind`` is not None), with no event sent and nothing recorded."""
+        kind = self.wake_kind(text, grammar_pass=grammar_pass, heard=heard, state=state)
+        return kind is not None
+
+    def wake_kind(
+        self,
+        text: str,
+        *,
+        grammar_pass: GrammarPass | None = None,
+        heard: frozenset[str] = frozenset(),
+        state: UtteranceState | None = None,
+    ) -> str | None:
+        """How final ``text`` (with what the grammar pass ``heard``) wakes the robot, as ``end``
+        decides it: ``WAKE``, ``NAME_FIRST`` (it needs the voice at a face) or None. No event
+        is sent and nothing is recorded."""
         u = state if state is not None else self._u
-        spotter = grammar_pass.spotter if grammar_pass is not None else self._spotter
-        cats = spotter.spot(text, u.language) | heard
-        words = len(text.split())
-        return "wake" in cats or (
-            "name" in cats and words <= self.cfg.fastpath.alias_wake_max_words
-        )
+        spotter = self._spotter_for(grammar_pass, server=False)
+        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
+        return self._wake(spotter, text, u.language, cats, heard)
+
+    def _spotter_for(self, grammar_pass: GrammarPass | None, server: bool) -> KeywordSpotter:
+        """The grammar pass's spotter (fixed at the utterance's end), else the server
+        transcript's (no vocabulary limit) or the local one."""
+        if grammar_pass is not None:
+            return grammar_pass.spotter
+        return self._server_spotter if server else self._spotter
+
+    def _wake(
+        self,
+        spotter: KeywordSpotter,
+        text: str,
+        language: str,
+        cats: set[str] | frozenset[str],
+        heard: frozenset[str],
+    ) -> str | None:
+        """The wake decision on final ``text`` with categories ``cats``: ``WAKE`` for a wake
+        phrase or the name in a final of at most ``alias_wake_max_words`` words; else
+        ``NAME_FIRST`` for the name opening the text (or heard first by the grammar pass), at
+        any length; else None."""
+        if "wake" in cats:
+            return WAKE
+        if "name" not in cats:
+            return None
+        if len(text.split()) <= self.cfg.fastpath.alias_wake_max_words:
+            return WAKE
+        if NAME_FIRST in heard or spotter.name_first(text, language):
+            return NAME_FIRST
+        return None
 
     def end(
         self,
@@ -293,11 +342,8 @@ class FastPath:
         """
         u = state if state is not None else self._u
         words = len(text.split())
-        if grammar_pass is not None:
-            spotter = grammar_pass.spotter
-        else:
-            spotter = self._server_spotter if server else self._spotter
-        cats = spotter.spot(text, u.language) | heard
+        spotter = self._spotter_for(grammar_pass, server)
+        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
         before = u.keyword_at
         self._fire(cats, u)
         if before is None and u.keyword_at is not None:
@@ -309,10 +355,10 @@ class FastPath:
             self.stats.record("reaction_vs_last_speech", min(reactions) - last_speech_stamp)
         if u.keyword_at is not None:
             self.stats.record("keyword_vs_last_speech", u.keyword_at - last_speech_stamp)
-        wake = "wake" in cats or ("name" in cats and words <= fp.alias_wake_max_words)
+        wake = self._wake(spotter, text, u.language, cats, heard)
         said = cats & {"yes", "no"}
         answer = next(iter(said)) if len(said) == 1 and words <= fp.gesture_max_words else None
-        return FastResult(frozenset(cats), wake, prosody, answer)
+        return FastResult(frozenset(cats), wake is not None, prosody, answer, wake)
 
     def impulses(
         self, result: FastResult, addressed: bool, state: UtteranceState | None = None
