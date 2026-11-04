@@ -50,6 +50,8 @@ rate over ``vision.report_rate_window_s`` of capture time, the visible lifetime 
 born near where one ended, with gap, IoU, distance and head pose change), and the scores of
 low-score detections the tracker refused or left unmatched, beside those that started tracks.
 The head pose comes from the frame's joint state through the robot's ``frame_spec``.
+``objects`` counts the animal and object detections below ``vision.object_score_min`` handed
+to the tracker and the confirmed tracks such a detection continued (the low-score pass).
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
 beside their product ``rate_scale``. ``stage_timing`` is what each model stage and the whole
 ``process`` call cost over ``vision.timing_window_s`` (``StageTimer``, its own clocks: the
@@ -198,7 +200,7 @@ class VisionPipeline:
         self.frame_spec = frame_spec
         self.track_stats = TrackDiagnostics(cfg)
         self.face_tracker.observer = self.track_stats
-        self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
+        self.object_tracker = Tracker(self._object_tracker_cfg(), ids, low_confirms=False)
         self.object_gate = ObjectGate(cfg.object_gate)
         self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
         self.motion_wanted: Callable[[], bool] = lambda: False
@@ -216,6 +218,8 @@ class VisionPipeline:
         self._created_stamps: deque[float] = deque()
         self._lifetimes_s: deque[float] = deque(maxlen=cfg.report_window)
         self._face_lost_held = 0.0
+        self._object_low_detections = 0
+        self._object_low_continued = 0
         self.timer = timer or StageTimer(TIMING_WINDOW_MAX_S)
         matcher.registry.add_forget_listener(self._on_forget)
 
@@ -374,19 +378,21 @@ class VisionPipeline:
     def _object_tracker_cfg(self) -> TrackerConfig:
         """Tracker settings for animals and objects, derived from the vision config.
 
-        A detection at ``object_score_min`` starts a track, and there is no low-score pass: the
-        detector and ``_process_objects`` already drop everything below that score, so
-        ``low_score`` equals ``high_score``. A track lives for the larger of ``object_lost_s``
-        and ``object_lost_periods`` object-detection periods at the rate the governor allows
-        now, so a slow object stage (circadian or load scale) does not expire tracks between
-        two frames. When the rate goes back up the longer lifetime is kept until the next
-        object frame has been folded in, so tracks do not expire just before it can match them.
+        A detection at ``object_score_min`` starts a track. One between ``object_low_score`` and
+        that only continues a confirmed track matched at the object frame before (the low-score
+        pass; the tracker is built with ``low_confirms`` off, so it never confirms a tentative
+        track). The detector and ``_process_objects`` drop everything below ``object_low_score``.
+        A track lives for the larger of ``object_lost_s`` and ``object_lost_periods``
+        object-detection periods at the rate the governor allows now, so a slow object stage
+        (circadian or load scale) does not expire tracks between two frames. When the rate goes
+        back up the longer lifetime is kept until the next object frame has been folded in, so
+        tracks do not expire just before it can match them.
         Both centre-distance gates take ``object_match_distance_heights`` (off by default).
         """
         return self.cfg.tracker.model_copy(
             update={
                 "high_score": self.cfg.object_score_min,
-                "low_score": self.cfg.object_score_min,
+                "low_score": self.cfg.object_low_score,
                 "confirm_hits": self.cfg.object_confirm_hits,
                 "match_distance_heights": self.cfg.object_match_distance_heights,
                 "low_match_distance_heights": self.cfg.object_match_distance_heights,
@@ -414,6 +420,10 @@ class VisionPipeline:
                 "lifetime_s": summarise(list(self._lifetimes_s), SUMMARY_LEVELS),
                 **self.track_stats.snapshot(),  # report lock, then observer lock: one report
             }
+            objects = {
+                "low_score_detections": self._object_low_detections,
+                "low_score_continued": self._object_low_continued,
+            }
         return {
             "face_tracks": len(self._faces),
             "entity_tracks": len(self._entities),
@@ -424,6 +434,7 @@ class VisionPipeline:
             "scene_motion": self.scene_motion.snapshot(),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
+            "objects": objects,
         }
 
     def _camera(self, width: int, height: int) -> CameraModel:
@@ -683,9 +694,10 @@ class VisionPipeline:
         finally:
             self.timer.record(OBJECTS, wall0, cpu0)
         dets: list[Detection] = [
-            d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
+            d for d in found if d.score >= self.cfg.object_low_score and d.label in kinds
         ]
         result = self.object_tracker.update(dets, frame.stamp)
+        self._count_low_objects(dets, result.visible)
         self._object_visible = result.visible
         self._lost_held = self._object_lost_s()
         for track_id in result.removed_ids:
@@ -716,6 +728,17 @@ class VisionPipeline:
                 extent_rad=_extent(camera, track.box),
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
+
+    def _count_low_objects(self, dets: list[Detection], visible: list[Track]) -> None:
+        """Count, for the debug report, the animal and object detections below
+        ``object_score_min`` handed to the tracker and the confirmed tracks one of them
+        continued in this update (a visible track carries the detection it matched now)."""
+        start = self.cfg.object_score_min
+        low = sum(1 for d in dets if d.score < start)
+        continued = sum(1 for t in visible if t.score < start)
+        with self._report_lock:
+            self._object_low_detections += low
+            self._object_low_continued += continued
 
     @staticmethod
     def _embed_age_key(state: _EntityState) -> float:
