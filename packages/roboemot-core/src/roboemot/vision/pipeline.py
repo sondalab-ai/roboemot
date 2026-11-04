@@ -24,6 +24,13 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    kind; any other class, ``person`` included, is ignored. No age or gender is estimated (owner
    decision 2026-10-23). On the ticks the governor allows, ``object_gate`` skips object runs
    while the scene is still (``vision.object_gate``, SPEC 5, 13; see ``object_gate``).
+   The appearance embedding (DINOv2-S, about 1.1 s on the CM4, inline on this thread) runs only
+   when it adds information (``_entity_reason``, SPEC 5, 13): never for a kind and category no
+   record holds and auto-enrollment does not collect; once for a new track, with a burst of
+   votes only while an active record could match it; then at ``rates.appearance_hz`` for a
+   recognised track, and for an unknown one only when its detector box changed size or shape,
+   after a missed object run, or after ``entity_reembed_floor_s``. ``stats`` counts runs and
+   skips by reason (``entity_embeds``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -134,10 +141,51 @@ class _FaceState:
 
 @dataclass
 class _EntityState:
-    evals: int = 0
+    votes: int = 0  # burst embeddings voted against registry records since the burst started
     last_embed: float | None = None
     owner_id: str | None = None
     embedding: np.ndarray | None = field(default=None, repr=False)
+    box: Box | None = None  # detector box at the last embedding
+    last_run: int = 0  # index of the last object run the track was visible on
+    reacquired: bool = False  # missed an object run since its last embedding
+
+
+# Why an animal or object embedding ran, or why a visible track was skipped (debug report).
+NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR = (
+    "new",
+    "burst",
+    "recognised",
+    "changed",
+    "reacquired",
+    "floor",
+)
+NO_CONSUMER, SPACING, SETTLED, BUDGET = "no_consumer", "spacing", "settled", "budget"
+EMBED_RUNS = (NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR)
+EMBED_SKIPS = (NO_CONSUMER, SPACING, SETTLED, BUDGET)
+EntityKey = tuple[str, str]  # (kind, readable category)
+
+
+def _covers(keys: frozenset[EntityKey], key: EntityKey) -> bool:
+    """A record of the same kind matches its own category, or any category when it has none."""
+    return key in keys or (key[0], "") in keys
+
+
+@dataclass(frozen=True)
+class _Consumers:
+    """Who uses an animal or object embedding: the matcher votes against active records with
+    embeddings of the current model (``vote``); a pending catalogue record is confirmed from a
+    seen entry's embedding (``keep``, records of any status); auto-enrollment collects the
+    embeddings of the kinds in ``autoenroll``. The world model only breaks ties with it."""
+
+    vote: frozenset[EntityKey]
+    keep: frozenset[EntityKey]
+    autoenroll: frozenset[str]
+
+    def votes(self, key: EntityKey) -> bool:
+        return _covers(self.vote, key)
+
+    def wants(self, key: EntityKey) -> bool:
+        return key[0] in self.autoenroll or _covers(self.keep, key)
 
 
 def _extent(camera: CameraModel, box: Box) -> float:
@@ -209,6 +257,9 @@ class VisionPipeline:
         self._budget = 0
         self._entity_budget = 0
         self._entity_embeds = 0
+        self._object_runs = 0
+        self._embed_runs = dict.fromkeys(EMBED_RUNS, 0)
+        self._embed_skips = dict.fromkeys(EMBED_SKIPS, 0)
         self._report_lock = threading.Lock()
         self._last_stamp: float | None = None
         self._tracks_created = 0
@@ -414,6 +465,7 @@ class VisionPipeline:
                 "lifetime_s": summarise(list(self._lifetimes_s), SUMMARY_LEVELS),
                 **self.track_stats.snapshot(),  # report lock, then observer lock: one report
             }
+            entity_embeds = {"runs": dict(self._embed_runs), "skips": dict(self._embed_skips)}
         return {
             "face_tracks": len(self._faces),
             "entity_tracks": len(self._entities),
@@ -424,6 +476,7 @@ class VisionPipeline:
             "scene_motion": self.scene_motion.snapshot(),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
+            "entity_embeds": entity_embeds,
         }
 
     def _camera(self, width: int, height: int) -> CameraModel:
@@ -695,10 +748,13 @@ class VisionPipeline:
             for t in result.visible
         }
         self._entity_budget = self.cfg.max_entity_embeds_per_frame
+        self._object_runs += 1
+        consumers = self._entity_consumers() if self.appearance_embedder is not None else None
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
-            self._evaluate_entity(frame, track, states[track.track_id])
+            key = (kinds[track.label], self.display_name(track.label))
+            self._evaluate_entity(frame, track, states[track.track_id], key, consumers)
         for track in result.visible:
             state = states[track.track_id]
             x1, y1, x2, y2 = track.box
@@ -721,23 +777,54 @@ class VisionPipeline:
     def _embed_age_key(state: _EntityState) -> float:
         return -math.inf if state.last_embed is None else state.last_embed
 
-    def _evaluate_entity(self, frame: Frame, track: Track, state: _EntityState) -> None:
-        if self.appearance_embedder is None or self._entity_budget <= 0:
+    def _entity_consumers(self) -> _Consumers:
+        """Who can use an animal or object embedding now, read once per object run (records
+        and auto-enrollment can change while a track lives)."""
+        assert self.appearance_embedder is not None
+        model = self.appearance_embedder.model_id
+        vote: set[EntityKey] = set()
+        keep: set[EntityKey] = set()
+        for record in self.matcher.registry.entities():
+            key = (record.kind, record.category)
+            keep.add(key)
+            usable = record.embedding_model_id == model and len(record.embeddings)
+            if record.status == "active" and usable:
+                vote.add(key)
+        auto = self.world.autoenroll
+        kinds = frozenset(auto.kinds) if auto.enabled else frozenset()
+        return _Consumers(frozenset(vote), frozenset(keep), kinds)
+
+    def _evaluate_entity(
+        self,
+        frame: Frame,
+        track: Track,
+        state: _EntityState,
+        key: EntityKey,
+        consumers: _Consumers | None,
+    ) -> None:
+        """Embed the track when ``_entity_reason`` says it is due and the frame's entity budget
+        allows; count the run or the skip by reason for the debug report."""
+        run = self._object_runs
+        if state.last_run and run - state.last_run > 1:
+            state.reacquired = True
+        state.last_run = run
+        if consumers is None:
             return
-        stamp = frame.stamp
-        if state.last_embed is None:
-            due = True
-        else:
-            gap = stamp - state.last_embed
-            if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-                burst_gap = self.governor.stretch(self.cfg.entity_burst_min_gap_s, CONVERSATION)
-                due = gap >= burst_gap - EPSILON_S
-            else:
-                due = gap >= self.governor.period("appearance")
+        due, reason = self._entity_reason(track, state, frame.stamp, key, consumers)
+        if due and self._entity_budget <= 0:
+            due, reason = False, BUDGET
+        with self._report_lock:
+            counts = self._embed_runs if due else self._embed_skips
+            counts[reason] += 1
         if not due:
             return
+        assert self.appearance_embedder is not None
+        voting = state.owner_id is None and consumers.votes(key)
+        if voting and reason in (CHANGED, REACQUIRED):
+            state.votes = 0  # it may look different now: a new burst of votes
         self._entity_budget -= 1
         self._entity_embeds += 1
+        stamp = frame.stamp
         wall0, cpu0 = self.timer.start()
         try:
             embedding = self.appearance_embedder.embed(frame.image, track.box)
@@ -746,6 +833,62 @@ class VisionPipeline:
         identity = self.matcher.observe(
             track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
         )
+        if state.owner_id is not None and identity.owner_id is None:
+            state.votes = 0  # recognition lost: vote again
+        elif voting:
+            state.votes += 1
         state.embedding, state.owner_id = embedding, identity.owner_id
-        state.evals += 1
-        state.last_embed = stamp
+        state.last_embed, state.box, state.reacquired = stamp, self._measured(track), False
+
+    @staticmethod
+    def _measured(track: Track) -> Box:
+        """The detector's box of this run: the filtered box lags a real change by several runs
+        and would trigger it twice."""
+        return track.detection.box if track.detection is not None else track.box
+
+    def _entity_reason(
+        self, track: Track, state: _EntityState, stamp: float, key: EntityKey, c: _Consumers
+    ) -> tuple[bool, str]:
+        """Whether an animal or object track is due for an embedding, and why (SPEC 5, 13).
+
+        Nothing uses the embedding of a kind and category that no record holds and
+        auto-enrollment does not collect: skipped. A new track is embedded once; it gets a burst
+        of votes only while a record could match it. After that a recognised track keeps
+        ``rates.appearance_hz``; an unknown one is embedded again only when its box changed size
+        or shape, when it was out of sight for an object run, or after ``entity_reembed_floor_s``.
+        """
+        cfg = self.cfg
+        if not c.wants(key):
+            return False, NO_CONSUMER
+        if state.last_embed is None:
+            return True, NEW
+        gap = stamp - state.last_embed
+        if state.owner_id is None and c.votes(key) and state.votes < cfg.embedding_burst:
+            burst_gap = self.governor.stretch(cfg.entity_burst_min_gap_s, CONVERSATION)
+            return (True, BURST) if gap >= burst_gap - EPSILON_S else (False, SPACING)
+        if gap < self.governor.period("appearance"):
+            return False, SPACING
+        if state.owner_id is not None:
+            return True, RECOGNISED
+        if state.reacquired:
+            return True, REACQUIRED
+        if state.box is not None and self._box_changed(state.box, self._measured(track)):
+            return True, CHANGED
+        if gap >= cfg.entity_reembed_floor_s - EPSILON_S:
+            return True, FLOOR
+        return False, SETTLED
+
+    def _box_changed(self, old: Box, new: Box) -> bool:
+        """Whether the box area or its width over height changed by the configured factors."""
+        ox1, oy1, ox2, oy2 = old
+        nx1, ny1, nx2, ny2 = new
+        ow, oh, nw, nh = ox2 - ox1, oy2 - oy1, nx2 - nx1, ny2 - ny1
+        if min(ow, oh, nw, nh) <= 0:
+            return True
+        area = (nw * nh) / (ow * oh)
+        aspect = (nw / nh) / (ow / oh)
+        cfg = self.cfg
+        return (
+            max(area, 1 / area) >= cfg.entity_reembed_size_ratio
+            or max(aspect, 1 / aspect) >= cfg.entity_reembed_aspect_ratio
+        )
