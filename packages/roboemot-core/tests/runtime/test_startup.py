@@ -89,13 +89,17 @@ def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep():
 def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     """SPEC 8 stage 8: the speech output applies barge-in's duck; the cut is bound in order."""
     bound = []
-    bargein = SimpleNamespace(duck=object(), bind=lambda *actions: bound.append(actions))
+    bargein = SimpleNamespace(
+        duck=object(), bind=lambda *actions, **kw: bound.append((actions, kw))
+    )
     output = SimpleNamespace(duck=None, stop=lambda: None)
     conv = SimpleNamespace(interrupt=lambda: None, mark_interrupting=lambda: None)
     listener = SimpleNamespace(resume=lambda samples, stamp: None)
-    bind_barge_in(bargein, output, conv, listener)
+    cut_own = lambda: False  # noqa: E731
+    bind_barge_in(bargein, output, conv, listener, cut_own)
     assert output.duck is bargein.duck
-    assert bound == [(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)]
+    actions = (output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)
+    assert bound == [(actions, {"cut_own": cut_own})]
 
 
 def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():
@@ -128,3 +132,29 @@ def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():
     assert not quiet()
     speaking.on = False
     assert quiet()
+
+
+def test_the_own_sound_cut_cuts_only_sounds_that_are_not_speech():
+    """SPEC 7B, 8: someone speaking over a hum cuts it through its runner (counted) and the
+    output; over the robot's speech it declines, and barge-in or the mute go on as before."""
+    from roboemot.runtime.startup import own_sound_cut
+
+    log = []
+    output = SimpleNamespace(raw=True)
+    output.cut_raw = lambda: log.append("cut_raw") or output.raw
+    soothe = SimpleNamespace(cut_by_speech=lambda now: log.append("soothe"))
+    cut = own_sound_cut(output, soothe)
+    assert cut() and log == ["cut_raw", "soothe"]
+    output.raw, log[:] = False, []
+    assert not cut() and log == ["cut_raw"]
+
+
+def test_the_soothe_tick_hands_the_listeners_speech_to_the_runner():
+    from roboemot.runtime.ticks import SootheContext, soothe_tick
+
+    seen = []
+    runner = SimpleNamespace(tick=lambda now, idle, state, quiet, speech: seen.append(speech))
+    for hearing in (False, True):
+        ctx = SootheContext(False, False, 0, False, False, hearing=hearing)
+        soothe_tick(runner, 1.0, lambda ctx=ctx: ctx, "awake", False)
+    assert seen == [False, True]

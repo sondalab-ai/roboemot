@@ -3,12 +3,12 @@
 
 import pytest
 from reachy_config import reachy_config
+from roboemot.voice.fastpath import FastPath
 from roboemot.voice.keywords import KeywordSpotter
 from roboemot.voice.robot_name import RobotName
 
 VOICE = reachy_config().voice
 SETS = VOICE.keywords
-MAX_WORDS = VOICE.fastpath.alias_wake_max_words
 VOSK_SMALL = {"it": ["reachy", "reati"], "en": ["reachy"]}  # words the small models lack
 
 
@@ -17,12 +17,13 @@ def vocab(language, words):
 
 
 def decide(text, language, platform=None, configured=None, with_vocab=True):
-    """(categories, wakes) as FastPath decides it for a final text."""
+    """(categories, wakes) for a final text: the production decision (``FastPath.wakes``)."""
     names = RobotName(platform, vocab if with_vocab else None)
-    names.configure(VOICE)
+    voice = VOICE.model_copy(update={"wake_word": configured})
+    fast = FastPath(voice, lambda *a: None, names=names)
+    fast.begin(0.0, 0.0, language)
     cats = KeywordSpotter(SETS, configured, names).spot(text, language)
-    words = len(text.split())
-    return cats, "wake" in cats or ("name" in cats and words <= MAX_WORDS)
+    return cats, fast.wakes(text)
 
 
 @pytest.mark.parametrize("platform", [None, "reachy_mini", "Reachy"])
@@ -37,7 +38,10 @@ def decide(text, language, platform=None, configured=None, with_vocab=True):
         ("reati", "it", {"name"}, True),
         ("hello riyadh she", "en", {"greeting", "name"}, True),
         ("il comune di reati ha approvato oggi il nuovo bilancio", "it", {"name"}, False),
-        ("riyadh she is a city in the middle of the desert today", "en", {"name"}, False),
+        # an alias opening the final text wakes at any length (owner decision 2026-11-04)
+        ("riyadh she is a city in the middle of the desert today", "en", {"name"}, True),
+        ("reati mi racconti una barzelletta per favore", "it", {"name"}, True),
+        ("the city of riyadh she is in the middle of the desert today", "en", {"name"}, False),
         ("che tempo fa", "it", set(), False),
         ("hello reachy", "en", {"greeting"}, False),  # out of vocabulary: no name wake
     ],
