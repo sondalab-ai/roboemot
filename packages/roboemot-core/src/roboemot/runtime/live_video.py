@@ -33,7 +33,6 @@ import numpy as np
 from roboemot.attention.types import SHOWN
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import person_name
-from roboemot.vision.types import PreviewOverlay
 from roboemot.world.types import UNKNOWN_IDENTITY
 
 log = logging.getLogger(__name__)
@@ -278,18 +277,15 @@ class LiveVideo:
     def _draw(self, cv2: Any, canvas: np.ndarray, scale: float, overlay: Any = None) -> None:
         """Face boxes with the confirmed name (nothing for an unknown face), animal and object
         boxes with their readable category, the gaze target in another colour and a thicker
-        line. ``overlay`` is what the runner kept with the frame: a ``PreviewOverlay``, a plain
-        list (no boxes, or a hook that gives face boxes only) or None (a runner without an
-        overlay hook: the pipeline's latest boxes)."""
+        line. ``overlay`` is the ``PreviewOverlay`` the runner kept with the frame, or None (a
+        runner without an overlay hook: the pipeline's latest boxes)."""
         pipeline = self._host.perception.pipeline
         if pipeline is None:
             return
         if overlay is None:
             faces, objects = pipeline.face_overlay(), pipeline.object_overlay()
-        elif isinstance(overlay, PreviewOverlay):
-            faces, objects = overlay.faces, overlay.objects
         else:
-            faces, objects = overlay, ()
+            faces, objects = overlay.faces, overlay.objects
         target = self._p.selector.target
         entry = None
         if target is not None and target.entry_id:

@@ -537,7 +537,7 @@ def test_switching_runners_unwatches_the_old_one(rig):
 
 
 def test_the_boxes_drawn_are_the_ones_kept_with_the_frame():
-    kept = [((20.0, 40.0, 140.0, 200.0), "mia")]
+    kept = PreviewOverlay(faces=(((20.0, 40.0, 140.0, 200.0), "mia"),))
     rig = Rig(faces=[], names={"mia": "Mia"}, hook=lambda report: kept)
     assert green_pixels(drawn(rig)) > 0  # the pipeline's current overlay is empty
 
@@ -555,7 +555,7 @@ def test_rare_face_detection_with_a_working_camera_is_never_stale():
 
 
 def test_a_stalled_camera_is_stale_even_with_a_kept_frame():
-    rig = Rig(hook=lambda report: [])
+    rig = Rig(hook=lambda report: PreviewOverlay())
     rig.video.frame("a")
     rig.submit()
     assert rig.video.frame("a")[1] is None
@@ -615,12 +615,11 @@ def test_a_bad_face_box_never_stops_the_picture(box):
         (0.0, 0.0, 3e9, 3e9),
     ],
 )
-def test_a_bad_object_box_is_skipped_and_the_others_are_drawn(box, caplog):
+def test_a_bad_object_box_is_skipped_and_the_others_are_drawn(box):
     rig = Rig(objects=[(box, "cup", None), ((300.0, 200.0, 400.0, 320.0), "cup", None)])
     img = drawn(rig)
     assert blue_pixels(img) > 0  # the good box
     assert img[260, 300:304].max() > 0
-    assert not any("cup" in r.getMessage() for r in caplog.records)
 
 
 def test_an_object_that_cannot_be_drawn_is_logged_without_content(caplog):
@@ -721,12 +720,37 @@ def test_object_boxes_come_from_the_frame_capture_with_the_faces():
     assert green_pixels(img) > 0 and blue_pixels(img) > 0
 
 
-def test_an_overlay_with_object_boxes_only_holds_the_detection_frame():
+def test_object_boxes_alone_never_hold_a_frame():
     rig = Rig(hook=lambda report: PreviewOverlay(objects=(CUP,)))
     rig.video.frame("a")
     rig.submit()
     held = rig.runner.latest()
-    rig.runner._overlay = lambda report: None  # a newer frame without a detection
-    rig.submit()
-    assert rig.runner.latest() is held  # kept for a poll period, like face boxes
-    assert not PreviewOverlay() and PreviewOverlay(objects=(CUP,))
+    rig.runner._overlay = lambda report: PreviewOverlay(objects=(CUP,), faces_current=False)
+    rig.submit()  # no face detection on it, inside the hold period
+    assert rig.runner.latest() is not held  # object boxes are an estimate: nothing to hold
+    assert not PreviewOverlay(objects=(CUP,)) and PreviewOverlay(faces=((CUP[0], None),))
+
+
+def test_a_frame_without_a_face_detection_still_shows_the_object_boxes():
+    face = (((20.0, 40.0, 140.0, 200.0), None),)
+    rig = Rig(hook=lambda report: PreviewOverlay(face, (CUP,)))
+    rig.apply(video_max_width=640)
+    rig.video.frame("a")
+    rig.submit(np.zeros((480, 640, 3), np.uint8))
+    rig.runner._overlay = lambda report: PreviewOverlay(objects=(CUP,), faces_current=False)
+    rig.clock.now += 1.0  # past the hold (one poll period)
+    rig.submit(np.zeros((480, 640, 3), np.uint8))
+    kept = rig.runner.latest()
+    assert kept.seq == 2 and kept.overlay.objects == (CUP,) and kept.overlay.faces == ()
+    img = decode(rig.video.frame("a")[0])
+    assert blue_pixels(img) > 0  # no flicker: the object box stays between face detections
+    assert img[120, 20:22].max() <= 10  # and no stale face box
+
+
+def test_a_shown_object_target_whose_entry_is_gone_marks_nothing():
+    face = [((20.0, 40.0, 140.0, 200.0), None)]
+    rig = Rig(faces=face, objects=[CUP], shown=("unknown", "cup"))
+    rig.p.world.get = lambda entry_id: None
+    img = drawn(rig)
+    assert yellow_pixels(img) == 0
+    assert blue_pixels(img) > 0 and img[120, 20:22].max() > 0  # both still drawn

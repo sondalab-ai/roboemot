@@ -1,6 +1,6 @@
 """SPEC 4A, 11A: the runner's latest-frame handoff for the Live tab's preview. Nothing is kept while
 nobody watches; a watch window keeps one reference (no copy) to the newest frame the pipeline
-finished, with the face boxes computed on it, and lapses by itself."""
+finished, with the boxes computed on it, and lapses by itself. Only face boxes hold a frame."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 from roboemot.vision.runner import LatestFrameRunner
-from roboemot.vision.types import Frame
+from roboemot.vision.types import Frame, PreviewOverlay
 
 
 class Module:
@@ -53,7 +53,7 @@ class Gated(Module):
         return f.stamp not in self.skip
 
     def overlay(self, detected):
-        return [self.current] if detected else None
+        return PreviewOverlay(faces=(self.current,)) if detected else None
 
 
 def started(module, clock=None, overlay=None):
@@ -97,11 +97,11 @@ def test_the_preview_shows_the_frame_the_boxes_were_computed_on_not_a_newer_one(
         module.release.release()
         assert until(lambda: runner.latest() is not None)
         kept, seq, overlay = runner.latest()
-        assert kept.stamp == 1.0 and seq == 1 and overlay == [1.0]
+        assert kept.stamp == 1.0 and seq == 1 and overlay.faces == (1.0,)
         assert module.entered.acquire(timeout=5)
         module.release.release()
         assert until(lambda: runner.latest()[0].stamp == 2.0)
-        assert runner.latest()[1:] == (2, [2.0])
+        assert runner.latest().seq == 2 and runner.latest().overlay.faces == (2.0,)
     finally:
         module.release.release()
         runner.stop()
@@ -118,7 +118,7 @@ def test_a_frame_without_a_detection_does_not_replace_the_kept_one():
             module.release.release()
             assert until(lambda n=stamp: runner.processed == n)
         kept, seq, overlay = runner.latest()
-        assert kept.stamp == 1.0 and seq == 1 and overlay == [1.0]  # not frame 2 with old boxes
+        assert kept.stamp == 1.0 and seq == 1 and overlay.faces == (1.0,)  # not frame 2
     finally:
         module.release.release()
         runner.stop()
@@ -201,13 +201,19 @@ def test_the_cost_on_the_submit_path_with_no_watcher_is_a_comparison():
 def test_with_rare_detection_a_newer_frame_without_boxes_follows_after_the_hold():
     clock = Clock()
     runner = LatestFrameRunner(
-        Module(), clock=clock, overlay=lambda report: ["box"] if detected[0] else None
+        Module(),
+        clock=clock,
+        overlay=lambda report: (
+            PreviewOverlay(("box",), ("cup",))
+            if detected[0]
+            else PreviewOverlay(objects=("cup",), faces_current=False)
+        ),
     )
     detected = [True]
     runner.watch(60.0, hold_s=1.0)
     runner.submit(frame(1.0))
     runner.run_pending()
-    assert runner.latest()[0].stamp == 1.0 and runner.latest().overlay == ["box"]
+    assert runner.latest()[0].stamp == 1.0 and runner.latest().overlay.faces == ("box",)
     detected[0] = False
     clock.now += 0.5
     runner.submit(frame(2.0))
@@ -217,12 +223,16 @@ def test_with_rare_detection_a_newer_frame_without_boxes_follows_after_the_hold(
     runner.submit(frame(3.0))
     runner.run_pending()
     kept = runner.latest()
-    assert kept.frame.stamp == 3.0 and kept.overlay == []  # live picture, no stale boxes
+    assert kept.frame.stamp == 3.0 and kept.overlay == PreviewOverlay(
+        objects=("cup",), faces_current=False
+    )  # a live picture with the object boxes, no stale face boxes
 
 
 def test_camera_age_follows_the_camera_not_the_kept_frame():
     clock = Clock()
-    runner = LatestFrameRunner(Module(), clock=clock, overlay=lambda report: ["box"])
+    runner = LatestFrameRunner(
+        Module(), clock=clock, overlay=lambda report: PreviewOverlay(("box",))
+    )
     assert runner.camera_age_s() is None
     runner.watch(60.0, hold_s=100.0)
     runner.submit(frame(1.0))
@@ -232,3 +242,11 @@ def test_camera_age_follows_the_camera_not_the_kept_frame():
     assert runner.latest().frame.stamp == 1.0 and runner.camera_age_s() == 0.0
     clock.now += 7.0
     assert runner.camera_age_s() == 7.0
+
+
+def test_a_hook_without_boxes_keeps_a_preview_overlay_never_a_bare_list():
+    runner = LatestFrameRunner(Module(), clock=Clock(), overlay=lambda report: None)
+    runner.watch(60.0, hold_s=1.0)
+    runner.submit(frame(1.0))
+    runner.run_pending()
+    assert runner.latest().overlay == PreviewOverlay(faces_current=False)

@@ -542,8 +542,10 @@ class VisionPipeline:
     def object_overlay(self) -> list[tuple[Box, str, str | None]]:
         """The confirmed animal and object tracks of the last object run that have not expired
         since, as ``(box in pixels, readable category, owner_id or None)``: the tracks the
-        world and attention get. Object detection is slower than face detection, so a box is
-        the tracker's latest estimate, not a detection on the frame it is drawn on."""
+        world and attention get. ``_drop_entity`` removes the entity state of a track that
+        expired or was removed, and this filters on that state, so a dropped track is gone
+        before the next object run. Object detection is slower than face detection, so a box
+        is the tracker's latest estimate, not a detection on the frame it is drawn on."""
         out: list[tuple[Box, str, str | None]] = []
         for track in self._object_visible:
             state = self._entities.get(track.track_id)
@@ -555,17 +557,18 @@ class VisionPipeline:
         """The readable category of a detector class (``vision.object_display_names``)."""
         return self.cfg.object_display_names.get(label, label.replace("_", " "))
 
-    def preview_overlay(self, report: FrameReport) -> PreviewOverlay | None:
-        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` and
-        ``object_overlay`` when face detection ran on it, only the object boxes while face
-        detection is off (governor scale 0 or no detection rate: no face boxes), else None (the
-        face boxes belong to an earlier frame; the runner keeps that one for a poll period,
-        then shows newer frames without boxes)."""
+    def preview_overlay(self, report: FrameReport) -> PreviewOverlay:
+        """The live preview's boxes for the frame ``report`` is about, always with the current
+        ``object_overlay``. Face boxes: ``face_overlay`` when face detection ran on it, none
+        while face detection is off (governor scale 0 or no detection rate), else unknown
+        (``faces_current`` False: the face boxes belong to an earlier frame; the runner keeps
+        that one for a poll period, then shows newer frames without face boxes)."""
+        objects = tuple(self.object_overlay())
         if report.faces_detected:
-            return PreviewOverlay(tuple(self.face_overlay()), tuple(self.object_overlay()))
+            return PreviewOverlay(tuple(self.face_overlay()), objects)
         if math.isinf(self.governor.period("detection")):
-            return PreviewOverlay(objects=tuple(self.object_overlay()))
-        return None
+            return PreviewOverlay(objects=objects)
+        return PreviewOverlay(objects=objects, faces_current=False)
 
     def _track_yaw(self, track: Track, state: _FaceState, stamp: float) -> None:
         """Add this frame's head yaw (from the matched detection's landmarks) to the track's

@@ -78,14 +78,18 @@ class PersonRecognized:
 class PreviewOverlay:
     """The live preview's boxes for one frame (SPEC 11A): face tracks as ``(box, owner_id or
     None)``, confirmed animal and object tracks as ``(box, readable category, owner_id or
-    None)``. False when it holds no box, like the empty list the frame runner keeps for a
-    picture without boxes."""
+    None)``. ``faces_current`` is False when face detection did not run on the frame (its face
+    boxes are unknown, ``faces`` is empty): ``LatestFrameRunner`` then holds the last frame
+    with face boxes for a poll period. Object boxes are the tracker's latest estimate, never
+    an exact match of the picture, so they never hold a frame."""
 
     faces: tuple[tuple[Box, str | None], ...] = ()
     objects: tuple[tuple[Box, str, str | None], ...] = ()
+    faces_current: bool = True
 
     def __bool__(self) -> bool:
-        return bool(self.faces or self.objects)
+        """True when it holds a face box: what makes a kept frame worth holding."""
+        return bool(self.faces)
 
 
 @dataclass(frozen=True)

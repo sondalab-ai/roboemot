@@ -58,7 +58,7 @@ def test_the_preview_overlay_is_only_for_frames_faces_were_detected_on(tmp_path)
     assert detected.faces_detected
     assert pipe.preview_overlay(detected) == PreviewOverlay(tuple(pipe.face_overlay()), ())
     skipped = pipe.process(Frame(image(8), 10.001))  # inside the detection period
-    assert not skipped.faces_detected and pipe.preview_overlay(skipped) is None
+    assert not skipped.faces_detected and not pipe.preview_overlay(skipped).faces_current
 
 
 def test_a_resting_pipeline_previews_frames_without_boxes(tmp_path):
@@ -89,12 +89,44 @@ def test_a_confirmed_object_track_gives_its_box_and_readable_category(tmp_path):
 def test_the_preview_overlay_carries_the_object_boxes_with_the_faces(tmp_path):
     _, _, pipe, _, _ = object_rig(tmp_path, [PLANT])
     run(pipe, 40)
-    overlays = []
+    pairs = []
     for i in range(8):  # what the runner's hook does: right after each frame
-        overlays.append(pipe.preview_overlay(pipe.process(Frame(image(40 + i), 5.0 + i * 0.125))))
-    overlay = next(o for o in overlays if o is not None)
-    assert overlay.faces and overlay.objects
-    assert overlay.objects == tuple(pipe.object_overlay())
+        report = pipe.process(Frame(image(40 + i), 5.0 + i * 0.125))
+        pairs.append((report, pipe.preview_overlay(report), tuple(pipe.object_overlay())))
+    report, overlay, objects = next(p for p in pairs if p[0].faces_detected)
+    assert overlay.faces_current and overlay.faces and overlay.objects == objects != ()
+
+
+def test_a_frame_without_a_face_detection_carries_the_object_boxes(tmp_path):
+    _, _, pipe, _, _ = object_rig(tmp_path, [PLANT])
+    run(pipe, 40)
+    pipe.process(Frame(image(40), 5.0))
+    skipped = pipe.process(Frame(image(41), 5.001))  # inside the detection period
+    assert not skipped.faces_detected
+    overlay = pipe.preview_overlay(skipped)
+    assert overlay == PreviewOverlay(objects=tuple(pipe.object_overlay()), faces_current=False)
+    assert overlay.objects and not overlay
+
+
+def test_object_boxes_while_face_detection_is_off(tmp_path):
+    _, _, pipe, _, _ = object_rig(tmp_path, [PLANT])
+    run(pipe, 40)
+    pipe.governor.set_scale(CIRCADIAN, 0.0)
+    overlay = pipe.preview_overlay(pipe.process(Frame(image(40), 5.0)))
+    assert overlay == PreviewOverlay(objects=tuple(pipe.object_overlay()))
+    assert overlay.objects and overlay.faces_current
+
+
+def test_display_name_follows_the_configured_mapping(tmp_path):
+    cfg = UNGATED.model_copy(
+        update={"object_categories": ["cup"], "object_display_names": {"cup": "mug"}}
+    )
+    cup = Detection((200.0, 100.0, 260.0, 160.0), 0.8, "cup")
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], vision=cfg, object_detector=ObjectMock([cup]))
+    assert pipe.display_name("cup") == "mug"
+    assert pipe.display_name("wine_glass") == "wine glass"  # not listed: underscores to spaces
+    run(pipe, 40)
+    assert [c for _, c, _ in pipe.object_overlay()] == ["mug"]
 
 
 def test_an_expired_object_track_leaves_the_overlay(tmp_path):
