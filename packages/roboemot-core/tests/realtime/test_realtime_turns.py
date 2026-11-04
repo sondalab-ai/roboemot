@@ -867,6 +867,7 @@ def test_a_barge_in_with_the_response_created_event_in_the_same_loop_step_cuts_t
         run._loop.call_soon_threadsafe(created_and_barge_in)
         assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
         assert rig.events[-1]["outcome"] == "interrupted"
+        assert wait_for(lambda: srv.of("response.cancel"))  # the cancel crosses the socket
         assert len(srv.of("response.cancel")) == 1
         assert wait_for(lambda: "call_1" in outputs_by_call(srv))  # the late call is answered
 
