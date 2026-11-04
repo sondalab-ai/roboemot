@@ -332,9 +332,10 @@ class PiperBackend:
             try:
                 while True:
                     try:
-                        kind, payload = await asyncio.wait_for(
-                            queue.get(), self.config.request_timeout_s
-                        )
+                        # asyncio.timeout, not wait_for: a stop's cancel is never swallowed
+                        # on 3.11 (the sentence task is cancelled while a chunk is queued)
+                        async with asyncio.timeout(self.config.request_timeout_s):
+                            kind, payload = await queue.get()
                     except TimeoutError as exc:
                         self._workers.pop(language, None)
                         self._failed(language)

@@ -176,9 +176,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       face's curiosity impulse in the same affect update as the sound's took its label, and `last_label`
       read late showed a later label. The sound now waits until the renderer took the face's impulse, and
       the test records every expression start.
-- [ ] `test_realtime_turns.py::test_a_late_calls_items_are_deleted_with_its_turn` fails on Python 3.11 only:
-      a production race, not a test one. On 3.11 `asyncio.wait_for` (`realtime/turn.py`, `ResponseRun.run`)
-      swallows a cancel that lands in the same loop iteration as a queued event: a barge-in at the
-      server's `response.created` is lost (no `response.cancel`, no truncate, the turn ends `ok`). The
-      robot may run 3.11 (Piper lock aarch64 py3.11) (SPEC 8). CI runs a `python (3.11)` job, so the test can
-      still fail there until the race is fixed (no xfail, no skip).
+- [x] `test_realtime_turns.py::test_a_late_calls_items_are_deleted_with_its_turn` failed on Python 3.11 only:
+      a production race. 3.11's `asyncio.wait_for` returned a queued event and swallowed a barge-in's
+      cancel in the same loop iteration (no `response.cancel`, the turn ended `ok`). `ResponseRun.run`,
+      the chat stream, skill calls and the TTS backends now use `asyncio.timeout` (SPEC 8).

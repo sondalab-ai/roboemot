@@ -398,7 +398,9 @@ class Router:
             create = client.chat.completions.create  # untimed: the first access imports lazily
             started = loop.time()
             deadline = started + route.first_token_timeout_s
-            stream = await asyncio.wait_for(create(**kwargs), max(0.0, deadline - loop.time()))
+            # asyncio.timeout, not wait_for: a barge-in's cancel is never swallowed on 3.11
+            async with asyncio.timeout(max(0.0, deadline - loop.time())):
+                stream = await create(**kwargs)
             it = stream.__aiter__()
             calls: dict[int, dict[str, Any]] = {}
             sent: set[int] = set()
@@ -408,7 +410,8 @@ class Router:
                 if timeout <= 0:
                     raise TimeoutError("first token timeout")
                 try:
-                    chunk = await asyncio.wait_for(it.__anext__(), timeout)
+                    async with asyncio.timeout(timeout):
+                        chunk = await it.__anext__()
                 except StopAsyncIteration:
                     break
                 if getattr(chunk, "usage", None):

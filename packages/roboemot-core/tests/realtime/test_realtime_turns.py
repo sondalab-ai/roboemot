@@ -823,6 +823,52 @@ def test_a_late_calls_items_are_deleted_with_its_turn(rigs):
         assert wait_for(lambda: {"fc_1", out} <= deleted())
 
 
+def test_a_barge_in_with_the_response_created_event_in_the_same_loop_step_cuts_the_turn(
+    rigs, monkeypatch
+):
+    """Python 3.11's ``asyncio.wait_for`` returned a queued item and swallowed a cancel that
+    came in the same loop iteration (CI flake of the late-call test): the barge-in was lost, no
+    ``response.cancel``, the turn ended ``ok``. Forced here: the run's ``response.created`` is
+    held, then posted together with the barge-in's cancel in one loop callback (SPEC 8)."""
+    from roboemot.realtime import protocol
+    from roboemot.realtime.turn import ResponseRun
+
+    held: list[tuple[ResponseRun, protocol.ResponseCreated]] = []
+    post = ResponseRun._post
+
+    def hold_created(run, item):
+        if isinstance(item, protocol.ResponseCreated) and not held:
+            held.append((run, item))
+            return
+        post(run, item)
+
+    monkeypatch.setattr(ResponseRun, "_post", hold_created)
+    with TurnServer(
+        ["cancel_then_tool", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: held and bool(rig.sink.pushed))
+        run, created = held[0]
+        rig.worker.mark_interrupting()
+        rig.speech.stop()
+
+        def created_and_barge_in() -> None:  # one loop step: the item first, then the cancel
+            run._queue.put_nowait(created)
+            rig.worker.interrupt()
+
+        run._loop.call_soon_threadsafe(created_and_barge_in)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert rig.events[-1]["outcome"] == "interrupted"
+        assert len(srv.of("response.cancel")) == 1
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))  # the late call is answered
+
+
 def test_a_pending_refusal_with_no_request_still_resets(rigs):
     """A ``function_call_output_pending`` whose request is no longer tracked (expired, given
     up, or an error that echoes nothing) resets the session too."""

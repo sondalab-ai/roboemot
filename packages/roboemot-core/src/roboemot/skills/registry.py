@@ -255,11 +255,14 @@ async def execute(
         kwargs[s.signature.context] = ctx
     try:
         if inspect.iscoroutinefunction(s.fn):
-            value = await asyncio.wait_for(s.fn(**kwargs), timeout_s)
+            # asyncio.timeout, not wait_for: a barge-in's cancel is never swallowed on 3.11
+            async with asyncio.timeout(timeout_s):
+                value = await s.fn(**kwargs)
         elif s.inline:
             value = s.fn(**kwargs)
         else:
-            value = await asyncio.wait_for(asyncio.to_thread(s.fn, **kwargs), timeout_s)
+            async with asyncio.timeout(timeout_s):
+                value = await asyncio.to_thread(s.fn, **kwargs)
     except TimeoutError:
         log.warning("skill %s: timed out", name)
         return _error("timeout", name)
