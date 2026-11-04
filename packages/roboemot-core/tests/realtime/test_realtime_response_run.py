@@ -255,9 +255,10 @@ async def test_a_request_pending_on_a_closed_session_is_settled_at_once():
     assert snap["resets"] == 0 and snap["stale_callbacks"] == 0 and charged == [100, 5]
 
 
-async def test_a_run_on_a_session_closed_by_a_reload_falls_back_at_once():
-    """probe_r4_midrun: pseudonyms come on mid-stream; the run ends now (closed), its
-    response is charged once, and nothing stays in flight."""
+async def test_a_run_on_a_session_closed_by_a_reload_is_ended_by_the_reload():
+    """probe_r4_midrun: pseudonyms come on mid-stream; the reload ends the run (closed
+    ``reconfigured``), not its stall timeout, its response is charged once, and nothing stays
+    in flight. No wall-clock bound: the stall is out of reach, so only the reload can end it."""
     route, sent = connected_route()
     charged = []
     route.charge = charged.append

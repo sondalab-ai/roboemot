@@ -167,10 +167,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       bang shorter than one chunk (10 ms) can be missed when the hub runs late. Owner decision pending:
       keep, or pass the loudest chunk of the pass (SPEC change) (found in CV-15, 2026-11-03).
 - [x] Realtime tests flaked once each on CI after CV-12 (`test_realtime_turns.py` pending-call reset,
-      `test_realtime_response_run.py:274` 0.2 s bound, `test_realtime_input.py` cancel/delete). Not the
-      reconnect threads. Pending-call reset: the turn count went up before the turn record (fixed by PR 166).
-      Reload bound: now a 60 s stall, so only the reload can end the run. Input cancel/delete: the server's
-      VAD and transcripts wait on a `TurnServer(hold=...)` event the test sets after its cancel.
+      `test_realtime_response_run.py:274` wall-clock bound, `test_realtime_input.py` cancel/delete). Not the
+      reconnect threads. Pending-call reset: the turn count went up before the turn record (fixed by PR 166,
+      `e311731`). Reload bound (0.2 s, 0.5 s since PR 169): gone, the stall is now 60 s, so only the
+      reload can end the run. Input cancel/delete: the server's VAD and transcripts wait on a
+      `TurnServer(hold=...)` event the test sets after its cancel.
 - [x] `test_app_soothe.py::test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it`: the
       face's curiosity impulse in the same affect update as the sound's took its label, and `last_label`
       read late showed a later label. The sound now waits until the renderer took the face's impulse, and
@@ -179,4 +180,5 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       a production race, not a test one. On 3.11 `asyncio.wait_for` (`realtime/turn.py`, `ResponseRun.run`)
       swallows a cancel that lands in the same loop iteration as a queued event: a barge-in at the
       server's `response.created` is lost (no `response.cancel`, no truncate, the turn ends `ok`). The
-      robot may run 3.11 (Piper lock aarch64 py3.11) (SPEC 8).
+      robot may run 3.11 (Piper lock aarch64 py3.11) (SPEC 8). CI runs a `python (3.11)` job, so the test can
+      still fail there until the race is fixed (no xfail, no skip).

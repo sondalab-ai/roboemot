@@ -321,6 +321,8 @@ def test_a_late_item_of_a_cancelled_burst_never_joins_the_next_one(rig_for):
     """I-7: a cancelled burst the server had not reported resets the session; its late item is
     stale, and the next burst waits for the new session."""
     hold = threading.Event()  # the first burst's VAD speaks only after its cancel
+    # the second burst's 0.8 s only widens the window in which the first one's late item can
+    # arrive before the second's; it is not used as sync (the test passes either way)
     kw = {"speech_delay_s": [0.0, 0.8], "hold": hold, "hold_at": "speech"}
     with TurnServer(heard=[["uno"], ["due"]], **kw) as server:
         rig = rig_for(server)

@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from roboemot.affect import AffectEngine
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.config.schema import RegisterParams, SootheConfig, StateEffects
 from roboemot.runtime import startup as startup_module
@@ -26,6 +27,7 @@ NOON = 12.0
 LABEL = "calm"
 LONG_S = 8
 LOW_JITTER_DRAW = -1.0  # u = -1: the first sound comes interval * (1 - jitter) = 3 s after idle
+FACE_EVENT = "person.unknown_appears"  # the fake face's labelled impulse (curiosity)
 YAML = f"""voice:
   enabled: true
 circadian:
@@ -66,11 +68,12 @@ class EarlyRandom(random.Random):
         return super().uniform(a, b)
 
 
-class SoothedApp:
+class GatedSootheProbe:
     """What the test sees of the app's soothe runner and expression renderer, from the first
     tick: every soothe event (``("event", name, payload)``) and every expression started
-    (``("start", label)``), in order, and the labelled impulses the renderer has taken
-    (``impulses``). The runner plays nothing until ``allow`` is set.
+    (``("start", label)``), in order; the engine's labelled-impulse count right after the
+    face's impulse (``face``) and the count the renderer has taken (``impulses``). The runner
+    plays nothing until ``allow`` is set.
 
     The face in view brings its own labelled impulse (``person.unknown_appears``: curiosity).
     In the same affect update as the sound's, the latest label wins and the sound's never
@@ -81,6 +84,7 @@ class SoothedApp:
         self.log: list[tuple] = []
         self.allow = threading.Event()
         self.impulses = 0
+        self.face: int | None = None
         log, allow = self.log, self.allow
 
         class GatedSoothe(SootheRunner):
@@ -96,6 +100,13 @@ class SoothedApp:
                     super()._start(now, state, quiet)
 
         real_update, real_start = ExpressionRenderer.update, ExpressionRenderer._start
+        real_on_event = AffectEngine.on_event
+
+        def on_event(engine, event, now, payload=None):
+            fired = real_on_event(engine, event, now, payload)
+            if fired and event == FACE_EVENT and self.face is None:
+                self.face = engine._label_impulses  # the count that includes the face's
+            return fired
 
         def update(renderer, state, register, now):
             started = real_update(renderer, state, register, now)
@@ -111,6 +122,11 @@ class SoothedApp:
         monkeypatch.setattr(startup_module, "SootheRunner", GatedSoothe)
         monkeypatch.setattr(ExpressionRenderer, "update", update)
         monkeypatch.setattr(ExpressionRenderer, "_start", start)
+        monkeypatch.setattr(AffectEngine, "on_event", on_event)
+
+    def face_taken(self) -> bool:
+        """The renderer has taken the face's labelled impulse."""
+        return self.face is not None and self.impulses >= self.face
 
     def events(self) -> list[tuple]:
         return [e[1:] for e in self.log if e[0] == "event"]
@@ -123,7 +139,7 @@ class SoothedApp:
 
 def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(data, monkeypatch):  # noqa: F811
     monkeypatch.setattr(startup_module, "random", SimpleNamespace(Random=EarlyRandom))
-    seen = SoothedApp(monkeypatch)
+    seen = GatedSootheProbe(monkeypatch)
     enable(data, YAML)  # validated settings; the 3 s first gap is the schema's shortest
     mini = ScriptedMini().mini
     flushes = []
@@ -136,7 +152,7 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
         output, real_cancel = app.speech_output, app.speech_output.cancel
         output.cancel = lambda job: (cancelled.append(job), real_cancel(job))[1]
         assert wait_for(lambda: app.selector.target is not None, timeout=15)  # a person is in view
-        assert wait_for(lambda: seen.impulses >= 1, timeout=15)  # the face's, taken
+        assert wait_for(seen.face_taken, timeout=15)
         seen.allow.set()
         assert wait_for(lambda: seen.events() and mini.media.push_audio_sample.called, timeout=30)
         assert seen.events()[0] == ("self.soothe", {"label": LABEL, "sound": "hum"})
