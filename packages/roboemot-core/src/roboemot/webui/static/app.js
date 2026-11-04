@@ -203,6 +203,22 @@ async function guarded(fn) {
   }
 }
 
+// `guarded` for a call that draws a view. The view takes #view before its first await, so the token
+// read right after the call starts is its own; an error of a view that was dropped since (a tab
+// switch, a later view, logout) is not shown on the tab the user is on now.
+async function guardedView(view) {
+  let current = null;
+  try {
+    const pending = view();
+    current = viewToken();
+    await pending;
+  } catch (err) {
+    if (current && !current()) return;
+    if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+    notice(explain(err), true);
+  }
+}
+
 function stopPolling() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
@@ -333,8 +349,8 @@ function enrollmentView() {
     try {
       const s = await api("GET", "/api/enrollment/status");
       if (!current()) return;
-      await renderEnrollment(box, s);
-      if (current() && state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
+      await renderEnrollment(box, s, current);
+      if (current() && ["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
     } catch (err) {
@@ -347,7 +363,7 @@ function enrollmentView() {
   poll();
 }
 
-async function renderEnrollment(box, s) {
+async function renderEnrollment(box, s, current) {
   const stateKey = "state_" + s.state;
   const tone = { collecting: "info", ready: "success", completing: "info", completed: "success" }[s.state] || "warning";
   const parts = [
@@ -373,6 +389,7 @@ async function renderEnrollment(box, s) {
   if (s.can_complete) {
     if (!state.form) {
       const reg = await api("GET", "/api/registry");
+      if (!current()) return;
       state.form = consentForm(reg.records.filter((r) => r.kind === "person" && r.status === "pending"));
     }
     cards.push(state.form);
@@ -453,11 +470,11 @@ async function purgeKey(key) {
     title: t("purge"), message: t("confirm_purge"), pin: true, danger: true, confirm: t("purge"),
     run: ({ pin }) => api("POST", "/api/registry/quarantined/purge", { key: key, confirm: true, pin: pin }),
   });
-  if (done) await guarded(registryView);
+  if (done) await guardedView(registryView);
 }
 
 function rowActions(r, entities) {
-  const reload = () => guarded(registryView);
+  const reload = () => guardedView(registryView);
   const buttons = [button(t("rename"), "plain", async () => {
     const done = await ask({
       title: t("rename"), confirm: t("rename"),
@@ -594,9 +611,9 @@ async function catalogueView() {
     card(t("tab_catalogue"), t("catalogue_pending"), pending.length ? el("p", { class: "hint" }, t("catalogue_pick")) : [], records),
     card(t("tab_catalogue"), t("catalogue_live"), live),
     card(t("tab_catalogue"), t("catalogue_clear"), el("div", { class: "row" },
-      button(t("catalogue_clear"), "danger", async () => { if (await clearCandidates()) await guarded(catalogueView); }),
+      button(t("catalogue_clear"), "danger", async () => { if (await clearCandidates()) await guardedView(catalogueView); }),
       data.tombstones ? button(t("tombstones_clear", { n: data.tombstones }), "plain",
-        async () => { if (await clearTombstones()) await guarded(catalogueView); }) : [])));
+        async () => { if (await clearTombstones()) await guardedView(catalogueView); }) : [])));
 }
 
 // ---------------------------------------------------------------- secrets (write-only)
@@ -830,13 +847,17 @@ async function routesView() {
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
   let secrets = null;
+  let secretsError = null;
   try {
     secrets = await api("GET", "/api/secrets");
   } catch (err) {
-    if (err.message === "secret_store") notice(explain(err), true);
-    else if (err.message !== "secrets_unavailable") throw err;
+    secretsError = err;
   }
   if (!current()) return;
+  if (secretsError) {
+    if (secretsError.message === "secret_store") notice(explain(secretsError), true);
+    else if (secretsError.message !== "secrets_unavailable") throw secretsError;
+  }
   const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + checkReason(c));
@@ -896,8 +917,9 @@ async function routesView() {
     ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
-  if (state.tab === "routes" && data.routes.some((r) => r.running)) {
-    state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
+  if (data.routes.some((r) => r.running)) {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
   }
 }
 
@@ -906,7 +928,9 @@ async function refreshRoutes() {
   const focus = document.activeElement;
   const typing = focus && document.getElementById("view").contains(focus) && ["INPUT", "SELECT", "TEXTAREA"].includes(focus.tagName);
   if (!typing) { await routesView(); return; }
-  if (state.tab === "routes") state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
+  if (state.tab !== "routes") return;
+  clearTimeout(state.timer);
+  state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
 }
 
 async function debugView() {
@@ -924,7 +948,7 @@ async function debugView() {
     el("pre", { class: "sl-term-block__out pre-scroll" }, JSON.stringify(data, null, 2)));
   const hasRobot = Object.keys(robotOnly).length > 0;
   view.append(card(t("tab_debug"), t("debug_title"),
-    el("div", { class: "row" }, button(t("debug_refresh"), "plain", () => guarded(debugView))),
+    el("div", { class: "row" }, button(t("debug_refresh"), "plain", () => guardedView(debugView))),
     markedEyebrow("h3", t("settings_core")),
     block("GET /api/debug", hasRobot ? { ...report, sections: coreOnly } : report),
     hasRobot ? [markedEyebrow("h3", t("settings_robot")), block("GET /api/debug (robot)", robotOnly)] : []));
@@ -956,7 +980,7 @@ function showTab(name) {
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
-  guarded(async () => { await TABS[name](); });
+  guardedView(TABS[name]);
 }
 
 function tabKeys(ev) {
