@@ -834,10 +834,16 @@ def crowd(n, label="cup"):
     return [Detection((10 + 50 * k, 100, 40 + 50 * k, 140), 0.8, label) for k in range(n)]
 
 
-def entity_rig(tmp_path, dets, **update):
+def entity_rig(tmp_path, dets, *, record=None, world=None, **update):
+    """``record`` enrolls a cup that never matches ``RecordingAppearance`` (axis 3), so a
+    burst of votes stays open; ``"pending"`` leaves it pending (a catalogue import)."""
     cfg = CFG.vision.model_copy(update=update)
     app = RecordingAppearance()
     reg = registry(tmp_path)
+    if record == "active":
+        reg.enroll_entity("object", "Mug", np.stack([axis(5)] * 5), APP_MODEL, category="cup")
+    elif record == "pending":
+        reg.create_pending_entity("object", "Mug", category="cup")
     bus = Bus()
     pipe = VisionPipeline(
         cfg,
@@ -848,12 +854,13 @@ def entity_rig(tmp_path, dets, **update):
         face_embedder=FixedFaceEmbedder(axis(0)),
         appearance_embedder=app,
         object_detector=ObjectMock(dets),
+        world=world,
     )
     return pipe, app
 
 
 def test_a_weak_object_hit_runs_no_entity_embedding(tmp_path):
-    pipe, app = entity_rig(tmp_path, [cup(0.8)])
+    pipe, app = entity_rig(tmp_path, [cup(0.8)], record="active")  # a burst stays open
     got = []
     pipe.bus.subscribe("percept.entity", got.append)
     for stamp in (0.0, 1.0):
@@ -869,7 +876,7 @@ def test_a_weak_object_hit_runs_no_entity_embedding(tmp_path):
     assert len(app.boxes) == 1
     pipe.object_detector.dets = [cup(0.8)]
     pipe.process(Frame(image(4), 4.0))
-    assert len(app.boxes) == 2  # embedded again at the next strong hit
+    assert len(app.boxes) == 2  # the burst goes on at the next strong hit
 
 
 def test_a_tentative_object_track_cut_by_a_weak_frame_restarts_on_the_next_strong_hit(tmp_path):
@@ -934,7 +941,9 @@ def test_a_new_entity_is_not_starved_by_old_ones(tmp_path):
 
 def test_entity_burst_evaluations_are_spaced_by_the_minimum_gap(tmp_path):
     rates = CFG.vision.rates.model_copy(update={"objects_hz": 4.0, "appearance_hz": 0.05})
-    pipe, app = entity_rig(tmp_path, crowd(1), rates=rates, entity_burst_min_gap_s=1.0)
+    pipe, app = entity_rig(
+        tmp_path, crowd(1), record="active", rates=rates, entity_burst_min_gap_s=1.0
+    )
     stamps = []
     for i in range(24):
         before = len(app.boxes)

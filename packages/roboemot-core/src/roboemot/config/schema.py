@@ -1862,7 +1862,8 @@ class VisionRates(Strict):
     )
     appearance_hz: float = param(
         0.5,
-        "Appearance embedding rate per animal or object track after the new-track burst",
+        "Appearance embedding rate of a recognised animal or object track, and the shortest "
+        "gap between two embeddings of any track after the new-track burst",
         unit="Hz",
         ge=0.05,
         le=30,
@@ -2063,8 +2064,10 @@ class ObjectCropConfig(Strict):
     enabled: bool = param(
         True,
         "On: while a face is in view, object detection runs on a square crop around the faces "
-        "(the shown-object region of attention.shown), with a full-frame run after a head move, "
-        "on the gate's floor and at least every full_interval_s. Off: always the full frame",
+        "(the shown-object region of attention.shown), and during a look at a shown thing with "
+        "no face to crop around (the head looks down at it), on a crop around that thing; with "
+        "a full-frame run after a head move, on the gate's floor and at least every "
+        "full_interval_s. Off: always the full frame",
     )
     margin_faces: float = param(
         0.5,
@@ -2228,6 +2231,29 @@ class VisionConfig(Strict):
         "Minimum capture-time gap between two burst evaluations of one animal or object track",
         unit="s",
         ge=0,
+        le=10,
+    )
+    entity_reembed_floor_s: float = param(
+        60.0,
+        "An unknown animal or object track whose box keeps its size and shape is embedded "
+        "again (DINOv2-S) only after this much capture time; recognised tracks keep "
+        "rates.appearance_hz",
+        unit="s",
+        ge=2,
+        le=3600,
+    )
+    entity_reembed_size_ratio: float = param(
+        1.5,
+        "An animal or object track whose box area grew or shrank by this factor since its last "
+        "embedding is embedded again (it may look different now)",
+        ge=1.05,
+        le=10,
+    )
+    entity_reembed_aspect_ratio: float = param(
+        1.3,
+        "An animal or object track whose box width over height changed by this factor since its "
+        "last embedding is embedded again (it turned or changed pose)",
+        ge=1.05,
         le=10,
     )
     report_window: int = param(

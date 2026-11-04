@@ -555,3 +555,60 @@ def test_weak_detections_from_a_crop_are_mapped_and_edge_checked():
         Detection((0.0, 60.0, 30.0, 150.0), 0.25, "cup"),  # cut by the left edge
     ]
     assert [d.box for d in crop.to_frame(weak)] == [(240.0, 160.0, 300.0, 250.0)]
+
+
+def test_crop_runs_over_an_aside_track_are_no_comeback(tmp_path):
+    # V-4: a track missed by an object run counts as reacquired; one only set aside by crop
+    # runs was not missed.
+    chair = Detection((5, 150, 45, 230), 0.8, "chair")
+    cfg = CFG.vision.model_copy(
+        update={
+            "object_crop": CFG.vision.object_crop.model_copy(update={"full_interval_s": 2.5}),
+            "object_gate": CFG.vision.object_gate.model_copy(update={"enabled": False}),
+        }
+    )
+    pipe, det, _ = crop_rig(tmp_path, [chair], vision=cfg)
+    feed(pipe, 8 * 6 + 1)  # runs at 0..6 s: full, crop, crop, full, crop, crop, full
+    assert [s == (H, W) for s in det.shapes] == [True, False, False, True, False, False, True]
+    (track,) = pipe.object_tracker._tracks
+    state = pipe._entities[track.track_id]
+    assert state.last_run == pipe._object_runs and not state.reacquired
+
+
+def test_a_missed_track_set_aside_later_is_still_a_comeback(tmp_path):
+    pipe, _, _ = crop_rig(tmp_path, [])
+    from roboemot.vision.pipeline import _EntityState
+
+    state = pipe._entities[7] = _EntityState("object")
+    state.last_run = 3
+    pipe._object_runs = 5  # missed run 4, set aside on run 5
+
+    class Aside:
+        track_id = 7
+
+    pipe._follow_aside([Aside()])
+    assert state.last_run == 3
+
+
+def test_a_picked_up_track_keeps_its_entity_state(tmp_path):
+    cfg = CFG.vision.model_copy(
+        update={
+            "object_crop": CFG.vision.object_crop.model_copy(update={"full_interval_s": 2.5}),
+            "object_gate": CFG.vision.object_gate.model_copy(update={"enabled": False}),
+        }
+    )
+    det = CropAwareDetector([Detection((60, 130, 100, 170), 0.8, "cup")])
+    _, _, pipe, _, _ = rig(tmp_path, face_script, vision=cfg, object_detector=det)
+    img = marked_image()
+    for i in range(30):
+        pipe.process(Frame(img, i * 0.125))
+    (track,) = pipe.object_tracker._tracks
+    state = pipe._entities[track.track_id]
+    state.owner_id, state.votes, state.last_embed = "cup-1", 3, 2.9
+    det.things = [Detection((130, 60, 170, 100), 0.8, "cup")]
+    for i in range(30, 34):  # the crop run at 4 s picks it up
+        pipe.process(Frame(img, i * 0.125))
+    assert pipe.object_tracker._tracks == [track]
+    assert pipe._entities[track.track_id] is state
+    assert (state.owner_id, state.votes, state.last_embed) == ("cup-1", 3, 2.9)
+    assert not state.reacquired
