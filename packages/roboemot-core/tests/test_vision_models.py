@@ -363,7 +363,7 @@ def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypat
     path, labels, classes, score_min, nms_iou, threads = built[0]
     assert stages.object_detector == "detector" and path.name == "nanodet-plus-m-320"
     assert len(labels) == 80 and classes == [*cfg.animal_categories, *cfg.object_categories]
-    assert (score_min, nms_iou, threads) == (cfg.object_score_min, cfg.object_nms_iou, cfg.threads)
+    assert (score_min, nms_iou, threads) == (cfg.object_low_score, cfg.object_nms_iou, cfg.threads)
     built.clear()
     off = cfg.model_copy(update={"objects_enabled": False})
     assert onnx.load_stages(tmp_path, off, appearance=False).object_detector is None

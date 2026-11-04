@@ -697,10 +697,95 @@ def test_an_object_track_survives_a_missed_frame_at_a_tenth_of_the_rate(tmp_path
     assert len(pipe._entities) == 1 and len(pipe.object_tracker._tracks) == 1
 
 
-def test_the_object_tracker_has_no_low_score_pass(tmp_path):
+def test_the_object_tracker_low_score_pass_uses_object_low_score(tmp_path):
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
     cfg = pipe.object_tracker.cfg
-    assert cfg.low_score == cfg.high_score == CFG.vision.object_score_min
+    assert cfg.high_score == CFG.vision.object_score_min
+    assert cfg.low_score == CFG.vision.object_low_score < cfg.high_score
+    assert pipe.object_tracker.low_confirms is False
+
+
+CUP_BOX = (100, 80, 140, 130)
+
+
+def cup(score: float, label: str = "cup") -> Detection:
+    return Detection(CUP_BOX, score, label)
+
+
+def test_a_weak_detection_continues_a_confirmed_object_track(tmp_path):
+    # robot 2026-11-04: a shown cup scored 0.55 then 0.24 and its world entry went stale
+    objs = ObjectMock([cup(0.8)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    for stamp in (0.0, 1.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    tid = pipe.object_tracker._tracks[0].track_id
+    before = len(got["percept.entity"])
+    objs.dets = [cup(0.25)]
+    for stamp in (2.0, 3.0, 4.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    weak = got["percept.entity"][before:]
+    assert [m.payload.stamp for m in weak] == [2.0, 3.0, 4.0]  # observation refreshed each frame
+    assert {m.payload.confidence for m in weak} == {0.25}
+    assert [t.track_id for t in pipe.object_tracker._tracks] == [tid]
+    assert pipe.stats()["objects"] == {"low_score_detections": 3, "low_score_continued": 3}
+
+
+def test_a_weak_object_detection_never_starts_a_track(tmp_path):
+    objs = ObjectMock([cup(0.3)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    for stamp in range(5):
+        pipe.process(Frame(image(stamp), float(stamp)))
+    assert got["percept.entity"] == [] and pipe.object_tracker._tracks == []
+    assert pipe.stats()["objects"] == {"low_score_detections": 5, "low_score_continued": 0}
+
+
+def test_a_weak_object_detection_does_not_confirm_a_tentative_track(tmp_path):
+    objs = ObjectMock([cup(0.8)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.process(Frame(image(0), 0.0))  # tentative after one strong hit
+    assert pipe.object_tracker.holds(0.0, (), 1.0, 3.0) == frozenset({"tentative"})
+    objs.dets = [cup(0.3)]
+    pipe.process(Frame(image(1), 1.0))
+    assert got["percept.entity"] == []
+    assert pipe.object_tracker._tracks == []  # missed, so dropped as tentative
+    assert pipe.object_tracker.holds(1.0, (), 1.0, 3.0) == frozenset()
+
+
+def test_the_class_filter_applies_to_weak_object_detections(tmp_path):
+    objs = ObjectMock([cup(0.8)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    for stamp in (0.0, 1.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    before = len(got["percept.entity"])
+    objs.dets = [cup(0.3, "person"), cup(0.3, "hair_drier"), cup(0.1)]
+    pipe.process(Frame(image(2), 2.0))
+    assert got["percept.entity"][before:] == []
+    assert pipe.stats()["objects"]["low_score_detections"] == 0
+
+
+def test_a_still_object_continued_by_weak_hits_does_not_hold_the_gate():
+    cfg = CFG.vision.tracker.model_copy(
+        update={"high_score": 0.4, "low_score": 0.2, "match_distance_heights": 0.0}
+    )
+    t = Tracker(cfg.model_copy(update={"low_match_distance_heights": 0.0}), low_confirms=False)
+    t.update([cup(0.8)], 0.0)
+    t.update([cup(0.8)], 1.0)
+    shifted = Detection((101, 80, 141, 130), 0.25, "cup")
+    assert [tr.score for tr in t.update([shifted], 2.0).visible] == [0.25]
+    assert t.holds(2.0, ("cat",), 0.05 * W, 3.0) == frozenset()
+
+
+def test_the_face_tracker_still_confirms_on_a_weak_detection():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(50)], 0.0)
+    assert len(t.update([face(50, score=0.3)], 0.125).visible) == 1
+
+
+def test_object_low_score_must_not_exceed_object_score_min():
+    with pytest.raises(ValidationError):
+        CFG.vision.model_validate({**CFG.vision.model_dump(), "object_low_score": 0.5})
+    ok = CFG.vision.model_validate({**CFG.vision.model_dump(), "object_low_score": 0.4})
+    assert ok.object_low_score == ok.object_score_min
 
 
 def test_two_bottles_side_by_side_both_get_object_tracks(tmp_path):
@@ -772,6 +857,41 @@ def entity_rig(tmp_path, dets, *, record=None, world=None, **update):
         world=world,
     )
     return pipe, app
+
+
+def test_a_weak_object_hit_runs_no_entity_embedding(tmp_path):
+    pipe, app = entity_rig(tmp_path, [cup(0.8)], record="active")  # a burst stays open
+    got = []
+    pipe.bus.subscribe("percept.entity", got.append)
+    for stamp in (0.0, 1.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    assert len(app.boxes) == 1
+    first = got[-1].payload.embedding
+    pipe.object_detector.dets = [cup(0.25)]
+    for stamp in (2.0, 3.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+        assert pipe._entity_budget == pipe.cfg.max_entity_embeds_per_frame
+        assert got[-1].payload.confidence == 0.25
+        assert got[-1].payload.embedding is first  # the previous embedding is kept
+    assert len(app.boxes) == 1
+    pipe.object_detector.dets = [cup(0.8)]
+    pipe.process(Frame(image(4), 4.0))
+    assert len(app.boxes) == 2  # the burst goes on at the next strong hit
+
+
+def test_a_tentative_object_track_cut_by_a_weak_frame_restarts_on_the_next_strong_hit(tmp_path):
+    objs = ObjectMock([cup(0.8)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.process(Frame(image(0), 0.0))
+    first = pipe.object_tracker._tracks[0].track_id
+    objs.dets = [cup(0.3)]
+    pipe.process(Frame(image(1), 1.0))
+    assert pipe.object_tracker._tracks == []
+    objs.dets = [cup(0.8)]
+    pipe.process(Frame(image(2), 2.0))
+    [track] = pipe.object_tracker._tracks
+    assert track.track_id != first and not track.confirmed
+    assert got["percept.entity"] == []
 
 
 def test_entities_have_their_own_embed_budget_and_never_take_the_faces_share(tmp_path):

@@ -343,6 +343,9 @@ def _file(root: Path, name: str, index: int = 0) -> Path:
 def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
     """The NanoDet-Plus-m detector for the configured animal and object classes.
 
+    It returns detections down to ``vision.object_low_score``, so the object tracker's low-score
+    pass sees them; only those at ``vision.object_score_min`` start tracks.
+
     Raises ``ModelError`` when the file is missing or unverified. Callers that can run without
     objects (the app) catch it so the rest of vision keeps working.
     """
@@ -353,7 +356,7 @@ def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
         _file(root, NANODET_NAME),
         spec.labels,
         [*cfg.animal_categories, *cfg.object_categories],
-        cfg.object_score_min,
+        cfg.object_low_score,
         cfg.object_nms_iou,
         cfg.threads,
     )
