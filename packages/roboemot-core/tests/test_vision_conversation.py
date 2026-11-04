@@ -214,7 +214,9 @@ def test_the_face_burst_keeps_its_gap_at_full_rate(tmp_path):
 
 def test_the_entity_burst_gap_is_stretched_by_the_governor_scale(tmp_path):
     rates = CFG.vision.rates.model_copy(update={"objects_hz": 4.0, "appearance_hz": 0.05})
-    pipe, app = entity_rig(tmp_path, crowd(1), rates=rates, entity_burst_min_gap_s=1.0)
+    pipe, app = entity_rig(
+        tmp_path, crowd(1), record="active", rates=rates, entity_burst_min_gap_s=1.0
+    )
     pipe.governor.set_scale(CONVERSATION, SCALE)
     stamps = []
     for i in range(48):
