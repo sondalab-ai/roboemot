@@ -172,6 +172,23 @@ def test_detect_scales_boxes_to_the_original_image_and_names_the_class(monkeypat
     assert session.seen[0, :, 10, 10] == pytest.approx(expected, rel=1e-5)
 
 
+def test_detect_on_a_crop_view_maps_boxes_back_to_the_frame(monkeypatch):
+    # The object crop (SPEC 5) hands the detector a non-contiguous square view of the frame;
+    # the 320x320 box (80, 32, 176, 96) is scaled by 240/320 and offset by the crop corner.
+    from roboemot.vision.object_crop import Crop
+
+    out = raw_output()
+    put(out, LEVEL1_START + 5 * 20 + 7, CAT, 0.9)
+    det, session = detector(monkeypatch, out)
+    frame = np.full((480, 640, 3), 255, np.uint8)
+    crop = Crop(200, 100, 440, 340, 640, 480, edge_px=2.4)
+    view = crop.view(frame)
+    assert not view.flags["C_CONTIGUOUS"]
+    (d,) = crop.to_frame(det.detect(view))
+    assert d.box == pytest.approx((200 + 60.0, 100 + 24.0, 200 + 132.0, 100 + 72.0))
+    assert session.seen.shape == (1, 3, 320, 320)
+
+
 def test_detect_returns_nothing_for_a_quiet_frame(monkeypatch):
     det, _ = detector(monkeypatch, raw_output())
     assert det.detect(np.zeros((240, 320, 3), np.uint8)) == []

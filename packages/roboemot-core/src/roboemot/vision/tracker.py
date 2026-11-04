@@ -21,6 +21,13 @@ with a height within ``match_height_ratio``. A track is reported only after
 ``confirm_hits`` matches, and removed once unmatched for ``lost_s`` seconds of capture stamps
 (the rate varies with the governor, so frame counts would be wrong).
 
+An update may carry a ``region`` (the object stage's crop, SPEC 5): the detector then looked
+only there, so tracks whose box is not fully inside it are left alone for that update (not
+associated, not missed, a tentative one not dropped) and come back in ``aside``. They still
+expire by ``lost_s``. A high-score detection left unmatched may then pick up the nearest aside
+track of its label within ``pickup_heights`` of its height (a thing lifted into the crop keeps
+its track); the track jumps to the detection.
+
 Track IDs come from an allocator that can be shared between trackers, so IDs are unique across
 faces and objects. No wall clock is read: everything uses the stamps passed in.
 
@@ -104,6 +111,13 @@ def gated_distance(tracks: np.ndarray, dets: np.ndarray, ratio: float) -> np.nda
     return np.where((small > 0) & (large <= ratio * small), dist, np.inf)
 
 
+def inside(box: Box, region: Box) -> bool:
+    """Whether ``box`` lies fully within ``region`` (both xyxy)."""
+    x1, y1, x2, y2 = box
+    left, top, right, bottom = region
+    return x1 >= left and y1 >= top and x2 <= right and y2 <= bottom
+
+
 def _cxcywh(box: Box) -> np.ndarray:
     x1, y1, x2, y2 = box
     return np.array([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1])
@@ -147,12 +161,16 @@ class Track:
         return (float(cx - w / 2), float(cy - h / 2), float(cx + w / 2), float(cy + h / 2))
 
     def _start(self, det: Detection, stamp: float) -> None:
+        self._place(det)
+        self._stamp = stamp
+        self._hit(det)
+
+    def _place(self, det: Detection) -> None:
+        """Put the filter on ``det``'s box at rest, with the initial uncertainty."""
         self._mean = np.concatenate([_cxcywh(det.box), np.zeros(MEASURE_DIM)])
         h = self._mean[HEIGHT]
         std = [INITIAL_POSITION_STD * h] * MEASURE_DIM + [INITIAL_VELOCITY_STD * h] * MEASURE_DIM
         self._cov = np.diag(np.array(std) ** 2)
-        self._stamp = stamp
-        self._hit(det)
 
     def _predict(self, stamp: float) -> None:
         dt = max(0.0, stamp - self._stamp)
@@ -180,11 +198,13 @@ class Track:
 
 @dataclass
 class TrackerResult:
-    """Outcome of one update: visible confirmed tracks, newly confirmed IDs, removed IDs."""
+    """Outcome of one update: visible confirmed tracks, newly confirmed IDs, removed IDs, and
+    the tracks outside the update's region that it left alone."""
 
     visible: list[Track]
     new_ids: set[int]
     removed_ids: list[int]
+    aside: list[Track] = field(default_factory=list)
 
 
 class Tracker:
@@ -283,21 +303,32 @@ class Tracker:
                     self.observer.dropped(t.track_id)
         return [t.track_id for t in gone if t.confirmed]
 
-    def update(self, detections: list[Detection], stamp: float) -> TrackerResult:
+    def update(
+        self,
+        detections: list[Detection],
+        stamp: float,
+        region: Box | None = None,
+        pickup_heights: float = 0.0,
+    ) -> TrackerResult:
         """Fold one frame's detections (all labels share one tracker) into the tracks.
 
         Returns the confirmed tracks matched in this frame, the IDs confirmed by it, and the IDs
         of confirmed tracks removed by it (callers drop per-track state for those).
-        Detections only associate with tracks of the same label.
+        Detections only associate with tracks of the same label. With ``region`` (xyxy, may be
+        infinite) only tracks whose predicted box lies fully inside it take part; the others
+        are returned in ``aside``, untouched, unless an unmatched detection picks one up
+        (``pickup_heights``, see the module docstring).
         """
         expired = self.expire(stamp)
         for t in self._tracks:
             t._predict(stamp)
+        aside = [] if region is None else [t for t in self._tracks if not inside(t.box, region)]
+        active = [t for t in self._tracks if t not in aside]
         high = [d for d in detections if d.score >= self.cfg.high_score]
         low = [d for d in detections if self.cfg.low_score <= d.score < self.cfg.high_score]
         cfg = self.cfg
         matched, rest_t, rest_d = self._greedy(
-            self._tracks, high, cfg.match_iou, cfg.match_distance_heights
+            active, high, cfg.match_iou, cfg.match_distance_heights
         )
         recent = [t for t in rest_t if t._matched_last]
         eligible = [t for t in recent if t.confirmed or self.low_confirms]
@@ -307,6 +338,9 @@ class Tracker:
         low_tracks = {id(m[0]) for m in matched_low}
         stale = [t for t in rest_t if t not in recent]
         missed = stale + rest_t2 + [t for t in recent if t not in eligible]
+        picked, rest_d = self._pick_up(aside, rest_d, pickup_heights)
+        matched += picked
+        aside = [t for t in aside if all(t is not p[0] for p in picked)]
         if self.observer is not None:
             self._observe_low(self.observer, stale, rest_low, stamp)
         new_ids: set[int] = set()
@@ -343,13 +377,44 @@ class Tracker:
                 if self.observer is not None:
                     self.observer.confirmed(t.track_id)
             self._tracks.append(t)
-        dropped = [t for t in self._tracks if not t.confirmed and not t._matched_last]
+        dropped = [
+            t for t in self._tracks if not t.confirmed and not t._matched_last and t not in aside
+        ]
         self._tracks = [t for t in self._tracks if t not in dropped]
         if self.observer is not None:
             for t in dropped:
                 self.observer.dropped(t.track_id)
         visible.sort(key=lambda t: t.track_id)
-        return TrackerResult(visible, new_ids, expired)
+        return TrackerResult(visible, new_ids, expired, aside)
+
+    def _pick_up(
+        self, aside: list[Track], dets: list[Detection], gate: float
+    ) -> tuple[list[tuple[Track, Detection, float | None]], list[Detection]]:
+        """Pairs of an aside track and an unmatched detection of its label whose centres are
+        within ``gate`` heights of the track box, nearest first (none when ``gate`` is 0); each
+        paired track is moved onto its detection. Also returns the detections left."""
+        if gate <= 0 or not aside or not dets:
+            return [], dets
+        dist = distance_matrix(
+            np.array([t.box for t in aside]).reshape(-1, BOX_COLUMNS),
+            np.array([d.box for d in dets]).reshape(-1, BOX_COLUMNS),
+        )
+        near = [
+            (dist[i, j], i, j)
+            for i, t in enumerate(aside)
+            for j, d in enumerate(dets)
+            if t.label == d.label and dist[i, j] <= gate
+        ]
+        picked: list[tuple[Track, Detection, float | None]] = []
+        used_t: set[int] = set()
+        used_d: set[int] = set()
+        for distance, i, j in sorted(near):
+            if i not in used_t and j not in used_d:
+                used_t.add(i)
+                used_d.add(j)
+                aside[i]._place(dets[j])
+                picked.append((aside[i], dets[j], float(distance)))
+        return picked, [d for j, d in enumerate(dets) if j not in used_d]
 
     def _not_duplicates(self, dets: list[Detection], matched: list[Track]) -> list[Detection]:
         """The unmatched high-score detections that may start a track: those whose centre is

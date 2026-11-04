@@ -198,7 +198,7 @@ class Perception:
         if self.registry is not None:
             self.registry.identity = cfg.identity
         if self.pipeline is not None:
-            self.pipeline.apply_config(cfg.vision, cfg.identity, cfg.world)
+            self.pipeline.apply_config(cfg.vision, cfg.identity, cfg.world, cfg.attention.shown)
 
     def vision_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.vision`` report section."""
@@ -293,6 +293,7 @@ def open_perception(
         camera_model=camera_model,
         world=cfg.world,
         frame_spec=frame_spec,
+        shown=cfg.attention.shown,
     )
     enrollment.attach(pipeline)
     return Perception(
