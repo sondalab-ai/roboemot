@@ -289,6 +289,20 @@ def test_contrary_votes_of_any_age_end_a_recognised_entity(tmp_path):
     assert not m.observe(1, axis(4), MODEL, need * GAP, kind="entity").known
 
 
+def test_contrary_votes_cast_while_the_owner_still_won_do_not_end_it(tmp_path):
+    """Regression (review of PR 185): Mug x3, Cup x2 at nearby stamps make Mug the owner; the
+    two Cup votes were already judged by the voting rule and must not unname it later."""
+    reg = make(tmp_path)
+    mug = reg.enroll_entity("object", "Mug", cluster(2), MODEL, category="cup")
+    reg.enroll_entity("object", "Cup", cluster(4), MODEL, category="cup")
+    m = matcher(reg)
+    for k, vote in enumerate([2, 2, 2, 4, 4]):
+        found = m.observe(1, axis(vote), MODEL, 0.1 * k, kind="entity")
+    assert found.owner_id == mug.entity_id
+    assert m.observe(1, axis(6), MODEL, GAP, kind="entity").owner_id == mug.entity_id
+    assert m.observe(1, axis(2), MODEL, 2 * GAP, kind="entity").owner_id == mug.entity_id
+
+
 def test_contrary_votes_for_two_different_owners_do_not_add_up(tmp_path):
     reg, m, mug, _ = recognised_mug(tmp_path, entity_contrary_votes=2)
     reg.enroll_entity("object", "Jar", cluster(5), MODEL, category="cup")
@@ -307,6 +321,20 @@ def test_a_deleted_record_ends_a_sticky_owner(tmp_path):
     reg, m, mug, _ = recognised_mug(tmp_path)
     reg.delete_entity(mug.entity_id)
     assert not m.observe(1, axis(2), MODEL, GAP, kind="entity").known
+
+
+def test_a_deleted_then_re_enrolled_record_is_matched_afresh(tmp_path):
+    reg, m, mug, _ = recognised_mug(tmp_path)
+    reg.delete_entity(mug.entity_id)
+    again = reg.enroll_entity("object", "Mug", cluster(2), MODEL, category="cup")
+    for k in range(IdentityConfig().votes_required):
+        found = m.observe(1, axis(2), MODEL, GAP + 0.1 * k, kind="entity")
+    assert found.owner_id == again.entity_id != mug.entity_id
+
+
+def test_another_model_id_ends_a_sticky_owner(tmp_path):
+    _, m, _, _ = recognised_mug(tmp_path)
+    assert not m.observe(1, axis(2), "appearance-v2", GAP, kind="entity").known
 
 
 def test_a_forgotten_owner_ends_a_sticky_owner(tmp_path):

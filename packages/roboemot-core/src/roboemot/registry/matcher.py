@@ -12,10 +12,12 @@ With a single enrolled owner there is no second best, so the margin rule cannot 
 states it only "over the second best"); the threshold alone decides.
 
 An animal or object track (``kind="entity"``) that was recognised keeps that owner, whatever the
-vote age, until ``entity_contrary_votes`` of its last ``votes_window`` votes name one other owner
-(a vote with no match never counts), its record leaves the gallery, or the track is released.
-The scene-change gate spaces the object runs of a still thing about 10 s apart (SPEC 5), longer
-than ``vote_max_age_s``, so the age rule alone would drop a still mug after its burst.
+vote age, until ``entity_contrary_votes`` of the votes cast since the voting rule last named it
+name one other owner (a vote with no match never counts), its record leaves the gallery of the
+observed model id, or the track is released. The scene-change gate spaces the object runs of a
+still thing about 10 s apart (SPEC 5), longer than ``vote_max_age_s``, so the age rule alone
+would drop a still mug after its burst. The trade-off: a thing swapped on the same track for one
+that no record matches keeps the old owner until one of those happens.
 """
 
 from __future__ import annotations
@@ -55,6 +57,8 @@ class _Track:
     voice: deque[tuple[str | None, float]]
     anonymous_id: str | None = None
     sticky: str | None = None
+    seen: int = 0
+    sticky_seen: int = 0
 
 
 @dataclass
@@ -137,10 +141,13 @@ class Matcher:
         return owner if n >= self.config.votes_required else None
 
     def _contradicted(self, track: _Track) -> bool:
-        """True when ``entity_contrary_votes`` of the track's last votes, of any age, name one
-        owner other than its sticky one. Votes with no match are no evidence either way: a
-        lighting change must not unname a still mug."""
-        others = Counter(v for v, _ in track.face if v is not None and v != track.sticky)
+        """True when ``entity_contrary_votes`` of the votes cast since the voting rule last named
+        the sticky owner, of any age, name one other owner. Votes with no match are no evidence
+        either way: a lighting change must not unname a still mug. Only ``track.face`` is read:
+        an entity track gets no voice votes."""
+        since = min(track.seen - track.sticky_seen, len(track.face))
+        recent = list(track.face)[len(track.face) - since :] if since else []
+        others = Counter(v for v, _ in recent if v is not None and v != track.sticky)
         return bool(others) and max(others.values()) >= self.config.entity_contrary_votes
 
     def _resolve(self, track_id: int, kind: Kind, now: float) -> Identity:
@@ -150,7 +157,7 @@ class Matcher:
         owner = None if disagreement else (face or voice)
         if kind == "entity":
             if owner is not None:
-                track.sticky = owner
+                track.sticky, track.sticky_seen = owner, track.seen
             elif track.sticky is not None and not self._contradicted(track):
                 owner = track.sticky
             else:
@@ -188,7 +195,8 @@ class Matcher:
         so a disagreement lasts until the stale votes age out or fresh ones agree. A recognised
         entity track is the exception to the ageing: it keeps its owner until
         ``entity_contrary_votes`` of its last votes name one other owner or the owner's record
-        leaves the gallery (deleted, no longer active); a person never does.
+        leaves the gallery of ``model_id`` (deleted, no longer active, or another model id);
+        a person never does.
         """
         with self._lock:
             track = self._track(track_id)
@@ -198,6 +206,7 @@ class Matcher:
                 track.sticky = None
             vote = self._vote(gallery_kind, embedding, model_id)
             track.face.append((vote.owner_id, stamp))
+            track.seen += 1
             identity = self._resolve(track_id, kind, stamp)
             if (
                 refresh

@@ -98,13 +98,15 @@ def test_a_still_cup_picked_up_and_shown_is_still_the_known_mug(tmp_path):
 def test_another_enrolled_object_in_the_same_place_ends_the_identity_at_gate_cadence(tmp_path):
     pipe, det, app, _, _, mug = scene(tmp_path)
     reg = pipe.matcher.registry
-    other = reg.enroll_entity("object", "Cup", np.stack([axis(6)] * 5), APP_MODEL, category="cup")
+    reg.enroll_entity("object", "Cup", np.stack([axis(6)] * 5), APP_MODEL, category="cup")
     drive(pipe, det, 0.0, CAT_LEAVES_S + 15.0)
     (cup,) = [s for s in pipe._entities.values() if s.kind == "object"]
     assert cup.owner_id == mug.entity_id
     app.look = axis(6)  # swapped for the other enrolled cup, same box
     drive(pipe, det, CAT_LEAVES_S + 15.0, CAT_LEAVES_S + 60.0)
-    assert cup.owner_id in (None, other.entity_id)
+    # Unknown, not Cup: at gate cadence Cup never holds votes_required live votes (the
+    # still-object burst gap, a follow-up); what matters here is that Mug is dropped.
+    assert cup.owner_id is None
 
 
 def test_a_no_match_vote_does_not_end_a_still_cups_identity(tmp_path):

@@ -1564,8 +1564,8 @@ class IdentityConfig(Strict):
     entity_contrary_votes: int = param(
         2,
         "A recognised animal or object track keeps its identity, whatever the vote age, until "
-        "this many of its last votes_window votes name one other owner; a vote with no match "
-        "never counts",
+        "this many of its votes since the voting rule last named it (within the last "
+        "votes_window) name one other owner; a vote with no match never counts",
         ge=1,
         le=50,
     )
