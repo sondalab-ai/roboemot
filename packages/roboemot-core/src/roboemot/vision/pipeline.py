@@ -23,7 +23,10 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
    kind; any other class, ``person`` included, is ignored. No age or gender is estimated (owner
    decision 2026-10-23). On the ticks the governor allows, ``object_gate`` skips object runs
-   while the scene is still (``vision.object_gate``, SPEC 5, 13; see ``object_gate``).
+   while the scene is still (``vision.object_gate``, SPEC 5, 13; see ``object_gate``). While a
+   face is in view, a run may look at a crop around the faces (``vision.object_crop``, SPEC 5,
+   13; see ``object_crop``): its boxes come back in frame pixels, and tracks outside the crop are
+   left alone for that run.
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -78,6 +81,7 @@ from ..bus import Bus
 from ..config.schema import (
     TIMING_WINDOW_MAX_S,
     IdentityConfig,
+    ShownObjectConfig,
     TrackerConfig,
     VisionConfig,
     WorldConfig,
@@ -88,6 +92,7 @@ from ..world import FrameSpec, Observation
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
+from .object_crop import CropSchedule
 from .object_gate import ObjectGate
 from .scene_motion import SceneMotionWatch, ScenePercept
 from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
@@ -172,6 +177,7 @@ class VisionPipeline:
         world: WorldConfig | None = None,
         frame_spec: FrameSpec | None = None,
         timer: StageTimer | None = None,
+        shown: ShownObjectConfig | None = None,
     ):
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
@@ -200,6 +206,8 @@ class VisionPipeline:
         self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
         self.object_gate = ObjectGate(cfg.object_gate)
+        self.shown = shown or ShownObjectConfig()
+        self.object_crop = CropSchedule(cfg.object_crop)
         self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
         self.motion_wanted: Callable[[], bool] = lambda: False
         self._generations = itertools.count(1)
@@ -262,7 +270,7 @@ class VisionPipeline:
                 self._object_holds(stamp, frame.image.shape[1]),
                 episode=self.governor.active("objects"),
             ):
-                self._process_objects(frame, camera)
+                self._process_objects(frame, camera, self.object_gate.last_reason)
                 objects = True
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
@@ -314,16 +322,25 @@ class VisionPipeline:
         self._face_lost_held = 0.0
         self.governor.reset()
         self.object_gate.reset()
+        self.object_crop.reset()
         self.scene_motion.reset()
 
     def apply_config(
-        self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
+        self,
+        vision: VisionConfig,
+        identity: IdentityConfig,
+        world: WorldConfig | None = None,
+        shown: ShownObjectConfig | None = None,
     ) -> None:
         """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
-        so does, with ``world``, the camera field of view. The thread count, the detector size
-        and the models folder are restart-only (the schema marks them).
+        so do, with ``world``, the camera field of view and, with ``shown``, the shown-object
+        region the object crop follows. The thread count, the detector size and the models
+        folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
+        self.object_crop.cfg = vision.object_crop
+        if shown is not None:
+            self.shown = shown
         self.track_stats.cfg = vision
         if world is not None:
             self.world = world
@@ -421,6 +438,7 @@ class VisionPipeline:
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
             "object_gate": self.object_gate.snapshot(),
+            "object_input": self.object_crop.snapshot(),
             "scene_motion": self.scene_motion.snapshot(),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
@@ -540,12 +558,13 @@ class VisionPipeline:
         return out
 
     def object_overlay(self) -> list[tuple[Box, str, str | None]]:
-        """The confirmed animal and object tracks of the last object run that have not expired
-        since, as ``(box in pixels, readable category, owner_id or None)``: the tracks the
-        world and attention get. ``_drop_entity`` removes the entity state of a track that
-        expired or was removed, and this filters on that state, so a dropped track is gone
-        before the next object run. Object detection is slower than face detection, so a box
-        is the tracker's latest estimate, not a detection on the frame it is drawn on."""
+        """The confirmed animal and object tracks of the last object run (on a crop, also those
+        drawn before that lay outside it) that have not expired since, as ``(box in pixels,
+        readable category, owner_id or None)``: the tracks the world and attention get.
+        ``_drop_entity`` removes the entity state of a track that expired or was removed, and
+        this filters on that state, so a dropped track is gone before the next object run.
+        Object detection is slower than face detection, so a box is the tracker's latest
+        estimate, not a detection on the frame it is drawn on."""
         out: list[tuple[Box, str, str | None]] = []
         for track in self._object_visible:
             state = self._entities.get(track.track_id)
@@ -671,22 +690,40 @@ class VisionPipeline:
 
     # --------------------------------------------------------- animals, objects
 
-    def _process_objects(self, frame: Frame, camera: CameraModel) -> None:
+    def _visible_face_boxes(self, stamp: float) -> list[Box]:
+        """Boxes of the face tracks of the last face run that are still alive at ``stamp`` (face
+        detection may be slowed or off, so the last run can be old)."""
+        lost = self.face_tracker.cfg.lost_s
+        return [t.box for t in self._visible if stamp - t.last_stamp <= lost]
+
+    def _process_objects(self, frame: Frame, camera: CameraModel, reason: str | None) -> None:
+        """One object run on the full frame or on a crop around the faces (``object_crop``,
+        ``reason`` is the object gate's): boxes in frame pixels, tracked, embedded, published.
+        On a crop, tracks outside it are left alone and those drawn before stay drawn."""
         assert self.object_detector is not None
         kinds: dict[str, Literal["animal", "object"]] = {
             **dict.fromkeys(self.cfg.object_categories, "object"),
             **dict.fromkeys(self.cfg.animal_categories, "animal"),
         }
+        height, width = frame.image.shape[:2]
+        crop = self.object_crop.choose(
+            frame.stamp, reason, self._visible_face_boxes(frame.stamp), width, height, self.shown
+        )
         wall0, cpu0 = self.timer.start()
         try:
-            found = self.object_detector.detect(frame.image)
+            if crop is None:
+                found = self.object_detector.detect(frame.image)
+            else:
+                found = crop.to_frame(self.object_detector.detect(crop.view(frame.image)))
         finally:
             self.timer.record(OBJECTS, wall0, cpu0)
         dets: list[Detection] = [
             d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
-        result = self.object_tracker.update(dets, frame.stamp)
-        self._object_visible = result.visible
+        region = None if crop is None else crop.trusted
+        result = self.object_tracker.update(dets, frame.stamp, region)
+        kept = [t for t in result.aside if t in self._object_visible]
+        self._object_visible = sorted(result.visible + kept, key=lambda t: t.track_id)
         self._lost_held = self._object_lost_s()
         for track_id in result.removed_ids:
             self._drop_entity(track_id)

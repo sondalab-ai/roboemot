@@ -2056,6 +2056,54 @@ class ObjectGateConfig(Strict):
     )
 
 
+class ObjectCropConfig(Strict):
+    """Object detection on a crop around the faces in view (SPEC 5, 13): a held thing is
+    larger in the detector input at the same cost per run."""
+
+    enabled: bool = param(
+        True,
+        "On: while a face is in view, object detection runs on a square crop around the faces "
+        "(the shown-object region of attention.shown), with a full-frame run after a head move, "
+        "on the gate's floor and at least every full_interval_s. Off: always the full frame",
+    )
+    margin_faces: float = param(
+        0.5,
+        "The crop reaches this many face-box heights beyond the shown-object region on every "
+        "side, so a thing whose centre is in the region is not cut by the crop",
+        ge=0,
+        le=5,
+    )
+    min_side_share: float = param(
+        0.4,
+        "Smallest crop side, as a share of the frame's shorter side, so a small or far face "
+        "does not give a tiny crop",
+        gt=0,
+        le=1,
+    )
+    full_frame_share: float = param(
+        0.5,
+        "When the crop would cover more than this share of the frame area, the full frame runs "
+        "instead (a close face: a held thing is large anyway)",
+        gt=0,
+        le=1,
+    )
+    full_interval_s: float = param(
+        2.0,
+        "While crops run, the full frame still runs at least this often (capture time), so "
+        "things away from people are found and keep their tracks; below vision.object_lost_s",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+    edge_margin_share: float = param(
+        0.01,
+        "A detection within this share of the crop side from a crop edge inside the frame is "
+        "cut by the crop and dropped (the full frame finds the whole thing)",
+        ge=0,
+        le=0.2,
+    )
+
+
 class SceneMotionConfig(Strict):
     """Motion watch of a day nap (SPEC 5, 7A): the object gate's scene-change test on captured
     frames, while the head is still; its thresholds are vision.object_gate's."""
@@ -2081,6 +2129,9 @@ class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
     object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
+    object_crop: ObjectCropConfig = param(
+        {}, "Object detection on a crop around the faces in view (SPEC 5, 13)"
+    )
     scene_motion: SceneMotionConfig = param({}, "Motion watch of a day nap (SPEC 5, 7A)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     detector_width_px: int = param(
@@ -2294,6 +2345,15 @@ class VisionConfig(Strict):
         both = set(self.animal_categories) & set(self.object_categories)
         if both:
             raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
+
+    @model_validator(mode="after")
+    def _full_frame_within_track_life(self) -> VisionConfig:
+        if self.object_crop.full_interval_s >= self.object_lost_s:
+            raise ValueError(
+                "vision.object_crop.full_interval_s must stay below vision.object_lost_s, or "
+                "tracks away from people expire between two full-frame runs"
+            )
         return self
 
     @model_validator(mode="after")

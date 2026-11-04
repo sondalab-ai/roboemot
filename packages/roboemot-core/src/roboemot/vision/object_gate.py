@@ -29,6 +29,9 @@ The gate does not compensate for it: it trusts the motion test only while the he
   changed, so the gate never raises per frame. A run with a pose takes a fresh copy and anchors
   the head pose there; a ``no_pose`` run takes none and drops it.
 
+``last_reason`` is the reason of the last decision (None with the gate off): the object crop
+(``object_crop``) runs the full frame on ``floor`` and ``settled``.
+
 Decisions use capture stamps only, so a replay gives the same decisions. One lock guards all
 state, so ``reset`` and ``snapshot`` may run on another thread. The copies stay in RAM and are
 never logged (SPEC 12); the debug report (SPEC 12A) gets counts only.
@@ -61,6 +64,7 @@ class ObjectGate:
     def __init__(self, cfg: ObjectGateConfig):
         self.cfg = cfg
         self._lock = threading.Lock()
+        self.last_reason: str | None = None
         self._clear()
 
     def _clear(self) -> None:
@@ -96,6 +100,7 @@ class ObjectGate:
         shown object is the attention target, so every allowed tick runs. Counts the reason,
         and on a run with a pose takes a fresh reference copy anchored at ``pose``."""
         if not self.cfg.enabled:
+            self.last_reason = None
             return True
         with self._lock:
             moving = self._head.moving(stamp, self.cfg.settle_s)
@@ -120,6 +125,7 @@ class ObjectGate:
                 small = self._thumbnail(image)
                 reason = "motion" if self._changed(small) else "still_scene"
             run = reason in RUN_REASONS
+            self.last_reason = reason
             (self._triggered if run else self._skipped)[reason] += 1
             if run:
                 self._last_run = stamp
