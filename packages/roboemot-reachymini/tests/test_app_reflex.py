@@ -119,6 +119,11 @@ def test_the_robot_turns_toward_a_voice_from_its_first_ticks(data):  # noqa: F81
             app.bus.publish("percept.entity", obs, now, joint_state={"head.yaw": 0.0})
             return turn()["fired"] > 0
 
+        # voice is off: no listener, so no speech detector confirms the chip (SPEC 10) ...
+        assert app.reflexes.vad is None and app.reflexes.motion_sample is not None
+        assert wait_for(lambda: not voice() and turn()["gate"]["suppressed"]["no_vad"] >= 1)
+        assert turn()["fired"] == 0
+        app.reflexes.vad = lambda: True  # ... a listener hearing speech does
         assert wait_for(voice)
     finally:
         stop.set()
@@ -157,6 +162,7 @@ def test_the_hub_starts_for_voice_alone_and_the_reflex_sink_stays_detached(
         assert wait_for(lambda: (app.audio.snapshot()["voice"] or {}).get("frames", 0) > 1600)
         assert app.audio.snapshot()["state"] == "running"
         assert app.audio.snapshot()["voice"]["rate_hz"] == 16000
+        assert app.reflexes.vad == app.voice_listener.hearing  # a turn needs a real voice
         scripted.bang.set()
         assert wait_for(lambda: not scripted.bang.is_set())  # the loud chunk was read ...
         time.sleep(0.2)

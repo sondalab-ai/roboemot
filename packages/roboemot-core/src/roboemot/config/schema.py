@@ -1153,7 +1153,9 @@ class ReflexRule(Strict):
         "disabled, nor disable a withdraw rule (protective)",
     )
     trigger: Literal["loud_onset", "new_voice", "proximity"] = param(
-        "loud_onset", "Percept that fires the rule"
+        "loud_onset",
+        "Percept that fires the rule. new_voice needs the voice listener's speech detector "
+        "(voice.enabled): with voice off a new_voice rule never fires",
     )
     primitive: Literal["startle", "withdraw", "turn_toward"] = param(
         "startle",
@@ -1216,13 +1218,29 @@ class ReflexAudioConfig(Strict):
     )
     poll_hz: float = param(50.0, "Audio chunk read rate", unit="Hz", ge=5, le=200, restart=True)
     floor_half_life_s: float = param(
-        2.0, "How slowly the sound floor rises to a louder room (it falls at once); a shorter "
-        "half-life makes a sustained noise stop counting as an onset sooner",
+        2.0, "How slowly the sound floor rises to a louder room; a shorter half-life makes a "
+        "sustained noise stop counting as an onset sooner",
         unit="s", ge=0.1, le=60, conservative="lower",
+    )  # fmt: skip
+    floor_fall_half_life_s: float = param(
+        2.0, "How slowly the sound floor falls to a quieter room. Gradual, so the floor follows "
+        "the room's typical level (about its median) instead of its quietest moment; a longer "
+        "half-life keeps the floor higher and the onsets rarer",
+        unit="s", ge=0.1, le=120, conservative="higher",
     )  # fmt: skip
     min_rms: float = param(
         0.01, "Lowest floor: a quieter room is treated as this level, so a higher value makes "
         "the onsets fire less", unit="full scale", ge=0.0001, le=0.5, conservative="higher",
+    )  # fmt: skip
+    rearm_fraction: float = param(
+        0.33, "One startle per loud sound: after a loud-onset rule fires (or its onset is "
+        "suppressed) it re-arms only once the level has stayed under this share of its threshold "
+        "for rearm_hold_s; a lower share needs a quieter room to re-arm",
+        unit="ratio", ge=0.05, le=0.95, conservative="lower",
+    )  # fmt: skip
+    rearm_hold_s: float = param(
+        0.5, "How long the level must stay under rearm_fraction of a loud-onset rule's threshold "
+        "before the rule re-arms", unit="s", ge=0, le=10, conservative="higher",
     )  # fmt: skip
     loud_event_ratio: float = param(
         4.0, "Level over the floor that publishes sound.loud for the affect engine", ge=1.5, le=100
@@ -1242,6 +1260,26 @@ class ReflexAudioConfig(Strict):
     level_window: int = param(
         300, "Report only: level blocks kept for the report", ge=10, le=10000, restart=True
     )
+
+
+class ReflexMotionGateConfig(Strict):
+    speed_dps: float = param(
+        60.0, "The robot does not react to its own motion: no loud onset and no new voice while "
+        "any of its angular dofs turns faster than this (commanded, or measured when known). "
+        "Above a scan sweep (40 deg/s) and ordinary gaze following, below a reflex (about 120 "
+        "to 240 deg/s); a lower value suppresses more",
+        unit="deg/s", ge=1, le=720, conservative="lower",
+    )  # fmt: skip
+    tail_ms: float = param(
+        500.0, "The gate stays shut this long after a reflex ends or the motion slows down, "
+        "for the motors' and the microphones' own tail; a longer tail suppresses more",
+        unit="ms", ge=0, le=5000, conservative="higher",
+    )  # fmt: skip
+    measured_min_span_ms: float = param(
+        20.0, "A measured speed is taken over at least this long (one control period of a 50 Hz "
+        "loop), so two jittery readings a few ms apart are not a fast move; a shorter span "
+        "suppresses more", unit="ms", ge=1, le=500, conservative="lower",
+    )  # fmt: skip
 
 
 class ReflexConfig(Strict):
@@ -1309,6 +1347,15 @@ class ReflexConfig(Strict):
     onset_window: int = param(
         500, "Onset peaks kept per loud-onset rule for the debug report", ge=10, le=10000
     )
+    voice_vad_window_s: float = param(
+        0.3, "A turn needs a real voice: a direction of arrival counts only if the voice "
+        "listener's speech detector heard speech within this time before it (or hears it now). "
+        "Without a voice listener the new-voice reflex never fires; a shorter window fires less",
+        unit="s", ge=0.02, le=3, conservative="lower",
+    )  # fmt: skip
+    motion_gate: ReflexMotionGateConfig = param(
+        {}, "Own-motion gate for the sound and voice triggers"
+    )
     audio: ReflexAudioConfig = param({}, "Microphone level source")
     rules: list[ReflexRule] = param(
         [
@@ -1318,7 +1365,7 @@ class ReflexConfig(Strict):
                 "primitive": "startle",
                 "threshold": 12.0,
                 "amplitude_deg": 12,
-                "cooldown_s": 3,
+                "cooldown_s": 10,
                 "duration_ms": 400,
             },
             {
@@ -1336,7 +1383,7 @@ class ReflexConfig(Strict):
                 "primitive": "turn_toward",
                 "threshold": 3.0,
                 "amplitude_deg": 40,
-                "cooldown_s": 5,
+                "cooldown_s": 8,
                 "duration_ms": 800,
             },
         ],
