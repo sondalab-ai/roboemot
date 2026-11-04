@@ -60,7 +60,7 @@ SOURCE_PREFIX = "reflex."
 DB_PER_DECADE = 20.0  # amplitude ratio to dB
 GATED_TRIGGERS = {
     "loud_onset": ("motion", "rearm"),
-    "new_voice": ("no_vad", "motion", "own_speech"),
+    "new_voice": ("no_vad", "own_speech", "motion"),  # in priority order (SPEC 12A)
 }
 
 
@@ -394,9 +394,9 @@ class ReflexEngine:
         A direction is a real voice only when the voice listener hears speech now (``vad``) or
         heard it within ``voice_vad_window_s`` before ``stamp``; only a real voice moves the
         silence clock. A direction after a silence of real voice of at least a ``new_voice``
-        rule's threshold is offered to it, and fires it unless the robot's own sound ended less
-        than the threshold ago (``own_speech``), the robot moves (``motion``) or the voice is not
-        real (``no_vad``)."""
+        rule's threshold is offered to it, and fires it unless (the first reason counts) the voice
+        is not real (``no_vad``: every chip bit without a real voice), the robot's own sound
+        ended less than the threshold ago (``own_speech``) or the robot moves (``motion``)."""
         if not all(map(math.isfinite, (stamp, azimuth_rad, head_yaw_rad))):
             return
         speaking, vad = self.speaking, self.vad
@@ -417,12 +417,12 @@ class ReflexEngine:
                     continue
                 gate = self._gate(rule)
                 gate.offered += 1
-                if own_gap < rule.threshold:
+                if not heard:  # first, so no_vad counts every chip bit without a real voice
+                    gate.suppress("no_vad")
+                elif own_gap < rule.threshold:
                     gate.suppress("own_speech")
                 elif moving:
                     gate.suppress("motion")
-                elif not heard:
-                    gate.suppress("no_vad")
                 else:
                     gate.triggered += 1
                     self._inbox.append(_Pending(rule.name, stamp, azimuth_rad + head_yaw_rad))
@@ -492,15 +492,40 @@ class ReflexEngine:
         if stamp > self._quiet_from:
             self._quiet_from = stamp
 
+    def _measured_fast(
+        self,
+        prev: Mapping[str, float],
+        last: Mapping[str, float],
+        span: float,
+        limit: float,
+        angles: list[str],
+    ) -> bool:
+        """Whether a fresh pair of measured poses ``span`` seconds apart shows a dof turning
+        faster than ``limit`` (rad/s). Robust to jitter: the span counts as at least
+        ``motion_gate.measured_min_span_ms`` (two readings a few ms apart are not a fast move),
+        and a change under ``motion_eps_deg`` (pose resolution) is not a move at all."""
+        span = max(span, self.cfg.motion_gate.measured_min_span_ms / MS_PER_S)
+        eps = math.radians(self.cfg.motion_eps_deg)
+        for n in angles:
+            if n in prev and n in last:
+                delta = abs(last[n] - prev[n])
+                if delta > eps and delta > limit * span:
+                    return True
+        return False
+
     def _watch_own_noise(self, now: float, core: MotionCore) -> None:
         """Note the voice listener hearing speech and the robot's own sound playing, and shut
         the audio triggers' gate for the tail when the robot turns fast (commanded, or measured
         from a fresh pair of poses) or yields to external control. A few float compares per
         angular dof on the motion thread; the audio thread only reads ``_quiet_from``."""
-        if self.vad is not None and self.vad():
-            self._vad_seen = now
-        if self.speaking is not None and self.speaking(now):
-            self._own_voice = now
+        heard = self.vad is not None and self.vad()
+        own = self.speaking is not None and self.speaking(now)
+        if heard or own:
+            with self._lock:  # like the other writers: a stamp never moves backwards
+                if heard:
+                    self._vad_seen = max(self._vad_seen, now)
+                if own:
+                    self._own_voice = max(self._own_voice, now)
         gate = self.cfg.motion_gate
         limit = math.radians(gate.speed_dps)
         sample = self.motion_sample() if self.motion_sample is not None else None
@@ -514,10 +539,7 @@ class ReflexEngine:
             t0, prev, t1, last = pair
             if t1 != self._measured_t and t1 > t0:  # judge each measured pair once
                 self._measured_t = t1
-                span = t1 - t0
-                fast = fast or any(
-                    abs(last[n] - prev[n]) > limit * span for n in angles if n in prev and n in last
-                )
+                fast = fast or self._measured_fast(prev, last, t1 - t0, limit, angles)
         if fast:
             self._quiet_until(now + gate.tail_ms / MS_PER_S)
 

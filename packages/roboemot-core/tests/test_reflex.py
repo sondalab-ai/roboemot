@@ -1475,6 +1475,72 @@ def test_fast_measured_motion_suppresses_when_the_commands_are_still():
     assert gate(rig, "r")["suppressed"]["motion"] == 1
 
 
+@pytest.mark.parametrize(
+    ("span_s", "delta_deg"),
+    [
+        (0.003, 0.5),  # two jittery readings 3 ms apart: 167 deg/s on paper, 25 over 20 ms
+        (0.001, 0.1),  # under the pose resolution (motion_eps_deg 0.2) whatever the span
+    ],
+)
+def test_measured_jitter_does_not_count_as_fast_motion(span_s, delta_deg):
+    from roboemot.motion.state import MotionSample
+
+    rig = Rig(cfg_with(rule(cooldown_s=0)))
+    rig.settle_audio()
+    pair = (rig.t - span_s, {YAW: 0.0}, rig.t, {YAW: math.radians(delta_deg)})
+    rig.engine.motion_sample = lambda: MotionSample(rig.t, {}, pair, False, False)
+    rig.tick()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 1
+    assert gate(rig, "r")["suppressed"]["motion"] == 0
+
+
+def test_a_reading_just_after_the_speech_end_is_still_confirmed():
+    # Silero's hearing() ends end_silence_ms after the last word; the chip's bit can lag it
+    rig = Rig(cfg_with(VOICE))
+    rig.hearing = False
+    rig.tick(3)
+    rig.hearing = True
+    rig.run(0.25)  # an utterance in progress
+    rig.hearing = False  # SpeechEnd
+    rig.run(0.14)
+    doa(rig, 0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 1
+
+
+def test_the_listening_blip_counts_as_the_robots_own_voice():
+    from roboemot.voice.activity import SpeechActivity
+
+    rig = Rig(cfg_with(VOICE))
+    act = SpeechActivity(300.0)
+    rig.engine.speaking = act.sounding
+    rig.tick(3)
+    act.extend_own(rig.t + 0.15, 0.15)  # the blip (SPEC 8, Non-verbal cues): not speech
+    rig.run(1.0)
+    doa(rig, 0.4)  # someone answers the blip right away
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 0
+    assert gate(rig, "v")["suppressed"]["own_speech"] == 1
+
+
+def test_no_vad_comes_first_so_it_counts_every_chip_bit_without_a_real_voice():
+    from roboemot.voice.activity import SpeechActivity
+
+    rig = Rig(cfg_with(VOICE))
+    rig.hearing = False
+    act = SpeechActivity(300.0)
+    rig.engine.speaking = act.sounding
+    rig.tick(3)
+    act.extend(rig.t + 0.5)  # the robot just spoke ...
+    rig.run(1.0)
+    doa(rig, 0.4)  # ... and the chip's bit has no voice behind it: no_vad, not own_speech
+    rig.tick()
+    g = gate(rig, "v")
+    assert g["suppressed"] == {"no_vad": 1, "own_speech": 0, "motion": 0}
+
+
 def test_sound_loud_is_not_published_while_the_robot_moves():
     rig = Rig(cfg_with(rule(cooldown_s=0), motion_gate={"tail_ms": 2000}))
     published: list = []

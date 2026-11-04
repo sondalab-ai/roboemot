@@ -1153,7 +1153,9 @@ class ReflexRule(Strict):
         "disabled, nor disable a withdraw rule (protective)",
     )
     trigger: Literal["loud_onset", "new_voice", "proximity"] = param(
-        "loud_onset", "Percept that fires the rule"
+        "loud_onset",
+        "Percept that fires the rule. new_voice needs the voice listener's speech detector "
+        "(voice.enabled): with voice off a new_voice rule never fires",
     )
     primitive: Literal["startle", "withdraw", "turn_toward"] = param(
         "startle",
@@ -1272,6 +1274,11 @@ class ReflexMotionGateConfig(Strict):
         500.0, "The gate stays shut this long after a reflex ends or the motion slows down, "
         "for the motors' and the microphones' own tail; a longer tail suppresses more",
         unit="ms", ge=0, le=5000, conservative="higher",
+    )  # fmt: skip
+    measured_min_span_ms: float = param(
+        20.0, "A measured speed is taken over at least this long (one control period of a 50 Hz "
+        "loop), so two jittery readings a few ms apart are not a fast move; a shorter span "
+        "suppresses more", unit="ms", ge=1, le=500, conservative="lower",
     )  # fmt: skip
 
 
