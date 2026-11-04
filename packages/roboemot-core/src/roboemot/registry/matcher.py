@@ -10,6 +10,12 @@ owner from every track. Never log embeddings or crops.
 
 With a single enrolled owner there is no second best, so the margin rule cannot apply (SPEC 6
 states it only "over the second best"); the threshold alone decides.
+
+An animal or object track (``kind="entity"``) that was recognised keeps that owner, whatever the
+vote age, until ``entity_contrary_votes`` of its last ``votes_window`` votes name one other owner
+(a vote with no match never counts), its record leaves the gallery, or the track is released.
+The scene-change gate spaces the object runs of a still thing about 10 s apart (SPEC 5), longer
+than ``vote_max_age_s``, so the age rule alone would drop a still mug after its burst.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ class _Track:
     face: deque[tuple[str | None, float]]
     voice: deque[tuple[str | None, float]]
     anonymous_id: str | None = None
+    sticky: str | None = None
 
 
 @dataclass
@@ -76,6 +83,8 @@ class Matcher:
                     kept = [(None if v == owner_id else v, at) for v, at in votes]
                     votes.clear()
                     votes.extend(kept)
+                if track.sticky == owner_id:
+                    track.sticky = None
 
     def new_session(self) -> None:
         """Forget every track and its anonymous ID; new tracks get new random IDs."""
@@ -127,11 +136,25 @@ class Matcher:
         owner, n = counts.most_common(1)[0]
         return owner if n >= self.config.votes_required else None
 
+    def _contradicted(self, track: _Track) -> bool:
+        """True when ``entity_contrary_votes`` of the track's last votes, of any age, name one
+        owner other than its sticky one. Votes with no match are no evidence either way: a
+        lighting change must not unname a still mug."""
+        others = Counter(v for v, _ in track.face if v is not None and v != track.sticky)
+        return bool(others) and max(others.values()) >= self.config.entity_contrary_votes
+
     def _resolve(self, track_id: int, kind: Kind, now: float) -> Identity:
         track = self._track(track_id)
         face, voice = self._winner(track.face, now), self._winner(track.voice, now)
         disagreement = face is not None and voice is not None and face != voice
         owner = None if disagreement else (face or voice)
+        if kind == "entity":
+            if owner is not None:
+                track.sticky = owner
+            elif track.sticky is not None and not self._contradicted(track):
+                owner = track.sticky
+            else:
+                track.sticky = None
         if owner is not None:
             return Identity(track_id, owner, kind, None)
         if track.anonymous_id is None:
@@ -162,11 +185,18 @@ class Matcher:
         ``stamp`` is the capture time in monotonic seconds, the clock of the world model's
         observation stamps (SPEC 14 replay), never the wall clock. Votes more than
         ``vote_max_age_s`` older than it are ignored; neither modality ever clears the other,
-        so a disagreement lasts until the stale votes age out or fresh ones agree.
+        so a disagreement lasts until the stale votes age out or fresh ones agree. A recognised
+        entity track is the exception to the ageing: it keeps its owner until
+        ``entity_contrary_votes`` of its last votes name one other owner or the owner's record
+        leaves the gallery (deleted, no longer active); a person never does.
         """
         with self._lock:
             track = self._track(track_id)
-            vote = self._vote("entity" if kind == "entity" else "face", embedding, model_id)
+            gallery_kind: GalleryKind = "entity" if kind == "entity" else "face"
+            gallery = self.registry.gallery(gallery_kind, model_id)
+            if track.sticky is not None and track.sticky not in gallery:
+                track.sticky = None
+            vote = self._vote(gallery_kind, embedding, model_id)
             track.face.append((vote.owner_id, stamp))
             identity = self._resolve(track_id, kind, stamp)
             if (

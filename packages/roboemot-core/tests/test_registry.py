@@ -255,6 +255,90 @@ def test_entities_are_matched_by_appearance(tmp_path):
     assert found.owner_id == cat.entity_id and found.kind == "entity"
 
 
+def recognised_mug(tmp_path, **cfg):
+    """An object track 1 recognised as Mug (axis 2) at stamp 0; Cup (axis 4) is enrolled too."""
+    reg = make(tmp_path, **cfg)
+    mug = reg.enroll_entity("object", "Mug", cluster(2), MODEL, category="cup")
+    cup = reg.enroll_entity("object", "Cup", cluster(4), MODEL, category="cup")
+    m = matcher(reg)
+    for _ in range(IdentityConfig().votes_required):
+        m.observe(1, axis(2), MODEL, 0.0, kind="entity")
+    return reg, m, mug, cup
+
+
+GAP = IdentityConfig().vote_max_age_s + 1  # sparser than the age rule: gate-spaced object runs
+
+
+def test_a_recognised_entity_keeps_its_owner_past_the_vote_age(tmp_path):
+    _, m, mug, _ = recognised_mug(tmp_path)
+    for k in range(1, 6):
+        assert m.observe(1, axis(2), MODEL, k * GAP, kind="entity").owner_id == mug.entity_id
+
+
+def test_no_match_votes_never_end_a_recognised_entity(tmp_path):
+    _, m, mug, _ = recognised_mug(tmp_path)
+    for k in range(1, 2 * IdentityConfig().votes_window):
+        assert m.observe(1, axis(6), MODEL, k * GAP, kind="entity").owner_id == mug.entity_id
+
+
+def test_contrary_votes_of_any_age_end_a_recognised_entity(tmp_path):
+    _, m, mug, cup = recognised_mug(tmp_path)
+    need = IdentityConfig().entity_contrary_votes
+    for k in range(1, need):
+        assert m.observe(1, axis(4), MODEL, k * GAP, kind="entity").owner_id == mug.entity_id
+    assert not m.observe(1, axis(4), MODEL, need * GAP, kind="entity").known
+
+
+def test_contrary_votes_for_two_different_owners_do_not_add_up(tmp_path):
+    reg, m, mug, _ = recognised_mug(tmp_path, entity_contrary_votes=2)
+    reg.enroll_entity("object", "Jar", cluster(5), MODEL, category="cup")
+    assert m.observe(1, axis(4), MODEL, GAP, kind="entity").owner_id == mug.entity_id
+    assert m.observe(1, axis(5), MODEL, 2 * GAP, kind="entity").owner_id == mug.entity_id
+
+
+def test_a_fresh_winner_replaces_a_sticky_owner(tmp_path):
+    _, m, _, cup = recognised_mug(tmp_path)
+    for _ in range(IdentityConfig().votes_required):
+        found = m.observe(1, axis(4), MODEL, GAP, kind="entity")
+    assert found.owner_id == cup.entity_id
+
+
+def test_a_deleted_record_ends_a_sticky_owner(tmp_path):
+    reg, m, mug, _ = recognised_mug(tmp_path)
+    reg.delete_entity(mug.entity_id)
+    assert not m.observe(1, axis(2), MODEL, GAP, kind="entity").known
+
+
+def test_a_forgotten_owner_ends_a_sticky_owner(tmp_path):
+    _, m, mug, _ = recognised_mug(tmp_path)
+    m._purge(mug.entity_id)  # what Registry.forget calls on every listener
+    assert not m.observe(1, axis(6), MODEL, GAP, kind="entity").known
+
+
+def test_a_released_track_starts_without_a_sticky_owner(tmp_path):
+    _, m, _, _ = recognised_mug(tmp_path)
+    m.release(1)
+    assert not m.observe(1, axis(2), MODEL, GAP, kind="entity").known
+
+
+def test_a_person_is_not_sticky(tmp_path):
+    reg = make(tmp_path)
+    a = enroll(reg, 2)
+    m = matcher(reg)
+    for _ in range(IdentityConfig().votes_required):
+        found = m.observe(1, axis(2), MODEL, 0.0, refresh=False)
+    assert found.owner_id == a.person_id
+    assert not m.observe(1, axis(2), MODEL, GAP, refresh=False).known
+
+
+def test_entity_contrary_votes_is_a_bounded_count():
+    assert IdentityConfig().entity_contrary_votes == 2
+    with pytest.raises(ValidationError):
+        IdentityConfig(entity_contrary_votes=0)
+    with pytest.raises(ValidationError):
+        IdentityConfig(votes_window=3, votes_required=3, entity_contrary_votes=4)
+
+
 def test_pending_records_are_never_matched(tmp_path):
     reg = make(tmp_path)
     reg.create_pending_entity("animal", "Mia")
