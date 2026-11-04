@@ -2096,11 +2096,30 @@ class ObjectCropConfig(Strict):
         le=60,
     )
     edge_margin_share: float = param(
-        0.01,
+        0.02,
         "A detection within this share of the crop side from a crop edge inside the frame is "
-        "cut by the crop and dropped (the full frame finds the whole thing)",
+        "cut by the crop and dropped (the full frame finds the whole thing). 0.02 is about 6 "
+        "of the detector's 320 input pixels, under one 8 px stride: a cut box ends on the "
+        "border or within its regression jitter",
         ge=0,
         le=0.2,
+    )
+    pickup_distance_heights: float = param(
+        4.0,
+        "On a crop run, a detection that matches no track may take over a track of its class "
+        "left outside the crop when their centres are at most this many heights of that track "
+        "apart: a thing picked up and shown keeps its track and identity instead of starting a "
+        "new one. 0 turns it off",
+        ge=0,
+        le=20,
+    )
+    shown_margin_heights: float = param(
+        1.5,
+        "During a look at a shown thing with no face to crop around (the head looks down at "
+        "it), the crop is around the object track nearest the frame centre, this many of its "
+        "box heights on every side",
+        ge=0,
+        le=10,
     )
 
 

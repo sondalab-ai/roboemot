@@ -263,14 +263,18 @@ class VisionPipeline:
         if self.object_detector is not None and self.cfg.objects_enabled:
             pose = head_pose(frame.joint_state, self.frame_spec)
             self.object_gate.observe(stamp, pose)
-            if self.governor.allow("objects", stamp) and self.object_gate.decide(
-                stamp,
-                frame.image,
-                pose,
-                self._object_holds(stamp, frame.image.shape[1]),
-                episode=self.governor.active("objects"),
-            ):
-                self._process_objects(frame, camera, self.object_gate.last_reason)
+            episode = self.governor.active("objects")
+            reason = None
+            if self.governor.allow("objects", stamp):
+                reason = self.object_gate.decide(
+                    stamp,
+                    frame.image,
+                    pose,
+                    self._object_holds(stamp, frame.image.shape[1]),
+                    episode=episode,
+                )
+            if reason is not None:
+                self._process_objects(frame, camera, reason, episode)
                 objects = True
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
@@ -690,24 +694,38 @@ class VisionPipeline:
 
     # --------------------------------------------------------- animals, objects
 
-    def _visible_face_boxes(self, stamp: float) -> list[Box]:
-        """Boxes of the face tracks of the last face run that are still alive at ``stamp`` (face
-        detection may be slowed or off, so the last run can be old)."""
-        lost = self.face_tracker.cfg.lost_s
-        return [t.box for t in self._visible if stamp - t.last_stamp <= lost]
+    def _fresh_face_boxes(self, stamp: float) -> list[Box]:
+        """Boxes of the faces matched in the last face run, when that run is at most one
+        face-detection period before ``stamp`` (the governor runs it at least that often while
+        detection is on); none while detection is off."""
+        period = self.governor.period("detection")
+        if math.isinf(period):
+            return []
+        return [t.box for t in self._visible if stamp - t.last_stamp <= period]
 
-    def _process_objects(self, frame: Frame, camera: CameraModel, reason: str | None) -> None:
-        """One object run on the full frame or on a crop around the faces (``object_crop``,
-        ``reason`` is the object gate's): boxes in frame pixels, tracked, embedded, published.
-        On a crop, tracks outside it are left alone and those drawn before stay drawn."""
+    def _process_objects(
+        self, frame: Frame, camera: CameraModel, reason: str, episode: bool
+    ) -> None:
+        """One object run on the full frame or on a crop (``object_crop``; ``reason`` is the
+        object gate's, ``episode`` a look at a shown thing): boxes in frame pixels, tracked,
+        embedded, published. On a crop, tracks outside it are left alone (unless picked up) and
+        those drawn before stay drawn."""
         assert self.object_detector is not None
         kinds: dict[str, Literal["animal", "object"]] = {
             **dict.fromkeys(self.cfg.object_categories, "object"),
             **dict.fromkeys(self.cfg.animal_categories, "animal"),
         }
         height, width = frame.image.shape[:2]
+        things = [t.box for t in self._object_visible if t.track_id in self._entities]
         crop = self.object_crop.choose(
-            frame.stamp, reason, self._visible_face_boxes(frame.stamp), width, height, self.shown
+            frame.stamp,
+            reason,
+            self._fresh_face_boxes(frame.stamp),
+            width,
+            height,
+            self.shown,
+            things=things,
+            episode=episode,
         )
         wall0, cpu0 = self.timer.start()
         try:
@@ -721,7 +739,8 @@ class VisionPipeline:
             d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
         region = None if crop is None else crop.trusted
-        result = self.object_tracker.update(dets, frame.stamp, region)
+        pickup = self.cfg.object_crop.pickup_distance_heights
+        result = self.object_tracker.update(dets, frame.stamp, region, pickup)
         kept = [t for t in result.aside if t in self._object_visible]
         self._object_visible = sorted(result.visible + kept, key=lambda t: t.track_id)
         self._lost_held = self._object_lost_s()

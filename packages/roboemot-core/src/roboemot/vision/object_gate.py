@@ -29,8 +29,8 @@ The gate does not compensate for it: it trusts the motion test only while the he
   changed, so the gate never raises per frame. A run with a pose takes a fresh copy and anchors
   the head pose there; a ``no_pose`` run takes none and drops it.
 
-``last_reason`` is the reason of the last decision (None with the gate off): the object crop
-(``object_crop``) runs the full frame on ``floor`` and ``settled``.
+``decide`` returns the run reason (``GATE_OFF`` with the gate off) or None for a skip: the
+object crop (``object_crop``) runs the full frame on ``floor`` and ``settled``.
 
 Decisions use capture stamps only, so a replay gives the same decisions. One lock guards all
 state, so ``reset`` and ``snapshot`` may run on another thread. The copies stay in RAM and are
@@ -53,6 +53,7 @@ from .tracker import HOLD_REASONS
 
 SKIP_REASONS = ("still_scene", "head_moving")
 RUN_REASONS = ("motion", "settled", "floor", "live_track", "no_pose", "episode")
+GATE_OFF = "gate_off"
 
 
 class ObjectGate:
@@ -64,7 +65,6 @@ class ObjectGate:
     def __init__(self, cfg: ObjectGateConfig):
         self.cfg = cfg
         self._lock = threading.Lock()
-        self.last_reason: str | None = None
         self._clear()
 
     def _clear(self) -> None:
@@ -94,14 +94,14 @@ class ObjectGate:
         holds: Collection[str],
         *,
         episode: bool = False,
-    ) -> bool:
-        """True when object detection should run on this governor-allowed tick. ``holds`` are
+    ) -> str | None:
+        """Why object detection runs on this governor-allowed tick (a ``RUN_REASONS`` entry, or
+        ``GATE_OFF`` with the gate off), None when it skips the tick. ``holds`` are
         the reasons live tracks need a steady detector (``Tracker.holds``); ``episode``: a
         shown object is the attention target, so every allowed tick runs. Counts the reason,
         and on a run with a pose takes a fresh reference copy anchored at ``pose``."""
         if not self.cfg.enabled:
-            self.last_reason = None
-            return True
+            return GATE_OFF
         with self._lock:
             moving = self._head.moving(stamp, self.cfg.settle_s)
             small: np.ndarray | None = None
@@ -125,7 +125,6 @@ class ObjectGate:
                 small = self._thumbnail(image)
                 reason = "motion" if self._changed(small) else "still_scene"
             run = reason in RUN_REASONS
-            self.last_reason = reason
             (self._triggered if run else self._skipped)[reason] += 1
             if run:
                 self._last_run = stamp
@@ -135,7 +134,7 @@ class ObjectGate:
                 else:
                     self._reference = self._thumbnail(image) if small is None else small
                     self._head.anchor_to(pose)
-            return run
+            return reason if run else None
 
     def _thumbnail(self, image: np.ndarray) -> np.ndarray | None:
         return thumbnail(image, self.cfg.thumb_width_px, self.cfg.thumb_height_px)

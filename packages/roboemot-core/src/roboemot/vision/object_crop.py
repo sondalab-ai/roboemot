@@ -12,16 +12,24 @@ cost per run. The crop changes what one run looks at, never how often runs happe
   the holder. It is made square (the detector's input is square, so the crop is not squashed),
   at least ``min_side_share`` of the frame's shorter side, at most that side, and shifted inside
   the frame. When it would cover more than ``full_frame_share`` of the frame, the full frame runs.
-- Schedule (``CropSchedule``): the full frame runs when the switch is off, with no face in view,
-  for a large crop, on the gate's ``floor`` and ``settled`` runs (a still thing anywhere, a new
-  view) and when the last full run is ``full_interval_s`` old or more (capture time), or there
-  was none. Every other run (``motion``, ``live_track``, ``episode``, ``no_pose``, the gate off)
-  crops.
+  Only faces of the last face run, at most one face-detection period old, count.
+- Look-down: during a look at a shown thing (SPEC 5A) the head pitches down and the holder's
+  face may leave the view. With no usable face crop, the crop is then around the confirmed
+  object track nearest the frame centre (the head follows the thing), ``shown_margin_heights``
+  of its box height on every side, with the same size rules.
+- Schedule (``CropSchedule``): the full frame runs when the switch is off, with no crop to make
+  (no fresh face, no shown thing) or a large one, on the gate's ``floor`` and ``settled`` runs (a
+  still thing anywhere, a new view), and when the last full run is ``full_interval_s`` old or
+  more (capture time), or there was none. Every other run (``motion``, ``live_track``,
+  ``episode``, ``no_pose``, the gate off) crops: ``no_pose`` is the fixed schedule, like the gate
+  off.
 - Boxes: ``Crop.to_frame`` adds the crop's offset, so tracking, the world, attention and the
   preview see frame pixels. A detection within ``edge_margin_share`` of the crop side from a crop
   edge inside the frame is cut by the crop and dropped: its box would start a wrong small track.
   ``Crop.trusted`` is the region where a crop run sees things whole; the object tracker leaves
   tracks outside it alone (not matched, not missed), so a run on a crop says nothing about them.
+  A detection that matches no track may pick up such a track of its class within
+  ``pickup_distance_heights`` (``Tracker.update``): a cup lifted into the crop keeps its track.
 
 The crop is a view of the frame inside one call and is never kept or logged (SPEC 12). The debug
 report (SPEC 12A) gets counts only.
@@ -43,6 +51,8 @@ from .types import Box, Detection
 
 FULL, CROP = "full", "crop"
 FULL_REASONS = ("off", "no_face", "large", "gate", "interval")
+FACE, SHOWN = "face", "shown"
+CROP_REASONS = (FACE, SHOWN)
 FULL_GATE_REASONS = frozenset({"floor", "settled"})
 
 
@@ -105,6 +115,21 @@ def _place(centre: float, side: int, limit: int) -> int:
     return min(max(round(centre - side / 2), 0), limit - side)
 
 
+def _square(region: Box, width: int, height: int, cfg: ObjectCropConfig) -> Crop | None:
+    """The square crop centred on ``region``: at least ``min_side_share`` of the frame's
+    shorter side, at most that side, shifted inside the frame; None above
+    ``full_frame_share`` of the frame area."""
+    rx1, ry1, rx2, ry2 = region
+    short = min(width, height)
+    side = max(rx2 - rx1, ry2 - ry1, cfg.min_side_share * short)
+    side = min(math.ceil(side), short)
+    if side * side > cfg.full_frame_share * width * height:
+        return None
+    x0 = _place((rx1 + rx2) / 2, side, width)
+    y0 = _place((ry1 + ry2) / 2, side, height)
+    return Crop(x0, y0, x0 + side, y0 + side, width, height, cfg.edge_margin_share * side)
+
+
 def crop_for(
     faces: Sequence[Box],
     width: int,
@@ -117,15 +142,26 @@ def crop_for(
     if not faces:
         return None
     lefts, tops, rights, bottoms = zip(*(_region(f, cfg, shown) for f in faces), strict=True)
-    rx1, ry1, rx2, ry2 = min(lefts), min(tops), max(rights), max(bottoms)
-    short = min(width, height)
-    side = max(rx2 - rx1, ry2 - ry1, cfg.min_side_share * short)
-    side = min(math.ceil(side), short)
-    if side * side > cfg.full_frame_share * width * height:
+    return _square((min(lefts), min(tops), max(rights), max(bottoms)), width, height, cfg)
+
+
+def _off_centre(box: Box, width: int, height: int) -> float:
+    """Distance in pixels from the centre of ``box`` to the centre of the frame."""
+    x1, y1, x2, y2 = box
+    return math.hypot((x1 + x2 - width) / 2, (y1 + y2 - height) / 2)
+
+
+def crop_around_thing(
+    things: Sequence[Box], width: int, height: int, cfg: ObjectCropConfig
+) -> Crop | None:
+    """The square crop around the thing box nearest the frame centre (the head follows a
+    shown thing), ``shown_margin_heights`` of its height on every side; None without a box or
+    above ``full_frame_share``."""
+    if not things:
         return None
-    x0 = _place((rx1 + rx2) / 2, side, width)
-    y0 = _place((ry1 + ry2) / 2, side, height)
-    return Crop(x0, y0, x0 + side, y0 + side, width, height, cfg.edge_margin_share * side)
+    x1, y1, x2, y2 = min(things, key=lambda box: _off_centre(box, width, height))
+    pad = cfg.shown_margin_heights * (y2 - y1)
+    return _square((x1 - pad, y1 - pad, x2 + pad, y2 + pad), width, height, cfg)
 
 
 class CropSchedule:
@@ -142,6 +178,7 @@ class CropSchedule:
         self._last_full: float | None = None
         self._runs = dict.fromkeys((FULL, CROP), 0)
         self._full_by = dict.fromkeys(FULL_REASONS, 0)
+        self._crop_by = dict.fromkeys(CROP_REASONS, 0)
 
     def choose(
         self,
@@ -151,34 +188,46 @@ class CropSchedule:
         width: int,
         height: int,
         shown: ShownObjectConfig,
+        *,
+        things: Sequence[Box] = (),
+        episode: bool = False,
     ) -> Crop | None:
         """The crop for the object run at ``stamp``, or None for the full frame.
-        ``gate_reason`` is why the object gate ran it (None with the gate off); ``faces`` are
-        the boxes of the faces in view."""
+        ``gate_reason`` is why the object gate ran it; ``faces`` are the boxes of the fresh
+        faces; during a look at a shown thing (``episode``) with no usable face crop, the crop
+        is around the confirmed thing box (``things``) nearest the frame centre."""
         cfg = self.cfg
         with self._lock:
-            crop = None
+            crop, by = None, FACE
             if not cfg.enabled:
                 why = "off"
             elif gate_reason in FULL_GATE_REASONS:
                 why = "gate"
             elif self._last_full is None or stamp - self._last_full >= cfg.full_interval_s:
                 why = "interval"
-            elif not faces:
-                why = "no_face"
             else:
                 crop = crop_for(faces, width, height, cfg, shown)
-                why = "large"
+                if crop is None and episode:
+                    crop, by = crop_around_thing(things, width, height, cfg), SHOWN
+                why = "large" if faces or (episode and things) else "no_face"
             if crop is None:
                 self._last_full = stamp
                 self._full_by[why] += 1
+            else:
+                self._crop_by[by] += 1
             self._runs[FULL if crop is None else CROP] += 1
             return crop
 
     def snapshot(self) -> dict[str, Any]:
-        """Counts for the debug report (SPEC 12A): object runs by input, full runs by reason."""
+        """Counts for the debug report (SPEC 12A): object runs by input, full runs and crop
+        runs by reason."""
         with self._lock:
-            return {"enabled": self.cfg.enabled, **self._runs, "full_by": dict(self._full_by)}
+            return {
+                "enabled": self.cfg.enabled,
+                **self._runs,
+                "full_by": dict(self._full_by),
+                "crop_by": dict(self._crop_by),
+            }
 
     def reset(self) -> None:
         """Forget the last full run and the counts (new session or replay start)."""

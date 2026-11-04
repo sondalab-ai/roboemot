@@ -16,7 +16,7 @@ from roboemot.config.schema import (
     TrackerConfig,
 )
 from roboemot.vision import Detection, Frame, Tracker
-from roboemot.vision.object_crop import Crop, CropSchedule, crop_for
+from roboemot.vision.object_crop import Crop, CropSchedule, crop_around_thing, crop_for
 from roboemot.world import FrameSpec
 from test_vision import CFG, H, W, rig
 
@@ -36,7 +36,8 @@ def test_defaults_units_and_ranges():
     c = ObjectCropConfig()
     assert c.enabled is True
     assert c.margin_faces == 0.5 and c.min_side_share == 0.4 and c.full_frame_share == 0.5
-    assert c.full_interval_s == 2.0 and c.edge_margin_share == 0.01
+    assert c.full_interval_s == 2.0 and c.edge_margin_share == 0.02
+    assert c.pickup_distance_heights == 4.0 and c.shown_margin_heights == 1.5
     assert ObjectCropConfig.model_fields["full_interval_s"].json_schema_extra["unit"] == "s"
     assert RoboEmotConfig().vision.object_crop == c
     for bad in ({"min_side_share": 0}, {"full_frame_share": 1.5}, {"edge_margin_share": 0.5}):
@@ -357,15 +358,18 @@ def test_pipeline_runs_the_full_frame_on_the_gate_floor(tmp_path):
     snap = pipe.stats()["object_input"]
     assert det.shapes[0] == (H, W) and snap["full_by"]["gate"] == 1
     assert det.shapes[1] != (H, W)  # the tentative cup holds the gate: a live_track crop run
-    assert pipe.object_gate.last_reason == "live_track"
+    assert pipe.stats()["object_gate"]["triggered"]["live_track"] >= 1
 
 
-def test_stale_face_boxes_do_not_crop(tmp_path):
+def test_only_fresh_faces_crop(tmp_path):
     pipe, _, _ = crop_rig(tmp_path, [])
-    feed(pipe, 8)
-    assert pipe._visible_face_boxes(0.875)  # the face of the last face run
-    lost = pipe.face_tracker.cfg.lost_s
-    assert pipe._visible_face_boxes(0.875 + lost + 0.1) == []
+    feed(pipe, 8)  # the last face run at 0.875 s
+    period = pipe.governor.period("detection")
+    assert pipe._fresh_face_boxes(0.875 + period)
+    assert pipe._fresh_face_boxes(0.875 + period + 0.01) == []  # within lost_s, but stale
+    assert period + 0.01 < pipe.face_tracker.cfg.lost_s
+    pipe.governor.set_scale("load", 0.0)  # face detection off: no fresh face at all
+    assert pipe._fresh_face_boxes(0.875) == []
 
 
 def test_hot_reload_takes_the_crop_switch_and_the_shown_region(tmp_path):
@@ -383,3 +387,150 @@ def test_pipeline_without_faces_runs_the_full_frame(tmp_path):
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=det)
     feed(pipe, 24)
     assert det.shapes and all(s == (H, W) for s in det.shapes)
+
+
+# ------------------------------------------------------------- review fix round
+
+
+def test_edge_margin_zero_keeps_a_box_on_the_crop_edge():
+    crop = Crop(200, 100, 440, 340, FW, FH, edge_px=0.0)
+    assert crop.trusted == (200, 100, 440, 340)
+    dets = crop.to_frame([Detection((0.0, 10.0, 40.0, 240.0), 0.8, "cup")])
+    assert [d.box for d in dets] == [(200.0, 110.0, 240.0, 340.0)]  # on the boundary: inside
+
+
+def test_portrait_and_square_frames():
+    crop = crop_for([face_box(240, 200, 60)], 480, 640, CROP, SHOWN)  # portrait
+    assert crop is not None and crop.x1 - crop.x0 == crop.y1 - crop.y0 == 240
+    small = crop_for([face_box(240, 200, 10)], 480, 640, CROP, SHOWN)
+    assert small is not None and small.x1 - small.x0 == math.ceil(CROP.min_side_share * 480)
+    whole = CROP.model_copy(update={"full_frame_share": 1.0})
+    crop = crop_for([face_box(240, 240, 150)], 480, 480, whole, SHOWN)  # square, close face
+    assert crop is not None and (crop.x0, crop.y0, crop.x1, crop.y1) == (0, 0, 480, 480)
+    assert crop.trusted == (-math.inf, -math.inf, math.inf, math.inf)  # no inner edge
+
+
+def test_hot_reload_of_full_interval():
+    s = schedule()
+    assert choose(s, 0.0) is None
+    assert choose(s, 1.0) is not None
+    s.cfg = CROP.model_copy(update={"full_interval_s": 0.5})
+    assert choose(s, 1.1) is None  # 1.1 s since the last full run
+    assert s.snapshot()["full_by"]["interval"] == 2
+
+
+def test_episode_without_a_face_crops_around_the_thing_nearest_the_centre():
+    things = [(300.0, 220.0, 340.0, 260.0), (20.0, 20.0, 60.0, 60.0)]
+    crop = crop_around_thing(things, FW, FH, CROP)
+    assert crop is not None
+    # The centred cup, 1.5 heights (60 px) on every side: 160 px, raised to the minimum side.
+    assert crop.x1 - crop.x0 == math.ceil(CROP.min_side_share * FH)
+    assert crop.x0 < 300 and crop.x1 > 340 and crop.y0 < 220 and crop.y1 > 260
+    s = schedule()
+    choose(s, 0.0)
+    assert s.choose(0.5, "episode", [], FW, FH, SHOWN, things=things, episode=True) is not None
+    assert s.choose(0.6, "motion", [], FW, FH, SHOWN, things=things) is None  # no episode
+    snap = s.snapshot()
+    assert snap["crop_by"] == {"face": 0, "shown": 1}
+    assert snap["full_by"]["large"] == 0 and snap["full_by"]["no_face"] == 1
+
+
+def test_episode_prefers_the_face_crop():
+    s = schedule()
+    choose(s, 0.0)
+    things = [(300.0, 400.0, 340.0, 440.0)]
+    faces = [face_box(320, 160, 60)]
+    crop = s.choose(0.5, "episode", faces, FW, FH, SHOWN, things=things, episode=True)
+    assert crop is not None and (crop.x0, crop.y0) == (200, 100)
+    assert s.snapshot()["crop_by"] == {"face": 1, "shown": 0}
+
+
+def test_an_aside_track_over_many_crop_runs_keeps_its_stamp_and_expires_by_lost_s():
+    t = object_tracker()
+    t.update([obj(10)], 0.0)
+    t.update([obj(10)], 1.0)  # confirmed, still: zero velocity
+    (track,) = t._tracks
+    box = track.box
+    region = (200.0, -math.inf, 440.0, math.inf)
+    for i in range(1, 9):  # eight crop runs over 4 s
+        res = t.update([], 1.0 + 0.5 * i, region)
+        assert res.aside == [track] and res.removed_ids == []
+        assert track.last_stamp == 1.0 and track._matched_last
+        assert track.box == pytest.approx(box)  # no drift into the crop
+    res = t.update([], 6.5, region)  # 5.5 s unmatched > lost_s
+    assert res.removed_ids == [track.track_id] and t._tracks == []
+
+
+def test_a_thing_lifted_into_the_crop_keeps_its_track():
+    t = object_tracker()
+    t.update([obj(100, "cup")], 0.0)
+    t.update([obj(100, "cup")], 1.0)
+    (cup,) = t._tracks
+    region = (200.0, -math.inf, 440.0, math.inf)
+    lifted = Detection((240, 60, 280, 100), 0.8, "cup")  # 3.6 heights away, inside the crop
+    res = t.update([lifted], 2.0, region, pickup_heights=4.0)
+    assert res.visible == [cup] and res.aside == [] and t._tracks == [cup]
+    assert cup.box == pytest.approx(lifted.box)
+    assert cup.moved_px > 0  # the move counts for the gate's moving hold
+
+
+def test_pickup_has_limits():
+    region = (200.0, -math.inf, 440.0, math.inf)
+    for det, gate in [
+        (Detection((240, 60, 280, 100), 0.8, "cup"), 0.0),  # switched off
+        (Detection((400, 40, 440, 80), 0.8, "cup"), 4.0),  # too far
+        (Detection((240, 60, 280, 100), 0.8, "bowl"), 4.0),  # another class
+    ]:
+        t = object_tracker()
+        t.update([obj(100, "cup")], 0.0)
+        t.update([obj(100, "cup")], 1.0)
+        res = t.update([det], 2.0, region, pickup_heights=gate)
+        assert len(res.aside) == 1 and len(t._tracks) == 2
+
+
+def test_pipeline_cup_picked_up_into_the_crop_keeps_its_id_and_identity(tmp_path):
+    cfg = CFG.vision.model_copy(
+        update={
+            "object_crop": CFG.vision.object_crop.model_copy(update={"full_interval_s": 2.5}),
+            "object_gate": CFG.vision.object_gate.model_copy(update={"enabled": False}),
+        }
+    )
+    table = Detection((60, 130, 100, 170), 0.8, "cup")  # left of the face crop
+    det = CropAwareDetector([table])
+    _, _, pipe, _, got = rig(tmp_path, face_script, vision=cfg, object_detector=det)
+    img = marked_image()
+    for i in range(30):  # runs at 0 (full), 1, 2 (crop), 3 (full: confirmed)
+        pipe.process(Frame(img, i * 0.125))
+    (before,) = pipe.object_tracker._tracks
+    assert before.confirmed
+    det.things = [Detection((130, 60, 170, 100), 0.8, "cup")]  # lifted in front of the chest
+    for i in range(30, 34):  # the run at 4 s is a crop run
+        pipe.process(Frame(img, i * 0.125))
+    assert det.shapes[-1] != (H, W)
+    assert pipe.object_tracker._tracks == [before]  # same track, no new one, no ghost
+    (overlay,) = pipe.object_overlay()
+    assert overlay[0] == pytest.approx((130, 60, 170, 100), abs=1.0)
+    cups = [m.payload for m in got["percept.entity"] if m.payload.kind == "object"]
+    assert len({(round(o.azimuth_rad, 3)) for o in cups}) == 2  # published at both places
+
+
+def test_pipeline_look_down_crops_around_the_shown_thing(tmp_path):
+    cfg = CFG.vision.model_copy(
+        update={
+            "object_crop": CFG.vision.object_crop.model_copy(update={"full_interval_s": 2.5}),
+            "object_gate": CFG.vision.object_gate.model_copy(update={"enabled": False}),
+        }
+    )
+    cup = Detection((140, 100, 180, 140), 0.8, "cup")
+    det = CropAwareDetector([cup])
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], vision=cfg, object_detector=det)
+    pipe.governor.set_active("objects", True)  # a look at a shown thing, no face in view
+    img = marked_image()
+    for i in range(24):  # 3 s: object runs at 3 Hz
+        pipe.process(Frame(img, i * 0.125))
+    snap = pipe.stats()["object_input"]
+    assert det.shapes[:2] == [(H, W), (H, W)]  # until the cup is confirmed
+    assert det.shapes[2][0] == det.shapes[2][1] < H  # then a crop around it
+    assert snap["crop_by"]["shown"] >= 1 and snap["crop_by"]["face"] == 0
+    assert len(pipe.object_tracker._tracks) == 1
+    pipe.governor.set_active("objects", False)
