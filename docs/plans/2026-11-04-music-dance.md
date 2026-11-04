@@ -20,6 +20,61 @@ binds to channels.
 Paths: `core/` = `packages/roboemot-core/src/roboemot/`, `rm/` = `packages/roboemot-reachymini/src/roboemot_reachymini/`,
 `tests/` = `packages/roboemot-core/tests/`.
 
+## Status (2026-11-04, end of the slice 1 session)
+
+- **Done.** Slice 1a (https://github.com/sondalab-ai/roboemot/pull/181) and slice 1b
+  (https://github.com/sondalab-ai/roboemot/pull/183) are merged into `epic/music-dance`. The epic went to
+  `main` with a merge commit in https://github.com/sondalab-ai/roboemot/pull/184 (`bb858c9`). The owner
+  asked for this before Q1, so that one robot session covers all recent changes.
+- **Waiting for the owner.** Q1 and three extra music checks are in `docs/plans/2026-11-04-qa-handoff.md`,
+  section G. Slice 2 starts only after Q1 passes.
+- **How to continue.** Keep `epic/music-dance`. Before slice 2, merge the latest `main` into it with a merge
+  commit. A slice PR that contains a `main` merge also lands with a merge commit, not a squash.
+- **Use these, not the plan text.**
+  - The debug path is `roboemot.voice.music`, not `voice.music`.
+  - The cost is CPU time of the listener thread (`time.thread_time`).
+  - The schema has one more field than the plan: `music.min_band_periodicity` (default 0.35).
+  - The line numbers under "Verified facts" are from `69a4440`. They are stale after #180 and #182.
+- **Cost so far.** 6 agents of the 10 in the estimate: 2 Opus authors and 4 Sonnet reviewers, the 1a
+  re-review included. The controller checked the 1b fix diff. Each slice needed one fix round.
+
+### Rulings made in the slice 1 session
+
+1. 1a fix round 1 also fixed three minor findings: a reader on another thread could see half of an update
+   (state and intervals now live in one frozen view), the tempo fields had no unit or range, and the cost
+   label said CPU while the timer measured wall time. Cost if wrong: a few extra lines.
+2. #180 changed the listener while 1b was open. The 1b author merged `main` into the 1b branch first, and
+   #183 landed with a merge commit. Cost if wrong: a larger 1b diff to review.
+3. A config with `music.enabled` and a top band edge at or above half of `voice.sample_rate_hz` is refused,
+   at load and on reload. Music is not skipped in silence. Cost if wrong: an 8 kHz setup must also lower
+   `music.bands_hz`.
+4. 1b fix round 1 also added a test that `music.enabled: false` turns the music rule off. Cost if wrong:
+   one test.
+5. The plan's onset-spread rule (onsets above the band median) passes for noise. The author replaced it
+   with a per-band periodicity rule, which the plan allows. The ticking-clock test still passes. A
+   broadband tick reads as music.
+
+### Deferred minor findings (for the final review)
+
+- 1a, behaviour:
+  - A broadband tick reads as music. The SPEC states it.
+  - One very large chunk can turn a "stopped" event into a "started" event in the same feed.
+  - The interval stays open for `release_s` after the last beat. This is intended.
+  - Back-dating covers the whole window, so noise before a song can enter the interval. This is intended.
+- 1a, tests and docs:
+  - The flywheel test loop restates the formula.
+  - The speech evidence is thin: there is no suite test of regular-rhythm speech through the octave rule.
+  - No test ties the clock rejection to `music.min_band_periodicity`.
+  - The test helpers in `audio_signals.py` have no docstrings.
+  - `music.beats_per_bar` is unused until slice 2.
+- 1b:
+  - On the realtime path the voice-at-face check still runs over music.
+  - A bad-bands reload with no detector left gating off until a good reload. The band validator now
+    refuses that reload.
+  - No test checks `music.stopped` when a reload turns music off.
+  - The gap code that subtracts lost audio needs a why-comment.
+  - No Vosk-path test uses the real detector.
+
 ---
 
 ## Estimate (owner OK needed before any branch or agent)
