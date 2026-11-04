@@ -1561,11 +1561,21 @@ class IdentityConfig(Strict):
     vote_max_age_s: float = param(
         10.0, "Identity votes older than this are ignored", unit="s", ge=1, le=300
     )
+    entity_contrary_votes: int = param(
+        2,
+        "A recognised animal or object track keeps its identity, whatever the vote age, until "
+        "this many of its votes since the voting rule last named it (within the last "
+        "votes_window) name one other owner; a vote with no match never counts",
+        ge=1,
+        le=50,
+    )
 
     @model_validator(mode="after")
     def _consistent(self) -> IdentityConfig:
         if self.votes_required > self.votes_window:
             raise ValueError("identity.votes_required must not exceed votes_window")
+        if self.entity_contrary_votes > self.votes_window:
+            raise ValueError("identity.entity_contrary_votes must not exceed votes_window")
         if self.enroll_min_embeddings > self.max_embeddings_per_person:
             raise ValueError("identity.enroll_min_embeddings exceeds max_embeddings_per_person")
         if self.refresh_min_similarity < self.match_threshold:
