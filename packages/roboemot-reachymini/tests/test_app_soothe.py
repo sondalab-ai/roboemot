@@ -4,10 +4,12 @@ a sound plays while a person sits in view, with its emotion, and a queued senten
 from __future__ import annotations
 
 import random
+import threading
 import time
 from types import SimpleNamespace
 
 import pytest
+from roboemot.affect.expression import ExpressionRenderer
 from roboemot.config.schema import RegisterParams, SootheConfig, StateEffects
 from roboemot.runtime import startup as startup_module
 from roboemot.runtime import ticks as ticks_module
@@ -64,8 +66,64 @@ class EarlyRandom(random.Random):
         return super().uniform(a, b)
 
 
+class SoothedApp:
+    """What the test sees of the app's soothe runner and expression renderer, from the first
+    tick: every soothe event (``("event", name, payload)``) and every expression started
+    (``("start", label)``), in order, and the labelled impulses the renderer has taken
+    (``impulses``). The runner plays nothing until ``allow`` is set.
+
+    The face in view brings its own labelled impulse (``person.unknown_appears``: curiosity).
+    In the same affect update as the sound's, the latest label wins and the sound's never
+    starts; and ``last_label`` holds only the latest start, so a reader that comes late finds
+    the face's or the region's label. The sound waits until the renderer took the face's."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.log: list[tuple] = []
+        self.allow = threading.Event()
+        self.impulses = 0
+        log, allow = self.log, self.allow
+
+        class GatedSoothe(SootheRunner):
+            def __init__(self, *args, on_event, **kw):
+                def record(name, now, payload):
+                    log.append(("event", name, payload))
+                    on_event(name, now, payload)
+
+                super().__init__(*args, on_event=record, **kw)
+
+            def _start(self, now, state, quiet):
+                if allow.is_set():  # held: still due, it plays at the first tick after
+                    super()._start(now, state, quiet)
+
+        real_update, real_start = ExpressionRenderer.update, ExpressionRenderer._start
+
+        def update(renderer, state, register, now):
+            started = real_update(renderer, state, register, now)
+            self.impulses = state.impulse
+            return started
+
+        def start(renderer, label, *args):
+            started = real_start(renderer, label, *args)
+            if started:
+                log.append(("start", label))
+            return started
+
+        monkeypatch.setattr(startup_module, "SootheRunner", GatedSoothe)
+        monkeypatch.setattr(ExpressionRenderer, "update", update)
+        monkeypatch.setattr(ExpressionRenderer, "_start", start)
+
+    def events(self) -> list[tuple]:
+        return [e[1:] for e in self.log if e[0] == "event"]
+
+    def started_after_the_sound(self) -> list[str]:
+        """The labels of the expressions started after the first soothe event."""
+        first = next((i for i, e in enumerate(self.log) if e[0] == "event"), len(self.log))
+        return [e[1] for e in self.log[first:] if e[0] == "start"]
+
+
 def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(data, monkeypatch):  # noqa: F811
     monkeypatch.setattr(startup_module, "random", SimpleNamespace(Random=EarlyRandom))
+    seen = SoothedApp(monkeypatch)
     enable(data, YAML)  # validated settings; the 3 s first gap is the schema's shortest
     mini = ScriptedMini().mini
     flushes = []
@@ -74,19 +132,15 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
     stop, thread, errors = run_app(app, mini)
     try:
         assert wait_for(lambda: app.soothe_runner is not None and app.speech_output is not None)
-        events = []
-        runner, real = app.soothe_runner, app.soothe_runner.on_event
-        runner.on_event = lambda name, now, payload: (
-            events.append((name, payload)),
-            real(name, now, payload),
-        )
         cancelled = []
         output, real_cancel = app.speech_output, app.speech_output.cancel
         output.cancel = lambda job: (cancelled.append(job), real_cancel(job))[1]
-        assert wait_for(lambda: events and mini.media.push_audio_sample.called, timeout=30)
         assert wait_for(lambda: app.selector.target is not None, timeout=15)  # a person is in view
-        assert events[0] == ("self.soothe", {"label": LABEL, "sound": "hum"})
-        assert wait_for(lambda: app.expression.last_label == LABEL)
+        assert wait_for(lambda: seen.impulses >= 1, timeout=15)  # the face's, taken
+        seen.allow.set()
+        assert wait_for(lambda: seen.events() and mini.media.push_audio_sample.called, timeout=30)
+        assert seen.events()[0] == ("self.soothe", {"label": LABEL, "sound": "hum"})
+        assert wait_for(lambda: LABEL in seen.started_after_the_sound())
         assert not cancelled  # the person did not cut it, nor did its own speaking window
         output.say(
             "Ciao.",

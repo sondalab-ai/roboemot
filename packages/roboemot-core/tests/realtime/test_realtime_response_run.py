@@ -261,18 +261,16 @@ async def test_a_run_on_a_session_closed_by_a_reload_falls_back_at_once():
     route, sent = connected_route()
     charged = []
     route.charge = charged.append
-    route.timeouts = lambda: (1.0, 1.0)
+    # a stall no run reaches: the reload is the only way this run can end ("stall" otherwise)
+    route.timeouts = lambda: (60.0, 60.0)
     run = make_run(route, Speech())
     task = asyncio.ensure_future(run.run("x" * 40))
     await until(lambda: creates(sent))
     route._on_event(created("R"), route._token)
     route._on_event(delta("R"), route._token)
-    t0 = asyncio.get_running_loop().time()
     route.stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
     route.apply_config(route.stack.effective())
-    reply = await asyncio.wait_for(task, 0.9)
-    # well under the 1 s stall, with room for a loaded CI runner
-    assert asyncio.get_running_loop().time() - t0 < 0.5
+    reply = await asyncio.wait_for(task, 10.0)  # a hang guard only
     assert reply.closed == "reconfigured"
     assert route._live == {} and not route.busy() and charged == [10]
 
