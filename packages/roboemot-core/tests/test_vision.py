@@ -852,6 +852,41 @@ def entity_rig(tmp_path, dets, **update):
     return pipe, app
 
 
+def test_a_weak_object_hit_runs_no_entity_embedding(tmp_path):
+    pipe, app = entity_rig(tmp_path, [cup(0.8)])
+    got = []
+    pipe.bus.subscribe("percept.entity", got.append)
+    for stamp in (0.0, 1.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    assert len(app.boxes) == 1
+    first = got[-1].payload.embedding
+    pipe.object_detector.dets = [cup(0.25)]
+    for stamp in (2.0, 3.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+        assert pipe._entity_budget == pipe.cfg.max_entity_embeds_per_frame
+        assert got[-1].payload.confidence == 0.25
+        assert got[-1].payload.embedding is first  # the previous embedding is kept
+    assert len(app.boxes) == 1
+    pipe.object_detector.dets = [cup(0.8)]
+    pipe.process(Frame(image(4), 4.0))
+    assert len(app.boxes) == 2  # embedded again at the next strong hit
+
+
+def test_a_tentative_object_track_cut_by_a_weak_frame_restarts_on_the_next_strong_hit(tmp_path):
+    objs = ObjectMock([cup(0.8)])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.process(Frame(image(0), 0.0))
+    first = pipe.object_tracker._tracks[0].track_id
+    objs.dets = [cup(0.3)]
+    pipe.process(Frame(image(1), 1.0))
+    assert pipe.object_tracker._tracks == []
+    objs.dets = [cup(0.8)]
+    pipe.process(Frame(image(2), 2.0))
+    [track] = pipe.object_tracker._tracks
+    assert track.track_id != first and not track.confirmed
+    assert got["percept.entity"] == []
+
+
 def test_entities_have_their_own_embed_budget_and_never_take_the_faces_share(tmp_path):
     pipe, app = entity_rig(
         tmp_path, crowd(4), max_embeds_per_frame=1, max_entity_embeds_per_frame=1

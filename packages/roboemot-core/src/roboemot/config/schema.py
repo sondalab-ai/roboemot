@@ -2212,7 +2212,7 @@ class VisionConfig(Strict):
     object_score_min: float = param(
         0.4,
         "An animal or object detection at or above this score starts a track; it replaces "
-        "tracker.high_score for the animal and object tracker, so a 0.4 detection starts a track",
+        "tracker.high_score for the animal and object tracker",
         ge=0,
         le=1,
         restart=True,

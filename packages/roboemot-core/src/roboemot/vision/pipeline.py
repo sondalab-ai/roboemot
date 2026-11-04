@@ -735,6 +735,8 @@ class VisionPipeline:
         continued in this update (a visible track carries the detection it matched now)."""
         start = self.cfg.object_score_min
         low = sum(1 for d in dets if d.score < start)
+        # A track starts and confirms only on a strong detection, so a weak score on a visible
+        # track is always a low-pass continuation.
         continued = sum(1 for t in visible if t.score < start)
         with self._report_lock:
             self._object_low_detections += low
@@ -746,6 +748,8 @@ class VisionPipeline:
 
     def _evaluate_entity(self, frame: Frame, track: Track, state: _EntityState) -> None:
         if self.appearance_embedder is None or self._entity_budget <= 0:
+            return
+        if track.score < self.cfg.object_score_min:  # a weak box is no evidence of identity
             return
         stamp = frame.stamp
         if state.last_embed is None:
