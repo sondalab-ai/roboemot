@@ -21,7 +21,7 @@ Start none of these before the `stage_timing` numbers from the robot exist. Each
 | --- | --- | --- |
 | V-3 | Lower `detection_hz` (face detection) while nobody is in view | YuNet is a large share of `cpu_share` |
 | V-4 | Run DINOv2 less often per tracked object | DINOv2 is a large share of `cpu_share` |
-| V-5 | INT8 SFace model, opt-in | SFace is a large share of `cpu_share` |
+| V-5 | Dropped 2026-11-04 (owner decision) | INT8 SFace measured slower on the Mac: OpenCV 18.8 ms vs FP32 5.3 ms; ONNX Runtime 12.1 ms. The CM4 (Cortex-A72) has no int8 dot-product instructions. |
 
 ## 3. Proposed, not approved
 
