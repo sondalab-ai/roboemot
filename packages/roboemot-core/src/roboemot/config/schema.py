@@ -3232,6 +3232,14 @@ class GrammarConfig(Strict):
         "is not `hello robot`",
         unit="s", ge=0, le=2,
     )  # fmt: skip
+    name_first_max_start_s: float = param(
+        1.5,
+        "A name the grammar pass rescues counts as opening the utterance (it then wakes the robot "
+        "at any length) only when it starts at most this long after the start of the decoded "
+        "audio, which begins with the pre-roll (voice.vad.pre_roll_ms). This leaves room for "
+        "one short lead-in word (`ok`, `senti`) and no long pause before the name",
+        unit="s", gt=0, le=10,
+    )  # fmt: skip
     max_competitor_words: int = param(
         64,
         "Most distinct free-text words added to the grammar as competitors; an utterance with "

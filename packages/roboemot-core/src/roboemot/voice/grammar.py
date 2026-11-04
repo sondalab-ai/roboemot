@@ -30,8 +30,10 @@ phrases, the name and aliases, ``keyword_min_word_conf`` for the others):
 
 A name or alias hit the free text missed that opens the decoded words (nothing before it, or one
 lead-in phrase of the language, ``KeywordSpotter.lead_in``; an unknown word before it is not a
-lead-in) adds the ``NAME_FIRST`` flag to the result: the name as the first word wakes the robot
-at any length (SPEC 8, owner decision 2026-11-04). Counted ``name_first``. When the free text has
+lead-in) and starts at most ``name_first_max_start_s`` into the decoded audio (a long pause or a
+lost stretch before it is not "first") adds the ``NAME_FIRST`` flag to the result: the name as
+the first word wakes the robot at any length (SPEC 8, owner decision 2026-11-04). Counted
+``name_first``. When the free text has
 the name, its position there decides: a decode that lost the words before it must not move it to
 the front.
 
@@ -314,7 +316,9 @@ class GrammarSpotter:
             bucket[category] = max(bucket.get(category, 0.0), best)
             if category == "name" and "name" not in found and not out.name_first:
                 out.name_first = any(
-                    min(w.conf for w in span) >= floor and _opens(seq[:i], lead)
+                    min(w.conf for w in span) >= floor
+                    and span[0].start_s <= cfg.name_first_max_start_s
+                    and _opens(seq[:i], lead)
                     for i, span in close
                 )
         for category in out.hits:

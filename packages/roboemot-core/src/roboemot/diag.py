@@ -59,7 +59,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "stop_consumed",
         "replaced",
     ),
-    "bargein": ("cut", "released"),  # a candidate episode closed
+    "bargein": ("cut", "cut_own", "released"),  # a candidate episode closed (cut_own: a hum)
     "session": ("reset", "reconnected", "connect_failed", "lost", "server_error"),
     "audio": ("transcript_timeout",),  # the server's transcript of sent audio never came
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw

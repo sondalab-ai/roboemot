@@ -77,12 +77,12 @@ from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .decode_worker import DecodeJob, DecodeWorker
 from .direction import VoiceDirection
-from .fastpath import FastPath, GrammarPass, UtteranceState
+from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
-from .wake import AT_FACE, AtFace, WakeGate
+from .wake import AT_FACE, NO_FACE_AT_VOICE, AtFace, WakeGate
 
 log = logging.getLogger(__name__)
 TOPIC = "percept.utterance"
@@ -276,6 +276,7 @@ class VoiceListener:
             "dropped_speaking": 0,
             "barge_ins": 0,
             "errors": 0,
+            "name_first_no_face": 0,  # the name opened a long final, no face at the voice
         }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
@@ -629,7 +630,9 @@ class VoiceListener:
     def voice_active(self) -> bool:
         """Whether someone's speech is in progress or may be starting (the VAD is counting
         frames above its threshold towards a start): no self-soothing sound starts then, and no
-        one-shot cue sound plays (SPEC 7B, 8). Safe from any thread (two single-word reads)."""
+        one-shot cue sound plays (SPEC 7B, 8). Safe from any thread: two single-word reads
+        without the listener's lock. A read racing the listener thread can be one chunk stale,
+        which costs at most one tick of hold or one cue sound; it never blocks the audio path."""
         return self._hearing or self._endpointer.onset
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
@@ -997,15 +1000,21 @@ class VoiceListener:
             return self._deliver_heard(p)
         text = p.text
         if p.addressed is None:
-            wake = self._fast.wakes(text, grammar_pass=p.grammar_pass, heard=heard, state=p.state)
+            kind = self._fast.wake_kind(
+                text, grammar_pass=p.grammar_pass, heard=heard, state=p.state
+            )
             face = p.face
+            at_face = self._checked(p) if face is None else (lambda: face)
+            wake = kind == WAKE
+            if kind == NAME_FIRST:
+                wake, at_face = self._name_first_at_face(at_face)
             outcome = self._gate.outcome(
                 wake_word=wake,
                 enrolled_in_view=self._enrolled(ev.start_stamp),
                 start=ev.start_stamp,
                 last_speech=ev.last_speech_stamp,
                 speaker=self._speaker(),
-                at_face=self._checked(p) if face is None else (lambda: face),
+                at_face=at_face,
             )
             p.addressed = not outcome.startswith("rejected")
             self._decided(p, outcome, text)
@@ -1018,6 +1027,19 @@ class VoiceListener:
             return None
         self._finish(p, text, p.grammar_pass, heard, local_only=p.local_only)
         return None
+
+    def _name_first_at_face(self, at_face: AtFace | None) -> tuple[bool, AtFace | None]:
+        """The name opened a long final (``NAME_FIRST``): it wakes the robot only when the
+        voice came from a visible face, whether or not that face looks at the robot (SPEC 8:
+        a television saying "Neve fino a 1000 metri" must not wake it). Runs the voice-at-face
+        check once; returns the wake and the check with its verdict kept for the gate."""
+        if at_face is None:
+            return True, None
+        verdict = at_face()
+        if verdict == NO_FACE_AT_VOICE:
+            self._count("name_first_no_face")
+            return False, lambda: verdict
+        return True, lambda: verdict
 
     def _deliver_heard(self, p: _Handoff) -> _Handoff | None:
         """``p``'s audio went to the realtime route: its final is the server's transcript

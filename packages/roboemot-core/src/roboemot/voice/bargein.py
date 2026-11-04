@@ -78,7 +78,9 @@ A sound of the robot's own that is not speech (a self-soothing hum, SPEC 7B) is 
 voice: when only such sounds play, a speech cut-off (the ``vad`` or ``onset`` path) calls
 ``cut_own`` instead (``bind``), which cuts them, and skips ``prepare`` and ``interrupt``: there is
 no answer to cancel or trim. The listener still restarts on the user's audio, and the cut is
-counted ``own_sound_cuts`` (not ``triggers``). The stop keyword cuts the robot as always. With
+counted ``own_sound_cuts`` (not ``triggers``); its record and decision event have the outcome
+``cut_own``, so the Live tab does not show the person cutting the robot off. The stop keyword
+cuts the robot as always. With
 barge-in off (``enabled``) speech over such a sound does not cut it.
 
 Audio and text are never logged or published.
@@ -641,13 +643,16 @@ class BargeIn:
         self._rec, self._rec_quiet = None, 0
         self._finish(rec, outcome, confirmed, end, by)
 
-    def _record_cut(self, rec: dict[str, Any] | None, path: str, detected: float) -> None:
+    def _record_cut(
+        self, rec: dict[str, Any] | None, path: str, detected: float, outcome: str = "cut"
+    ) -> None:
         """After a cut (``interrupt``, ``reset`` and the hand-off are done): end the episode's
-        record as cut by ``path``, or make one for a keyword stop with no episode open."""
+        record as cut by ``path``, or make one for a keyword stop with no episode open.
+        ``outcome`` is ``cut_own`` when only the robot's own sounds were cut."""
         if rec is None:
             rec = self._open_record(path, detected)
             self._rec = None
-        self._finish(rec, "cut", path, detected, None)
+        self._finish(rec, outcome, path, detected, None)
 
     def _finish(
         self,
@@ -897,7 +902,7 @@ class BargeIn:
             self.reset()
             if self._resume is not None:
                 self._resume(samples, audio_stamp)
-            self._safe(self._record_cut, rec, path, detected)
+            self._safe(self._record_cut, rec, path, detected, "cut_own")
             return
         self._counts["keyword_triggers" if kind == "keyword" else "triggers"] += 1
         self._cuts_by_path[path] += 1

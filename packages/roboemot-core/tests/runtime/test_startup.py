@@ -140,13 +140,13 @@ def test_the_own_sound_cut_cuts_only_sounds_that_are_not_speech():
     from roboemot.runtime.startup import own_sound_cut
 
     log = []
-    output = SimpleNamespace(raw=True, stop=lambda: log.append("stop"))
-    output.raw_only = lambda: output.raw
+    output = SimpleNamespace(raw=True)
+    output.cut_raw = lambda: log.append("cut_raw") or output.raw
     soothe = SimpleNamespace(cut_by_speech=lambda now: log.append("soothe"))
     cut = own_sound_cut(output, soothe)
-    assert cut() and log == ["soothe", "stop"]
+    assert cut() and log == ["cut_raw", "soothe"]
     output.raw, log[:] = False, []
-    assert not cut() and log == []
+    assert not cut() and log == ["cut_raw"]
 
 
 def test_the_soothe_tick_hands_the_listeners_speech_to_the_runner():

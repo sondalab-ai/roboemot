@@ -201,14 +201,14 @@ def start_voice_output(
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
     """Someone speaks while only the robot's own sounds that are not speech play (a
-    self-soothing hum, a cue sound): cut them, the hum through its runner (counted
-    ``cut_by_speech``), and say so; never robot speech (SPEC 7B, 8)."""
+    self-soothing hum, a cue sound): cut them (``SpeechOutput.cut_raw``: checked and cut under
+    the output's lock, so robot speech queued meanwhile is kept), count the hum's cut on its
+    runner (``cut_by_speech``) and say so (SPEC 7B, 8)."""
 
     def cut() -> bool:
-        if not output.raw_only():
+        if not output.cut_raw():
             return False
         soothe.cut_by_speech(time.monotonic())
-        output.stop()
         return True
 
     return cut

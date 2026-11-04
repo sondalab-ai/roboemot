@@ -1338,3 +1338,38 @@ def test_raw_only_is_true_while_nothing_but_raw_sounds_plays(make):
     say(out, "Ancora.")
     assert wait_for(lambda: out.timeline.sentence_at(time.monotonic()) is not None)
     assert not out.raw_only()  # a sentence plays
+
+
+def test_cut_raw_cuts_only_raw_sounds_and_a_sentence_after_it_plays(make):
+    """SPEC 7B, 8: speech over a hum cuts the hum (and a raw sound queued behind it); a
+    sentence said right after the cut is not touched (no epoch move)."""
+    sink, backend = TimelineSink(), FakeBackend()
+    out = make(backend, sink=sink)
+    hum = out.play(sound(20), RATE)
+    queued = out.play(sound(1), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    assert out.cut_raw()
+    assert sink.stopped_at and wait_for(lambda: not out.live(hum))
+    assert not out.live(queued)
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert backend.texts == ["Ciao."] and len(sink.pushed) == 2  # the queued sound never played
+
+
+def test_cut_raw_declines_and_keeps_everything_when_a_sentence_is_queued(make):
+    sink, backend = TimelineSink(), FakeBackend()
+    out = make(backend, sink=sink)
+    hum = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    say(out, "Ciao.")  # held behind the sound
+    assert not out.cut_raw()
+    assert out.live(hum) and not sink.stopped_at and out.waiting(exclude=hum) == 1
+    out.cancel(hum)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert backend.texts == ["Ciao."]
+
+
+def test_cut_raw_with_nothing_playing_does_nothing(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    assert not out.cut_raw() and not sink.stopped_at

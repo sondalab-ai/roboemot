@@ -1115,7 +1115,8 @@ def test_speech_over_the_robots_own_sound_cuts_it_without_cancelling_an_answer()
     the hum (``cut_own``), not the robot's speech: no prepare, stop or interrupt, and the
     person's words are kept."""
     w = World(["ciao", "neve mi racconti una barzelletta"])
-    order, cuts = [], []
+    order, cuts, decisions = [], [], []
+    w.bargein.events = lambda kind, reason, **fields: decisions.append((kind, reason))
 
     def cut_own():
         cuts.append(w.rig.now)
@@ -1136,6 +1137,8 @@ def test_speech_over_the_robots_own_sound_cuts_it_without_cancelling_an_answer()
     assert len(cuts) == 1 and order == []
     snap = w.bargein.snapshot()
     assert snap["own_sound_cuts"] == 1 and snap["triggers"] == 0
+    assert [r["outcome"] for r in snap["recent"]] == ["cut_own"]  # not the user cutting it off
+    assert decisions == [("bargein", "cut_own")]
     w.feed(2.0)
     (u,) = w.rig.utterances
     assert u.text == "neve mi racconti una barzelletta"

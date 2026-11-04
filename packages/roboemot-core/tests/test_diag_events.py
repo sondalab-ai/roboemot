@@ -241,6 +241,17 @@ def test_age_of_finds_the_newest_event_of_a_kind():
     assert ring.age_of("bargein", "released") is None
 
 
+def test_an_own_sound_cut_is_not_the_live_cut_status():
+    """SPEC 7B, 8: speech over a hum cuts the hum, not the robot: the Live status ``cut``
+    reads ``bargein``/``cut`` only."""
+    bus = Bus()
+    ring = EventRing(live(), clock=lambda: 100.0)
+    ring.attach(bus)
+    BusEvents(bus, clock=lambda: 99.0)("bargein", "cut_own")
+    assert ring.age_of("bargein", "cut") is None
+    assert ring.events()[0]["reason"] == "cut_own"  # a known reason, not "other"
+
+
 # ------------------------------------------------------------------ cues
 
 

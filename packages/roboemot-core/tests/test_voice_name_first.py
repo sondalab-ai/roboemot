@@ -175,3 +175,46 @@ def test_the_free_texts_name_position_wins_over_a_decode_that_lost_the_words_bef
     result = grammar_end(fast, SNOW)
     assert not result.wake_word and "name" in result.keywords
     assert grammar.snapshot()["name_first"] == 0
+
+
+@pytest.mark.parametrize("gap_s,wakes", [(0.4, True), (2.0, False)])
+def test_a_grammar_name_after_a_lead_in_must_start_near_the_audio_start(gap_s, wakes):
+    """Review of #180: "ciao ... neve" with a long pause, or a lost stretch, before the name
+    is not the name opening the utterance (``voice.grammar.name_first_max_start_s``, 1.5 s).
+    Both gaps are too wide for the "ciao neve" template (``max_word_gap_s``)."""
+    words = [("ciao", 1.0), ("neve", 1.0), ("mi", 1.0), ("racconti", 1.0), ("una", 1.0)]
+    dec = Decoder(words, gaps={0: gap_s})
+    fast, grammar, _ = build(config(), dec, platform="Neve")
+    assert fast.cfg.grammar.name_first_max_start_s == 1.5
+    result = grammar_end(fast, "ciao deve mi racconti una barzelletta")
+    assert result.wake_word is wakes
+    assert grammar.snapshot()["name_first"] == int(wakes)
+    assert grammar.snapshot()["gapped"]["wake"] == 1
+
+
+def test_the_name_start_limit_is_configuration():
+    words = [("ok", 1.0), ("neve", 1.0), ("mi", 1.0), ("racconti", 1.0), ("una", 1.0)]
+    cfg = RoboEmotConfig.model_validate(
+        {
+            "voice": {
+                "default_name": "Reachy",
+                "keywords": {"it": {"name_lead_ins": ["ok"]}},
+                "grammar": {"name_first_max_start_s": 0.2},
+            }
+        }
+    )
+    fast, _, _ = build(cfg, Decoder(words), platform="Neve")  # the name starts at 0.3 s
+    assert not grammar_end(fast, "ok deve mi racconti una barzelletta").wake_word
+
+
+def test_the_wake_kind_tells_the_first_word_rule_from_the_others():
+    """Only a wake from the first-word rule needs the voice at a face (the listener's gate)."""
+    from roboemot.voice.fastpath import WAKE
+
+    fast = fast_path()
+    fast.begin(0.0, 0.0, "it")
+    assert fast.wake_kind(JOKE) == NAME_FIRST
+    assert fast.wake_kind("c'è la neve") == WAKE  # short final
+    assert fast.wake_kind("domani ciao neve come stai oggi") == WAKE  # template
+    assert fast.wake_kind(SNOW) is None
+    assert final(fast, JOKE).wake == NAME_FIRST

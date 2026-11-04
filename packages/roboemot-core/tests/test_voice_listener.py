@@ -1108,3 +1108,16 @@ def test_the_robots_speech_starting_mid_utterance_still_drops_it():
     hum_mid_utterance(r, lambda: False)
     assert r.utterances == []
     assert r.listener.snapshot()["dropped_speaking"] > 0
+
+
+def test_voice_active_does_not_stick_once_the_listener_mutes_for_the_robots_sound():
+    """The listener drops the utterance when the speaking window opens (no own-sound cut):
+    the endpointer is reset, so nothing keeps holding the hum or the cue sounds."""
+    r = Rig(["ciao"])
+    r.feed(silence(0.5))
+    r.feed(voice(seconds=0.4))
+    assert r.listener.voice_active()
+    r.speech.extend(r.now + 1.0)  # the robot speaks: nothing to cut
+    r.feed(voice(seconds=0.3))
+    assert r.listener.snapshot()["dropped_speaking"] > 0
+    assert not r.listener.voice_active() and not r.listener.hearing()

@@ -702,12 +702,40 @@ class SpeechOutput:
         job, and no sentence on the speech timeline now. A person speaking over such a sound is
         not cutting the robot's speech (SPEC 7B, 8). Safe from any thread."""
         with self._lock:
-            if any(not isinstance(job, _RawJob) for job in self._jobs):
+            return self._raw_only()
+
+    def cut_raw(self) -> bool:
+        """Cut the raw sounds if nothing but raw sounds is queued or playing (``raw_only``),
+        and say whether it did: the queued raw jobs are dropped and the one playing is cut as
+        ``cancel`` cuts it (the sink flushed once it pushed). The check and the cut share the
+        lock, so a sentence queued meanwhile is never touched: no epoch move, no synthesis
+        cancelled (SPEC 7B, 8). Safe from any thread."""
+        with self._lock:
+            if not self._raw_only():
                 return False
-            if self._in_flight and self._raw_current is None:
-                return False
-            if not self._jobs and self._raw_current is None:
-                return False  # nothing raw either: the speaking window is someone else's
+            kept = [job for job in self._jobs if not isinstance(job, _RawJob)]
+            self._jobs.clear()
+            self._jobs.extend(kept)
+            current = self._raw_current
+            if current is not None:
+                self._raw_cancelled.add(current)
+                if self._raw_pushed == current:
+                    self.sink.stop()
+        loop = self._loop
+        if current is not None and loop is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._cancel_raw, current)
+        return True
+
+    def _raw_only(self) -> bool:
+        """``raw_only`` with the lock held (the timeline takes its own lock after ours, as
+        ``stop`` does)."""
+        if any(not isinstance(job, _RawJob) for job in self._jobs):
+            return False
+        if self._in_flight and self._raw_current is None:
+            return False
+        if not self._jobs and self._raw_current is None:
+            return False  # nothing raw either: the speaking window is someone else's
         return self.timeline.sentence_at(self.clock()) is None
 
     def waiting(self, exclude: int | None = None) -> int:

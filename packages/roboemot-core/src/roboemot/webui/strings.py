@@ -152,6 +152,10 @@ EN: dict[str, str] = {
         "Cut by a barge-in (confirmed by {confirmed}): level {level_db} dB, robot playing "
         "{robot_playing}, head moving {moving}, echo {echo_corr}"
     ),
+    "live_ev_bargein_cut_own": (
+        "Speech over the robot's own sound (a hum or a cue) cut that sound (confirmed by "
+        "{confirmed}): level {level_db} dB, echo {echo_corr}"
+    ),
     "live_ev_bargein_released": (
         "Voice lowered, then released ({released_by}): level {level_db} dB, robot playing "
         "{robot_playing}, echo {echo_corr}"
@@ -1070,6 +1074,10 @@ IT: dict[str, str] = {
     "live_ev_bargein_cut": (
         "Interrotto da chi parlava (confermato da {confirmed}): livello {level_db} dB, robot "
         "in riproduzione {robot_playing}, testa in movimento {moving}, eco {echo_corr}"
+    ),
+    "live_ev_bargein_cut_own": (
+        "Chi parlava ha interrotto un suono del robot (un canticchiare o un segnale; confermato "
+        "da {confirmed}): livello {level_db} dB, eco {echo_corr}"
     ),
     "live_ev_bargein_released": (
         "Voce abbassata, poi ripristinata ({released_by}): livello {level_db} dB, robot in "

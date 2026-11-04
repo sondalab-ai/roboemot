@@ -312,6 +312,48 @@ def test_the_name_inside_a_long_utterance_does_not_wake_past_the_facing_check(ea
         assert not ear.utterances[0].addressed and appended(server) == []
 
 
+def test_a_television_opening_with_the_name_does_not_wake(ears):
+    """Review of #180: a weather report's "Neve fino a 1000 metri" opens with the name. The
+    first-word rule wakes only a voice from a visible face, so no audio leaves the robot."""
+    with TurnServer() as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="neve fino a mille metri sulle alpi",
+            bearing=OFF_FACE_RAD,  # the voice comes from no face: the television
+            yaw=0.0,
+            app=NEVE_FACING,
+        )
+        say_after_quiet(ear, 1.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and appended(server) == []
+        snap = ear.r.listener.snapshot()
+        assert snap["name_first_no_face"] == 1
+        assert snap["wake"]["decisions"]["rejected_no_face_at_voice"] == 1
+        assert snap["direction"]["checks"]["rejected"] == 1  # checked once
+
+
+def test_a_long_first_piece_opening_with_the_name_continues_the_decode(ears):
+    """The wake decode's first piece (``wake_decode_max_s``) already holds more words than
+    the short-final rule allows: the name opening it continues the decode to the end."""
+    with TurnServer(heard=[["Neve, mi racconti una barzelletta divertente adesso?"]]) as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="neve mi racconti una barzelletta divertente adesso",
+            bearing=FACE_RAD,
+            yaw=0.7,
+            app=NEVE_FACING,
+        )
+        ear.r.asr.partial = "neve mi racconti una barzelletta divertente"  # 6 words in 3 s
+        say_after_quiet(ear, 6.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].addressed
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["decodes_capped"] == 0 and audio["decodes"] == 1
+        assert ear.r.asr.decoded_s == [pytest.approx(6.0 + pre_roll_s(ear), abs=0.1)]
+
+
 def test_a_short_rejected_utterance_is_decoded_whole(ears):
     with TurnServer() as server:
         ear = ears(server, script=["x"], decoded="ciao", bearing=OFF_FACE_RAD)
