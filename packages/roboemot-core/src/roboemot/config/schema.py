@@ -3270,6 +3270,146 @@ class ListenerConfig(Strict):
     )  # fmt: skip
 
 
+MUSIC_TEMPO_BOUNDS_BPM = (30.0, 300.0)
+MUSIC_BANDS_MAX = 8
+SECONDS_PER_MINUTE = 60.0
+
+
+class MusicConfig(Strict):
+    """Music in the room, from the audio the listener hears (SPEC 8): onset envelope per band,
+    tempo by autocorrelation, beat phase by a comb, a confirm and release rule."""
+
+    enabled: bool = param(
+        True, "Detect music in the room; while it plays every utterance needs the wake word"
+    )
+    hop_ms: float = param(
+        32.0,
+        "Length of one analysis hop (one band-energy value per band and hop)",
+        unit="ms", ge=8, le=128,
+    )  # fmt: skip
+    bands_hz: list[tuple[float, float]] = param(
+        [(30.0, 150.0), (150.0, 2000.0), (2000.0, 7000.0)],
+        "Frequency bands [low, high) whose energy rises make the onset envelope (low: kick, "
+        "mid: snare and voices, high: hats); the top edge must stay under half the sample rate",
+        unit="Hz",
+    )
+    window_s: float = param(
+        6.0,
+        "Onset envelope kept for the tempo estimate; must hold two periods of the slowest tempo",
+        unit="s", ge=1, le=30,
+    )  # fmt: skip
+    estimate_interval_s: float = param(
+        1.0, "Time between two tempo estimates", unit="s", ge=0.1, le=10
+    )
+    min_level_db: float = param(
+        -50.0,
+        "Least mean level over the last estimate interval for audio to count as heard (below "
+        "it a band's energy rises are ignored and no estimate runs)",
+        unit="dBFS", ge=-100, le=0,
+    )  # fmt: skip
+    tempo_bpm: tuple[float, float] = param(
+        (60.0, 180.0),
+        "Tempo range searched, [min, max] in beats per minute, within 30 to 300",
+        unit="bpm",
+    )
+    prior_bpm: tuple[float, float] = param(
+        (100.0, 130.0),
+        "Preferred tempo range against octave errors, within tempo_bpm: a tempo found at twice "
+        "or half a tempo in this range, with that tempo periodic enough on its own, is folded "
+        "into it",
+        unit="bpm",
+    )
+    min_periodicity: float = param(
+        0.5,
+        "Least normalised autocorrelation of the onset envelope at the tempo",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_band_periodicity: float = param(
+        0.35,
+        "Least normalised autocorrelation of one band's own onset envelope at the tempo for the "
+        "band to count as carrying the beat; lower than min_periodicity, since speech or noise in "
+        "a band dilutes its beat",
+        ge=0, le=1,
+    )  # fmt: skip
+    tempo_tolerance: float = param(
+        0.04,
+        "Largest relative change of the tempo between two estimates for it to count as stable",
+        ge=0.005, le=0.5,
+    )  # fmt: skip
+    min_active_share: float = param(
+        0.5,
+        "Least share of the envelope window whose level was above min_level_db",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_bands_active: int = param(
+        2,
+        "Least bands that carry the beat on their own; a ticking clock is one narrow band",
+        ge=1, le=MUSIC_BANDS_MAX,
+    )  # fmt: skip
+    confirm_s: float = param(
+        3.0,
+        "Least time from the start of the evidence (back-dated) to the confirmation; every "
+        "estimate since held and the tempo stayed stable",
+        unit="s", ge=0.5, le=60,
+    )  # fmt: skip
+    release_s: float = param(
+        8.0,
+        "Music ends after this much heard audio with no estimate holding (blind time does not "
+        "count), so a quiet bar or a pause between songs keeps it",
+        unit="s", ge=0, le=120,
+    )  # fmt: skip
+    max_gap_s: float = param(
+        1.0,
+        "A hole in the audio (the robot speaking, a lost stretch) longer than this clears the "
+        "onset envelope; state, tempo and phase keep running",
+        unit="s", ge=0.05, le=30,
+    )  # fmt: skip
+    blind_hold_s: float = param(
+        30.0,
+        "While nothing is heard (the robot speaks) music stays on for at most this long after "
+        "the last heard audio",
+        unit="s", ge=0, le=600,
+    )  # fmt: skip
+    history_s: float = param(
+        60.0,
+        "Music intervals kept to answer whether music played during an utterance",
+        unit="s", ge=5, le=3600,
+    )  # fmt: skip
+    beats_per_bar: int = param(4, "Beats in one bar, for the dance's bar grid", ge=1, le=16)
+
+    @field_validator("bands_hz", mode="after")
+    @classmethod
+    def _bands(cls, value: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not value or len(value) > MUSIC_BANDS_MAX:
+            raise ValueError(f"music.bands_hz needs 1 to {MUSIC_BANDS_MAX} bands")
+        for lo, hi in value:
+            if not (math.isfinite(lo) and math.isfinite(hi)) or lo < 0 or lo >= hi:
+                raise ValueError("each music band is [low, high) with 0 <= low < high, finite")
+        return value
+
+    @field_validator("tempo_bpm", "prior_bpm", mode="after")
+    @classmethod
+    def _tempo_range(cls, value: tuple[float, float]) -> tuple[float, float]:
+        low, high = MUSIC_TEMPO_BOUNDS_BPM
+        lo, hi = value
+        if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
+            raise ValueError("a tempo range is [min, max] with min < max, finite")
+        if lo < low or hi > high:
+            raise ValueError(f"a tempo range must lie within [{low}, {high}] bpm")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> MusicConfig:
+        if self.min_bands_active > len(self.bands_hz):
+            raise ValueError("music.min_bands_active must not exceed the number of bands")
+        if self.prior_bpm[0] < self.tempo_bpm[0] or self.prior_bpm[1] > self.tempo_bpm[1]:
+            raise ValueError("music.prior_bpm must lie within music.tempo_bpm")
+        slowest_period_s = SECONDS_PER_MINUTE / self.tempo_bpm[0]
+        if self.window_s < 2 * slowest_period_s:
+            raise ValueError("music.window_s must hold two periods of the slowest tempo")
+        return self
+
+
 class VoiceDirectionConfig(Strict):
     """Voice-at-face gate: without the wake word, answer only a voice that comes from a visible
     face (SPEC 8 stage 2, 5A)."""
@@ -5227,6 +5367,7 @@ with warnings.catch_warnings():
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
+        music: MusicConfig = param({}, "SPEC 8: music in the room, the wake word over it")
         speech_motion: SpeechMotionConfig = param(
             {}, "SPEC 7, 8: speech timeline and speaking motion"
         )
