@@ -753,7 +753,9 @@ def test_a_barge_in_while_a_skill_runs_answers_the_queued_calls(rigs):
 
         rig.worker._call = slow
         n = rig.say()
-        assert wait_for(lambda: running and srv.sent_of("response.done"))
+        # the route took the response.done (it is no longer live), not only the server sent it:
+        # a barge-in before that cancels a response still in flight on the route
+        assert wait_for(lambda: running and rig.route.snapshot()["responses"].get("completed") == 1)
         assert barge_in(rig)
         assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
         assert wait_for(lambda: len(outputs_by_call(srv)) == 3)

@@ -180,3 +180,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       a production race. 3.11's `asyncio.wait_for` returned a queued event and swallowed a barge-in's
       cancel in the same loop iteration (no `response.cancel`, the turn ended `ok`). `ResponseRun.run`,
       the chat stream, skill calls and the TTS backends now use `asyncio.timeout` (SPEC 8).
+- [x] `test_realtime_turns.py::test_a_barge_in_while_a_skill_runs_answers_the_queued_calls`: it barged in once
+      the server had sent `response.done`, before the route took it, so the cut cancelled a response still
+      live on the route. It now waits for the route's `responses` count.
+- [x] `test_realtime_tone.py::test_an_invalid_only_tone_round_gets_its_output_and_no_extra_response`: both CI
+      failures predate PR 168 (`7ba46ee`), which waits for the output to cross the socket. No change.
