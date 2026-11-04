@@ -194,9 +194,9 @@ class Matcher:
         ``vote_max_age_s`` older than it are ignored; neither modality ever clears the other,
         so a disagreement lasts until the stale votes age out or fresh ones agree. A recognised
         entity track is the exception to the ageing: it keeps its owner until
-        ``entity_contrary_votes`` of its last votes name one other owner or the owner's record
-        leaves the gallery of ``model_id`` (deleted, no longer active, or another model id);
-        a person never does.
+        ``entity_contrary_votes`` of the votes cast since the voting rule last named it name one
+        other owner or the owner's record leaves the gallery of ``model_id`` (deleted, no longer
+        active, or another model id); a person never does.
         """
         with self._lock:
             track = self._track(track_id)
