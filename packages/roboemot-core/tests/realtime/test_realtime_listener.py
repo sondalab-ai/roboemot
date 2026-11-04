@@ -268,6 +268,50 @@ def test_a_long_rejected_utterance_decodes_only_its_first_seconds(ears):
         assert not ear.utterances[0].addressed and appended(server) == []
 
 
+NEVE_FACING = {
+    "voice": {"wake_word_policy": "never", "wake_word": "Neve", "facing": {"enabled": True}}
+}
+
+
+def test_a_long_utterance_opening_with_the_name_wakes_past_the_facing_check(ears):
+    """Regression, robot run 2026-11-04: the facing check rejected "Neve, mi racconti una
+    barzelletta?" (the owner looking away), and the wake decode did not wake on the bare name
+    in a long final. The name as the first word now wakes it at any length (SPEC 8)."""
+    with TurnServer(heard=[["Neve, mi racconti una barzelletta?"]]) as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="neve mi racconti una barzelletta",
+            bearing=FACE_RAD,
+            yaw=0.7,  # 40 deg away: not facing
+            app=NEVE_FACING,
+        )
+        ear.r.asr.partial = "neve mi racconti una"  # the first piece's words
+        say_after_quiet(ear, 6.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.wake_word
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["decodes_capped"] == 0  # the first piece woke it: decoded to the end
+        assert audio["wake_word_heard"] == 1  # the server's transcript wakes it too
+        assert len(server.of("input_audio_buffer.commit")) == 1
+
+
+def test_the_name_inside_a_long_utterance_does_not_wake_past_the_facing_check(ears):
+    with TurnServer() as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="c'è tanta neve oggi in montagna",
+            bearing=FACE_RAD,
+            yaw=0.7,
+            app=NEVE_FACING,
+        )
+        say_after_quiet(ear, 1.0)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and appended(server) == []
+
+
 def test_a_short_rejected_utterance_is_decoded_whole(ears):
     with TurnServer() as server:
         ear = ears(server, script=["x"], decoded="ciao", bearing=OFF_FACE_RAD)

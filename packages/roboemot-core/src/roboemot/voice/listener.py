@@ -6,7 +6,11 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
    ``on_speaking_chunk`` (the barge-in detector, SPEC 8 stage 8), and resets the pipeline on that
    transition and on a gap, since the audio is no longer contiguous. ``resume`` is the detector's
    way back: it feeds the audio from the barge-in onset and keeps the gate open until the echo
-   tail is over, so the user's first words are not lost;
+   tail is over, so the user's first words are not lost. When the window opens on a sound of
+   the robot's own that is not speech (a self-soothing hum, SPEC 7B) while someone's speech is
+   in progress or starting (``voice_active``), ``cut_own_sound`` (``bind_own_sound``) cuts that
+   sound and the utterance goes on instead: the gate stays open until the cut's echo tail is
+   over;
 2. runs the VAD endpointer; the ASR only ever sees speech (pre-roll included);
 3. on speech start picks the language, runs the fast path (head turn, ``speech.heard``) and
    starts the recognizer; on each partial runs the keyword spotter;
@@ -242,6 +246,7 @@ class VoiceListener:
         # finished utterances waiting for their final, in order (the head goes first)
         self._queue: collections.deque[_Handoff] = collections.deque()
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
+        self._cut_own_sound: Callable[[], bool] | None = None  # bind_own_sound
         self._realtime: Any = None  # the realtime route's audio input (bind_realtime)
         self._on_audio: Callable[[str, float], None] = lambda event, key: None  # bind_realtime
         self._audio = {
@@ -293,6 +298,12 @@ class VoiceListener:
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
+
+    def bind_own_sound(self, cut: Callable[[], bool]) -> None:
+        """``cut()`` cuts a sound of the robot's own that is not speech, when only such a sound
+        plays, and says whether it did: someone's speech that is in progress as the sound starts
+        then goes on (SPEC 7B, 8)."""
+        self._cut_own_sound = cut
 
     def bind_realtime(
         self, realtime: Any, on_audio: Callable[[str, float], None] | None = None
@@ -524,6 +535,8 @@ class VoiceListener:
             self._count("gaps")
             self._abort(wait=True)
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
+        if speaking and start >= self._open_until and self._own_sound_cut():
+            self._open_until = self._speech.until()  # the cut's echo tail: the utterance goes on
         if speaking and start >= self._open_until:
             if not self._muted:
                 self._muted = True
@@ -539,6 +552,17 @@ class VoiceListener:
             self._muted = False
             self._speaking_ended()
         self._ingest(chunk.samples, start, chunk.stamp)
+
+    def _own_sound_cut(self) -> bool:
+        """Someone's speech is in progress or starting as the speaking window opens: cut the
+        robot's own sound if only such a sound plays (``bind_own_sound``); True when it did."""
+        if self._muted or self._cut_own_sound is None or not self.voice_active():
+            return False
+        try:
+            return bool(self._cut_own_sound())
+        except Exception as exc:
+            log.warning("voice listener: own-sound cut: %s", type(exc).__name__)
+            return False
 
     def resume(self, audio: np.ndarray, start: float) -> None:
         """Barge-in handoff (SPEC 8 stage 8), called from the speaking-chunk hook after the
@@ -601,6 +625,12 @@ class VoiceListener:
         listening blip waits for a quiet moment (SPEC 8, Non-verbal cues). Safe from any thread
         (a single flag)."""
         return self._hearing
+
+    def voice_active(self) -> bool:
+        """Whether someone's speech is in progress or may be starting (the VAD is counting
+        frames above its threshold towards a start): no self-soothing sound starts then, and no
+        one-shot cue sound plays (SPEC 7B, 8). Safe from any thread (two single-word reads)."""
+        return self._hearing or self._endpointer.onset
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
         self._hearing = True  # before the hand-offs below: their blip must not cover this speech

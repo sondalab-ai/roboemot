@@ -1056,3 +1056,55 @@ def test_hearing_is_true_from_speech_start_to_its_end():
     assert r.listener.hearing()
     r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
     assert not r.listener.hearing()
+
+
+# ------------------------------------------------------------------ the robot's own sounds
+
+
+def test_voice_active_covers_a_speech_onset_before_the_vad_confirms_it():
+    """The soothe hold and the cue sounds read ``voice_active``: speech may be starting before
+    ``hearing`` (the utterance) begins."""
+    r = Rig(["ciao"])
+    r.feed(silence(0.5))
+    assert not r.listener.voice_active()
+    r.feed(voice(seconds=CHUNK / RATE))  # shorter than voice.vad.min_speech_ms
+    assert r.listener.voice_active() and not r.listener.hearing()
+    r.feed(voice(seconds=0.5))
+    assert r.listener.voice_active() and r.listener.hearing()
+    r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
+    assert not r.listener.voice_active()
+
+
+def hum_mid_utterance(r, cut):
+    """Someone speaks; 0.4 s in, a sound of the robot's own opens the speaking window."""
+    r.listener.bind_own_sound(cut)
+    r.feed(silence(0.5))
+    r.feed(voice(seconds=0.4))
+    r.speech.extend(r.now + 2.0)  # the hum pushed to the speaker: 2 s of it
+    r.say(1.0)
+
+
+def test_a_sound_that_starts_while_someone_speaks_is_cut_and_the_utterance_goes_on():
+    """Regression, robot run 2026-11-04: a self-soothing hum that started as the owner began
+    "Neve, ..." opened the speaking window and the listener dropped the utterance's start."""
+    r = Rig(["neve", "neve mi racconti una barzelletta"])
+    cuts = []
+
+    def cut():
+        cuts.append(r.now)
+        r.speech.reset(r.now)  # the hum is cut: the window ends, its echo tail stays
+        return True
+
+    hum_mid_utterance(r, cut)
+    assert len(cuts) == 1
+    (u,) = r.utterances
+    assert u.text == "neve mi racconti una barzelletta"
+    assert r.listener.snapshot()["dropped_speaking"] == 0
+
+
+def test_the_robots_speech_starting_mid_utterance_still_drops_it():
+    """``cut`` declines (robot speech is playing): the listener mutes as before."""
+    r = Rig(["neve", "neve mi racconti una barzelletta"])
+    hum_mid_utterance(r, lambda: False)
+    assert r.utterances == []
+    assert r.listener.snapshot()["dropped_speaking"] > 0

@@ -117,7 +117,8 @@ EXCEPTIONS = {  # exception class name -> the code a turn failure carries
 }
 CUE_KINDS = ("listening", "offline", "not_heard", "fallback")
 CUE_RESULTS = (
-    "played", "disabled", "muted", "unsupported", "sound_dropped", "skipped", "dropped"
+    "played", "disabled", "muted", "unsupported", "sound_dropped", "sound_skipped", "skipped",
+    "dropped",
 )  # fmt: skip
 FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
 PATHS = ("vad", "onset", "keyword")

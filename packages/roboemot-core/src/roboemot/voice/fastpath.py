@@ -20,6 +20,11 @@ from that text.
 A short final text with exactly one yes or no keyword, in an addressed utterance, also goes to
 ``on_answer(category, now)`` (the nod / shake handler, ``roboemot.voice.yes_no``); partials do not.
 
+The wake decision (``wakes``, ``end``): a wake phrase anywhere; the robot's name or an alias
+opening the final text (``KeywordSpotter.name_first``, or the grammar pass's ``NAME_FIRST`` flag),
+at any length; the name elsewhere only in a final of at most
+``voice.fastpath.alias_wake_max_words`` words (a name such as "Neve" is also a word).
+
 With a ``grammar`` (``roboemot.voice.grammar``), the end of an utterance also gets a grammar pass
 on its audio (``grammar_pass``, run on the grammar worker thread): the categories it hears
 confidently join those of the final text in ``end``, before the wake and answer decisions.
@@ -42,7 +47,7 @@ import numpy as np
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
 from .grammar import GrammarSpotter
-from .keywords import KeywordSpotter
+from .keywords import NAME_FIRST, KeywordSpotter
 from .robot_name import RobotName
 from .speech_features import Prosody, analyse
 
@@ -260,12 +265,35 @@ class FastPath:
         """Whether final ``text`` (with what the grammar pass ``heard``) wakes the robot, as
         ``end`` decides it, with no event sent and nothing recorded."""
         u = state if state is not None else self._u
-        spotter = grammar_pass.spotter if grammar_pass is not None else self._spotter
-        cats = spotter.spot(text, u.language) | heard
-        words = len(text.split())
-        return "wake" in cats or (
-            "name" in cats and words <= self.cfg.fastpath.alias_wake_max_words
-        )
+        spotter = self._spotter_for(grammar_pass, server=False)
+        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
+        return self._wake(spotter, text, u.language, cats, heard)
+
+    def _spotter_for(self, grammar_pass: GrammarPass | None, server: bool) -> KeywordSpotter:
+        """The grammar pass's spotter (fixed at the utterance's end), else the server
+        transcript's (no vocabulary limit) or the local one."""
+        if grammar_pass is not None:
+            return grammar_pass.spotter
+        return self._server_spotter if server else self._spotter
+
+    def _wake(
+        self,
+        spotter: KeywordSpotter,
+        text: str,
+        language: str,
+        cats: set[str] | frozenset[str],
+        heard: frozenset[str],
+    ) -> bool:
+        """The wake decision on final ``text`` with categories ``cats``: a wake phrase; the
+        name opening the text (or the grammar pass heard it first), at any length; the name
+        elsewhere in a final of at most ``alias_wake_max_words`` words."""
+        if "wake" in cats:
+            return True
+        if "name" not in cats:
+            return False
+        if NAME_FIRST in heard or spotter.name_first(text, language):
+            return True
+        return len(text.split()) <= self.cfg.fastpath.alias_wake_max_words
 
     def end(
         self,
@@ -293,11 +321,8 @@ class FastPath:
         """
         u = state if state is not None else self._u
         words = len(text.split())
-        if grammar_pass is not None:
-            spotter = grammar_pass.spotter
-        else:
-            spotter = self._server_spotter if server else self._spotter
-        cats = spotter.spot(text, u.language) | heard
+        spotter = self._spotter_for(grammar_pass, server)
+        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
         before = u.keyword_at
         self._fire(cats, u)
         if before is None and u.keyword_at is not None:
@@ -309,7 +334,7 @@ class FastPath:
             self.stats.record("reaction_vs_last_speech", min(reactions) - last_speech_stamp)
         if u.keyword_at is not None:
             self.stats.record("keyword_vs_last_speech", u.keyword_at - last_speech_stamp)
-        wake = "wake" in cats or ("name" in cats and words <= fp.alias_wake_max_words)
+        wake = self._wake(spotter, text, u.language, cats, heard)
         said = cats & {"yes", "no"}
         answer = next(iter(said)) if len(said) == 1 and words <= fp.gesture_max_words else None
         return FastResult(frozenset(cats), wake, prosody, answer)

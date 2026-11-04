@@ -697,6 +697,19 @@ class SpeechOutput:
                 isinstance(job, _RawJob) and job.id == job_id for job in self._jobs
             )
 
+    def raw_only(self) -> bool:
+        """Whether a raw sound is queued or playing and nothing else is: no sentence or stream
+        job, and no sentence on the speech timeline now. A person speaking over such a sound is
+        not cutting the robot's speech (SPEC 7B, 8). Safe from any thread."""
+        with self._lock:
+            if any(not isinstance(job, _RawJob) for job in self._jobs):
+                return False
+            if self._in_flight and self._raw_current is None:
+                return False
+            if not self._jobs and self._raw_current is None:
+                return False  # nothing raw either: the speaking window is someone else's
+        return self.timeline.sentence_at(self.clock()) is None
+
     def waiting(self, exclude: int | None = None) -> int:
         """Jobs still queued (sentences and raw sounds), not counting job ``exclude``. The idle
         runner passes its own sound, so only somebody else's audio counts (SPEC 7B)."""

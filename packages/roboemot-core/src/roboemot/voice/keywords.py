@@ -8,6 +8,12 @@ the inflections you want. Categories are ``stop``, ``yes``, ``no``, ``greeting``
 (one of its ``wake_phrases``, or a ``name_wake_templates`` phrase rendered with the name). It
 runs on every partial, so it is a few substring tests.
 
+``name_first`` tells whether a text *opens* with the robot's name or an alias, after at most one
+lead-in (a ``name_lead_ins`` phrase or a ``greeting`` of the language): the name as the first
+word wakes the robot at any sentence length (SPEC 8, owner decision 2026-11-04), while the name
+elsewhere wakes only a short final. The grammar pass reports the same position in what it heard
+with the ``NAME_FIRST`` flag (never a category: the fast path takes it out).
+
 ``grammar_phrases`` gives the same lists *folded* instead (lower case, accents kept): the form a
 recognizer vocabulary spells them in, for the grammar pass (``roboemot.voice.grammar``).
 """
@@ -27,6 +33,7 @@ if TYPE_CHECKING:
 NON_WORD = re.compile(r"[\W_]+")
 FOLD_SPLIT = re.compile(r"[^\w']+|_")
 CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
+NAME_FIRST = "name_first"  # grammar pass flag in what it heard: the name opened the utterance
 
 
 def normalise(text: str) -> str:
@@ -58,6 +65,12 @@ class KeywordSpotter:
         self._phrases: dict[str, dict[str, list[str]]] = {}
         self._folded: dict[str, dict[str, tuple[str, ...]]] = {}
         self._oov: dict[str, int] = {}
+        self._leads = {
+            language: tuple(
+                p for p in (normalise(x) for x in [*ks.name_lead_ins, *ks.greeting]) if p
+            )
+            for language, ks in self._sets.items()
+        }
         self._rebuild()
 
     def _rebuild(self) -> None:
@@ -115,6 +128,26 @@ class KeywordSpotter:
         """Per language whose recognizer vocabulary is known, how many wake phrases (generic
         and rendered with the name) can never be heard (SPEC 8, 12A: numbers only)."""
         return dict(self._oov)
+
+    def lead_in(self, words: str, language: str) -> bool:
+        """Whether ``words`` (any spelling) is empty or one lead-in phrase of ``language``: what
+        may come before the name for ``name_first``."""
+        plain = normalise(words)
+        return not plain or plain in self._leads.get(language, ())
+
+    def name_first(self, text: str, language: str) -> bool:
+        """Whether ``text`` opens with the robot's name or one of its aliases (whole words),
+        alone or after one lead-in phrase of ``language`` (``lead_in``)."""
+        padded = f" {normalise(text)} "
+        if padded == "  ":
+            return False
+        self._rebuild()
+        names = list(self._phrases.get(language, {}).get("name", []))
+        name = self._resolved
+        if name is not None and name.usable(language):
+            names.append(name.matching)
+        starts = [" ", *(f" {lead} " for lead in self._leads.get(language, ()))]
+        return any(padded.startswith(f"{s}{n} ") for s in starts for n in names)
 
     def spot(self, text: str, language: str) -> set[str]:
         """The categories whose phrases occur as whole words in ``text``."""

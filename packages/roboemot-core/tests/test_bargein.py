@@ -1105,3 +1105,55 @@ def test_recording_does_not_change_any_decision():
         face_offset=lambda now: 1.0,
     )
     assert a == b and len(a) == 1
+
+
+# ------------------------------------------------------------------ a sound that is not speech
+
+
+def test_speech_over_the_robots_own_sound_cuts_it_without_cancelling_an_answer():
+    """SPEC 7B, 8 (owner decision 2026-11-04): a person speaking over a self-soothing hum cuts
+    the hum (``cut_own``), not the robot's speech: no prepare, stop or interrupt, and the
+    person's words are kept."""
+    w = World(["ciao", "neve mi racconti una barzelletta"])
+    order, cuts = [], []
+
+    def cut_own():
+        cuts.append(w.rig.now)
+        w.stop()  # the hum is cut: what ReachySpeaker.stop does to the speaking window
+        return True
+
+    w.bargein.bind(
+        lambda: order.append("stop"),
+        lambda: order.append("interrupt"),
+        w.rig.listener.resume,
+        lambda: order.append("prepare"),
+        cut_own=cut_own,
+    )
+    w.speak(5.0)  # the hum
+    w.feed(1.0)
+    onset = w.rig.t + 0.5
+    w.feed(2.0, user_voice(1.5, 0.21), user_at=0.5)
+    assert len(cuts) == 1 and order == []
+    snap = w.bargein.snapshot()
+    assert snap["own_sound_cuts"] == 1 and snap["triggers"] == 0
+    w.feed(2.0)
+    (u,) = w.rig.utterances
+    assert u.text == "neve mi racconti una barzelletta"
+    assert u.start_stamp <= onset + 0.1  # the first words were not lost to the hum
+
+
+def test_over_the_robots_speech_cut_own_declines_and_the_cut_off_is_as_before():
+    w = World(["ciao"])
+    order = []
+    w.bargein.bind(
+        lambda: (order.append("stop"), w.stop()),
+        lambda: order.append("interrupt"),
+        w.rig.listener.resume,
+        lambda: order.append("prepare"),
+        cut_own=lambda: False,  # a sentence is playing
+    )
+    w.speak(4.0)
+    w.feed(0.5)
+    w.feed(1.5, user_voice(1.0, 0.3), user_at=0.2)
+    assert order == ["prepare", "stop", "interrupt"]
+    assert w.bargein.snapshot()["own_sound_cuts"] == 0

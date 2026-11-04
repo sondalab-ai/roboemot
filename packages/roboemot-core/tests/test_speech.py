@@ -1322,3 +1322,19 @@ def test_play_aside_racing_say_and_stop_never_blocks_or_breaks_the_output(make):
     before = out.sentences_spoken
     say(out)
     assert wait_for(lambda: out.sentences_spoken == before + 1)  # the output still works
+
+
+def test_raw_only_is_true_while_nothing_but_raw_sounds_plays(make):
+    """SPEC 7B, 8: speech over the robot's own sound is not speech over its voice."""
+    sink = TimelineSink()
+    out = make(sink=sink)
+    assert not out.raw_only()  # idle: no sound of its own either
+    out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    assert out.raw_only()
+    say(out)  # a sentence queued behind the sound
+    assert not out.raw_only()
+    out.stop()
+    say(out, "Ancora.")
+    assert wait_for(lambda: out.timeline.sentence_at(time.monotonic()) is not None)
+    assert not out.raw_only()  # a sentence plays

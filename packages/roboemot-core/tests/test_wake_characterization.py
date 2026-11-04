@@ -20,9 +20,11 @@ def decide(text, language, platform=None, configured=None, with_vocab=True):
     """(categories, wakes) as FastPath decides it for a final text."""
     names = RobotName(platform, vocab if with_vocab else None)
     names.configure(VOICE)
-    cats = KeywordSpotter(SETS, configured, names).spot(text, language)
-    words = len(text.split())
-    return cats, "wake" in cats or ("name" in cats and words <= MAX_WORDS)
+    spotter = KeywordSpotter(SETS, configured, names)
+    cats = spotter.spot(text, language)
+    short = len(text.split()) <= MAX_WORDS
+    first = spotter.name_first(text, language)  # the name opening the text (owner, 2026-11-04)
+    return cats, "wake" in cats or ("name" in cats and (short or first))
 
 
 @pytest.mark.parametrize("platform", [None, "reachy_mini", "Reachy"])
@@ -37,7 +39,8 @@ def decide(text, language, platform=None, configured=None, with_vocab=True):
         ("reati", "it", {"name"}, True),
         ("hello riyadh she", "en", {"greeting", "name"}, True),
         ("il comune di reati ha approvato oggi il nuovo bilancio", "it", {"name"}, False),
-        ("riyadh she is a city in the middle of the desert today", "en", {"name"}, False),
+        ("the city of riyadh she is in the middle of the desert today", "en", {"name"}, False),
+        ("reati mi racconti una barzelletta per favore", "it", {"name"}, True),  # opens the text
         ("che tempo fa", "it", set(), False),
         ("hello reachy", "en", {"greeting"}, False),  # out of vocabulary: no name wake
     ],

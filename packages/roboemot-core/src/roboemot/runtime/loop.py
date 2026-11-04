@@ -152,6 +152,7 @@ def _tick_until_stopped(
                     in_session=host.conversation is not None and host.conversation.in_session(),
                     last_voice=p.voice_heard[0],
                     echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
+                    hearing=p.listener is not None and p.listener.voice_active(),
                 ),
                 host.circadian.state if host.circadian else "awake",
                 live.circadian.enabled and in_window(p.clock.hour(), live.circadian.quiet_hours),
