@@ -1256,6 +1256,20 @@ def test_no_wake_word_over_music_is_rejected_music():
     assert start == pytest.approx(u.start_stamp) and end == pytest.approx(u.last_speech_stamp)
 
 
+def test_music_off_never_requires_the_wake_word():
+    """Review 1b, Minor-1: with ``music.enabled`` off the gate does not ask the detector, even
+    one that still says music (a reload turned it off before its next chunk)."""
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"wake_word_policy": "never"}, "music": {"enabled": False}}
+    )
+    r = Rig(["come stai"], cfg=cfg)
+    spy = r.listener.music = SpyMusic(True)
+    r.say()
+    assert r.utterances[0].addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["not_required"] == 1
+    assert spy.asked == []
+
+
 def test_music_wins_over_the_voice_at_face_check():
     r, _, _ = direction_rig("la la la amore mio", OFF_FACE_RAD)
     r.listener.music = SpyMusic(True)

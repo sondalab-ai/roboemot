@@ -5448,6 +5448,22 @@ with warnings.catch_warnings():
             return self
 
         @model_validator(mode="after")
+        def _music_bands_fit_the_rate(self) -> RoboEmotConfig:
+            """With music on, every band of ``music.bands_hz`` must stay under the Nyquist
+            frequency of ``voice.sample_rate_hz`` (SPEC 8, Music detector): the detector could
+            not be built and the listener would fail to start. Checked at load and on every
+            reload, so a bad override is refused instead of skipping music silently."""
+            nyquist = self.voice.sample_rate_hz / 2
+            top = max(hi for _, hi in self.music.bands_hz)
+            if self.music.enabled and top >= nyquist:
+                raise ValueError(
+                    f"music.bands_hz top edge {top:g} Hz must be under half of "
+                    f"voice.sample_rate_hz ({nyquist:g} Hz); lower the bands or turn "
+                    "music.enabled off"
+                )
+            return self
+
+        @model_validator(mode="after")
         def _appraisal_labels_exist(self) -> RoboEmotConfig:
             for rule in self.appraisal.rules:
                 if rule.label is not None and rule.label not in self.affect.labels:
