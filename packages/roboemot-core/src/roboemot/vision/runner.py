@@ -22,7 +22,7 @@ import numpy as np
 from .. import priority, shutdown
 from .geometry import CameraModel
 from .stages import PerceptionModule
-from .types import Frame
+from .types import Frame, PreviewOverlay
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,8 @@ class LockedSource:
 
 class Kept(NamedTuple):
     """The frame the live preview shows: the newest one the pipeline finished, its submit
-    sequence number and the overlay computed on it (None without an overlay hook)."""
+    sequence number and the ``PreviewOverlay`` computed on it (face and object boxes; None
+    without an overlay hook)."""
 
     frame: Frame
     seq: int
@@ -84,10 +85,12 @@ class LatestFrameRunner:
         overlay: Callable[[Any], Any] | None = None,
     ):
         """``overlay`` gets what ``process`` returned, on the worker thread right after it and
-        only while watched, and returns the overlay to keep with that frame (the face boxes of
-        the live preview), or None when face detection did not run on it: the kept frame then
-        stays for ``hold_s`` (see ``watch``), after which this one is kept without boxes.
-        Without a hook every processed frame is kept, with no overlay."""
+        only while watched, and returns the ``PreviewOverlay`` to keep with that frame (the
+        face and object boxes of the live preview). When its face boxes are not current (face
+        detection did not run on it; None counts as an empty one), a kept frame with face
+        boxes stays for ``hold_s`` (see ``watch``), after which this one is kept with its
+        object boxes and no face boxes. Without a hook every processed frame is kept, with no
+        overlay."""
         self.module = module
         self._overlay = overlay
         self.dropped = 0
@@ -234,8 +237,8 @@ class LatestFrameRunner:
         return True
 
     def _keep(self, frame: Frame, seq: int, arrived: float, report: Any) -> None:
-        """While watched, keep ``frame`` with the overlay computed on it (worker thread, right
-        after ``process``, so nothing newer has touched the pipeline's state)."""
+        """While watched, keep ``frame`` with the ``PreviewOverlay`` computed on it (worker
+        thread, right after ``process``, so nothing newer has touched the pipeline's state)."""
         with self._cond:
             if self._clock() >= self._watch_until:
                 return
@@ -249,11 +252,14 @@ class LatestFrameRunner:
         with self._cond:
             if self._clock() >= self._watch_until:  # unwatch() may have run meanwhile
                 return
-            if self._overlay is not None and overlay is None:
-                held = self._latest is not None and self._latest.overlay
-                if held and arrived - self._latest_at < self._hold_s:
-                    return  # the detection frame still shows, with its boxes
-                overlay = []  # a live picture without boxes rather than stale ones
+            if self._overlay is not None:
+                if overlay is None:
+                    overlay = PreviewOverlay(faces_current=False)
+                if not overlay.faces_current:
+                    held = self._latest is not None and self._latest.overlay
+                    if held and arrived - self._latest_at < self._hold_s:
+                        return  # the detection frame still shows, with its face boxes
+                    # else a live picture with the object boxes, no stale face boxes
             self._latest = Kept(frame, seq, overlay)
             self._latest_at = arrived
 

@@ -41,7 +41,7 @@ def pipeline():
         alone=SimpleNamespace(alone=False),
         network=SimpleNamespace(online=True),
         tracker=SimpleNamespace(active=SimpleNamespace(people=1)),
-        selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5")),
+        selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5", priority="face")),
         perception=SimpleNamespace(registry=SimpleNamespace(get_person=people.__getitem__)),
         world=SimpleNamespace(entries=[face]),
         reflexes=SimpleNamespace(last_fired=lambda now: None),
@@ -335,7 +335,10 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
     runner = LatestFrameRunner(Module())
     service = SimpleNamespace(runner=runner, paused=False)
     faces = SimpleNamespace(
-        face_overlay=lambda: [], clear_overlay=lambda: None, matcher=SimpleNamespace(registry=None)
+        face_overlay=lambda: [],
+        object_overlay=lambda: [],
+        clear_overlay=lambda: None,
+        matcher=SimpleNamespace(registry=None),
     )
     bus = Bus()
     host = SimpleNamespace(
