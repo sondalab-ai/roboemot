@@ -11,11 +11,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from roboemot.attention.types import SHOWN
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.runtime import live_video
 from roboemot.runtime.live_video import LiveVideo, ascii_label
 from roboemot.vision.runner import LatestFrameRunner
-from roboemot.vision.types import Frame
+from roboemot.vision.types import Frame, PreviewOverlay
 from roboemot.world.types import Entry
 
 cv2 = pytest.importorskip("cv2")  # the vision extra: run by the python-vision CI job
@@ -49,9 +50,9 @@ def image(width=640, height=480):
 
 
 class World:
-    def __init__(self, identity):
+    def __init__(self, identity, kind="person", category="face"):
         self.entry = Entry(
-            entry_id="e1", kind="person", category="face", identity=identity, azimuth_rad=0.0,
+            entry_id="e1", kind=kind, category=category, identity=identity, azimuth_rad=0.0,
             elevation_rad=0.0, distance_m=1.0, uncertainty_rad=0.1, confidence=0.9,
             first_seen=0.0, last_seen=1.0,
         )  # fmt: skip
@@ -63,9 +64,13 @@ class World:
 class Rig:
     """A LiveVideo over a real runner, a fake pipeline overlay and a settable clock."""
 
-    def __init__(self, faces=(), names=None, target_identity=None, hook=None, **live):
+    def __init__(
+        self, faces=(), names=None, target_identity=None, hook=None, objects=(), shown=None, **live
+    ):
         """``hook``: the runner's overlay hook (production wires the pipeline's); without it
-        every frame is kept and the pipeline's ``face_overlay`` (``faces``) is drawn."""
+        every frame is kept and the pipeline's ``face_overlay`` (``faces``) and
+        ``object_overlay`` (``objects``) are drawn. ``shown``: ``(identity, category)`` of a
+        shown-object target (SPEC 5A) instead of a person target."""
         self.clock = Clock()
         self.runner = LatestFrameRunner(Module(), clock=self.clock, overlay=hook)
         self.service = SimpleNamespace(runner=self.runner, paused=False)
@@ -73,18 +78,26 @@ class Rig:
             k: SimpleNamespace(display_name=v, status="active") for k, v in (names or {}).items()
         }
         self.faces = list(faces)
+        self.objects = list(objects)
         registry = SimpleNamespace(get_person=people.__getitem__)
         pipeline = SimpleNamespace(
-            face_overlay=lambda: self.faces, matcher=SimpleNamespace(registry=registry)
+            face_overlay=lambda: self.faces,
+            object_overlay=lambda: self.objects,
+            matcher=SimpleNamespace(registry=registry),
         )
         self.host = SimpleNamespace(
             perception=SimpleNamespace(service=self.service, pipeline=pipeline)
         )
-        target = None if target_identity is None else SimpleNamespace(entry_id="e1")
+        target, world = None, World(target_identity)
+        if target_identity is not None:
+            target = SimpleNamespace(entry_id="e1", priority="nearest_face")
+        if shown is not None:
+            target = SimpleNamespace(entry_id="e1", priority=SHOWN)
+            world = World(shown[0], kind="object", category=shown[1])
         self.p = SimpleNamespace(
             sleep=SimpleNamespace(asleep=False),
             selector=SimpleNamespace(target=target),
-            world=World(target_identity),
+            world=world,
         )
         self.video = LiveVideo(self.host, self.p, config(**live), clock=self.clock)
         self.encodes = 0
@@ -538,7 +551,7 @@ def test_rare_face_detection_with_a_working_camera_is_never_stale():
         jpeg, code = rig.video.frame("a")
         assert code is None and jpeg is not None
         rig.clock.now += stale_s / 2  # the camera keeps handing frames in
-    assert rig.runner.latest().overlay == []  # a live picture, without boxes
+    assert not rig.runner.latest().overlay  # a live picture, without boxes
 
 
 def test_a_stalled_camera_is_stale_even_with_a_kept_frame():
@@ -594,6 +607,31 @@ def test_a_bad_face_box_never_stops_the_picture(box):
 
 
 @pytest.mark.parametrize(
+    "box",
+    [
+        (float("nan"),) * 4,
+        (float("inf"), 0.0, 10.0, 10.0),
+        (1e12, 1e12, 2e12, 2e12),
+        (0.0, 0.0, 3e9, 3e9),
+    ],
+)
+def test_a_bad_object_box_is_skipped_and_the_others_are_drawn(box, caplog):
+    rig = Rig(objects=[(box, "cup", None), ((300.0, 200.0, 400.0, 320.0), "cup", None)])
+    img = drawn(rig)
+    assert blue_pixels(img) > 0  # the good box
+    assert img[260, 300:304].max() > 0
+    assert not any("cup" in r.getMessage() for r in caplog.records)
+
+
+def test_an_object_that_cannot_be_drawn_is_logged_without_content(caplog):
+    rig = Rig(objects=[(("a", "b", "c", "d"), "secret cup", "owner-1")])
+    img = drawn(rig)
+    assert img is not None  # the frame is still served
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert lines == ["live video: an object could not be drawn"]
+
+
+@pytest.mark.parametrize(
     "display_name", [None, 123, b"bytes", "x" * 10000, "\x00a\nb", "\U0001f600"]
 )
 def test_a_bad_display_name_never_stops_the_picture(display_name):
@@ -605,3 +643,90 @@ def test_a_bad_display_name_never_stops_the_picture(display_name):
     rig.submit()
     jpeg, code = rig.video.frame("a")
     assert code is None and jpeg[:2] == b"\xff\xd8"
+
+
+# ---------------------------------------------------------------- animal and object boxes (SPEC 5A)
+
+
+def blue_pixels(img):
+    return int(((img[:, :, 0] > 180) & (img[:, :, 1] > 80) & (img[:, :, 1] < 160)
+                & (img[:, :, 2] < 90)).sum())  # fmt: skip
+
+
+CUP = ((300.0, 200.0, 400.0, 320.0), "cup", None)
+
+
+def test_an_object_box_is_drawn_in_its_own_colour_with_its_category():
+    img = drawn(Rig(objects=[CUP]))
+    assert blue_pixels(img) > 0
+    assert green_pixels(img) == 0 and yellow_pixels(img) == 0
+    assert img[260, 300:302].max() > 0  # the left edge (scale 1)
+    text = lambda img: int((img[170:196, 304:340] > 60).sum())  # noqa: E731
+    assert text(img) > 0  # the category label above the box
+    unlabelled = Rig(objects=[CUP])
+    unlabelled.video._label = lambda *a: None
+    assert text(drawn(unlabelled)) == 0
+
+
+def test_the_object_colour_differs_from_the_face_and_target_colours():
+    assert len({live_video.BGR_FACE, live_video.BGR_TARGET, live_video.BGR_OBJECT}) == 3
+
+
+def test_a_shown_object_target_uses_the_target_colour_and_line():
+    plain = drawn(Rig(objects=[CUP]))
+    shown = drawn(Rig(objects=[CUP], shown=("unknown", "cup")))
+    assert yellow_pixels(shown) > 0 and blue_pixels(shown) == 0
+    width = lambda img: int((img[260, 290:310].max(axis=1) > 60).sum())  # noqa: E731
+    assert width(shown) > width(plain)  # TARGET_LINE_PX against LINE_PX
+
+
+def test_a_shown_object_is_matched_by_owner_or_as_the_lone_one_of_its_category():
+    mug, ball = (
+        ((20.0, 20.0, 120.0, 120.0), "cup", "o1"),
+        ((300.0, 200.0, 400.0, 320.0), "cup", None),
+    )
+    by_owner = drawn(Rig(objects=[mug, ball], shown=("o1", "cup")))
+    assert by_owner[70, 20:24].max() > 0 and yellow_pixels(by_owner[:150]) > 0
+    assert yellow_pixels(by_owner[150:]) == 0
+    two = ((20.0, 20.0, 120.0, 120.0), "cup", None)
+    ambiguous = drawn(Rig(objects=[two, CUP], shown=("unknown", "cup")))
+    assert yellow_pixels(ambiguous) == 0  # two unknown cups: no guess
+    other = drawn(Rig(objects=[CUP], shown=("unknown", "dog")))
+    assert yellow_pixels(other) == 0
+
+
+def test_a_shown_object_target_never_marks_a_lone_unknown_face():
+    face = [((20.0, 40.0, 140.0, 200.0), None)]
+    img = drawn(Rig(faces=face, objects=[CUP], shown=("unknown", "cup")))
+    assert img[120, 20:22].max() > 0  # the face is drawn
+    assert yellow_pixels(img[:, :200]) == 0  # but not as the target
+
+
+def test_object_boxes_come_from_the_frame_capture_with_the_faces():
+    kept = PreviewOverlay(
+        faces=(((20.0, 40.0, 140.0, 200.0), "mia"),),
+        objects=(CUP,),
+    )
+    seen = []
+
+    def hook(report):
+        seen.append(report)
+        return kept
+
+    rig = Rig(names={"mia": "Mia"}, hook=hook)  # the pipeline's current overlays are empty
+    rig.host.perception.pipeline.object_overlay = lambda: pytest.fail("read at encode time")
+    rig.host.perception.pipeline.face_overlay = lambda: pytest.fail("read at encode time")
+    img = drawn(rig)
+    assert seen and rig.runner.latest().overlay is kept
+    assert green_pixels(img) > 0 and blue_pixels(img) > 0
+
+
+def test_an_overlay_with_object_boxes_only_holds_the_detection_frame():
+    rig = Rig(hook=lambda report: PreviewOverlay(objects=(CUP,)))
+    rig.video.frame("a")
+    rig.submit()
+    held = rig.runner.latest()
+    rig.runner._overlay = lambda report: None  # a newer frame without a detection
+    rig.submit()
+    assert rig.runner.latest() is held  # kept for a poll period, like face boxes
+    assert not PreviewOverlay() and PreviewOverlay(objects=(CUP,))

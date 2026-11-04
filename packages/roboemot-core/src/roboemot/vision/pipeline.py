@@ -106,6 +106,7 @@ from .types import (
     Frame,
     FrameReport,
     PersonRecognized,
+    PreviewOverlay,
 )
 
 log = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ class VisionPipeline:
         self.world = world or WorldConfig()
         self.face_tap: FaceTap | None = None
         self._visible: list[Track] = []
+        self._object_visible: list[Track] = []
         self.light_tap: LightTap | None = None
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
@@ -304,6 +306,7 @@ class VisionPipeline:
         self.track_stats.reset(len(self._faces))
         self._faces.clear()
         self._entities.clear()
+        self._object_visible = []
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
@@ -523,6 +526,7 @@ class VisionPipeline:
     def clear_overlay(self) -> None:
         """Forget the visible tracks the live preview would draw (the robot fell asleep)."""
         self._visible = []
+        self._object_visible = []
 
     def face_overlay(self) -> list[tuple[Box, str | None]]:
         """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
@@ -535,15 +539,32 @@ class VisionPipeline:
             out.append((track.box, state.owner_id if state is not None else None))
         return out
 
-    def preview_overlay(self, report: FrameReport) -> list[tuple[Box, str | None]] | None:
-        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` when
-        face detection ran on it, ``[]`` while detection is off (governor scale 0: the picture
-        shows without boxes), else None (the boxes belong to an earlier frame; the runner keeps
-        that one for a poll period, then shows newer frames without boxes)."""
+    def object_overlay(self) -> list[tuple[Box, str, str | None]]:
+        """The confirmed animal and object tracks of the last object run that have not expired
+        since, as ``(box in pixels, readable category, owner_id or None)``: the tracks the
+        world and attention get. Object detection is slower than face detection, so a box is
+        the tracker's latest estimate, not a detection on the frame it is drawn on."""
+        out: list[tuple[Box, str, str | None]] = []
+        for track in self._object_visible:
+            state = self._entities.get(track.track_id)
+            if state is not None:
+                out.append((track.box, self.display_name(track.label), state.owner_id))
+        return out
+
+    def display_name(self, label: str) -> str:
+        """The readable category of a detector class (``vision.object_display_names``)."""
+        return self.cfg.object_display_names.get(label, label.replace("_", " "))
+
+    def preview_overlay(self, report: FrameReport) -> PreviewOverlay | None:
+        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` and
+        ``object_overlay`` when face detection ran on it, only the object boxes while face
+        detection is off (governor scale 0 or no detection rate: no face boxes), else None (the
+        face boxes belong to an earlier frame; the runner keeps that one for a poll period,
+        then shows newer frames without boxes)."""
         if report.faces_detected:
-            return self.face_overlay()
+            return PreviewOverlay(tuple(self.face_overlay()), tuple(self.object_overlay()))
         if math.isinf(self.governor.period("detection")):
-            return []
+            return PreviewOverlay(objects=tuple(self.object_overlay()))
         return None
 
     def _track_yaw(self, track: Track, state: _FaceState, stamp: float) -> None:
@@ -662,6 +683,7 @@ class VisionPipeline:
             d for d in found if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
         result = self.object_tracker.update(dets, frame.stamp)
+        self._object_visible = result.visible
         self._lost_held = self._object_lost_s()
         for track_id in result.removed_ids:
             self._drop_entity(track_id)
@@ -684,9 +706,7 @@ class VisionPipeline:
                 source=self.source,
                 azimuth_rad=azimuth,
                 elevation_rad=elevation,
-                category=self.cfg.object_display_names.get(
-                    track.label, track.label.replace("_", " ")
-                ),
+                category=self.display_name(track.label),
                 identity=state.owner_id,
                 confidence=min(1.0, max(0.0, track.score)),
                 embedding=state.embedding,

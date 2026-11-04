@@ -2,12 +2,15 @@
 
 ``LiveVideo.frame`` serves one JPEG of the newest frame vision already processed: it never
 opens the camera, never resumes a paused pump and never reads a frame itself. The frame comes
-from ``LatestFrameRunner.latest`` with the face boxes computed on it (under overload it lags
-the camera, but the boxes never trail the picture); it keeps one reference only while a page
-asked within ``webui.live.viewer_window_s``. A request encodes only when that frame is newer than
-the last one encoded and the last encode is older than ``1 / video_fps``; otherwise it returns
-the cached JPEG, so any number of viewers cost one encode. Face boxes and confirmed names are
-drawn on the picture, the gaze target highlighted.
+from ``LatestFrameRunner.latest`` with the boxes computed on it (under overload it lags the
+camera, but the face boxes never trail the picture; the animal and object boxes, captured with
+them, are the tracker's latest estimate, since object detection runs about once per second);
+it keeps one reference only while a page asked within ``webui.live.viewer_window_s``. A request
+encodes only when that frame is newer than the last one encoded and the last encode is older
+than ``1 / video_fps``; otherwise it returns the cached JPEG, so any number of viewers cost one
+encode. Face boxes and confirmed names are drawn on the picture, and a box with its readable
+category for each confirmed animal or object track; the gaze target, a face or a shown object
+(SPEC 5A), is highlighted.
 
 A viewer is a client IP that was sent a frame within the window. ``viewers`` feeds the banner every
 open page shows. Start and stop of viewing are logged once each per client IP (the address only).
@@ -27,8 +30,10 @@ from typing import Any
 
 import numpy as np
 
+from roboemot.attention.types import SHOWN
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import person_name
+from roboemot.vision.types import PreviewOverlay
 from roboemot.world.types import UNKNOWN_IDENTITY
 
 log = logging.getLogger(__name__)
@@ -43,6 +48,7 @@ VIDEO_STALE = "video_stale"
 
 BGR_FACE = (80, 200, 80)
 BGR_TARGET = (0, 215, 255)
+BGR_OBJECT = (230, 120, 40)
 BGR_TEXT_BG = (0, 0, 0)
 LINE_PX = 1
 TARGET_LINE_PX = 3
@@ -135,7 +141,7 @@ class LiveVideo:
         self._release()
 
     def sleep(self) -> None:
-        """The robot fell asleep: ``drop`` and forget the face tracks of the last frame."""
+        """The robot fell asleep: ``drop`` and forget the face and object tracks it would draw."""
         self.drop()
         pipeline = self._host.perception.pipeline if self._host.perception else None
         if pipeline is not None:
@@ -216,7 +222,7 @@ class LiveVideo:
             if age is not None and age > live.video_stale_s:
                 self._prune(now)
                 return None, VIDEO_STALE
-            image, seq, faces = latest.frame.image, latest.seq, latest.overlay
+            image, seq, overlay = latest.frame.image, latest.seq, latest.overlay
             if self._cached(seq, now, live) is not None:
                 return self._serve(client, now), None
             generation = self._generation
@@ -227,7 +233,7 @@ class LiveVideo:
                     return None, VIDEO_NO_FRAME
                 if self._cached(seq, now, live) is not None:  # another viewer encoded meanwhile
                     return self._serve(client, now), None
-            jpeg = self._encode(self._load_cv2(), image, live, faces)
+            jpeg = self._encode(self._load_cv2(), image, live, overlay)
             with self._lock:
                 now = self._clock()
                 if generation != self._generation:  # dropped while encoding: discard the result
@@ -253,7 +259,7 @@ class LiveVideo:
 
     # ------------------------------------------------------------------ drawing
 
-    def _encode(self, cv2: Any, image: np.ndarray, live: Any, faces: Any = None) -> bytes:
+    def _encode(self, cv2: Any, image: np.ndarray, live: Any, overlay: Any = None) -> bytes:
         height, width = image.shape[:2]
         scale = min(1.0, live.video_max_width / width)
         small = (
@@ -263,50 +269,101 @@ class LiveVideo:
             if scale < 1.0
             else image.copy()
         )
-        self._draw(cv2, small, scale, faces)
+        self._draw(cv2, small, scale, overlay)
         ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, live.video_jpeg_quality])
         if not ok:
             raise RuntimeError("jpeg encode failed")
         return bytes(buf)
 
-    def _draw(self, cv2: Any, canvas: np.ndarray, scale: float, faces: Any = None) -> None:
-        """Face boxes with the confirmed name (nothing for an unknown face), the gaze target in
-        another colour and a thicker line."""
+    def _draw(self, cv2: Any, canvas: np.ndarray, scale: float, overlay: Any = None) -> None:
+        """Face boxes with the confirmed name (nothing for an unknown face), animal and object
+        boxes with their readable category, the gaze target in another colour and a thicker
+        line. ``overlay`` is what the runner kept with the frame: a ``PreviewOverlay``, a plain
+        list (no boxes, or a hook that gives face boxes only) or None (a runner without an
+        overlay hook: the pipeline's latest boxes)."""
         pipeline = self._host.perception.pipeline
         if pipeline is None:
             return
-        if faces is None:  # a runner without an overlay hook: the pipeline's latest boxes
-            faces = pipeline.face_overlay()
-        registry = pipeline.matcher.registry
+        if overlay is None:
+            faces, objects = pipeline.face_overlay(), pipeline.object_overlay()
+        elif isinstance(overlay, PreviewOverlay):
+            faces, objects = overlay.faces, overlay.objects
+        else:
+            faces, objects = overlay, ()
         target = self._p.selector.target
+        entry = None
+        if target is not None and target.entry_id:
+            entry = self._p.world.get(target.entry_id)
+        shown = target is not None and target.priority == SHOWN
+        self._draw_faces(cv2, canvas, scale, faces, None if shown else target, entry)
+        lone = self._shown_index(objects, entry) if shown else -1
+        for i, (box, category, _) in enumerate(objects):
+            try:
+                color = BGR_TARGET if i == lone else BGR_OBJECT
+                line = TARGET_LINE_PX if i == lone else LINE_PX
+                self._box(cv2, canvas, scale, box, color, line, ascii_label(category))
+            except (ValueError, OverflowError, TypeError, cv2.error):
+                log.warning("live video: an object could not be drawn")
+
+    def _draw_faces(
+        self, cv2: Any, canvas: np.ndarray, scale: float, faces: Any, target: Any, entry: Any
+    ) -> None:
+        """The face boxes; ``target`` is the attention target unless it is a shown object."""
+        registry = self._host.perception.pipeline.matcher.registry
         target_owner = None
-        if target is not None:
-            entry = self._p.world.get(target.entry_id) if target.entry_id else None
-            if entry is not None and entry.identity not in ("", UNKNOWN_IDENTITY):
-                target_owner = entry.identity
+        if (
+            target is not None
+            and entry is not None
+            and entry.identity not in ("", UNKNOWN_IDENTITY)
+        ):
+            target_owner = entry.identity
         unowned = [i for i, (_, owner) in enumerate(faces) if owner is None]
         lone = (
             unowned[0] if target is not None and target_owner is None and len(unowned) == 1 else -1
         )
-        height, width = canvas.shape[:2]
         for i, (box, owner) in enumerate(faces):
             try:
-                if not all(math.isfinite(v) for v in box):
-                    continue  # a diverged track: skip the face, the picture is still served
                 is_target = (owner is not None and owner == target_owner) or i == lone
-                x1, y1, x2, y2 = (
-                    min(max(round(v * scale), -width), 2 * width) if k % 2 == 0
-                    else min(max(round(v * scale), -height), 2 * height)
-                    for k, v in enumerate(box)
-                )  # fmt: skip
                 color = BGR_TARGET if is_target else BGR_FACE
                 line = TARGET_LINE_PX if is_target else LINE_PX
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, line)
                 name = person_name(registry, owner)
-                if name:
-                    self._label(cv2, canvas, ascii_label(name), x1, y1, color)
+                self._box(cv2, canvas, scale, box, color, line, ascii_label(name) if name else "")
             except (ValueError, OverflowError, TypeError, cv2.error):
                 log.warning("live video: a face could not be drawn")
+
+    @staticmethod
+    def _shown_index(objects: Any, entry: Any) -> int:
+        """The object track that is the shown-object target's entry, or -1: the track whose
+        owner is the entry's identity, else the one unowned track of the entry's category;
+        none when that is ambiguous (a world entry carries no track id)."""
+        if entry is None:
+            return -1
+        if entry.identity not in ("", UNKNOWN_IDENTITY):
+            hits = [i for i, (_, _, owner) in enumerate(objects) if owner == entry.identity]
+        else:
+            hits = [
+                i
+                for i, (_, category, owner) in enumerate(objects)
+                if owner is None and category == entry.category
+            ]
+        return hits[0] if len(hits) == 1 else -1
+
+    def _box(
+        self, cv2: Any, canvas: np.ndarray, scale: float, box: Any, color: Any, line: int, text: str
+    ) -> None:
+        """One box at ``scale`` with ``text`` above it (none when empty). A non-finite box (a
+        diverged track) is skipped, so the picture is still served; coordinates are clamped."""
+        if not all(math.isfinite(v) for v in box):
+            return
+        height, width = canvas.shape[:2]
+        x1, y1, x2, y2 = (
+            min(max(round(v * scale), -width), 2 * width) if k % 2 == 0
+            else min(max(round(v * scale), -height), 2 * height)
+            for k, v in enumerate(box)
+        )  # fmt: skip
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, line)
+        if text:
+            self._label(cv2, canvas, text, x1, y1, color)
 
     @staticmethod
     def _label(cv2: Any, canvas: np.ndarray, text: str, x: int, y: int, color: Any) -> None:

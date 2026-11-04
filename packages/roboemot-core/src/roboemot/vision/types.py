@@ -75,6 +75,20 @@ class PersonRecognized:
 
 
 @dataclass(frozen=True)
+class PreviewOverlay:
+    """The live preview's boxes for one frame (SPEC 11A): face tracks as ``(box, owner_id or
+    None)``, confirmed animal and object tracks as ``(box, readable category, owner_id or
+    None)``. False when it holds no box, like the empty list the frame runner keeps for a
+    picture without boxes."""
+
+    faces: tuple[tuple[Box, str | None], ...] = ()
+    objects: tuple[tuple[Box, str, str | None], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.faces or self.objects)
+
+
+@dataclass(frozen=True)
 class FrameReport:
     """What ``VisionPipeline.process`` did with a frame (for tests, replay and the governor)."""
 

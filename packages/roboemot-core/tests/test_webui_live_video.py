@@ -52,7 +52,9 @@ def stack(tmp_path):
 def served(tmp_path, stack):
     runner = LatestFrameRunner(Module())
     service = SimpleNamespace(runner=runner, paused=False)
-    faces = SimpleNamespace(face_overlay=lambda: [], matcher=SimpleNamespace(registry=None))
+    faces = SimpleNamespace(
+        face_overlay=lambda: [], object_overlay=lambda: [], matcher=SimpleNamespace(registry=None)
+    )
     host = SimpleNamespace(
         circadian=None,
         phase=ConversationPhase(),
