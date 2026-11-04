@@ -12,12 +12,13 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from audio_signals import drum_loop, mix
 from realtime_helpers import wait_until
 from roboemot.realtime.input import RealtimeInput
 from roboemot.voice.direction import DirectionSample, VoiceDirection
 from roboemot.voice.facing import CpuLoad, FacingCheck
 from rt_rig import build_rt
-from test_voice_listener import CHUNK, RATE, FakeASR, Rig, silence, voice
+from test_voice_listener import CHUNK, RATE, FakeASR, Rig, SpyMusic, silence, voice
 from turn_server import TurnServer
 
 FACE_RAD = 0.2
@@ -843,3 +844,111 @@ def test_a_wake_word_in_the_servers_transcript_is_counted(ears):
         assert ear.settle(lambda: len(ear.utterances) == 1)
         assert ear.utterances[0].wake_word
         assert ear.r.listener.snapshot()["realtime_audio"]["wake_word_heard"] == 1
+
+
+# ------------------------------------------------------------------ music (SPEC 8)
+
+
+def test_no_audio_sent_over_music(ears):
+    """A voice from the face would skip Vosk and go; over music it needs the wake word."""
+    with TurnServer() as server:
+        ear = ears(server, script=["come stai"], bearing=FACE_RAD)
+        ear.r.listener.music = SpyMusic(playing=True)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert ear.r.asr.started  # not addressable at its start: the Vosk path
+        assert appended(server) == [] and server.of("input_audio_buffer.commit") == []
+        snap = ear.r.listener.snapshot()
+        assert snap["wake"]["decisions"]["rejected_music"] == 1
+        assert snap["realtime_audio"]["vosk_skipped"] == 0
+
+
+def test_music_confirmed_mid_utterance_sends_no_audio(ears):
+    """Music confirmed between speech start and end: the utterance skipped Vosk, then the gate
+    says ``rejected_music`` at its end, its buffer is decoded locally and nothing leaves."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="come stai", bearing=FACE_RAD)
+        music = ear.r.listener.music = SpyMusic(playing=False)
+        ear.r.feed(voice(seconds=0.6))
+        assert ear.r.listener.snapshot()["realtime_audio"]["vosk_skipped"] == 1
+        music.playing = True
+        ear.say(0.4)
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert not u.addressed and u.text == "come stai"
+        assert ear.r.asr.started == [] and ear.r.asr.decodes == 1
+        assert appended(server) == [] and server.of("input_audio_buffer.commit") == []
+        assert ear.r.listener.snapshot()["wake"]["decisions"]["rejected_music"] == 1
+        start, last = pytest.approx(u.start_stamp), pytest.approx(u.last_speech_stamp)
+        assert music.asked[:2] == [(start, start), (start, last)]  # speech start, then its end
+
+
+@pytest.mark.parametrize("wake", [False, True], ids=["no_wake_word", "wake_word"])
+def test_music_starting_mid_utterance_with_the_real_detector(ears, wake):
+    """Review 1b, Important-1: the real detector back-dates the music only to its evidence,
+    after the speech started (the voice alone lasts longer than ``music.window_s``), so only
+    ``addressable`` over [start, last speech] at the end sends the utterance to the wake
+    decode: without the wake word nothing leaves, and with it the utterance is addressed and
+    its audio goes. Asked at the start alone, it would be decided there and its wake word lost."""
+    heard = [["ciao robot che ore sono"]] if wake else []
+    with TurnServer(heard=heard) as server:
+        decoded = "ciao robot che ore sono" if wake else "la la la"
+        ear = ears(server, script=["x"], decoded=decoded, bearing=FACE_RAD)
+        ear.r.feed(silence(1.0))
+        ear.r.feed(voice(seconds=ear.r.cfg.music.window_s + 1.0))
+        assert ear.r.listener.snapshot()["realtime_audio"]["vosk_skipped"] == 1
+        ear.r.feed(mix(voice(seconds=8.0), drum_loop(120, 8.0, RATE), 0.0))
+        ear.r.feed(silence(1.0))
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        det = ear.r.listener.music
+        assert det.snapshot()["starts"] == 1
+        assert not det.during(u.start_stamp, u.start_stamp)  # no music at speech start
+        assert det.during(u.start_stamp, u.last_speech_stamp)
+        decisions = ear.r.listener.snapshot()["wake"]["decisions"]
+        if wake:
+            assert u.addressed and u.wake_word and decisions["wake_word"] == 1
+            assert len(server.of("input_audio_buffer.commit")) == 1
+        else:
+            assert not u.addressed and decisions["rejected_music"] == 1
+            assert appended(server) == [] and server.of("input_audio_buffer.commit") == []
+
+
+def test_wake_word_over_music_is_addressed(ears):
+    with TurnServer(heard=[["ciao robot che ore sono"]]) as server:
+        ear = ears(server, script=["ciao robot che ore"], bearing=FACE_RAD)
+        ear.r.listener.music = SpyMusic(playing=True)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.wake_word and u.text == "ciao robot che ore sono"
+        assert ear.r.asr.started  # the Vosk path found the wake word
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        assert ear.r.listener.snapshot()["wake"]["decisions"]["wake_word"] == 1
+
+
+def test_the_name_opening_a_long_utterance_over_music_is_addressed(ears):
+    """The name-first wake (#180) is a wake word: music never blocks it."""
+    with TurnServer(heard=[["Neve, mi racconti una barzelletta?"]]) as server:
+        text = "neve mi racconti una barzelletta"
+        ear = ears(server, script=[text], bearing=FACE_RAD, yaw=0.7, app=NEVE_FACING)
+        ear.r.listener.music = SpyMusic(playing=True)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.wake_word
+        assert len(server.of("input_audio_buffer.commit")) == 1
+
+
+def test_a_television_opening_with_the_name_over_music_is_rejected_music(ears):
+    with TurnServer() as server:
+        text = "neve fino a mille metri sulle alpi"
+        ear = ears(server, script=[text], bearing=OFF_FACE_RAD, yaw=0.0, app=NEVE_FACING)
+        ear.r.listener.music = SpyMusic(playing=True)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and appended(server) == []
+        snap = ear.r.listener.snapshot()
+        assert snap["name_first_no_face"] == 1
+        assert snap["wake"]["decisions"]["rejected_music"] == 1

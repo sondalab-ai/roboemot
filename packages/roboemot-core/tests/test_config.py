@@ -641,3 +641,26 @@ def test_a_failing_listener_is_audited_and_kept_in_last_error(tmp_path):
     assert (entry.source, entry.key, entry.new) == ("listener", "listener_failed", "RuntimeError")
     assert "listener_failed" in audit.read_text()
     assert "secret detail" not in audit.read_text()
+
+
+def test_music_bands_must_fit_under_the_voice_nyquist(tmp_path):
+    """Review 1b, Important-2: a voice rate below 14 kHz with the default music bands (top
+    edge 7000 Hz) would stop the listener from starting; the config is refused instead, at
+    load and on a reload, naming both keys."""
+    with pytest.raises(ConfigError, match=r"music\.bands_hz.*voice\.sample_rate_hz"):
+        ConfigStack(app={"voice": {"sample_rate_hz": 8000}})
+    with pytest.raises(ConfigError, match="music.enabled"):
+        ConfigStack(app={"voice": {"sample_rate_hz": 14000}})  # the top edge at Nyquist
+    off = ConfigStack(app={"voice": {"sample_rate_hz": 8000}, "music": {"enabled": False}})
+    assert off.effective().voice.sample_rate_hz == 8000  # music off: no band check
+    stack = ConfigStack()
+    with pytest.raises(ConfigError, match=r"music\.bands_hz"):
+        stack.set("music.bands_hz", [[30.0, 150.0], [150.0, 9000.0]])  # over 8 kHz
+    assert stack.get("music.bands_hz")[-1][1] == 7000.0  # rolled back
+    app = tmp_path / "app.yaml"
+    app.write_text("affect: {half_life_s: 7}\n")
+    files = ConfigStack.from_files(app=app)
+    app.write_text("voice: {sample_rate_hz: 8000}\n")
+    os.utime(app, (time.time() + 5, time.time() + 5))
+    assert files.poll() is None and "music.bands_hz" in files.last_error
+    assert files.get("voice.sample_rate_hz") == 16000  # last valid config kept

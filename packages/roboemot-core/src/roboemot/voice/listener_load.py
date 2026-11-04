@@ -1,12 +1,12 @@
 """The listener's real-time account (SPEC 8, 13): does it keep up with the microphone?
 
 Per second of audio read, the wall time the listener thread spent on each stage (voice activity
-detection, recognizer accept, start and finish, the barge-in check while the robot speaks) and
-in total (``grammar_wait``: the listener waiting for a pass before the next utterance starts;
-``handoff``: wake gate, prosody and delivery of an utterance, also when it runs between chunks),
-the grammar pass time on its own thread, how far behind real time each chunk was when
-read (``lag_s``: the age of its end, about the depth of the microphone queue) and the audio lost
-before the listener read it (``dropped_s``: the holes in the chunk stamps after a gap).
+detection, recognizer accept, start and finish, the barge-in check while the robot speaks, the
+music detector) and in total (``grammar_wait``: the listener waiting for a pass before the next
+utterance starts; ``handoff``: wake gate, prosody and delivery of an utterance, also when it runs
+between chunks), the grammar pass time on its own thread, how far behind real time each chunk was
+when read (``lag_s``: the age of its end, about the depth of the microphone queue) and the audio
+lost before the listener read it (``dropped_s``: the holes in the chunk stamps after a gap).
 
 Figures are kept since start and per window of ``voice.listener.report_window_s`` of audio (the
 last full window is reported); ``over_budget`` flags a window whose total share of the audio time
@@ -32,6 +32,7 @@ STAGES = (
     "handoff",
     "grammar",
     "decode",
+    "music",
 )
 
 

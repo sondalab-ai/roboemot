@@ -16,6 +16,7 @@ KEYS = {
     "rejected_no_face_at_voice",
     "rejected_not_facing",
     "rejected_no_facing_data",
+    "rejected_music",
 }
 WINDOW_S = 5.0
 
@@ -68,6 +69,7 @@ def test_wake_word_window_and_rejections_when_required(policy):
         "rejected_no_face_at_voice": 0,
         "rejected_not_facing": 0,
         "rejected_no_facing_data": 0,
+        "rejected_music": 0,
     }
 
 
@@ -146,3 +148,97 @@ def test_addressable_asks_without_counting_or_moving_the_window():
     enrolled = WakeGate("unless_enrolled_in_view", 0.0)
     assert enrolled.addressable(enrolled_in_view=True, start=0.0)
     assert not enrolled.addressable(enrolled_in_view=False, start=0.0)
+
+
+# ------------------------------------------------------------------ music (SPEC 8)
+
+
+class Music:
+    """A scripted music predicate over [start, end] that records what it was asked."""
+
+    def __init__(self, playing=True):
+        self.playing, self.asked = playing, []
+
+    def __call__(self, start, end):
+        self.asked.append((start, end))
+        return self.playing
+
+
+def test_music_requires_wake_word_with_policy_never():
+    gate = WakeGate("never", WINDOW_S, music=Music())
+    assert gate.outcome(wake_word=False, enrolled_in_view=False, start=0.0, last_speech=1.0) == (
+        "rejected_music"
+    )
+    assert counts(gate) == {**dict.fromkeys(KEYS, 0), "rejected_music": 1}
+
+
+def test_music_is_asked_over_the_whole_utterance():
+    music = Music(playing=False)
+    gate = WakeGate("never", WINDOW_S, music=music)
+    decide(gate, start=2.0, last=4.5)
+    assert music.asked == [(2.0, 4.5)]
+
+
+def test_music_closes_follow_up_window():
+    music = Music(playing=False)
+    gate = WakeGate("always", WINDOW_S, music=music)
+    assert decide(gate, wake_word=True, start=0.0, last=1.0)
+    assert decide(gate, start=2.0, last=3.0)  # a follow-up while no music plays
+    music.playing = True
+    out = gate.outcome(wake_word=False, enrolled_in_view=False, start=4.0, last_speech=5.0)
+    assert out == "rejected_music"
+
+
+def test_wake_word_over_music_is_addressed():
+    for policy in ("never", "always", "unless_enrolled_in_view"):
+        gate = WakeGate(policy, WINDOW_S, music=Music())
+        out = gate.outcome(wake_word=True, enrolled_in_view=True, start=0.0, last_speech=1.0)
+        assert out == "wake_word"
+        assert gate.snapshot(1.0 + WINDOW_S)["window_open"]  # the window opens as today
+        assert gate.snapshot(1.0 + WINDOW_S + 0.1)["window_open"] is False
+
+
+def test_music_wins_over_no_window_and_face():
+    check = Check(False)
+    gate = WakeGate("always", WINDOW_S, music=Music())
+    out = gate.outcome(
+        wake_word=False, enrolled_in_view=False, start=0.0, last_speech=1.0, at_face=check
+    )
+    assert out == "rejected_music" and check.calls == 0
+    never = WakeGate("never", WINDOW_S, music=Music())
+    assert not decide(never, at_face=check) and check.calls == 0
+    assert counts(never)["rejected_music"] == 1
+
+
+def test_addressable_false_over_music():
+    music = Music(playing=False)
+    gate = WakeGate("never", WINDOW_S, music=music)
+    assert gate.addressable(enrolled_in_view=False, start=1.0, end=3.0)
+    assert gate.addressable(enrolled_in_view=False, start=1.0)
+    assert music.asked == [(1.0, 3.0), (1.0, 1.0)]  # end None: the start alone
+    music.playing = True
+    assert not gate.addressable(enrolled_in_view=False, start=1.0, end=3.0)
+    assert not gate.addressable(enrolled_in_view=False, start=1.0)
+    window = WakeGate("always", WINDOW_S, music=music)
+    music.playing = False
+    window.decide(wake_word=True, enrolled_in_view=False, start=0.0, last_speech=1.0)
+    music.playing = True
+    assert not window.addressable(enrolled_in_view=False, start=2.0, end=3.0)
+    assert counts(window)["rejected_music"] == 0  # asking counts nothing
+
+
+def test_no_music_callable_keeps_today():
+    with_none = WakeGate("always", WINDOW_S, music=None)
+    quiet = WakeGate("always", WINDOW_S, music=Music(playing=False))
+    for gate in (with_none, quiet):
+        assert not decide(gate, start=0.0, last=1.0)
+        assert decide(gate, wake_word=True, start=2.0, last=3.0, speaker="ann")
+        assert decide(gate, start=4.0, last=5.0, speaker="ann")
+        assert not decide(gate, start=8.0, last=9.0, speaker="bob")
+        assert counts(gate) == {
+            **dict.fromkeys(KEYS, 0),
+            "wake_word": 1,
+            "window": 1,
+            "rejected_no_window": 1,
+            "rejected_other_speaker": 1,
+        }
