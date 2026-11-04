@@ -110,6 +110,7 @@ def test_the_robot_turns_toward_a_voice_with_an_unknown_age_face_in_view(data): 
     stop, thread, errors = start(app)
     try:
         assert wait_for(lambda: app.reflexes is not None and face_in_view(app), 30)
+        app.reflexes.vad = lambda: True  # voice is off here: stand in for a hearing listener
 
         def voice() -> bool:
             now = time.monotonic()

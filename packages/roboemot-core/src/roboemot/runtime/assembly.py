@@ -186,6 +186,7 @@ def assemble(
         bus=bus,
     )
     loop.tick_hooks.append(reflexes.on_tick)
+    reflexes.motion_sample = loop.motion_sample  # the own-motion gate (SPEC 10)
     # The robot's own voice must not startle it or draw its gaze: the speaker feeds this
     # window (playback end + echo tail) and the reflex engine and the DoA source read it, with
     # the robot's other own sounds (the listening blip: ``sounding``).
@@ -402,6 +403,9 @@ def assemble(
     bargein = host.bargein = voice_pipeline[2] if voice_pipeline else None
     if listener is not None:
         listener.events = host.events
+        # A turn needs a real voice: the speech detector confirms the chip's direction (SPEC 10);
+        # without a listener the new-voice reflex never fires.
+        reflexes.vad = listener.hearing
     if bargein is not None:
         bargein.events = host.events
     if cfg.voice.enabled and listener is None:

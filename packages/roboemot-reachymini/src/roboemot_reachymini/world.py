@@ -136,8 +136,9 @@ class DoASource:
     measured pose); without one the reading is skipped, since it could not be rotated into the
     base frame. Sources never create entries: they confirm one or trigger a glance. Nothing
     that fails inside a poll (the SDK, the joint state, a raising subscriber) ends the thread.
-    ``speaking`` (set by the app to ``SpeechActivity.speaking``) is checked on every poll, like
-    the reflex engine's gate, so the robot's own voice and its echo tail are never read;
+    ``speaking`` (set by the app to ``SpeechActivity.sounding``) is checked on every poll, like
+    the reflex engine's gate, so the robot's own voice, its other own sounds and their echo tail
+    are never read;
     ``mute`` is the one-off variant that takes a stamp.
     """
 
@@ -179,13 +180,13 @@ class DoASource:
             return False
         try:
             reading = self._mini.media.get_DoA()
+            if reading is None:
+                return False
+            angle, speech = reading
         except Exception as exc:
             self._note_error(exc, "read")
             return False
         self._errors.pop("read", None)
-        if reading is None:
-            return False
-        angle, speech = reading
         if not speech:
             return False
         try:

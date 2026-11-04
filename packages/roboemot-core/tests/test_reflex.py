@@ -16,6 +16,7 @@ from roboemot.config.schema import (
     AppraisalConfig,
     ReflexAudioConfig,
     ReflexConfig,
+    ReflexMotionGateConfig,
     ReflexRule,
     RoboEmotConfig,
 )
@@ -89,6 +90,8 @@ class Rig:
             bus=self.bus,
         )
         self.engine.attach(self.bus)
+        self.hearing = True  # the voice listener's speech detector (SPEC 10: a real voice)
+        self.engine.vad = lambda: self.hearing
         self.loop.tick_hooks.append(self.engine.on_tick)
         self.hold = hold
         self.pitch: list[float] = []
@@ -275,13 +278,26 @@ def test_a_loud_withdraw_also_freezes_the_microphone_settings():
     assert "reflexes.audio" in {v.path for v in violations(approved, cand)}
 
 
+@pytest.mark.parametrize("gate", [{"speed_dps": 20.0}, {"tail_ms": 900.0}])
+def test_a_loud_withdraw_also_freezes_the_own_motion_gate_in_both_directions(gate):
+    loud = dict(WITHDRAW_BASE, trigger="loud_onset", threshold=6.0)
+    approved = cfg_rules(loud)
+    cand = RoboEmotConfig.model_validate({"reflexes": {"rules": [loud], "motion_gate": gate}})
+    assert "reflexes.motion_gate" in {v.path for v in violations(approved, cand)}
+    quiet = cfg_rules(WITHDRAW_BASE)  # a close-face withdraw does not read it
+    cand = RoboEmotConfig.model_validate(
+        {"reflexes": {"rules": [WITHDRAW_BASE], "motion_gate": gate}}
+    )
+    assert "reflexes.motion_gate" not in {v.path for v in violations(quiet, cand)}
+
+
 def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_not():
     from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
 
     assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
     not_read_by_a_withdraw = {
         "startle_lift_ratio", "latency_window", "audio", "rules", "onset_watch_ratio",
-        "onset_window",
+        "onset_window", "voice_vad_window_s", "motion_gate",
     }  # fmt: skip
     assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
 
@@ -829,8 +845,9 @@ def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
 NEUTRAL = {
     ReflexConfig: {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
-        "audio", "onset_watch_ratio", "onset_window",
+        "audio", "onset_watch_ratio", "onset_window", "motion_gate",
     },
+    ReflexMotionGateConfig: set(),
     ReflexAudioConfig: {
         "poll_hz", "loud_event_ratio", "loud_event_refractory_s", "level_block_s", "level_window",
     },
@@ -858,6 +875,12 @@ def with_top(path: str, value) -> RoboEmotConfig:
     [
         ("audio.min_rms", 0.02, 0.005),
         ("audio.floor_half_life_s", 1.0, 5.0),
+        ("audio.floor_fall_half_life_s", 8.0, 2.0),
+        ("audio.rearm_fraction", 0.2, 0.5),
+        ("audio.rearm_hold_s", 1.0, 0.2),
+        ("voice_vad_window_s", 0.2, 0.5),
+        ("motion_gate.speed_dps", 20.0, 60.0),
+        ("motion_gate.tail_ms", 800.0, 200.0),
         ("command_ttl_ms", 50, 200),
         ("attack_fraction", 0.4, 0.1),
         ("max_future_ms", 10, 100),
@@ -888,7 +911,7 @@ def test_a_trigger_stamped_in_the_future_is_dropped_and_a_tiny_skew_counts_as_ze
     rig.engine.offer_audio_level(LOUD, rig.t + 5.0)
     rig.tick()
     assert rig.stats()["fired"] == 0 and rig.stats()["dropped_stale"] == 1
-    rig.settle_audio()
+    rig.settle_audio()  # one chunk after a jump moves the floor like one chunk, no more
     rig.engine.offer_audio_level(LOUD, rig.t + 0.03)
     rig.tick()
     assert rig.stats()["fired"] == 1
@@ -971,9 +994,10 @@ def test_a_reset_lets_a_startle_through_once_the_tail_has_passed():
 
 def test_loud_then_speaking_then_one_quiet_chunk_then_loud_fires():
     rig, _ = speaking_rig(until=1.5)
-    rig.engine.offer_audio_level(LOUD, 1.2)  # speaking: ignored
-    rig.engine.offer_audio_level(LOUD, 1.85)  # first chunk after the tail: never an edge
-    rig.engine.offer_audio_level(QUIET, 1.87)
+    for i in range(40):  # speaking (a chunk every 20 ms up to the tail's end): ignored
+        rig.engine.offer_audio_level(LOUD, 1.0 + i * DT)
+    rig.engine.offer_audio_level(LOUD, 1.81)  # first chunk after the tail: never an edge
+    rig.engine.offer_audio_level(QUIET, 1.83)
     assert rig.stats()["fired"] == 0
     rig.t = 1.9
     rig.engine.offer_audio_level(LOUD, rig.t)
@@ -1023,6 +1047,7 @@ def test_onset_stats_hold_the_peak_of_each_episode_fired_or_below_the_threshold(
     rig.settle_audio()
     speech_like(rig, 8.0)
     speech_like(rig, 6.0)
+    rig.settle_audio(5.0)  # the floor falls back to the room after the speech
     rig.engine.offer_audio_level(LOUD, rig.t)
     rig.tick()
     rig.settle_audio(0.3)
@@ -1172,3 +1197,311 @@ def test_turning_the_engine_back_on_does_not_fire_on_a_sound_that_went_on_while_
     rig.engine.offer_audio_level(LOUD, rig.t)
     rig.tick()
     assert len(published) == 1  # a real onset after it fires again
+
+
+# ------------------------------------------- own noise: real voice, one startle, motion (SPEC 10)
+
+
+def gate(rig: Rig, name: str) -> dict:
+    return rig.stats(name)["gate"]
+
+
+def adds_up(g: dict) -> bool:
+    return g["offered"] == g["triggered"] + sum(g["suppressed"].values())
+
+
+def test_a_chip_speech_reading_without_vad_speech_does_not_turn():
+    rig = Rig(cfg_with(VOICE))
+    rig.hearing = False
+    rig.tick(3)
+    doa(rig, 0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 0
+    assert rig.reflex_sources() == []
+    assert gate(rig, "v") == {
+        "offered": 1,
+        "triggered": 0,
+        "suppressed": {"no_vad": 1, "motion": 0, "own_speech": 0},
+    }
+    assert rig.engine.snapshot()["voice_gate"] == {"vad": "available", "chip_speech": 1}
+
+
+def test_a_chip_speech_reading_with_vad_speech_turns():
+    rig = Rig(cfg_with(VOICE))
+    rig.tick(3)
+    doa(rig, 0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 1
+    assert gate(rig, "v")["triggered"] == 1 and adds_up(gate(rig, "v"))
+
+
+def test_without_a_voice_listener_the_turn_never_fires():
+    rig = Rig(cfg_with(VOICE))
+    rig.engine.vad = None
+    rig.tick(3)
+    doa(rig, 0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 0
+    assert gate(rig, "v")["suppressed"]["no_vad"] == 1
+    assert rig.engine.snapshot()["voice_gate"]["vad"] == "unavailable"
+
+
+def test_a_reading_before_the_speech_detector_starts_does_not_spend_the_turn():
+    # the chip's speech bit comes first and Silero needs min_speech_ms: the reading without VAD
+    # must not move the silence clock, or the confirmed one 0.4 s later is "not new"
+    rig = Rig(cfg_with(VOICE))
+    rig.hearing = False
+    rig.tick(3)
+    doa(rig, 0.4)
+    rig.run(0.24)
+    rig.hearing = True
+    rig.run(0.16)
+    doa(rig, 0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 1
+    g = gate(rig, "v")
+    assert g["suppressed"]["no_vad"] == 1 and g["triggered"] == 1 and adds_up(g)
+
+
+def test_speech_heard_just_before_the_reading_counts_within_the_window_only():
+    for gap_s, fired in ((0.2, 1), (0.6, 0)):
+        rig = Rig(cfg_with(VOICE, voice_vad_window_s=0.3))
+        rig.tick()  # the detector heard speech on this tick, then the utterance ended
+        rig.hearing = False
+        rig.run(gap_s)
+        doa(rig, 0.4)
+        rig.run(1.0)
+        assert rig.stats("v")["fired"] == fired, gap_s
+
+
+def test_a_robot_reply_does_not_re_arm_the_turn():
+    from roboemot.voice.activity import SpeechActivity
+
+    rig = Rig(cfg_with(VOICE))
+    act = SpeechActivity(300.0)
+    rig.engine.speaking = act.sounding
+    rig.tick(3)
+    doa(rig, 0.4)  # the person speaks: the robot turns
+    rig.run(1.0)
+    act.extend(rig.t + 5.0)  # the robot answers for 5 s (no reading while it speaks)
+    rig.run(6.0)
+    doa(rig, 0.4)  # the person answers right after the reply
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 1
+    g = gate(rig, "v")
+    assert g["suppressed"]["own_speech"] == 1 and adds_up(g)
+    rig.run(4.0)  # a voice after a real silence still turns
+    doa(rig, -0.4)
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 2
+
+
+def test_regression_many_chip_readings_with_no_vad_never_turn():
+    # owner report 2026-11-04: 10 turns with 0 VAD starts in 108 s
+    rig = Rig(cfg_with(replace_rule(VOICE, cooldown_s=5)))
+    rig.hearing = False
+    rig.tick(3)
+    for burst in range(27):  # a chip speech bit for 0.6 s every 4 s
+        for _ in range(3):
+            doa(rig, 0.3 if burst % 2 else -0.3)
+            rig.run(0.2)
+        rig.run(3.4)
+    assert rig.stats("v")["fired"] == 0
+    g = gate(rig, "v")
+    assert g["triggered"] == 0 and g["suppressed"]["no_vad"] == 81 and adds_up(g)
+    assert rig.engine.snapshot()["voice_gate"]["chip_speech"] == 81
+
+
+def flicker(rig: Rig, cycles: int, loud: float = LOUD, dip: float = QUIET * 3) -> None:
+    """A rattling sound: loud for 2 chunks, a dip for 2, ``cycles`` times."""
+    for _ in range(cycles):
+        for level in (loud, loud, dip, dip):
+            rig.engine.offer_audio_level(level, rig.t)
+            rig.tick()
+
+
+def test_a_flickering_loud_sound_startles_once():
+    rig = Rig(cfg_with(rule(cooldown_s=0)))
+    rig.settle_audio()
+    flicker(rig, 10)
+    assert rig.stats()["fired"] == 1 and rig.stats()["dropped_cooldown"] == 0
+    g = gate(rig, "r")
+    assert g["offered"] == 10 and g["triggered"] == 1 and adds_up(g)
+    assert g["suppressed"]["rearm"] + g["suppressed"]["motion"] == 9
+    assert rig.stats()["armed"] is False
+
+
+def test_a_flickering_sound_while_still_counts_as_rearm():
+    still = {"tail_ms": 0, "speed_dps": 720}  # only the arm decides
+    rig = Rig(cfg_with(rule(cooldown_s=0, duration_ms=100), motion_gate=still))
+    rig.settle_audio()
+    flicker(rig, 5)
+    g = gate(rig, "r")
+    assert g["triggered"] == 1 and g["suppressed"]["rearm"] >= 3 and adds_up(g)
+    assert rig.stats()["fired"] == 1
+
+
+def test_a_second_loud_sound_after_the_re_arm_startles_again():
+    rig = Rig(cfg_with(rule(cooldown_s=0)))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    rig.settle_audio(2.0)  # reflex, tail and re-arm hold are over
+    assert rig.stats()["armed"] is True
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 2
+
+
+def test_the_re_arm_needs_the_hold_under_the_re_arm_level():
+    rig = Rig(cfg_with(rule(cooldown_s=0, threshold=12.0)))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    rig.settle_audio(0.3)  # quiet, but for less than the hold
+    assert rig.stats()["armed"] is False
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)  # under the threshold, over a third of it
+    rig.tick()
+    rig.settle_audio(0.3)  # the hold starts again
+    assert rig.stats()["armed"] is False
+    rig.settle_audio(0.3)
+    assert rig.stats()["armed"] is True
+
+
+def test_the_floor_follows_the_room_level_and_is_not_pinned_by_a_quiet_moment():
+    # the robot's room (2026-11-04): 1 s blocks p10 -41, p50 -34.5, p90 -27 dBFS; a quiet chunk
+    # used to drop the floor at once, so it sat at min_rms (-40 dBFS)
+    rig = Rig(cfg_with(rule(threshold=12.0)))
+    room, dip = 10 ** (-34.5 / 20), 10 ** (-50 / 20)
+    for i in range(500):
+        rig.engine.offer_audio_level(dip if i % 10 == 0 else room, rig.t)
+        rig.tick()
+    floor_dbfs = rig.engine.snapshot()["floor_dbfs"]
+    assert -37.0 < floor_dbfs < -34.0
+    # a sound at -15 dBFS (ratio 17.8 over the old pinned floor) is no startle any more
+    rig.engine.offer_audio_level(10 ** (-15 / 20), rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 0
+    rig.settle_audio(1.0, level=room)
+    rig.engine.offer_audio_level(10 ** (-8 / 20), rig.t)  # a bang
+    rig.tick()
+    assert rig.stats()["fired"] == 1
+
+
+def test_the_floor_is_still_bounded_below_by_min_rms():
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio(5.0, level=0.0005)
+    assert rig.engine.snapshot()["floor_dbfs"] == pytest.approx(-40.0)
+
+
+def test_a_reflex_moves_own_noise_fires_neither_trigger_during_the_move_and_its_tail():
+    rig = Rig(cfg_with(rule(cooldown_s=0), VOICE, audio={"rearm_hold_s": 0}))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)  # a real bang: startle (400 ms) + 500 ms tail
+    rig.tick()
+    assert rig.stats()["fired"] == 1
+    rig.settle_audio(0.1)
+    doa(rig, 0.4)  # the motors under the mics: a chip reading (VAD fooled too)
+    rig.tick()
+    rig.engine.offer_audio_level(LOUD, rig.t)  # and a loud edge of its own
+    rig.tick()
+    rig.settle_audio(0.5)
+    assert rig.stats()["fired"] == 1 and rig.stats("v")["fired"] == 0
+    assert gate(rig, "r")["suppressed"]["motion"] == 1
+    assert gate(rig, "v")["suppressed"]["motion"] == 1
+    rig.settle_audio(1.5)  # move, tail and re-arm over
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 2
+
+
+def test_regression_the_startle_does_not_feed_on_its_own_noise():
+    # owner report 2026-11-04: startle 41 fired in 12 min, dropped_cooldown above fired
+    rig = Rig(cfg_with(rule(cooldown_s=3), audio={"rearm_hold_s": 0}))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    for _ in range(4):  # the move rattles under the mics, during the startle and its tail
+        rig.settle_audio(0.1)
+        flicker(rig, 1)
+    stats = rig.stats()
+    assert stats["fired"] == 1 and stats["dropped_cooldown"] == 0
+    g = gate(rig, "r")
+    assert g["suppressed"]["motion"] == 4 and adds_up(g)
+
+
+def test_fast_commanded_head_motion_suppresses_both_triggers():
+    rig = Rig(cfg_with(rule(cooldown_s=0), VOICE))
+    rig.settle_audio()
+    for i in range(10):  # an expression swings the head yaw fast
+        target = 0.6 if i % 2 == 0 else -0.6
+        rig.loop.feed(Command("expr", Priority.COMMANDED, {YAW: target}, rig.t))
+        rig.engine.offer_audio_level(QUIET, rig.t)
+        rig.tick(5)
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    doa(rig, 0.4)
+    rig.tick()
+    assert rig.stats()["fired"] == 0 and rig.stats("v")["fired"] == 0
+    assert gate(rig, "r")["suppressed"]["motion"] == 1
+    assert gate(rig, "v")["suppressed"]["motion"] == 1
+
+
+def test_a_scan_sweep_does_not_suppress():
+    rig = Rig(cfg_with(rule(cooldown_s=0)))
+    rig.settle_audio()
+    yaw = 0.0
+    for _ in range(50):  # a scan sweep at 40 deg/s (world.scan.speed_dps)
+        yaw += math.radians(40) * DT
+        rig.loop.feed(Command("gaze", Priority.COMMANDED, {YAW: yaw}, rig.t))
+        rig.engine.offer_audio_level(QUIET, rig.t)
+        rig.tick()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 1
+
+
+def test_fast_measured_motion_suppresses_when_the_commands_are_still():
+    from roboemot.motion.state import MotionSample
+
+    rig = Rig(cfg_with(rule(cooldown_s=0)))
+    rig.settle_audio()
+    # a hand turns the head: commanded still, measured 90 deg/s
+    pair = (rig.t - DT, {YAW: 0.0}, rig.t, {YAW: math.radians(90) * DT})
+    rig.engine.motion_sample = lambda: MotionSample(rig.t, {}, pair, False, False)
+    rig.tick()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats()["fired"] == 0
+    assert gate(rig, "r")["suppressed"]["motion"] == 1
+
+
+def test_sound_loud_is_not_published_while_the_robot_moves():
+    rig = Rig(cfg_with(rule(cooldown_s=0), motion_gate={"tail_ms": 2000}))
+    published: list = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    rig.settle_audio(1.2)  # past sound.loud's refractory, still inside the startle's tail
+    assert len(published) == 1
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert len(published) == 1
+
+
+def test_the_report_carries_the_floor_and_numbers_only():
+    rig = Rig(ReflexConfig())
+    assert rig.engine.snapshot()["floor_dbfs"] is None
+    rig.settle_audio()
+    snap = rig.engine.snapshot()
+    assert snap["floor_dbfs"] == pytest.approx(20 * math.log10(QUIET))
+    for name in ("startle-loud", "turn-to-voice"):
+        g = snap["rules"][name]["gate"]
+        assert adds_up(g) and all(isinstance(v, int) for v in g["suppressed"].values())
+    assert "gate" not in snap["rules"]["withdraw-close"]
+
+
+def test_the_default_cooldowns_were_raised():
+    rules = {r.name: r for r in ReflexConfig().rules}
+    assert rules["startle-loud"].cooldown_s == 10
+    assert rules["turn-to-voice"].cooldown_s == 8

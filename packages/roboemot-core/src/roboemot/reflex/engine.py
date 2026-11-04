@@ -20,6 +20,15 @@ manifest ranges still apply, and REFLEX is not additive. Nothing tips the head f
 ``turn_toward`` answers a voice, stays in the front half-plane, within ``amplitude_deg`` of where
 the head points, and inside the manifest range and the head-body ``yaw_delta`` reach.
 
+Not its own noise (SPEC 10). A turn needs a real voice: a direction of arrival counts only when
+the voice listener's speech detector (``vad``) heard speech within ``voice_vad_window_s`` before
+it, and the robot's own sound counts as recent voice, so a reply does not re-arm the turn. A
+loud-onset rule fires once per loud sound: a crossing consumes its arm, which comes back only
+after the level stayed under ``audio.rearm_fraction`` of the threshold for
+``audio.rearm_hold_s``. Both triggers (and ``sound.loud``) are suppressed while a reflex plays or
+the robot moves faster than ``motion_gate.speed_dps``, plus ``motion_gate.tail_ms``: the motion
+thread publishes one stamp (``_quiet_from``) that the audio and bus threads compare with.
+
 Latency. Each firing records the time from the producer's stamp to the command being fed (the
 SPEC 13 budget) and to the first pose change of the commanded output. Producers stamp at read
 time, so a poll interval or the SDK stream delay before the read is not included.
@@ -39,6 +48,7 @@ from ..bus import Bus, Message
 from ..config.schema import ReflexConfig, ReflexRule
 from ..manifest import Constraint, Dof
 from ..motion import Keyframe, MotionCore, Player, Primitive, Priority
+from ..motion.state import MotionSample
 from ..stats import P50, P90, P95, P99, quantile, summarise
 from ..world.types import Observation
 
@@ -47,6 +57,11 @@ ONSET_LEVELS = {"p50": P50, "p90": P90, "p99": P99}
 INBOX_MAX = 64
 HALF_PLANE = math.pi / 2
 SOURCE_PREFIX = "reflex."
+DB_PER_DECADE = 20.0  # amplitude ratio to dB
+GATED_TRIGGERS = {
+    "loud_onset": ("motion", "rearm"),
+    "new_voice": ("no_vad", "motion", "own_speech"),
+}
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,28 @@ class _RuleStats:
 
 
 @dataclass
+class _GateStats:
+    """What the gate of a loud-onset or new-voice rule did (SPEC 12A). ``offered`` is what the
+    rule alone would fire on (a threshold crossing; a direction after a silence of real voice);
+    it splits into ``triggered`` (sent on to the cooldown) and one suppression reason each."""
+
+    reasons: tuple[str, ...]
+    offered: int = 0
+    triggered: int = 0
+    suppressed: dict[str, int] = field(default_factory=dict)
+
+    def suppress(self, reason: str) -> None:
+        self.suppressed[reason] = self.suppressed.get(reason, 0) + 1
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "offered": self.offered,
+            "triggered": self.triggered,
+            "suppressed": {r: self.suppressed.get(r, 0) for r in self.reasons},
+        }
+
+
+@dataclass
 class _OnsetTrack:
     """Onset peaks of one loud-onset rule: scalars only, bounded (SPEC 12A).
 
@@ -129,6 +166,8 @@ class ReflexEngine:
         self._gaze = GazeMap(rmap.head_yaw, rmap.head_pitch, rmap.body_yaw)
         self.audio_status: Callable[[], dict[str, Any]] | None = None
         self.speaking: Callable[[float], bool] | None = None  # "is the robot speaking at stamp"
+        self.vad: Callable[[], bool] | None = None  # "the voice listener hears speech now"
+        self.motion_sample: Callable[[], MotionSample | None] | None = None
         self.bad_payloads = 0
         self._lock = threading.Lock()
         self._inbox: deque[_Pending] = deque(maxlen=INBOX_MAX)
@@ -138,8 +177,17 @@ class ReflexEngine:
         self._audio_stamp = 0.0
         self._prev_ratio = 0.0
         self._last_event = -math.inf
+        self._armed: dict[str, bool] = {}  # loud-onset rule -> armed (one startle per sound)
+        self._below: dict[str, float] = {}  # loud-onset rule -> stamp the level fell under re-arm
+        # own-noise gates: each stamp is written by one thread and read by others (one float)
+        self._quiet_from = -math.inf  # the audio triggers are suppressed before this stamp
+        self._measured_t: float | None = None  # stamp of the measured pair last judged
+        self._vad_seen = -math.inf  # last tick the voice listener heard speech
+        self._own_voice = -math.inf  # last time the robot's own sound was playing
+        self._chip_speech = 0
+        self._gates: dict[str, _GateStats] = {}
         # voice and face
-        self._last_voice: float | None = None
+        self._last_voice: float | None = None  # last direction confirmed as a real voice
         self._face_stamp = -math.inf
         self._face_h = 0.0
         self._face_new = False
@@ -234,9 +282,12 @@ class ReflexEngine:
     def offer_audio_level(self, rms: float, stamp: float) -> None:
         """One microphone chunk's RMS (full scale 1.0) captured at ``stamp``.
 
-        The onset is the level over a running floor that falls at once and rises with a half-life
-        (``reflexes.audio``). Triggers are rising edges of each loud-onset rule's threshold;
-        ``sound.loud`` goes on the bus on a rising edge of ``audio.loud_event_ratio``.
+        The onset is the level over a running floor that rises and falls with half-lives
+        (``reflexes.audio``), so it follows the room's typical level, never below ``min_rms``. A
+        rising edge of a loud-onset rule's threshold fires the rule when it is armed and the robot
+        is not moving (``_quiet_from``); the edge consumes the arm either way, and the rule
+        re-arms after ``rearm_hold_s`` under ``rearm_fraction`` of its threshold. ``sound.loud``
+        goes on the bus on a rising edge of ``audio.loud_event_ratio``, not while the robot moves.
 
         While the robot speaks (``speaking``, echo tail included) the chunk is its own voice: no
         trigger, no ``sound.loud``, and the floor is not updated, so the voice never becomes the
@@ -259,9 +310,12 @@ class ReflexEngine:
         if speaking is not None and speaking(stamp):
             with self._lock:
                 self._close_onsets()
+                self._below.clear()  # the room was not heard: a re-arm needs its hold again
                 self._audio_stamp, self._prev_ratio = stamp, math.inf
+                self._own_voice = max(self._own_voice, stamp)
             return
         event: SoundLoud | None = None
+        moving = stamp < self._quiet_from
         with self._lock:
             audio = self.cfg.audio
             floor = max(self._floor if self._floor is not None else rms, audio.min_rms)
@@ -271,34 +325,109 @@ class ReflexEngine:
                 if not (rule.enabled and rule.trigger == "loud_onset"):
                     continue
                 self._track_onset(rule, ratio, prev)
-                if ratio >= rule.threshold > prev:
-                    self._inbox.append(_Pending(rule.name, stamp, ratio))
+                self._onset_edge(rule, ratio, prev, stamp, moving)
             edge = ratio >= audio.loud_event_ratio > prev
-            if edge and stamp - self._last_event >= audio.loud_event_refractory_s:
+            if edge and not moving and stamp - self._last_event >= audio.loud_event_refractory_s:
                 self._last_event = stamp
                 event = SoundLoud(ratio, rms)
-            if rms <= floor:
-                self._floor = rms
-            else:
-                dt = max(0.0, stamp - self._audio_stamp)
-                alpha = 1.0 - 0.5 ** (dt / audio.floor_half_life_s)
-                self._floor = floor + alpha * (rms - floor)
+            self._floor = self._next_floor(rms, stamp)
             self._audio_stamp, self._prev_ratio = stamp, ratio
         if event is not None and self.bus is not None:
             self.bus.publish("sound.loud", event, stamp)
 
+    def _next_floor(self, rms: float, stamp: float) -> float:
+        """The running floor after a chunk, toward the chunk's level (never under ``min_rms``):
+        it rises with ``floor_half_life_s`` (a share of the difference, as before) and falls
+        with ``floor_fall_half_life_s`` (a share of the ratio, so a quiet chunk far under it
+        does not pull it down at once). A single chunk barely moves it, and it settles near the
+        room's typical level rather than its quietest moment. The step counts at most one chunk
+        period (``audio.poll_hz``): one chunk after a gap or a clock jump is still one chunk."""
+        audio = self.cfg.audio
+        level = max(rms, audio.min_rms)
+        floor = self._floor
+        if floor is None:
+            return level
+        dt = min(max(0.0, stamp - self._audio_stamp), 1.0 / audio.poll_hz)
+        if level > floor:
+            return floor + (1.0 - 0.5 ** (dt / audio.floor_half_life_s)) * (level - floor)
+        return floor * (level / floor) ** (1.0 - 0.5 ** (dt / audio.floor_fall_half_life_s))
+
+    def _gate(self, rule: ReflexRule) -> _GateStats:
+        gate = self._gates.get(rule.name)
+        if gate is None:
+            gate = self._gates[rule.name] = _GateStats(GATED_TRIGGERS[rule.trigger])
+        return gate
+
+    def _onset_edge(
+        self, rule: ReflexRule, ratio: float, prev: float, stamp: float, moving: bool
+    ) -> None:
+        """One startle per loud sound (caller holds the lock): a crossing of the threshold fires
+        only an armed rule while the robot is still, and consumes the arm whatever happened;
+        the rule re-arms after ``rearm_hold_s`` under ``rearm_fraction`` of its threshold."""
+        audio = self.cfg.audio
+        armed = self._armed.get(rule.name, True)
+        if not armed:
+            if ratio < audio.rearm_fraction * rule.threshold:
+                since = self._below.setdefault(rule.name, stamp)
+                if stamp - since >= audio.rearm_hold_s:
+                    armed = True
+                    del self._below[rule.name]
+            else:
+                self._below.pop(rule.name, None)
+        if ratio >= rule.threshold > prev:
+            gate = self._gate(rule)
+            gate.offered += 1
+            if not armed:
+                gate.suppress("rearm")
+            elif moving:
+                gate.suppress("motion")
+            else:
+                gate.triggered += 1
+                self._inbox.append(_Pending(rule.name, stamp, ratio))
+            armed = False
+        self._armed[rule.name] = armed
+
     def offer_voice(self, stamp: float, azimuth_rad: float, head_yaw_rad: float = 0.0) -> None:
         """A speech direction: ``azimuth_rad`` is head-relative (positive left), ``head_yaw_rad``
-        the head's yaw at capture, so their sum is the bearing in the base frame. A voice after
-        a silence of at least a ``new_voice`` rule's threshold fires it."""
+        the head's yaw at capture, so their sum is the bearing in the base frame.
+
+        A direction is a real voice only when the voice listener hears speech now (``vad``) or
+        heard it within ``voice_vad_window_s`` before ``stamp``; only a real voice moves the
+        silence clock. A direction after a silence of real voice of at least a ``new_voice``
+        rule's threshold is offered to it, and fires it unless the robot's own sound ended less
+        than the threshold ago (``own_speech``), the robot moves (``motion``) or the voice is not
+        real (``no_vad``)."""
         if not all(map(math.isfinite, (stamp, azimuth_rad, head_yaw_rad))):
             return
+        speaking, vad = self.speaking, self.vad
+        own_now = speaking is not None and speaking(stamp)
+        heard_now = vad is not None and vad()
         with self._lock:
-            gap = math.inf if self._last_voice is None else stamp - self._last_voice
-            self._last_voice = stamp if self._last_voice is None else max(self._last_voice, stamp)
+            self._chip_speech += 1
+            if own_now:
+                self._own_voice = max(self._own_voice, stamp)
+            window = self.cfg.voice_vad_window_s
+            heard = heard_now or (vad is not None and stamp - self._vad_seen <= window)
+            last = self._last_voice
+            gap = math.inf if last is None else stamp - last
+            own_gap = stamp - self._own_voice
+            moving = stamp < self._quiet_from
             for rule in self._rules:
-                if rule.enabled and rule.trigger == "new_voice" and gap >= rule.threshold:
+                if not (rule.enabled and rule.trigger == "new_voice") or gap < rule.threshold:
+                    continue
+                gate = self._gate(rule)
+                gate.offered += 1
+                if own_gap < rule.threshold:
+                    gate.suppress("own_speech")
+                elif moving:
+                    gate.suppress("motion")
+                elif not heard:
+                    gate.suppress("no_vad")
+                else:
+                    gate.triggered += 1
                     self._inbox.append(_Pending(rule.name, stamp, azimuth_rad + head_yaw_rad))
+            if heard:
+                self._last_voice = stamp if last is None else max(last, stamp)
 
     def offer_face_height(self, stamp: float, height: float) -> None:
         """A face's box height as a fraction of the frame; several faces of one frame (same
@@ -342,6 +471,7 @@ class ReflexEngine:
     def on_tick(self, now: float, core: MotionCore) -> None:
         """Start due reflexes and advance the running ones. Called with the loop's lock held:
         it only uses ``core`` and never the loop's own methods."""
+        self._watch_own_noise(now, core)
         triggers, cfg = self._collect(now)
         if not cfg.enabled or core.holding:
             # Disabled, or the watchdog holds the robot (the app stalled): no new reflex, and the
@@ -354,6 +484,42 @@ class ReflexEngine:
         for p in triggers:
             self._start(p, now, core, cfg)
         self._advance(now, core, cfg)
+        if self._players:  # a reflex plays: its own noise until it ends, plus the tail
+            self._quiet_until(now + cfg.motion_gate.tail_ms / MS_PER_S)
+
+    def _quiet_until(self, stamp: float) -> None:
+        """Suppress the audio triggers until ``stamp`` (never shortens the gate)."""
+        if stamp > self._quiet_from:
+            self._quiet_from = stamp
+
+    def _watch_own_noise(self, now: float, core: MotionCore) -> None:
+        """Note the voice listener hearing speech and the robot's own sound playing, and shut
+        the audio triggers' gate for the tail when the robot turns fast (commanded, or measured
+        from a fresh pair of poses) or yields to external control. A few float compares per
+        angular dof on the motion thread; the audio thread only reads ``_quiet_from``."""
+        if self.vad is not None and self.vad():
+            self._vad_seen = now
+        if self.speaking is not None and self.speaking(now):
+            self._own_voice = now
+        gate = self.cfg.motion_gate
+        limit = math.radians(gate.speed_dps)
+        sample = self.motion_sample() if self.motion_sample is not None else None
+        velocities = sample.velocities if sample is not None else core.limiter.vel
+        angles = [n for n, d in self.dofs.items() if d.kind == "angle"]
+        fast = (sample is not None and sample.external) or any(
+            abs(velocities.get(n, 0.0)) > limit for n in angles
+        )
+        pair = sample.measured if sample is not None else None
+        if pair is not None and pair[0] is not None and pair[1] is not None:
+            t0, prev, t1, last = pair
+            if t1 != self._measured_t and t1 > t0:  # judge each measured pair once
+                self._measured_t = t1
+                span = t1 - t0
+                fast = fast or any(
+                    abs(last[n] - prev[n]) > limit * span for n in angles if n in prev and n in last
+                )
+        if fast:
+            self._quiet_until(now + gate.tail_ms / MS_PER_S)
 
     def _collect(self, now: float) -> tuple[list[_Pending], ReflexConfig]:
         """Drain the inbox (dropping stale triggers) and add the close-face edges."""
@@ -427,6 +593,7 @@ class ReflexEngine:
                 Keyframe(duration, start),
             ]
         source = SOURCE_PREFIX + rule.name
+        self._quiet_until(now + duration + cfg.motion_gate.tail_ms / MS_PER_S)
         prim = Primitive(source, tuple(frames))
         self._players[rule.name] = Player(prim, now, source=source, priority=Priority.REFLEX)
         self._last_fire[rule.name] = now
@@ -578,6 +745,11 @@ class ReflexEngine:
                 "dropped_cooldown": s.cooldown,
                 "no_motion": s.no_motion,
             }
+            if r.trigger in GATED_TRIGGERS:
+                gate = self._gates.get(r.name) or _GateStats(GATED_TRIGGERS[r.trigger])
+                entry["gate"] = gate.report()
+            if r.trigger == "loud_onset":
+                entry["armed"] = self._armed.get(r.name, True)
             track = self._onset.get(r.name)
             if r.trigger == "loud_onset" and track is not None:
                 entry["onset"] = self._onset_report(track)
@@ -587,10 +759,18 @@ class ReflexEngine:
                 )
             rules[r.name] = entry
         audio = self.audio_status() if self.audio_status is not None else {"state": "off"}
+        floor = self._floor  # reported as the onsets see it: never under min_rms
+        min_rms = self.cfg.audio.min_rms
+        floor_dbfs = None if floor is None else DB_PER_DECADE * math.log10(max(floor, min_rms))
         return {
             "enabled": self.cfg.enabled,
             "active": self.active(),
             "rules": rules,
             "latency": latency,
             "audio": audio,
+            "floor_dbfs": floor_dbfs,
+            "voice_gate": {
+                "vad": "available" if self.vad is not None else "unavailable",
+                "chip_speech": self._chip_speech,
+            },
         }
