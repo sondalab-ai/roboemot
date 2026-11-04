@@ -27,10 +27,10 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    The appearance embedding (DINOv2-S, about 1.1 s on the CM4, inline on this thread) runs only
    when it adds information (``_entity_reason``, SPEC 5, 13): never for a kind and category no
    record holds and auto-enrollment does not collect; once for a new track, with a burst of
-   votes only while an active record could match it; then at ``rates.appearance_hz`` for a
-   recognised track, and for an unknown one only when its detector box changed size or shape,
-   after a missed object run, or after ``entity_reembed_floor_s``. ``stats`` counts runs and
-   skips by reason (``entity_embeds``).
+   votes only while an active record of its kind could match it (again when such records
+   change); then at ``rates.appearance_hz`` for a recognised track, and for an unknown one only
+   when its detector box changed size or shape, after a missed object run, or after
+   ``entity_reembed_floor_s``. ``stats`` counts runs and skips by reason (``entity_embeds``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -141,6 +141,7 @@ class _FaceState:
 
 @dataclass
 class _EntityState:
+    kind: str = ""  # animal or object
     votes: int = 0  # burst embeddings voted against registry records since the burst started
     last_embed: float | None = None
     owner_id: str | None = None
@@ -171,21 +172,34 @@ def _covers(keys: frozenset[EntityKey], key: EntityKey) -> bool:
 
 
 @dataclass(frozen=True)
-class _Consumers:
-    """Who uses an animal or object embedding: the matcher votes against active records with
-    embeddings of the current model (``vote``); a pending catalogue record is confirmed from a
-    seen entry's embedding (``keep``, records of any status); auto-enrollment collects the
-    embeddings of the kinds in ``autoenroll``. The world model only breaks ties with it."""
+class _Records:
+    """What the registry's animal and object records offer an embedding, keyed by its
+    ``version``: ``voters``, ``(kind, entity_id)`` of the active records with embeddings of the
+    current model (the matcher votes against these, by kind; a record of another model is left
+    out); ``keep``, ``(kind, category)`` of every record, pending ones and other models
+    included (a pending catalogue record is confirmed from a seen entry's embedding)."""
 
-    vote: frozenset[EntityKey]
+    version: int
+    model_id: str
+    voters: frozenset[tuple[str, str]]
     keep: frozenset[EntityKey]
+
+
+@dataclass(frozen=True)
+class _Consumers:
+    """Who uses an animal or object embedding: the matcher (``records.voters``, by kind like
+    ``Registry.gallery``, so a cat-or-dog label flicker still matches), a pending catalogue
+    record (``records.keep``, by kind and category, as confirm checks) and auto-enrollment
+    (the kinds in ``autoenroll``). The world model only breaks ties with it."""
+
+    records: _Records
     autoenroll: frozenset[str]
 
     def votes(self, key: EntityKey) -> bool:
-        return _covers(self.vote, key)
+        return any(kind == key[0] for kind, _ in self.records.voters)
 
     def wants(self, key: EntityKey) -> bool:
-        return key[0] in self.autoenroll or _covers(self.keep, key)
+        return key[0] in self.autoenroll or self.votes(key) or _covers(self.records.keep, key)
 
 
 def _extent(camera: CameraModel, box: Box) -> float:
@@ -258,6 +272,7 @@ class VisionPipeline:
         self._entity_budget = 0
         self._entity_embeds = 0
         self._object_runs = 0
+        self._records: _Records | None = None
         self._embed_runs = dict.fromkeys(EMBED_RUNS, 0)
         self._embed_skips = dict.fromkeys(EMBED_SKIPS, 0)
         self._report_lock = threading.Lock()
@@ -509,7 +524,7 @@ class VisionPipeline:
                 state.announced = None
         for entity in self._entities.values():
             if entity.owner_id == owner_id:
-                entity.owner_id = None
+                entity.owner_id, entity.votes = None, 0
 
     def _expire(self, stamp: float) -> None:
         for track_id in self.face_tracker.expire(stamp):
@@ -744,12 +759,14 @@ class VisionPipeline:
         for track_id in result.removed_ids:
             self._drop_entity(track_id)
         states = {
-            t.track_id: self._entities.setdefault(t.track_id, _EntityState())
+            t.track_id: self._entities.setdefault(t.track_id, _EntityState(kinds[t.label]))
             for t in result.visible
         }
         self._entity_budget = self.cfg.max_entity_embeds_per_frame
         self._object_runs += 1
         consumers = self._entity_consumers() if self.appearance_embedder is not None else None
+        if consumers is not None:
+            self._follow_records(consumers.records)
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
@@ -778,21 +795,43 @@ class VisionPipeline:
         return -math.inf if state.last_embed is None else state.last_embed
 
     def _entity_consumers(self) -> _Consumers:
-        """Who can use an animal or object embedding now, read once per object run (records
-        and auto-enrollment can change while a track lives)."""
+        """Who can use an animal or object embedding now, checked once per object run (records
+        and auto-enrollment can change while a track lives); the records are read again only
+        when the registry's ``version`` moved."""
         assert self.appearance_embedder is not None
         model = self.appearance_embedder.model_id
-        vote: set[EntityKey] = set()
-        keep: set[EntityKey] = set()
-        for record in self.matcher.registry.entities():
-            key = (record.kind, record.category)
-            keep.add(key)
-            usable = record.embedding_model_id == model and len(record.embeddings)
-            if record.status == "active" and usable:
-                vote.add(key)
+        registry = self.matcher.registry
+        records = self._records
+        if records is None or records.version != registry.version or records.model_id != model:
+            version = registry.version
+            voters: set[tuple[str, str]] = set()
+            keep: set[EntityKey] = set()
+            for record in registry.entities():
+                keep.add((record.kind, record.category))
+                usable = record.embedding_model_id == model and len(record.embeddings)
+                if record.status == "active" and usable:
+                    voters.add((record.kind, record.entity_id))
+            records = _Records(version, model, frozenset(voters), frozenset(keep))
         auto = self.world.autoenroll
         kinds = frozenset(auto.kinds) if auto.enabled else frozenset()
-        return _Consumers(frozenset(vote), frozenset(keep), kinds)
+        return _Consumers(records, kinds)
+
+    def _follow_records(self, records: _Records) -> None:
+        """When the records a track could match change (one enrolled, confirmed or deleted),
+        unknown tracks of that kind vote again with a new burst, and a track whose record is
+        gone loses it (its votes are released)."""
+        old = self._records
+        self._records = records
+        if old is None or old.voters == records.voters:
+            return
+        kinds = {kind for kind, _ in old.voters ^ records.voters}
+        live = {entity_id for _, entity_id in records.voters}
+        for track_id, state in self._entities.items():
+            if state.owner_id is not None and state.owner_id not in live:
+                self.matcher.release(track_id)
+                state.owner_id, state.votes = None, 0
+            elif state.owner_id is None and state.kind in kinds:
+                state.votes = 0
 
     def _evaluate_entity(
         self,
@@ -820,8 +859,7 @@ class VisionPipeline:
             return
         assert self.appearance_embedder is not None
         voting = state.owner_id is None and consumers.votes(key)
-        if voting and reason in (CHANGED, REACQUIRED):
-            state.votes = 0  # it may look different now: a new burst of votes
+        restart = voting and reason in (CHANGED, REACQUIRED, FLOOR)
         self._entity_budget -= 1
         self._entity_embeds += 1
         stamp = frame.stamp
@@ -830,6 +868,8 @@ class VisionPipeline:
             embedding = self.appearance_embedder.embed(frame.image, track.box)
         finally:
             self.timer.record(APPEARANCE, wall0, cpu0)
+        if restart:
+            state.votes = 0  # it may look different now: a new burst of votes
         identity = self.matcher.observe(
             track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
         )
@@ -853,7 +893,8 @@ class VisionPipeline:
 
         Nothing uses the embedding of a kind and category that no record holds and
         auto-enrollment does not collect: skipped. A new track is embedded once; it gets a burst
-        of votes only while a record could match it. After that a recognised track keeps
+        of votes only while an active record of its kind could match it (again after a re-embed
+        of an unknown track, or when such records change). After that a recognised track keeps
         ``rates.appearance_hz``; an unknown one is embedded again only when its box changed size
         or shape, when it was out of sight for an object run, or after ``entity_reembed_floor_s``.
         """
