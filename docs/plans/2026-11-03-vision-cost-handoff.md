@@ -27,6 +27,9 @@ Start none of these before the `stage_timing` numbers from the robot exist. Each
 
 - **Sticky identity for still objects.** A recognised object that sits still loses its identity: gate-spaced object runs (about 10 s apart) exceed `identity.vote_max_age_s` (10 s), so a known mug can turn unknown and get a long novelty look again (`attention/interest.py`, `familiar_novelty`). Keep a recognised identity until a strong contrary vote arrives, instead of letting it lapse. Principle: best UX drives every vision catalogue decision (owner, 2026-11-04).
 
+- **Wake path test on the robot (owner, later).** Diagnosis 2026-11-04: the facing check, not ASR, blocks answers (yaw 40-73 deg vs 30). Run 5 times each, then send `roboemot debug`: (1) alone at 50 cm looking at the robot, no name; (2) same, looking away; (3) looking away, "Neve, come stai?"; (4) looking away, "Neve" plus 5+ words; (5) looking away, "ciao Neve" plus a long sentence; (6) as 1 with a second person 1 m aside; (7) turn from the other person and speak at once vs face the robot 3 s first. Step 1 > 30 deg: bias (raise `voice.facing.max_yaw_deg` or recalibrate `vision.facing_nose_depth_ratio`); 1 passes and 6 fails: wrong face (keep yaw per face track); only 7 fails: timing (judge yaw after speech start).
+- **Flaky tests** blocking merges: `test_app_soothe.py::test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it`, `test_realtime_turns.py::test_a_late_calls_items_are_deleted_with_its_turn` (Python 3.11 CI). Make them timing-independent.
+
 ## 4. Proposed, not approved
 
 - Put the shown object into the conversation context ("the person is showing you a cup").
