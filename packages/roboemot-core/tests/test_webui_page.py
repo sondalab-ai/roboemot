@@ -111,6 +111,13 @@ def test_local_stylesheet_has_only_the_registered_product_accent():
     assert "url(" not in css and "@import" not in css
 
 
+def test_local_stylesheet_hides_every_hidden_element():
+    # an author `display` (`.stack`, `.row`) beats the browser's `[hidden]` rule, so the page
+    # needs its own global one; jsdom applies no stylesheet, so the JS tests cannot see this
+    css = (STATIC / "style.css").read_text()
+    assert re.search(r"(?m)^\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", css)
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()

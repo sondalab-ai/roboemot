@@ -214,6 +214,61 @@ test("search matches the path or the description and opens the matching groups",
   assert.equal(group(page, "core-voice").getAttribute("aria-expanded"), "false", "back to what was opened by hand");
 });
 
+/** The rows of an open group body: every child is a `.setting` with content, or a rule between two of them. */
+function shownRows(node) {
+  const kids = [...node.children].filter((k) => !k.matches(".row")); // the "show all" button row
+  kids.forEach((k, i) => {
+    if (i % 2) assert.equal(k.tagName, "HR", "a rule only between two rows");
+    else {
+      assert.ok(k.matches(".setting"), "a row, not a bare rule");
+      assert.ok(k.querySelector(".sl-code") && k.textContent.trim() !== "", "the row has its content");
+    }
+  });
+  assert.ok(kids.length % 2 === 1, "no trailing rule");
+  return kids.filter((k) => k.matches(".setting")).map((k) => k.dataset.path);
+}
+
+test("search: an open group shows full rows, only the matching ones", async () => {
+  const page = await settingsPage();
+  await typeQuery(page, "voice.mo");
+  assert.equal(group(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.deepEqual(shownRows(body(page, "core-voice")), ["voice.mode", "voice.moods"]);
+});
+
+test("the group toggle collapses and reopens an open group", async () => {
+  const page = await settingsPage();
+  await typeQuery(page, "voice.mo");
+  const toggle = group(page, "core-voice");
+  assert.equal(body(page, "core-voice").hidden, false);
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(body(page, "core-voice").hidden, true);
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(body(page, "core-voice").hidden, false);
+  assert.deepEqual(shownRows(body(page, "core-voice")), ["voice.mode", "voice.moods"]);
+});
+
+test("overlapping renders draw one view, whose rows keep their content", async () => {
+  // the tab clicked twice while the catalogue loads: the second render used to move the cached
+  // leaf rows out of the first copy, which kept only its rules and its containers
+  const page = await loadPage({ "GET /api/settings": async () => { await sleep(20); return { fields: fields(), pin_required: true }; } });
+  page.run("settingsState.query = 'voice.mo'");
+  page.run("settingsView(); settingsView();");
+  await sleep(100);
+  assert.equal(page.document.querySelectorAll("#settings-search").length, 1);
+  assert.equal(page.document.querySelectorAll("#grp-core-voice-body").length, 1);
+  assert.deepEqual(shownRows(body(page, "core-voice")), ["voice.mode", "voice.moods"]);
+});
+
+test("a render still loading when the user logs out draws nothing", async () => {
+  const page = await loadPage({ "GET /api/settings": async () => { await sleep(20); return { fields: fields(), pin_required: true }; } });
+  page.run("settingsView(); resetSettingsState();");
+  await sleep(100);
+  assert.equal(page.run("settingsState.data"), null);
+  assert.equal(page.document.querySelector("#view").children.length, 0);
+});
+
 test("the changed-only filter keeps runtime values and values that differ from the default", async () => {
   const page = await settingsPage();
   const only = page.document.querySelector("#settings-changed");

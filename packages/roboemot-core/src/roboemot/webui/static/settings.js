@@ -18,6 +18,7 @@ const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
+  render: 0, // the latest settingsView call; an older one still waiting for the catalogue draws nothing
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -30,6 +31,7 @@ function resetSettingsState() {
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
+  settingsState.render++; // a render in flight must not draw the catalogue after a logout
   const view = document.getElementById("view");
   if (view) view.replaceChildren();
 }
@@ -873,10 +875,16 @@ function settingsToolbar() {
       el("p", { class: "hint", id: "settings-count", role: "status", "aria-live": "polite" })));
 }
 
+// Draws the Settings tab. Only the latest call draws: two overlapping calls (the tab clicked twice, or
+// left and reopened while the catalogue loads) would each append a full view, and the second would move
+// the cached leaf rows out of the first, leaving its group bodies with bare separators.
 async function settingsView() {
+  const mine = ++settingsState.render;
   const view = document.getElementById("view");
   view.replaceChildren();
   const data = await api("GET", "/api/settings");
+  if (mine !== settingsState.render) return;
+  view.replaceChildren();
   settingsState.data = data;
   const robot = data.robot || null;
   const sections = [
