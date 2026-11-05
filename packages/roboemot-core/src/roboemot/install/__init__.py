@@ -37,6 +37,12 @@ removes exactly them), asks for the route's key when the store has none, skips P
 voices and removes a recorded Piper virtualenv. ``-y`` does not turn it on; an unattended run
 names ``--cloud-voice`` or ``--no-cloud-voice``.
 
+The overclock (``--overclock``, opt-in, only where the platform's hardware supports it:
+``Platform.overclock``, ``roboemot.install.overclock``) writes one marked block into the robot's
+boot config, through a trial config booted once when the platform has one; the reboot for it
+has its own question (``--overclock-reboot``). ``-y`` turns neither on; an unattended run names
+``--overclock`` or ``--no-overclock``, and a reinstall without it removes the recorded block.
+
 Later, ``scripts/run_on_robot.py`` (``roboemot.install.run``) starts the installed app and
 prints its web UI address.
 
@@ -74,6 +80,7 @@ import yaml
 
 from .. import paths, timezones
 from ..secret_store import NAME as SECRET_NAME
+from . import overclock as overclocking
 from .build import (
     build_wheels,
     distribution_names,
@@ -82,9 +89,17 @@ from .build import (
     with_extras,
 )
 from .caches import clear_caches
+from .overclock import Overclock
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
-from .record import InstallRecord, UninstallPlan, canonical, plan_uninstall, unknown_keys
+from .record import (
+    InstallRecord,
+    OverclockRecord,
+    UninstallPlan,
+    canonical,
+    plan_uninstall,
+    unknown_keys,
+)
 from .remote import Remote
 from .ui import (
     COMMAND,
@@ -166,7 +181,7 @@ PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
 )
 PROBE_PATTERN = re.compile(r"[A-Za-z0-9_]+\n\d+\.\d+")
-INSTALL_STEPS = 6
+INSTALL_STEPS = 7
 DEV_CONFIG = "configs/dev-unmeasured.yaml"
 APP_CONFIG_SCHEMA = 1
 APP_CONFIG_HEADER = (
@@ -235,6 +250,8 @@ class Platform(Protocol):
     restart: Callable[[Ui], None] | None
     # The route of the cloud-voice profile (``--cloud-voice``); None: the platform has none.
     cloud_voice: CloudVoiceRoute | None
+    # The CPU overclock its hardware may support (``--overclock``); None: the platform has none.
+    overclock: Overclock | None
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
@@ -278,6 +295,8 @@ class Options:
     version: bool = False
     cloud_voice: bool | None = None  # the cloud-voice profile; None: not answered yet
     timezone: str | None = None  # circadian.timezone (IANA name); None: not answered yet
+    overclock: bool | None = None  # the opt-in overclock; None: not answered yet
+    overclock_reboot: bool | None = None  # its reboot; None: asked on a terminal, else refused
 
 
 # ---------------------------------------------------------------- app config
@@ -1889,6 +1908,8 @@ def _rerun(opts: Options) -> str:
         ("dev", opts.dev),
         ("piper", opts.piper if opts.voice and not opts.cloud_voice else None),
         ("cloud-voice", opts.cloud_voice),
+        ("overclock", opts.overclock),
+        ("overclock-reboot", opts.overclock_reboot),
         ("start", opts.start),
         ("startup-app", opts.startup),
     ):
@@ -2021,6 +2042,39 @@ def check_saved_overrides(ui: Ui, opts: Options, platform: Platform, remote: Rem
         )
 
 
+def check_overclock(ui: Ui, opts: Options, platform: Platform) -> None:
+    """Refuse ``--overclock`` on a platform without one, before the robot is touched; on a
+    platform with one, off a terminal the run needs ``--overclock`` or ``--no-overclock`` (``-y``
+    is not an answer: a board that fails to boot needs a computer to recover)."""
+    if platform.overclock is None:
+        if opts.overclock:
+            raise WizardError(
+                f"No overclock for {platform.display_name}",
+                "its installer offers none",
+                _rerun(replace(opts, overclock=None)),
+            )
+        opts.overclock = False
+        return
+    flag = overclocking.FLAG
+    ui.require(
+        f"--no-{flag[2:]}",
+        opts.overclock is not None,
+        f"Missing {flag} or --no-{flag[2:]} (-y does not answer it)",
+    )
+
+
+def overclock_saver(
+    remote: Remote, platform: Platform, record: InstallRecord
+) -> Callable[[OverclockRecord | None], None]:
+    """Write ``record`` with a new overclock entry (None: none), before or after a change."""
+
+    def save(entry: OverclockRecord | None) -> None:
+        record.overclock = entry
+        write_record(remote, platform.record_path, record)
+
+    return save
+
+
 def say_cloud_voice_off(ui: Ui, opts: Options, platform: Platform, remote: Remote) -> None:
     """Over an install that recorded the cloud-voice profile, say that this run turns it off
     and what that changes (read-only: the record)."""
@@ -2104,9 +2158,11 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
     check_cloud_voice(ui, opts, platform)
+    check_overclock(ui, opts, platform)
     ui.ok("Selected the robot", f"{platform.display_name} at {host}")
     platform.connect(ui, host)
     _check_running_app(opts, ui, platform)
+    oc_plan: list[overclocking.Plan] = []  # settled before any change, applied last
 
     stopped: list[bool] = []  # whether this run stopped the running app
 
@@ -2155,6 +2211,19 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     key.append(
                         ask_cloud_voice_key(ui, opts, platform, remote, platform.cloud_voice)
                     )
+                earlier = read_record(remote, platform.record_path)
+                opts.overclock, plan = overclocking.settle(
+                    ui,
+                    remote,
+                    platform.overclock,
+                    earlier.overclock if earlier else None,
+                    opts.overclock,
+                    opts.dry_run,
+                )
+                plan.rerun = _rerun(
+                    replace(opts, overclock=True, overclock_reboot=True, dry_run=False)
+                )
+                oc_plan.append(plan)
                 check_shared_packages(ui, platform, remote, dirs, extras, opts.dry_run)
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
@@ -2232,34 +2301,26 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 if blocker:
                     ui.warn("Start would be refused", blocker)
                 ui.kv("Autostart app", platform.autostart() or "none")
+            else:
+                start_app(ui, opts, platform, remote, record, host)
+
+            ui.step("Overclock")
+            overclocking.apply(
+                ui,
+                remote,
+                platform.overclock,
+                oc_plan[0] if oc_plan else overclocking.Plan(),
+                record.overclock,
+                bool(opts.overclock),
+                opts.overclock_reboot,
+                opts.dry_run,
+                overclock_saver(remote, platform, record),
+            )
+            if opts.dry_run:
                 ui.ok("Dry run passed", "the robot was not modified")
                 ui.next(_rerun(opts))
                 ui.summary()
                 return
-            blocker = platform.start_blocker()
-            if blocker:
-                ui.warn(f"Did not start {platform.app_name}", blocker)
-                ui.hint("Start it once that is done", "python scripts/run_on_robot.py")
-            elif (
-                opts.start
-                if opts.start is not None
-                else ui.confirm(f"Start {platform.app_name} now?", False, flag="--start")
-            ):
-                platform.start(ui)
-                report_app_url(ui, platform, host, configured_webui_port(remote))
-            startup = opts.startup
-            if startup is None:
-                startup = ui.confirm(
-                    f"Start {platform.app_name} automatically when the robot wakes up?",
-                    False,
-                    flag="--startup-app",
-                )
-            if startup:
-                if not record.autostart_recorded:
-                    record.autostart_before, record.autostart_recorded = platform.autostart(), True
-                    write_record(remote, platform.record_path, record)
-                platform.set_autostart(platform.app_name)
-                ui.ok("Set the autostart app", f"{platform.app_name} starts on wake-up")
             ui.ok("Installed", f"{platform.app_name} on {host}")
             ui.next(shlex.join(["python", "scripts/robot_ssh.py", "--host", host, "--debug"]))
             ui.hint("Start it later", "python scripts/run_on_robot.py")
@@ -2273,6 +2334,37 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.warn(f"{platform.app_name} is stopped", "it was stopped before installing")
             ui.hint("Start it once the problem is fixed", "python scripts/run_on_robot.py")
         raise
+
+
+def start_app(
+    ui: Ui, opts: Options, platform: Platform, remote: Remote, record: InstallRecord, host: str
+) -> None:
+    """The install's start step: start the app (asked, default no) unless something blocks it,
+    then make it the autostart app (asked), recording the one it replaces first."""
+    blocker = platform.start_blocker()
+    if blocker:
+        ui.warn(f"Did not start {platform.app_name}", blocker)
+        ui.hint("Start it once that is done", "python scripts/run_on_robot.py")
+    elif (
+        opts.start
+        if opts.start is not None
+        else ui.confirm(f"Start {platform.app_name} now?", False, flag="--start")
+    ):
+        platform.start(ui)
+        report_app_url(ui, platform, host, configured_webui_port(remote))
+    startup = opts.startup
+    if startup is None:
+        startup = ui.confirm(
+            f"Start {platform.app_name} automatically when the robot wakes up?",
+            False,
+            flag="--startup-app",
+        )
+    if startup:
+        if not record.autostart_recorded:
+            record.autostart_before, record.autostart_recorded = platform.autostart(), True
+            write_record(remote, platform.record_path, record)
+        platform.set_autostart(platform.app_name)
+        ui.ok("Set the autostart app", f"{platform.app_name} starts on wake-up")
 
 
 def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> bool:
@@ -2337,6 +2429,10 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
             if record.pending_before is not None:
                 ui.warn("Last install interrupted", "its changes are included")
                 record.merge(record.pending_before, installed)
+        _, oc_plan = overclocking.settle(
+            ui, remote, platform.overclock, record.overclock, False, dry
+        )  # root settled now: off a terminal, a sudo asking for a password stops it here
+        oc_removed = False
 
         ui.step("App")
         app = platform.app_name
@@ -2402,6 +2498,20 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         remove_models_dirs(ui, remote, record, dry)
         remove_app_config(ui, remote, record, dry)
         remove_data_dir(ui, remote, record, dry)
+        if record.overclock is not None:
+            save = (lambda entry: None) if dry else overclock_saver(remote, platform, record)
+            if record.overclock.state != "on":  # a promote cut short: finish it, then revert
+                record.overclock = (
+                    overclocking.finish_promote(
+                        ui, remote, platform.overclock, oc_plan, record.overclock, dry, save
+                    )
+                    or record.overclock
+                )
+            on = record.overclock.state == "on"
+            removed = overclocking.remove(
+                ui, remote, platform.overclock, oc_plan, record.overclock, dry, save
+            )
+            oc_removed = on and removed == overclocking.REMOVED
         platform.cleanup(ui, py, dry)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
         tmp_dirs = [d for d in listed if TMP_DIR_PATTERN.fullmatch(d)]
@@ -2419,6 +2529,15 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         remote.run(f"rm -f {shlex.quote(platform.record_path)}")
         ui.ok("Deleted the install record", platform.record_path)
         ui.ok("Uninstalled", f"{app} from {host}")
+        if oc_removed:  # last: a reboot ends the daemon and the SSH connection
+            overclocking.offer_reboot(
+                ui,
+                remote,
+                platform.overclock,
+                oc_plan,
+                opts.overclock_reboot,
+                overclocking.OFF_NEXT_BOOT,
+            )
         ui.summary()
 
     _with_remote(opts, ui, platform, host, body)
@@ -2461,6 +2580,12 @@ def verify_uninstall(
     config = app_config_remote_path(py.remote)
     if record.app_config == config and _exists(py.remote, config):
         problems.append(f"app config {config} still present")
+    if record.overclock is not None:
+        oc = record.overclock
+        problems.append(
+            f"overclock {'block' if oc.state == 'on' else 'trial config'} in "
+            f"{oc.path if oc.state == 'on' else oc.trial} edited by hand: fix it, then rerun"
+        )
     data_dir, bad = checked_data_dir(py.remote, record)
     if bad:
         problems.append(bad)
@@ -2581,6 +2706,25 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         "removes a recorded Piper venv (default: ask on a terminal; -y does not turn it on)",
     )
     p.add_argument(
+        overclocking.FLAG,
+        dest="overclock",
+        action=argparse.BooleanOptionalAction,
+        help="overclock the CPU where the platform's hardware supports it (every support check "
+        "passes), writing one marked block into the boot config, through a trial boot when the "
+        "board has one; --no-overclock (and a reinstall without it) removes the recorded block "
+        "(default: ask on a terminal, no; -y does not turn it on, and on a reinstall -y removes "
+        "an active overclock unless --overclock is passed)",
+    )
+    p.add_argument(
+        overclocking.REBOOT_FLAG,
+        dest="overclock_reboot",
+        action=argparse.BooleanOptionalAction,
+        help="reboot the robot when the overclock needs it (the trial boot, or applying a "
+        "removed block) and wait for it to come back; the reboot stops the app and the robot's "
+        "own software (default: ask on a terminal, no; without a terminal no reboot; -y does "
+        "not answer it)",
+    )
+    p.add_argument(
         "--clear-caches",
         action=argparse.BooleanOptionalAction,
         help="delete the robot's download caches the platform names (e.g. a uv cache) to "
@@ -2593,7 +2737,8 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         action="store_true",
         help="answer yes to every confirmation: dev mode, Piper, the models, start, autostart, "
         "stopping another app, changing shared packages, replacing a PIN or secret (not "
-        "clearing caches: only --clear-caches does)",
+        "clearing caches, the cloud-voice profile, the overclock or its reboot: only their own "
+        "flags do)",
     )
     p.add_argument(
         "--debug", action="store_true", help="show raw tool output and tracebacks on errors"
@@ -2620,6 +2765,8 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         version=a.version,
         cloud_voice=a.cloud_voice,
         timezone=a.timezone,
+        overclock=a.overclock,
+        overclock_reboot=a.overclock_reboot,
     )
 
 

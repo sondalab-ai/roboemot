@@ -287,7 +287,14 @@ def test_diagnostics_sources_read_the_daemon_api():
     assert {sec["scope"] for sec in s.values()} == {"robot"}
     # registered under the manifest id (entry point installed with the package)
     names = [src.name for src in platform_sources("reachy-mini-wireless", Target())]
-    assert names == ["robot.daemon", "robot.motors", "robot.state", "robot.app", "robot.wifi"]
+    assert names == [
+        "robot.daemon",
+        "robot.motors",
+        "robot.state",
+        "robot.app",
+        "robot.wifi",
+        "robot.overclock",
+    ]
 
 
 class StatusClient(FakeClient):

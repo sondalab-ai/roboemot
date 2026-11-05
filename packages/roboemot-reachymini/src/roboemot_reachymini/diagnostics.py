@@ -16,6 +16,10 @@ section is one read-only call to the daemon's REST API through ``DaemonClient`` 
   their names). Unlike the others this router has no ``/api`` prefix and exists only on the
   Wireless daemon: elsewhere the section says it is not available.
 
+- ``robot.overclock``: whether the installer's overclock block is in the boot config and a
+  trial config with it is waiting (``roboemot_reachymini.overclock``; both files are
+  world-readable, so no root). Only when the report is built on the robot.
+
 The daemon reports no battery, CPU or memory figures, and no Wi-Fi signal strength; those come
 from the generic ``local`` sources (``network.wifi``) when the report is built on the robot
 (``scripts/robot_ssh.py --debug``).
@@ -23,11 +27,13 @@ from the generic ``local`` sources (``network.wifi``) when the report is built o
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from roboemot.diagnostics import FnSource, Source, Target
 
 from .daemon import DaemonClient
+from .overclock import CONFIG, TRIAL, block_state
 
 ID_FIELD = "hardware_id"
 
@@ -48,7 +54,26 @@ def sources(target: Target, daemon: DaemonClient | None = None) -> list[Source]:
         FnSource("robot.state", api.state, "robot"),
         FnSource("robot.app", api.current_app, "robot"),
         FnSource("robot.wifi", wifi, "robot"),
+        FnSource("robot.overclock", lambda: overclock_state(target), "robot"),
     ]
+
+
+def overclock_state(target: Target, root: Path = Path("/")) -> dict[str, Any]:
+    """The installer's overclock block in this machine's boot config (read-only files);
+    unavailable when the report is built off the robot."""
+    if target.remote:
+        return {"available": False, "reason": "the boot config is read only on the robot"}
+    config, trial = (_text(root / p.lstrip("/")) for p in (CONFIG, TRIAL))
+    if config is None:
+        return {"available": False, "reason": f"no {CONFIG} on this machine"}
+    return {"available": True, **block_state(config, trial)}
+
+
+def _text(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
 
 
 def daemon_summary(status: Any) -> Any:

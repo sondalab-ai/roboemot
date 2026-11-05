@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from roboemot.install.pyenv import RemotePython, report_changes
 from roboemot.install.record import (
     RECORD_VERSION,
     InstallRecord,
+    OverclockRecord,
     Replaced,
     canonical,
     plan_uninstall,
@@ -232,6 +234,7 @@ class BarePlatform:
     clearable_caches = ()
     restart = None
     cloud_voice = None
+    overclock = None
 
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp
@@ -324,7 +327,49 @@ def test_unknown_keys_of_the_same_version_are_dropped_and_named():
 
 def test_an_old_record_is_written_back_at_the_current_version():
     old = {"app": "a", "platform": "p", "packages": ["x"], "version": 1}
-    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 3
+    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 4
+
+
+def test_a_version_3_record_loads_without_an_overclock_and_is_written_back_as_4():
+    v3 = {**rec(added=["scipy"]).to_json(), "version": 3}
+    del v3["overclock"]
+    loaded = InstallRecord.from_json(v3)
+    assert loaded.overclock is None and loaded.added == ["scipy"]
+    assert loaded.to_json() == {**v3, "overclock": None, "version": 4}
+
+
+def oc(**kw) -> OverclockRecord:
+    base = dict(path="/boot/cfg", block="# >>>\nx=1\n# <<<\n", backup="a=1\n")
+    return OverclockRecord(**{**base, "trial": "/boot/trial", **kw})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [oc(), oc(state="trying"), oc(state="promoting"), oc(state="on", trial=None), oc(backup="")],
+)
+def test_the_overclock_entry_round_trips_with_its_backup(entry):
+    r = rec(overclock=entry)
+    loaded = InstallRecord.from_json(json.loads(json.dumps(r.to_json())))
+    assert loaded == r and loaded.overclock.applied == entry.backup + entry.block
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "on",
+        {"path": "/boot/cfg"},
+        {**asdict(oc()), "state": "maybe"},
+        {**asdict(oc()), "trial": None},  # a trial state needs its trial file
+        {**asdict(oc()), "block": ""},
+        {**asdict(oc()), "trial": 5},
+        {**asdict(oc()), "backup": "a=1\x00"},  # a NUL byte: a WizardError, not a ValueError
+        {**asdict(oc()), "path": "/boot/\x00cfg"},
+        {**asdict(oc()), "extra": 1},
+    ],
+)
+def test_an_unreadable_overclock_entry_is_refused(bad):
+    with pytest.raises(WizardError, match="unreadable overclock"):
+        InstallRecord.from_json({**rec().to_json(), "overclock": bad})
 
 
 @pytest.mark.parametrize("version", ["2", None, True, 1.5])

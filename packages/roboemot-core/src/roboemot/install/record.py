@@ -18,6 +18,13 @@ uninstall removes those names and leaves the others. When the robot has no app e
 yet, the installer creates it the way the robot's own software would and records its path
 before creating it (``env_created``) with the distributions it held afterwards
 (``env_baseline``); uninstall removes it again unless another app or package has moved in.
+An opt-in overclock (``--overclock``) is recorded as an :class:`OverclockRecord` before the boot
+config is written: the file, the exact block, a backup of the file as it was, and the trial
+config while the block is only there; a reinstall without the option and uninstall remove
+exactly that block, and refuse a block edited by hand. This file is writable by the robot user,
+so root never trusts it: the overclock's paths and block must equal the platform's, the texts
+written are built from the live boot config, and the backup is kept only for the owner's
+recovery by hand.
 
 The record carries a ``version``. A record from a newer installer (a higher version) is refused
 with a message naming the cause, since this installer cannot honour fields it does not know;
@@ -34,7 +41,8 @@ from typing import Any
 
 from .ui import WizardError
 
-RECORD_VERSION = 3  # 2: models_dirs, env_created, env_baseline, app_config; 3: app_config_keys
+# 2: models_dirs, env_created, env_baseline, app_config; 3: app_config_keys; 4: overclock
+RECORD_VERSION = 4
 
 Versions = dict[str, str]  # canonical distribution name -> version
 
@@ -53,6 +61,31 @@ def versions(pip_list: list[dict[str, str]]) -> Versions:
 class Replaced:
     before: str  # the version found on the robot before the first install
     after: str  # the version this installer left
+
+
+# trial written, trial boot asked, promote begun (finished on the next run), block in place
+OVERCLOCK_STATES = ("trial", "trying", "promoting", "on")
+
+
+@dataclass
+class OverclockRecord:
+    """The overclock block this installer wrote (``roboemot.install.overclock``). ``path`` is
+    the boot config, ``block`` the exact text with its markers, ``backup`` the file as it was
+    before the first write (for the owner's recovery by hand: never written back as root).
+    ``trial`` is the trial config (a copy of ``backup`` plus the block) while ``state`` is
+    ``trial`` (written, or its write did not finish), ``trying`` (its one boot asked) or
+    ``promoting`` (the move into ``path`` began); ``on``: the block is in ``path``."""
+
+    path: str
+    block: str
+    backup: str
+    trial: str | None = None
+    state: str = "trial"
+
+    @property
+    def applied(self) -> str:
+        """The boot config's text with the block, as this installer wrote it."""
+        return self.backup + self.block
 
 
 @dataclass
@@ -78,6 +111,7 @@ class InstallRecord:
     # app config keys a profile set (``--cloud-voice``), each a key path; ``["llm_routes",
     # name]`` is the route entry of that name: a reinstall without the profile removes them
     app_config_keys: list[list[str]] = field(default_factory=list)
+    overclock: OverclockRecord | None = None  # the overclock block it wrote, if any
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:
@@ -104,6 +138,7 @@ class InstallRecord:
             for k in keys
         ):
             raise WizardError("the install record has unreadable app_config_keys")
+        data["overclock"] = _overclock(data.get("overclock"))
         data["version"] = RECORD_VERSION
         return cls(**data)
 
@@ -126,6 +161,30 @@ class InstallRecord:
                     self.replaced[name] = Replaced(before[name], version)
         self.added = sorted(added)
         self.pending_before = None
+
+
+def _overclock(raw: Any) -> OverclockRecord | None:
+    """The record's ``overclock`` field, checked: a field of the wrong type, a NUL byte or an
+    unknown state is refused, not guessed (the paths and the block are checked against the
+    platform's own before any root write, ``overclock.require_trusted``)."""
+    if raw is None:
+        return None
+    names = {f.name for f in fields(OverclockRecord)}
+    if not isinstance(raw, dict) or not {"path", "block", "backup"} <= set(raw) <= names:
+        raise WizardError("the install record has an unreadable overclock entry")
+    oc = OverclockRecord(**raw)
+    texts = (oc.path, oc.block, oc.backup)
+    if (
+        not all(isinstance(t, str) for t in texts)
+        or not oc.path
+        or not oc.block
+        or not (oc.trial is None or (isinstance(oc.trial, str) and oc.trial))
+        or any("\x00" in t for t in (*texts, oc.trial or ""))
+        or oc.state not in OVERCLOCK_STATES
+        or (oc.state != "on" and oc.trial is None)
+    ):
+        raise WizardError("the install record has an unreadable overclock entry")
+    return oc
 
 
 def unknown_keys(data: dict[str, Any]) -> list[str]:
@@ -176,7 +235,9 @@ def plan_uninstall(
 
 
 __all__ = [
+    "OVERCLOCK_STATES",
     "InstallRecord",
+    "OverclockRecord",
     "Replaced",
     "UninstallPlan",
     "Versions",

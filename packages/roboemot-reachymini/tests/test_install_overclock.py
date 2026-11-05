@@ -1,0 +1,916 @@
+"""SPEC 4A, Installer: the opt-in CPU overclock (roboemot.install.overclock) with the Reachy Mini
+Wireless platform (roboemot_reachymini.overclock), against the fake robot and daemon of
+test_install_wizard extended with the boot config, vcgencmd, sudo and a reboot. Never the real
+robot."""
+
+# ruff: noqa: F811  (the wizard's fixtures are imported, then taken as arguments)
+
+from __future__ import annotations
+
+import base64
+import json
+import shlex
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+import roboemot.install as inst
+from roboemot.install import Options, Ui, WizardError
+from roboemot.install import overclock as oc_mod
+from roboemot.install.record import InstallRecord
+from roboemot_reachymini import overclock as reachy_oc
+from roboemot_reachymini.install import ReachyMiniWireless
+from sondalab_palette.term import MissingFlag
+from test_install_wizard import (  # noqa: F401  (fixtures)
+    RECORD,
+    ROOT,
+    FakeRobot,
+    answers,
+    daemon,
+    flat,
+    no_settle,
+    options,
+    pc_zone,
+    plain_terminal,
+    quiet_ui,
+    robot,
+)
+
+CONFIG = reachy_oc.CONFIG
+TRIAL = reachy_oc.TRIAL
+ORIGINAL = (
+    "# For more options and information see\n"
+    "# http://rptl.io/configtxt\n"
+    "dtparam=audio=on\n"
+    "camera_auto_detect=1\n"
+    "\n"
+    "[cm4]\n"
+    "otg_mode=1\n"
+    "\n"
+    "[all]\n"
+    "arm_boost=1\n"
+    "dtoverlay=vc4-kms-v3d\n"
+)
+CPU_KHZ = {False: "1500000", True: "1800000"}
+ARM = {False: "arm_freq=1500", True: "arm_freq=1800"}
+
+
+def local_bins(folder: Path) -> dict[str, str]:
+    """This machine's binaries for the root script's absolute ones (``sha256sum`` through
+    ``shasum`` where only that exists, as on some macOS)."""
+    bins = {name: shutil.which(name) or "" for name in oc_mod.ROOT_BINS}
+    if not bins["sha256sum"]:
+        wrapper = folder / "sha256sum"
+        wrapper.write_text('#!/bin/sh\nexec shasum -a 256 "$@"\n')
+        wrapper.chmod(0o755)
+        bins["sha256sum"] = str(wrapper)
+    assert all(bins.values()), bins
+    return bins
+
+
+def run_script(script: str, root: Path, bins: dict[str, str]) -> int:
+    """``script`` through a real ``/bin/sh``, with the boot partition under ``root`` and this
+    machine's binaries in place of the robot's absolute ones."""
+    for name, path in oc_mod.ROOT_BINS.items():
+        script = script.replace(path, bins[name])
+    script = script.replace(reachy_oc.BOOT + "/", f"{root}{reachy_oc.BOOT}/")
+    return subprocess.run(["/bin/sh", "-c", script], capture_output=True).returncode
+
+
+class BootRobot(FakeRobot):
+    """The fake robot with a boot partition (a real folder: the root scripts run through
+    ``/bin/sh``), firmware answers, sudo and a reboot."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+        self.bins = local_bins(root)
+        (root / reachy_oc.BOOT.lstrip("/")).mkdir(parents=True)
+        self.boot = {CONFIG: ORIGINAL}  # /boot/firmware files, synced with the folder
+        self.leftovers: list[str] = []  # temporary files a root script left behind
+        self.unreadable: set[str] = set()
+        self.model = "Raspberry Pi Compute Module 4 Rev 1.1"
+        self.throttled = 0
+        self.temp_milli = 52_000
+        self.firmware = "Mar 12 2025 10:00:00\nCopyright (c) 2012 Broadcom\nversion abc (release)"
+        self.bootloader = "2025/02/12 10:51:52\nversion 1 (release)\ntimestamp 1739357512"
+        self.passwordless = True
+        self.sudo_fails = False
+        self.reboot_fails = False  # the reboot command itself fails
+        self.roots: list[tuple[str, bool]] = []
+        self.reboots: list[str] = []
+        self.boot_id = "boot-1"
+        self.tryboot = 0  # the device tree's tryboot flag of the current boot
+        self.overclocked = False  # whether the current boot runs the block
+        self.never_back = False
+        self.down_polls = 2  # reachable() answers False this many times after a reboot
+        self.after_boot: dict[str, object] = {}  # attributes a trial boot sets (a failure)
+        self._down = 0
+
+    def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
+        words = shlex.split(command) if "'" in command or '"' in command else command.split()
+        if command.startswith("if [ -e /boot/firmware/") and "base64 -w0" in command:
+            path = words[3]
+            if path in self.unreadable:
+                raise WizardError("Command failed on the robot", f"{path}: Permission denied")
+            text = self.boot.get(path)
+            return "" if text is None else "x" + base64.b64encode(text.encode()).decode()
+        if command.startswith(f"{oc_mod.SUDO} -n true"):
+            self.commands.append(command)
+            return "yes" if self.passwordless else "no"
+        if command == oc_mod.BOOT_ID:
+            return self.boot_id
+        if command.startswith("tr -d "):
+            return self.model
+        if command.startswith("vcgencmd get_throttled"):
+            return f"throttled={hex(self.throttled)}"
+        if command.startswith(f"cat {reachy_oc.THERMAL}"):
+            return str(self.temp_milli)
+        if command.startswith("vcgencmd version"):
+            return self.firmware
+        if command.startswith("vcgencmd bootloader_version"):
+            return self.bootloader
+        if command.startswith("vcgencmd get_config arm_freq"):
+            return ARM[self.overclocked]
+        if command.startswith(f"cat {reachy_oc.CPU_MAX_FREQ}"):
+            return CPU_KHZ[self.overclocked]
+        if command.startswith("od -An -tu1 "):
+            return f"0 0 0 {self.tryboot}"
+        return super().run(command, check=check, stdin=stdin)
+
+    @property
+    def folder(self) -> Path:
+        return self.root / reachy_oc.BOOT.lstrip("/")
+
+    def run_root(self, script: str, tty: bool) -> int:
+        self.roots.append((script, tty))
+        if self.sudo_fails:
+            return oc_mod.SUDO_DENIED_RC
+        if script.startswith(reachy_oc.REBOOT):
+            command, _, tail = script.partition(" || ")
+            assert tail == f"exit {oc_mod.REBOOT_FAILED_RC}", script
+            return oc_mod.REBOOT_FAILED_RC if self.reboot_fails else self._reboot(command)
+        for f in self.folder.iterdir():
+            f.unlink()
+        for path, text in self.boot.items():
+            (self.root / path.lstrip("/")).write_bytes(text.encode())
+        rc = run_script(script, self.root, self.bins)
+        self.boot, self.leftovers = {}, []
+        for f in sorted(self.folder.iterdir()):
+            if f.name.endswith(oc_mod.NEW_SUFFIX):
+                self.leftovers.append(f.name)
+            else:
+                self.boot[f"{reachy_oc.BOOT}/{f.name}"] = f.read_bytes().decode()
+        return rc
+
+    def _reboot(self, line: str) -> int:
+        self.reboots.append(line)
+        self.boot_id = f"boot-{len(self.reboots) + 1}"
+        self._down = self.down_polls
+        trial = line == reachy_oc.TRIAL_REBOOT and TRIAL in self.boot
+        self.tryboot = int(trial)
+        booted = self.boot[TRIAL] if trial else self.boot[CONFIG]
+        self.overclocked = reachy_oc.BEGIN in booted
+        for name, value in self.after_boot.items():
+            setattr(self, name, value)
+        return 255  # ssh loses the connection
+
+    def reachable(self) -> bool:
+        if self.never_back:
+            return False
+        self._down -= 1
+        return self._down < 0
+
+    def disconnect(self) -> None:
+        pass
+
+    @property
+    def record(self) -> dict:
+        return json.loads(self.files[RECORD])
+
+
+@pytest.fixture()
+def boot_robot(tmp_path):
+    return BootRobot(tmp_path)
+
+
+@pytest.fixture()
+def offline_boot(monkeypatch, boot_robot, daemon):
+    monkeypatch.setattr(inst, "load_platform", lambda rid: ReachyMiniWireless(port=daemon.port))
+    monkeypatch.setattr(inst, "Remote", lambda user, host, control_dir: boot_robot)
+    monkeypatch.setattr(
+        inst, "build_wheels", lambda dirs, out: [out / f"{d.name}-0.1.whl" for d in dirs]
+    )
+    clock = iter(range(0, 10**6, 7))
+    monkeypatch.setattr(oc_mod.time, "monotonic", lambda: float(next(clock)))
+    monkeypatch.setattr(oc_mod.time, "sleep", lambda s: None)
+    return boot_robot
+
+
+@pytest.fixture()
+def robot(boot_robot):  # noqa: F811  (the wizard's fixtures use the boot robot)
+    return boot_robot
+
+
+def install(ui: Ui | None = None, **kw) -> None:
+    opts = options(**{"start": False, "startup": False, "overclock": True, **kw})
+    inst.run_install(opts, ui or quiet_ui(yes=True), ROOT)
+
+
+def uninstall(**kw) -> None:
+    inst.run_uninstall(options(uninstall=True, **kw), quiet_ui(yes=True), ROOT)
+
+
+def overclocked() -> str:
+    return ORIGINAL + reachy_oc.BLOCK
+
+
+# ---------------------------------------------------------------- the block
+
+
+def test_the_block_sets_only_1800_mhz_for_a_cm4_and_resets_the_filter():
+    lines = reachy_oc.BLOCK.splitlines()
+    assert lines == [reachy_oc.BEGIN, "[all]", "[cm4]", "arm_freq=1800", "[all]", reachy_oc.END]
+    assert "force_turbo" not in reachy_oc.BLOCK and "over_voltage" not in reachy_oc.BLOCK
+
+
+def test_with_and_without_the_block_keep_every_other_byte():
+    for text in (ORIGINAL, ORIGINAL.replace("\n", "\r\n"), ""):
+        new = oc_mod.with_block(text, reachy_oc.BLOCK)
+        assert new == text + reachy_oc.BLOCK
+        assert oc_mod.without_block(new, reachy_oc.BLOCK) == text
+        edited = new.replace("arm_freq=1800", "arm_freq=2000")
+        assert oc_mod.without_block(edited, reachy_oc.BLOCK) is None
+    with pytest.raises(WizardError, match="does not end in a newline"):
+        oc_mod.with_block("x=1", reachy_oc.BLOCK)
+
+
+# ---------------------------------------------------------------- support checks
+
+
+@pytest.mark.parametrize(
+    ("attr", "value", "check"),
+    [
+        ("model", "Raspberry Pi 4 Model B Rev 1.4", "Board"),
+        ("throttled", 0x50000, "Throttling"),  # under-voltage and throttling since boot
+        ("throttled", 0x1, "Throttling"),  # under-voltage now
+        ("throttled", 0x80000, "Throttling"),  # soft temperature limit since boot
+        ("temp_milli", 70_000, "Temperature"),
+        ("firmware", "Oct  1 2020 10:00:00\nCopyright", "Firmware"),
+        ("firmware", "", "Firmware"),
+        ("bootloader", "", "Bootloader"),  # no parseable date: the path cannot be chosen
+        ("bootloader", "version abc (release)", "Bootloader"),
+        ("bootloader", "2020/12/10 10:00:00\ntimestamp 1607594400", "Bootloader"),
+    ],
+)
+def test_a_failed_support_check_leaves_the_robot_unchanged_and_names_it(
+    offline_boot, daemon, capsys, attr, value, check
+):
+    setattr(offline_boot, attr, value)
+    install()
+    out = flat(capsys.readouterr().out)
+    assert f"! {check}" in out and "No overclock" in out and "the robot is unchanged" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+    assert offline_boot.record["overclock"] is None
+
+
+@pytest.mark.parametrize(
+    ("boot", "why"),
+    [
+        ({CONFIG: ORIGINAL + "arm_freq=2000\n"}, "already sets arm_freq (line 12)"),
+        ({CONFIG: ORIGINAL + "over_voltage_delta=50000\n"}, "already sets over_voltage_delta"),
+        ({CONFIG: ORIGINAL + "force_turbo=1\n"}, "already sets force_turbo"),
+        ({CONFIG: ORIGINAL + reachy_oc.BLOCK}, "already has a RoboEmot block"),
+        ({CONFIG: ORIGINAL, TRIAL: "foreign\n"}, "tryboot.txt exists and is not the installer's"),
+        ({}, "config.txt not found"),
+        ({CONFIG: ORIGINAL.rstrip("\n")}, "does not end in a newline"),
+        ({CONFIG: ORIGINAL + "include extra.txt\n"}, "includes another file (line 12)"),
+        ({CONFIG: ORIGINAL + "  include  cm4.txt # x\n"}, "includes another file"),
+        ({CONFIG: ORIGINAL + "tryboot_a_b=1\n"}, "config.txt sets tryboot_a_b=1"),
+        (
+            {CONFIG: ORIGINAL, reachy_oc.AUTOBOOT: "[all]\ntryboot_a_b = 1\nboot_partition=2\n"},
+            "autoboot.txt sets tryboot_a_b=1",
+        ),
+    ],
+)
+def test_a_boot_config_that_cannot_take_the_block_is_refused(
+    offline_boot, daemon, capsys, boot, why
+):
+    offline_boot.boot = dict(boot)
+    install()
+    out = flat(capsys.readouterr().out)
+    assert why in out and "No overclock" in out
+    assert offline_boot.boot == boot and offline_boot.roots == []
+
+
+def test_arm_boost_in_the_stock_config_is_no_conflict():
+    assert reachy_oc.conflicts(ORIGINAL) == []
+    assert reachy_oc.conflicts("#arm_freq=2000\nx=1 # arm_freq=2\n") == []
+
+
+def test_build_dates_are_read_from_vcgencmd():
+    assert reachy_oc.firmware_date("Mar  7 2023 10:52:00\nCopyright") == reachy_oc.date(2023, 3, 7)
+    assert reachy_oc.bootloader_date("2020/09/03 12:11:43\nversion x\ntimestamp 1599135103") == (
+        reachy_oc.date(2020, 9, 3)
+    )
+    assert reachy_oc.bootloader_date("2021/04/29 14:55:08") == reachy_oc.date(2021, 4, 29)
+    assert reachy_oc.bootloader_date("") is None
+
+
+# ---------------------------------------------------------------- dry run
+
+
+def test_the_dry_run_prints_the_checks_and_the_diff_and_writes_nothing(
+    offline_boot, daemon, capsys
+):
+    install(dry_run=True)
+    out = capsys.readouterr().out
+    for check in ("Board", "Throttling", "Temperature", "Firmware", "Bootloader", "Boot config"):
+        assert f"✓ {check}" in out
+    assert "+arm_freq=1800" in out and f"--- {CONFIG}" in out
+    assert "Write the trial config" in flat(out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+    assert offline_boot.reboots == []
+    assert RECORD not in offline_boot.files
+
+
+# ---------------------------------------------------------------- tryboot path
+
+
+def test_the_trial_boot_is_checked_then_promoted_with_every_other_line_unchanged(
+    offline_boot, daemon, capsys
+):
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT]
+    assert offline_boot.boot == {CONFIG: overclocked()}  # the trial config is gone
+    assert offline_boot.boot[CONFIG].startswith(ORIGINAL)
+    assert "Promoted the overclock" in out and "no second reboot" in out
+    rec = offline_boot.record["overclock"]
+    assert rec["state"] == "on" and rec["backup"] == ORIGINAL and rec["trial"] is None
+    assert rec["block"] == reachy_oc.BLOCK
+    assert all(not tty for _, tty in offline_boot.roots)  # passwordless sudo: no prompt
+
+
+def test_the_trial_config_is_a_full_copy_of_the_boot_config_plus_the_block(offline_boot, daemon):
+    install(overclock_reboot=False)
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "trial"
+    assert offline_boot.reboots == []
+
+
+def test_the_reboot_question_shows_the_warnings_and_defaults_to_no(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    ui = Ui(interactive=True, assume_yes=True, read=answers(*["\n"] * 10))
+    install(ui=ui, secrets=[])
+    captured = capsys.readouterr()
+    assert "Reboot the robot now into the trial config?" in captured.err
+    assert "rpiboot" in flat(captured.out) and "the head may drop" in flat(captured.out)
+    assert offline_boot.reboots == [] and TRIAL in offline_boot.boot
+    assert "--overclock --overclock-reboot" in flat(captured.out)
+
+
+def test_yes_without_the_reboot_flag_refuses_the_reboot(offline_boot, daemon, capsys):
+    install()  # -y, no terminal, no --overclock-reboot
+    out = flat(capsys.readouterr().out)
+    assert "Did not reboot" in out and "--overclock-reboot" in out
+    assert offline_boot.reboots == [] and offline_boot.boot[CONFIG] == ORIGINAL
+
+
+def test_a_robot_that_does_not_come_back_is_left_for_a_power_cycle_and_cleaned_next_run(
+    offline_boot, daemon, capsys
+):
+    offline_boot.never_back = True
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Robot not back" in out and "Power-cycle the robot" in out
+    assert "boots the unchanged /boot/firmware/config.txt" in out
+    assert offline_boot.record["overclock"]["state"] == "trying"
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+    # the owner power-cycles: the flag is gone, the robot runs the unchanged config.txt
+    offline_boot.never_back, offline_boot.tryboot, offline_boot.overclocked = False, 0, False
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Trial boot not finished" in out and "Removed trial config" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+    assert offline_boot.record["overclock"] is None
+    assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT]  # no retry in that run
+
+
+@pytest.mark.parametrize(
+    ("after_boot", "failed"),
+    [
+        ({"overclocked": False}, "arm_freq"),
+        ({"throttled": 0x50005}, "Throttling"),
+        ({"temp_milli": 81_000}, "Temperature"),
+        ({"tryboot": 0, "overclocked": False}, "Booted the trial config"),
+    ],
+)
+def test_a_failed_check_after_the_trial_boot_removes_the_trial_and_does_not_promote(
+    offline_boot, daemon, capsys, after_boot, failed
+):
+    offline_boot.after_boot = after_boot
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert f"Overclock not promoted {failed}" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+    assert offline_boot.record["overclock"] is None
+
+
+def test_a_boot_config_edited_during_the_trial_is_not_promoted(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    offline_boot.boot[CONFIG] = ORIGINAL + "dtparam=i2c_arm=on\n"
+    offline_boot.tryboot, offline_boot.overclocked = 1, True  # booted by hand
+    install()
+    assert "Overclock not promoted" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL + "dtparam=i2c_arm=on\n"}
+
+
+def test_a_trial_booted_by_hand_is_promoted_on_the_next_run(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    offline_boot._reboot(reachy_oc.TRIAL_REBOOT)  # the owner: sudo reboot '0 tryboot'
+    install()
+    assert "Promoted the overclock" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_a_failed_sudo_leaves_the_robot_unchanged(offline_boot, daemon):
+    offline_boot.sudo_fails = True
+    with pytest.raises(WizardError, match="Root command failed"):
+        install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.reboots == []
+    assert offline_boot.record["overclock"] is None
+
+
+def test_a_refused_trial_reboot_keeps_the_trial_unbooted(offline_boot, daemon, monkeypatch):
+    real = offline_boot.run_root
+
+    def refuse_reboot(script: str, tty: bool) -> int:
+        return oc_mod.SUDO_DENIED_RC if script.startswith(reachy_oc.REBOOT) else real(script, tty)
+
+    monkeypatch.setattr(offline_boot, "run_root", refuse_reboot)
+    with pytest.raises(WizardError, match="sudo refused the reboot"):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial" and offline_boot.reboots == []
+    assert offline_boot.boot[CONFIG] == ORIGINAL
+
+
+def test_without_a_terminal_a_sudo_that_asks_stops_before_anything_changes(offline_boot, daemon):
+    offline_boot.passwordless = False
+    env = dict(offline_boot.env)
+    with pytest.raises(WizardError, match="The overclock needs root"):
+        install()
+    assert offline_boot.env == env and RECORD not in offline_boot.files
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and daemon.mutations == []
+
+
+def test_on_a_terminal_sudo_asks_over_the_terminal(offline_boot, daemon, monkeypatch):
+    offline_boot.passwordless = False
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    install(
+        ui=Ui(interactive=True, assume_yes=True, read=answers()), secrets=[], overclock_reboot=True
+    )
+    assert offline_boot.roots and all(tty for _, tty in offline_boot.roots)
+
+
+# ---------------------------------------------------------------- fallback path
+
+
+def test_a_bootloader_without_tryboot_is_not_supported(offline_boot, daemon, capsys):
+    """Owner decision 2026-11-05: always a trial boot first; no direct write to config.txt."""
+    offline_boot.bootloader = "2020/09/03 12:11:43\nversion x (release)\ntimestamp 1599135103"
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "! Bootloader built 2020-09-03, no tryboot" in out and "No overclock" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+    assert offline_boot.record["overclock"] is None
+
+
+# ---------------------------------------------------------------- revert
+
+
+def promoted(robot_: BootRobot) -> None:
+    install(overclock_reboot=True)
+    assert robot_.boot == {CONFIG: overclocked()}
+
+
+def test_a_reinstall_without_the_option_removes_exactly_the_block(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] += "dtparam=i2c_arm=on\n"  # the owner's later edit stays
+    install(overclock=False)
+    out = flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL + "dtparam=i2c_arm=on\n"}
+    assert "Removed overclock block" in out and "Did not reboot" in out
+    assert offline_boot.record["overclock"] is None
+
+
+def test_a_crlf_boot_config_comes_back_byte_identical(offline_boot, daemon):
+    crlf = ORIGINAL.replace("\n", "\r\n")
+    offline_boot.boot[CONFIG] = crlf
+    install(overclock_reboot=True)
+    assert offline_boot.boot[CONFIG] == crlf + reachy_oc.BLOCK
+    install(overclock=False)
+    assert offline_boot.boot == {CONFIG: crlf}
+
+
+def test_the_hint_to_boot_the_trial_later_names_the_robot(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    assert "Boot the trial config later: python scripts/install_on_robot.py --host 127.0.0.1" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_commented_include_is_no_include():
+    check = reachy_oc.config_check(ORIGINAL + "# include extra.txt\n", None)
+    assert check.ok, check
+
+
+def test_the_installers_own_leftover_trial_config_does_not_lock_the_robot_out(
+    offline_boot, daemon, capsys
+):
+    offline_boot.boot[TRIAL] = overclocked()  # left by a write whose record was lost
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Found the trial config" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_the_revert_reboot_has_its_own_question(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    install(overclock=False, overclock_reboot=True)
+    assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT, reachy_oc.REBOOT]
+    assert not offline_boot.overclocked
+
+
+def test_uninstall_removes_the_block(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+    assert "Removed overclock block" in flat(capsys.readouterr().out)
+    assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT]  # no reboot without the flag
+
+
+def test_uninstall_removes_a_trial_config(offline_boot, daemon):
+    install(overclock_reboot=False)
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+
+
+def test_uninstall_dry_run_shows_the_diff_and_writes_nothing(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    roots = list(offline_boot.roots)
+    uninstall(dry_run=True)
+    out = capsys.readouterr().out
+    assert "-arm_freq=1800" in out and "Remove overclock block" in flat(out)
+    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.roots == roots
+
+
+def test_an_edited_block_is_refused_with_the_difference(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    edited = overclocked().replace("arm_freq=1800", "arm_freq=2000")
+    offline_boot.boot[CONFIG] = edited
+    install(overclock=False)
+    out = capsys.readouterr().out
+    assert "Left the overclock alone" in flat(out)
+    assert "-arm_freq=1800" in out and "+arm_freq=2000" in out
+    assert offline_boot.boot == {CONFIG: edited}
+    assert offline_boot.record["overclock"]["state"] == "on"
+    with pytest.raises(WizardError, match="Uninstall incomplete"):
+        uninstall()
+    assert offline_boot.boot == {CONFIG: edited} and RECORD in offline_boot.files
+
+
+def test_a_block_removed_by_hand_is_forgotten(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] = ORIGINAL
+    install(overclock=False)
+    assert "No overclock block left" in flat(capsys.readouterr().out)
+    assert offline_boot.record["overclock"] is None and offline_boot.boot == {CONFIG: ORIGINAL}
+
+
+def test_a_reinstall_with_the_option_keeps_the_block(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    install(overclock_reboot=True)
+    assert "Overclock on" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT]
+
+
+# ---------------------------------------------------------------- opt-in
+
+
+def test_yes_on_a_terminal_does_not_turn_it_on(offline_boot, daemon, monkeypatch, capsys):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    ui = Ui(interactive=True, assume_yes=True, read=answers())
+    install(ui=ui, overclock=None, secrets=[])
+    captured = capsys.readouterr()
+    assert "Overclock the CPU" not in captured.err
+    assert "Overclock off -y does not turn it on, --overclock does" in flat(captured.out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+
+
+def test_the_overclock_question_defaults_to_no(offline_boot, daemon, monkeypatch, capsys):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    opts = options(overclock=None, start=False, startup=False, piper=False, models=False)
+    inst.run_install(Options(**{**vars(opts), "yes": False, "secrets": []}), ui, ROOT)
+    assert "Overclock the CPU (1.8 GHz, from 1.5)?" in capsys.readouterr().err
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+
+
+@pytest.mark.parametrize("yes", [False, True])
+def test_a_run_without_a_terminal_needs_an_overclock_flag(offline_boot, daemon, yes):
+    opts = options(overclock=None, start=False, startup=False, yes=yes, piper=False, models=False)
+    with pytest.raises(MissingFlag, match="--overclock or --no-overclock"):
+        inst.run_install(opts, quiet_ui(yes=yes), ROOT)
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+
+
+def test_a_platform_without_an_overclock_refuses_the_flag_and_is_a_no_op_without(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    bare = ReachyMiniWireless(port=daemon.port)
+    bare.overclock = None
+    monkeypatch.setattr(inst, "load_platform", lambda rid: bare)
+    with pytest.raises(WizardError, match="No overclock for Reachy Mini Wireless"):
+        install()
+    inst.run_install(options(start=False, startup=False, overclock=None), quiet_ui(yes=True), ROOT)
+    assert "No overclock the boot config is not touched" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+
+
+def test_the_rerun_line_repeats_the_overclock_flags():
+    line = inst._rerun(Options(host="h", overclock=True, overclock_reboot=False))
+    assert "--overclock" in line and "--no-overclock-reboot" in line
+    assert inst.parse_args(["--overclock", "--overclock-reboot"]).overclock_reboot is True
+    assert inst.parse_args([]).overclock is None
+
+
+def test_the_record_keeps_the_backup_and_round_trips(offline_boot, daemon):
+    install(overclock_reboot=False)
+    data = offline_boot.record
+    assert data["version"] == 4 and data["overclock"]["backup"] == ORIGINAL
+    assert InstallRecord.from_json(data).to_json() == data
+
+
+# ---------------------------------------------------------------- diagnostics
+
+
+def test_the_debug_report_says_whether_the_block_is_there(tmp_path):
+    from roboemot.diagnostics import Target
+    from roboemot_reachymini.diagnostics import overclock_state
+
+    boot = tmp_path / "boot" / "firmware"
+    assert overclock_state(Target(), tmp_path)["available"] is False
+    boot.mkdir(parents=True)
+    (boot / "config.txt").write_text(overclocked())
+    assert overclock_state(Target(), tmp_path) == {
+        "available": True,
+        "block_present": True,
+        "trial_pending": False,
+    }
+    assert overclock_state(Target("192.168.1.20"), tmp_path)["available"] is False
+
+
+# ---------------------------------------------------------------- an untrusted record
+
+
+def tamper(robot_: BootRobot, **fields) -> None:
+    """Edit the overclock entry the way the robot user (no sudo) could: the record is theirs."""
+    data = robot_.record
+    data["overclock"].update(fields)
+    robot_.files[RECORD] = json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"path": "/etc/sudoers"},
+        {"path": "/boot/firmware/cmdline.txt"},
+        {"block": reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1800\ndtoverlay=evil")},
+        {"block": "# >>> x\n# <<< x\n"},
+    ],
+)
+@pytest.mark.parametrize("run", ["reinstall", "uninstall", "keep"])
+def test_a_tampered_record_path_or_block_is_refused_and_nothing_changes(
+    offline_boot, daemon, fields, run
+):
+    promoted(offline_boot)
+    tamper(offline_boot, **fields)
+    roots, boot = list(offline_boot.roots), dict(offline_boot.boot)
+    with pytest.raises(WizardError, match="does not match the platform"):
+        if run == "uninstall":
+            uninstall()
+        else:
+            install(overclock=run == "keep", overclock_reboot=True)
+    assert offline_boot.roots == roots and offline_boot.boot == boot
+
+
+def test_a_tampered_trial_path_is_refused(offline_boot, daemon):
+    install(overclock_reboot=False)
+    tamper(offline_boot, trial="/etc/shadow")
+    with pytest.raises(WizardError, match="does not match the platform"):
+        uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+
+
+def test_a_tampered_backup_is_never_written_as_root_on_promote(offline_boot, daemon):
+    install(overclock_reboot=False)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    offline_boot._reboot(reachy_oc.TRIAL_REBOOT)  # the owner boots the trial by hand
+    install()
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert not any("evil" in text for text in offline_boot.boot.values())
+
+
+def test_a_tampered_backup_is_never_written_as_root_on_revert(offline_boot, daemon):
+    promoted(offline_boot)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL}  # the live file minus the block
+    install(overclock_reboot=False)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    install(overclock=False)  # the trial config no longer matches: left alone, never rewritten
+    assert not any("evil" in text for text in offline_boot.boot.values())
+
+
+# ---------------------------------------------------------------- interrupted and partial writes
+
+
+def test_ctrl_c_after_the_trial_write_keeps_the_record_and_the_rerun_finishes(
+    offline_boot, daemon, monkeypatch
+):
+    real = offline_boot.run_root
+
+    def interrupted(script: str, tty: bool) -> int:
+        real(script, tty)
+        raise KeyboardInterrupt  # the owner pressed Ctrl-C while sudo ran
+
+    monkeypatch.setattr(offline_boot, "run_root", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial"
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+    monkeypatch.setattr(offline_boot, "run_root", real)
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_ctrl_c_before_the_trial_write_is_cleaned_up_by_the_rerun(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    real = offline_boot.run_root
+
+    def interrupted(script: str, tty: bool) -> int:
+        raise KeyboardInterrupt  # before sudo ran anything
+
+    monkeypatch.setattr(offline_boot, "run_root", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial" and TRIAL not in offline_boot.boot
+    monkeypatch.setattr(offline_boot, "run_root", real)
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Trial config not current" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_a_stale_trial_config_before_a_deferred_trial_is_replaced(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    offline_boot.boot[CONFIG] = ORIGINAL + "dtparam=i2c_arm=on\n"  # the owner's edit since
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Trial config not current" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL + "dtparam=i2c_arm=on\n" + reachy_oc.BLOCK}
+
+
+def test_a_foreign_trial_config_before_a_deferred_trial_is_left_alone(offline_boot, daemon):
+    install(overclock_reboot=False)
+    offline_boot.boot[TRIAL] = "kernel=evil.img\n"
+    install(overclock_reboot=True)
+    assert offline_boot.boot[TRIAL] == "kernel=evil.img\n" and offline_boot.reboots == []
+    assert offline_boot.boot[CONFIG] == ORIGINAL
+
+
+def test_a_partial_root_write_says_so_and_keeps_the_record(offline_boot, daemon, monkeypatch):
+    monkeypatch.setattr(offline_boot, "run_root", lambda script, tty: oc_mod.PARTIAL_RC)
+    with pytest.raises(WizardError) as e:
+        install(overclock_reboot=True)
+    assert "may be partly changed" in str(e.value.why) and "rerun the installer" in e.value.fix
+    assert offline_boot.record["overclock"]["state"] == "trial"
+
+
+def test_an_unreadable_boot_config_stops_the_run(offline_boot, daemon):
+    offline_boot.unreadable.add(CONFIG)
+    with pytest.raises(WizardError, match="Command failed"):
+        install()
+    assert offline_boot.roots == []
+
+
+def test_a_record_with_an_older_known_block_is_removed_and_only_the_current_is_written(
+    offline_boot, daemon, monkeypatch
+):
+    old = reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1750")
+    monkeypatch.setattr(reachy_oc.ReachyOverclock, "known_blocks", (reachy_oc.BLOCK, old))
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] = ORIGINAL + old
+    tamper(offline_boot, block=old)
+    install(overclock=False)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.record["overclock"] is None
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_no_root_script_reads_a_staged_file(offline_boot, daemon):
+    promoted(offline_boot)
+    install(overclock=False)
+    scripts = [script for script, _ in offline_boot.roots]
+    assert scripts and not any("/tmp/" in script for script in scripts)
+    assert offline_boot.leftovers == []
+
+
+# ---------------------------------------------------------------- a promote cut short
+
+
+def failing_rm(robot_: BootRobot, name: str) -> None:
+    """Make the root script's ``rm`` fail for ``name`` only (the trial config's delete after
+    the promote's rename), as a disk error or a cut connection would."""
+    tool = robot_.root / "rm-fails"
+    real = robot_.bins["rm"]
+    tool.write_text(f'#!/bin/sh\ncase "$*" in *{name}) exit 1;; esac\nexec {real} "$@"\n')
+    tool.chmod(0o755)
+    robot_.bins = {**robot_.bins, "rm": str(tool)}
+
+
+@pytest.mark.parametrize("reboot_between", [False, True])
+def test_a_promote_cut_after_the_rename_is_finished_by_the_rerun(
+    offline_boot, daemon, capsys, reboot_between
+):
+    real_bins = dict(offline_boot.bins)
+    failing_rm(offline_boot, "tryboot.txt")
+    with pytest.raises(oc_mod.RootPartial, match="Root command failed"):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "promoting"
+    assert offline_boot.boot == {CONFIG: overclocked(), TRIAL: overclocked()}
+    offline_boot.bins = real_bins
+    if reboot_between:
+        offline_boot._reboot(reachy_oc.REBOOT)  # a plain boot: no tryboot flag now
+    capsys.readouterr()
+    install(overclock_reboot=False)
+    out = flat(capsys.readouterr().out)
+    assert "Promoted the overclock" in out and "an earlier run's promote" in out
+    assert "unchanged /boot/firmware/config.txt" not in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    rec = offline_boot.record["overclock"]
+    assert rec["state"] == "on" and rec["block"] == reachy_oc.BLOCK and rec["trial"] is None
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+
+
+def test_uninstall_finishes_a_promote_cut_short_and_removes_the_block(offline_boot, daemon):
+    real_bins = dict(offline_boot.bins)
+    failing_rm(offline_boot, "tryboot.txt")
+    with pytest.raises(oc_mod.RootPartial):
+        install(overclock_reboot=True)
+    offline_boot.bins = real_bins
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+
+
+# ---------------------------------------------------------------- the last review's low items
+
+
+def test_the_trial_write_pins_the_boot_config(offline_boot, daemon):
+    install(overclock_reboot=False)
+    script = offline_boot.roots[0][0]
+    assert oc_mod.sha256(ORIGINAL) in script  # config.txt checked by root, not written
+    assert f"{CONFIG}{oc_mod.NEW_SUFFIX}" not in script
+
+
+def test_an_unattended_reinstall_that_keeps_the_overclock_needs_no_root(offline_boot, daemon):
+    promoted(offline_boot)
+    offline_boot.passwordless = False  # sudo would ask, and there is no terminal
+    roots = list(offline_boot.roots)
+    install(overclock_reboot=False)
+    assert offline_boot.roots == roots and offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_an_own_leftover_trial_with_an_older_block_is_replaced(offline_boot, daemon, monkeypatch):
+    old = reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1750")
+    monkeypatch.setattr(reachy_oc, "KNOWN_BLOCKS", (reachy_oc.BLOCK, old))
+    monkeypatch.setattr(reachy_oc.ReachyOverclock, "known_blocks", (reachy_oc.BLOCK, old))
+    offline_boot.boot[TRIAL] = ORIGINAL + old  # an earlier release's write, record lost
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_a_failed_reboot_command_is_not_called_a_sudo_refusal(offline_boot, daemon):
+    offline_boot.reboot_fails = True
+    with pytest.raises(oc_mod.RootUnchanged, match="The reboot failed"):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial"
