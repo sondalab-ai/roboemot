@@ -13,9 +13,11 @@ Weights are never downloaded here, see ``roboemot models fetch``.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -71,6 +73,11 @@ DINO_PATCH = DINO_PATCH_PX
 HF_POS_OFFSET = 0.1  # added to the patch grid side by interpolate_pos_encoding
 RESIZE_SCALES = 2  # input index of a Resize node's scales
 RESIZE_SPATIAL = 2  # the scales of the two spatial axes follow batch and channels
+RESIZE_RANK = 4  # the Resize scales one (batch, channels, rows, columns) table
+POS_TABLE_DIMS = 3  # (1, grid x grid, width): the position embeddings without CLS
+MAX_TRACE_NODES = 8  # nodes between the position table and the Resize (2 in the export)
+SCALE_TOL = 1e-4  # the export's scales are float32 of (16 + 0.1) / 37
+NO_SPINNING = "session.intra_op.allow_spinning"
 DINO_MEAN = (0.485, 0.456, 0.406)
 DINO_STD = (0.229, 0.224, 0.225)
 
@@ -81,12 +88,15 @@ def configure(threads: int) -> None:
     cv2.setNumThreads(threads)
 
 
-def _session(source: Path | bytes, threads: int) -> ort.InferenceSession:
-    """A CPU session of a model file, or of serialised model bytes, on ``threads`` threads."""
+def _session(source: Path | bytes, threads: int, spinning: bool = True) -> ort.InferenceSession:
+    """A CPU session of a model file, or of serialised model bytes, on ``threads`` threads;
+    without ``spinning`` its pool threads sleep instead of spin-waiting between operators."""
     options = ort.SessionOptions()
     options.log_severity_level = LOG_ERROR
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
+    if not spinning:
+        options.add_session_config_entry(NO_SPINNING, "0")
     model = source if isinstance(source, bytes) else str(source)
     return ort.InferenceSession(model, options, providers=["CPUExecutionProvider"])
 
@@ -172,28 +182,79 @@ def dino_model_id(input_px: int) -> str:
 
 
 def _dino_at(path: Path, input_px: int) -> bytes:
-    """The DINOv2-S graph for a ``input_px`` input. The export interpolates its 37 x 37
-    position embeddings to the patch grid with a Resize whose scales were fixed at 224 px
-    ((16 + 0.1) / 37, Hugging Face's ``interpolate_pos_encoding``), so any other size fails at
-    the position add; the scales are set for the new grid instead. Raises ``ModelError`` when
-    the graph does not have that shape."""
+    """The DINOv2-S graph of the file at ``path`` for a ``input_px`` input (``rescale_positions``),
+    serialised for a session. External data is not loaded: the export has none, and one that
+    does is refused by the session rather than read from beside the file."""
     import onnx
-    from onnx import numpy_helper
 
-    model = onnx.load(str(path))
-    resizes = [n for n in model.graph.node if n.op_type == "Resize"]
-    constants = {o: n for n in model.graph.node if n.op_type == "Constant" for o in n.output}
-    if len(resizes) != 1 or len(resizes[0].input) <= RESIZE_SCALES:
-        raise ModelError(f"{path.name}: expected one position-embedding Resize")
-    scales = constants.get(resizes[0].input[RESIZE_SCALES])
-    if scales is None or len(scales.attribute) != 1:
-        raise ModelError(f"{path.name}: the position-embedding Resize has no constant scales")
-    old = numpy_helper.to_array(scales.attribute[0].t)
-    factor = (input_px // DINO_PATCH + HF_POS_OFFSET) / (DINO_SIZE // DINO_PATCH + HF_POS_OFFSET)
-    new = old.astype(np.float32)
-    new[RESIZE_SPATIAL:] *= factor
-    scales.attribute[0].t.CopyFrom(numpy_helper.from_array(new))
+    model = onnx.load(str(path), load_external_data=False)
+    rescale_positions(model, input_px, path.name)
     return model.SerializeToString()
+
+
+def rescale_positions(model: Any, input_px: int, name: str) -> None:
+    """Set the position-embedding Resize of a DINOv2-S graph for a ``input_px`` input, in place.
+
+    The export interpolates its grid x grid position table (37 x 37) to the patch grid with a
+    Resize whose scales were fixed at 224 px ((16 + 0.1) / 37, Hugging Face's
+    ``interpolate_pos_encoding``), so any other size fails at the position add. Everything is
+    checked before the rewrite: exactly one Resize in the graph; its data traced back to a
+    ``(1, grid * grid, width)`` initializer; its scales a Constant node with one ``value``
+    tensor of four entries, 1 for batch and channels and (16 + 0.1) / grid for both spatial
+    axes. Anything else raises ``ModelError`` naming ``name``."""
+    from onnx import AttributeProto, numpy_helper
+
+    graph = model.graph
+    resizes = [n for n in graph.node if n.op_type == "Resize"]
+    if len(resizes) != 1 or len(resizes[0].input) <= RESIZE_SCALES:
+        raise ModelError(f"{name}: expected one position-embedding Resize")
+    resize = resizes[0]
+    grid = _position_grid(graph, resize.input[0], name)
+    producers = [n for n in graph.node if resize.input[RESIZE_SCALES] in n.output]
+    scales = producers[0] if len(producers) == 1 else None
+    if scales is None or scales.op_type != "Constant" or len(scales.attribute) != 1:
+        raise ModelError(f"{name}: the position-embedding Resize has no constant scales")
+    attribute = scales.attribute[0]
+    if attribute.name != "value" or attribute.type != AttributeProto.TENSOR:
+        raise ModelError(f"{name}: the Resize scales are not a constant tensor")
+    old = numpy_helper.to_array(attribute.t).astype(np.float32)
+    trained = (DINO_SIZE // DINO_PATCH + HF_POS_OFFSET) / grid
+    expected = np.array([1, 1, trained, trained], np.float32)
+    if old.shape != (RESIZE_RANK,) or not np.allclose(old, expected, atol=SCALE_TOL):
+        raise ModelError(f"{name}: the Resize scales {old.tolist()} are not the 224 px ones")
+    new = expected.copy()
+    new[RESIZE_SPATIAL:] = (input_px // DINO_PATCH + HF_POS_OFFSET) / grid
+    attribute.t.CopyFrom(numpy_helper.from_array(new))
+
+
+def _position_grid(graph: Any, tensor: str, name: str) -> int:
+    """The side of the square position table that feeds ``tensor``: follow the first input of
+    each producer (at most ``MAX_TRACE_NODES``) to an initializer shaped ``(1, side^2, width)``;
+    ``ModelError`` otherwise."""
+    tables = {t.name: t for t in graph.initializer}
+    producer = {o: n for n in graph.node for o in n.output}
+    for _ in range(MAX_TRACE_NODES):
+        if tensor in tables:
+            dims = list(tables[tensor].dims)
+            side = math.isqrt(dims[1]) if len(dims) == POS_TABLE_DIMS else 0
+            if dims[0] != 1 or side * side != dims[1] or side == 0:
+                raise ModelError(f"{name}: the Resize input {dims} is no square position table")
+            return side
+        node = producer.get(tensor)
+        if node is None or not node.input:
+            break
+        tensor = node.input[0]
+    raise ModelError(f"{name}: the Resize input is not traced to the position table")
+
+
+def check_tokens(sess: Any, input_name: str, input_px: int, name: str) -> None:
+    """One run on a blank input: the output must hold one token per patch plus CLS, else
+    ``ModelError`` (a graph the rewrite did not fit)."""
+    x = np.zeros((1, CHANNELS, input_px, input_px), np.float32)
+    tokens = sess.run(None, {input_name: x})[0]
+    want = (input_px // DINO_PATCH) ** 2 + 1
+    if tokens.shape[1] != want:
+        raise ModelError(f"{name}: {tokens.shape[1]} tokens at {input_px} px, expected {want}")
 
 
 class DinoV2Embedder:
@@ -204,25 +265,23 @@ class DinoV2Embedder:
     thread) share one session.
     """
 
-    def __init__(self, path: Path, threads: int, input_px: int = DINO_SIZE):
+    def __init__(
+        self, path: Path, threads: int, input_px: int = DINO_SIZE, *, spinning: bool = True
+    ):
+        """``spinning`` False keeps the pool threads from spin-waiting (``_session``); the app
+        passes ``vision.appearance_spinning``. The rewritten graph's bytes are dropped once the
+        session holds the model."""
         if input_px % DINO_PATCH:
             raise ValueError(f"DINOv2 input must be a multiple of {DINO_PATCH} px")
         self._lock = threading.Lock()
         self._px = input_px
         self.model_id = dino_model_id(input_px)
         source: Path | bytes = path if input_px == DINO_SIZE else _dino_at(path, input_px)
-        self._sess = _session(source, threads)
+        self._sess = _session(source, threads, spinning)
+        del source
         self._input = self._sess.get_inputs()[0].name
         if input_px != DINO_SIZE:
-            self._check_tokens(path.name)
-
-    def _check_tokens(self, name: str) -> None:
-        """One run on a blank input: the output must hold one token per patch plus CLS."""
-        x = np.zeros((1, CHANNELS, self._px, self._px), np.float32)
-        tokens = self._sess.run(None, {self._input: x})[0]
-        want = (self._px // DINO_PATCH) ** 2 + 1
-        if tokens.shape[1] != want:
-            raise ModelError(f"{name}: {tokens.shape[1]} tokens at {self._px} px, expected {want}")
+            check_tokens(self._sess, self._input, input_px, path.name)
 
     def embed(self, image: np.ndarray, box: Box) -> np.ndarray:
         """Unit-length appearance embedding of the box; the crop is dropped on return."""
@@ -448,7 +507,10 @@ def load_stages(
             detector = load_object_detector(root, cfg) if wanted else None
             embedder = (
                 DinoV2Embedder(
-                    _file(root, "dinov2-small"), cfg.appearance_threads, cfg.appearance_input_px
+                    _file(root, "dinov2-small"),
+                    cfg.appearance_threads,
+                    cfg.appearance_input_px,
+                    spinning=cfg.appearance_spinning,
                 )
                 if appearance
                 else None

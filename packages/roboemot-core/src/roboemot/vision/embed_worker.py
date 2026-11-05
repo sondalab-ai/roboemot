@@ -9,11 +9,14 @@ vision thread calls at the start of each ``process`` and applies there, with the
 stamp, so every per-track state stays on one thread.
 
 The queue keeps only the latest job per track: a newer job for a track replaces a waiting one
-(``replaced``). It holds at most ``vision.embed_queue_max`` jobs; a job that would pass that
+(``replaced``; the pipeline never queues a pending track, so only direct callers and tests
+reach it). It holds at most ``vision.embed_queue_max`` jobs; a job that would pass that
 drops the oldest waiting one (``dropped_cap``: the fresher crop wins), and the vision thread
 learns of it through ``drain`` so the track can be queued again. A job for a track that ended
-is withdrawn (``cancel``, ``clear``) or its result discarded (``dropped_ended``). Crops and
-embeddings live only in the job and the result; nothing is logged but exception type names.
+is withdrawn (``cancel``, ``clear``) or its result discarded (``dropped_ended``). The crop
+lives only in a waiting or running job: every outcome, dropped job and withdrawal lets go
+of it, and only a finished outcome carries its embedding to the vision thread; nothing is
+logged but exception type names (SPEC 12).
 
 ``run_one`` is the thread's step; tests drive it directly. Counters and the queue wait (wall
 time from ``submit`` to the start of the run) are numbers for the debug report.
@@ -43,6 +46,8 @@ log = logging.getLogger(__name__)
 
 THREAD_NAME = "roboemot-embed"
 JOIN_TIMEOUT_S = 10.0
+INTERRUPTED = "interrupted"  # a run that ended without a result
+NO_PIXELS = np.zeros(0, np.uint8)  # the crop of a job that ended (SPEC 12)
 Clock = Callable[[], float]
 
 
@@ -102,13 +107,16 @@ class EmbedWorker:
         *,
         clock: Clock = time.monotonic,
         max_window_s: float = 0.0,
+        join_timeout_s: float = JOIN_TIMEOUT_S,
     ):
         """``timer`` records ``appearance_embed`` runs (wall and CPU time of this thread);
         ``max_window_s`` (the upper bound of ``vision.timing_window_s``) sizes the ring of
-        queue waits, which ``snapshot`` filters to the window asked for."""
+        queue waits, which ``snapshot`` filters to the window asked for; ``join_timeout_s``
+        bounds the wait of ``stop``."""
         self.embedder = embedder
         self.timer = timer
         self._clock = clock
+        self._join_timeout_s = join_timeout_s
         self._cond = threading.Condition()
         self._queue: OrderedDict[int, EmbedJob] = OrderedDict()
         self._done: list[EmbedOutcome] = []
@@ -127,9 +135,14 @@ class EmbedWorker:
         return self.embedder.model_id
 
     def submit(self, job: EmbedJob, cap: int) -> None:
-        """Queue ``job`` without blocking: it replaces a waiting job of its track, else, with
-        ``cap`` jobs waiting, the oldest waiting job is dropped (handed back by ``drain``)."""
+        """Queue ``job`` without blocking: it replaces a waiting job of its track (the pipeline
+        never queues a pending track, so only direct callers reach that branch), else, with
+        ``cap`` jobs waiting, the oldest waiting job is dropped (handed back by ``drain``).
+        After ``stop`` nothing is kept: the job comes back at once as dropped."""
         with self._cond:
+            if self._stop:
+                self._done.append(EmbedOutcome(_bare(job), dropped=True))
+                return
             now = self._clock()
             job = replace(job, queued_at=now)
             self._counts["queued"] += 1
@@ -140,12 +153,13 @@ class EmbedWorker:
                 while len(self._queue) >= cap:
                     _, old = self._queue.popitem(last=False)
                     self._counts["dropped_cap"] += 1
-                    self._done.append(EmbedOutcome(old, dropped=True))
+                    self._done.append(EmbedOutcome(_bare(old), dropped=True))
                 self._queue[job.track_id] = job
             self._cond.notify()
 
     def cancel(self, track_id: int) -> None:
-        """Withdraw the waiting job of a track that ended (counted as ``dropped_ended``)."""
+        """Withdraw the waiting job of a track that ended (counted as ``dropped_ended``); its
+        crop goes with it."""
         with self._cond:
             if self._queue.pop(track_id, None) is not None:
                 self._counts["dropped_ended"] += 1
@@ -154,7 +168,7 @@ class EmbedWorker:
         """Withdraw every waiting job and discard every finished result (a reset); a run in
         flight finishes and is discarded by the vision thread, whose states it no longer
         matches. The jobs and results count as ``dropped_ended`` (a cap drop is counted
-        already)."""
+        already). No crop or embedding is kept."""
         with self._cond:
             results = sum(1 for o in self._done if o.embedding is not None)
             self._counts["dropped_ended"] += len(self._queue) + results
@@ -167,14 +181,17 @@ class EmbedWorker:
             self._counts["dropped_ended"] += 1
 
     def drain(self) -> list[EmbedOutcome]:
-        """The finished and dropped jobs since the last call, in the order they ended."""
+        """The finished and dropped jobs since the last call, in the order they ended; their
+        jobs hold no crop (only a finished one carries its embedding)."""
         with self._cond:
             done, self._done = self._done, []
         return done
 
     def run_one(self, wait_s: float | None = 0.0) -> bool:
         """Run the oldest waiting job on the calling thread, waiting up to ``wait_s`` for one
-        (None: until one comes or ``stop``); returns whether one ran."""
+        (None: until one comes or ``stop``); returns whether one ran. Whatever fails while it
+        runs, the job comes back through ``drain`` (as ``error`` when it did not finish), so
+        its track never stays pending."""
         with self._cond:
             if wait_s is None:
                 while not self._queue and not self._stop:
@@ -187,31 +204,33 @@ class EmbedWorker:
             self._busy = True
             started = self._clock()
             self._waits.append((started, started - job.queued_at))
+        outcome = EmbedOutcome(_bare(job), error=INTERRUPTED)
         try:
             outcome = self._run(job)
-        except BaseException:
+        except Exception as exc:
+            log.warning("embed worker step failed: %s", type(exc).__name__)
+            outcome = EmbedOutcome(_bare(job), error=type(exc).__name__)
+        finally:
+            del job  # the crop goes with the run
             with self._cond:
+                self._counts["finished" if outcome.error is None else "failed"] += 1
+                self._done.append(outcome)
                 self._busy = False
                 self._cond.notify_all()
-            raise
-        with self._cond:
-            self._counts["finished" if outcome.error is None else "failed"] += 1
-            self._done.append(outcome)
-            self._busy = False
-            self._cond.notify_all()
         return True
 
     def _run(self, job: EmbedJob) -> EmbedOutcome:
+        bare = _bare(job)
         wall0, cpu0 = self.timer.start() if self.timer is not None else (0.0, 0.0)
         try:
             embedding = self.embedder.embed(job.crop, job.box)
         except Exception as exc:
             log.warning("appearance embed failed: %s", type(exc).__name__)
-            return EmbedOutcome(job, error=type(exc).__name__)
+            return EmbedOutcome(bare, error=type(exc).__name__)
         finally:
             if self.timer is not None:
                 self.timer.record(APPEARANCE, wall0, cpu0)
-        return EmbedOutcome(job, embedding)
+        return EmbedOutcome(bare, embedding)
 
     def wait_idle(self, timeout_s: float) -> bool:
         """Wait until no job is waiting or running, up to ``timeout_s``; returns whether that
@@ -220,24 +239,41 @@ class EmbedWorker:
             return self._cond.wait_for(lambda: not self._queue and not self._busy, timeout_s)
 
     def start(self) -> None:
-        """Start the worker thread."""
+        """Start the worker thread. A thread from before a ``stop`` that timed out (a run stuck
+        in a native call) is kept, never doubled: it carries on once its run returns. Warns
+        when the background priority applies here but ``runtime.background_threads`` leaves
+        this thread out (a user list written before it existed)."""
+        if priority.left_out(THREAD_NAME):
+            log.warning(
+                "%s is not in runtime.background_threads: it runs DINOv2 at normal priority",
+                THREAD_NAME,
+            )
         with self._cond:
             self._stop = False
-        thread = threading.Thread(target=self._loop, name=THREAD_NAME, daemon=True)
+            old = self._thread
+            if old is not None and old.is_alive():
+                log.warning("embed worker still running from before: not started twice")
+                return
+            thread = threading.Thread(target=self._loop, name=THREAD_NAME, daemon=True)
+            self._thread = thread
         thread.start()
-        self._thread = thread
 
     def stop(self) -> None:
-        """Stop the thread and wait for the run in flight, bounded by ``JOIN_TIMEOUT_S`` (a run
-        stuck in a native call is logged, not waited for). Waiting jobs are discarded."""
+        """Stop the thread and wait for the run in flight, bounded by ``join_timeout_s`` (a run
+        stuck in a native call is logged, not waited for). Waiting jobs come back through
+        ``drain`` as dropped, without their crops, so their tracks can be queued after a
+        restart."""
         with self._cond:
             self._stop = True
+            for old in self._queue.values():
+                self._done.append(EmbedOutcome(_bare(old), dropped=True))
             self._queue.clear()
             self._cond.notify_all()
-        if self._thread is not None:
-            shutdown.join(self._thread, JOIN_TIMEOUT_S)
-            if self._thread.is_alive():
-                log.warning("embed worker did not stop within %.0f s", JOIN_TIMEOUT_S)
+            thread = self._thread
+        if thread is not None:
+            shutdown.join(thread, self._join_timeout_s)
+            if thread.is_alive():
+                log.warning("embed worker did not stop within %.0f s", self._join_timeout_s)
 
     def _loop(self) -> None:
         priority.lower_current()  # the calling thread does part of the ONNX Runtime work
@@ -245,7 +281,10 @@ class EmbedWorker:
             with self._cond:
                 if self._stop:
                     return
-            self.run_one(None)
+            try:
+                self.run_one(None)
+            except Exception as exc:  # run_one hands every job back itself; belt and braces
+                log.warning("embed worker loop failed: %s", type(exc).__name__)
 
     def snapshot(self, window_s: float) -> dict[str, Any]:
         """For the debug report (SPEC 12A): the counters since start, the jobs waiting now,
@@ -256,8 +295,9 @@ class EmbedWorker:
             waiting, busy = len(self._queue), self._busy
             cutoff = self._clock() - window_s
             waits = sorted(w * MS_PER_S for at, w in self._waits if at >= cutoff)
+            alive = self._thread is not None and self._thread.is_alive()
         return {
-            "state": "running" if self._thread is not None and self._thread.is_alive() else "idle",
+            "state": "running" if alive else "idle",
             **counts,
             "waiting": waiting,
             "busy": busy,
@@ -266,3 +306,8 @@ class EmbedWorker:
                 "p90": quantile(waits, P90) if waits else None,
             },
         }
+
+
+def _bare(job: EmbedJob) -> EmbedJob:
+    """The job without its pixels: what an outcome keeps (SPEC 12)."""
+    return replace(job, crop=NO_PIXELS)

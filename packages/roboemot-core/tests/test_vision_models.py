@@ -386,7 +386,7 @@ def _optional_stage_rig(monkeypatch, tmp_path, missing):
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: "yunet")
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "sface")
     monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append("nanodet") or "nanodet")
-    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a: built.append("dino") or "dino")
+    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a, **kw: built.append("dino") or "dino")
     return onnx, built
 
 

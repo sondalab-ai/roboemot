@@ -2345,6 +2345,22 @@ class VisionConfig(Strict):
         ge=1,
         le=64,
     )
+    embed_retry_s: float = param(
+        10.0,
+        "An animal or object track whose appearance embedding failed on the embed worker (an "
+        "empty crop, a backend error) is not queued again for this much capture time, so a "
+        "failing box does not fail again at every object run",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    appearance_spinning: bool = param(
+        False,
+        "Let the appearance embedder's (DINOv2-S) ONNX Runtime threads spin-wait between "
+        "operators. Off: it runs beside the face and object detectors, and on four cores two "
+        "spinning pools take cycles from each other and from audio",
+        restart=True,
+    )
     appearance_threads: int = param(
         2,
         "CPU threads of the appearance embedder (DINOv2-S), apart from vision.threads: it runs "

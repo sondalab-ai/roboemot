@@ -13,11 +13,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from pydantic import ValidationError
+from roboemot import priority
 from roboemot.bus import Bus
 from roboemot.config.schema import VisionConfig
 from roboemot.registry import Matcher
 from roboemot.vision import Detection, Frame
-from roboemot.vision.embed_worker import EmbedJob, EmbedWorker, cut
+from roboemot.vision.embed_worker import THREAD_NAME, EmbedJob, EmbedWorker, cut
 from roboemot.vision.pipeline import VisionPipeline
 from roboemot.vision.replay import load_session, replay, summarize
 from roboemot.vision.service import open_perception
@@ -465,3 +466,378 @@ def test_the_model_id_names_any_size_but_224():
     assert onnx.dino_model_id(224) == "dinov2-small"
     assert onnx.dino_model_id(112) == "dinov2-small-112px"
     assert onnx.dino_model_id(126) != onnx.dino_model_id(112)
+
+
+# ------------------------------------------------------------------ robustness (review)
+
+
+class Raising:
+    model_id = APP_MODEL
+
+    def __init__(self, exc=ValueError):
+        self.exc = exc
+        self.calls = 0
+
+    def embed(self, img, box):
+        self.calls += 1
+        raise self.exc("secret detail")
+
+
+class BrokenTimer:
+    """A stage timer whose ``record`` raises: a failure outside ``embedder.embed``."""
+
+    def start(self):
+        return 0.0, 0.0
+
+    def record(self, stage, wall0, cpu0):
+        raise RuntimeError("timer")
+
+
+def test_a_failure_outside_the_embedder_still_hands_the_job_back(tmp_path):
+    app = Appearance()
+    pipe, _ = pipeline(tmp_path, app, worker=False)
+    worker = EmbedWorker(app, BrokenTimer())
+    pipe.embed_worker = worker
+    for i in range(2):
+        pipe.process(frame(i))
+    assert entity(pipe).pending
+    assert worker.run_one()
+    (outcome,) = worker.drain()
+    assert outcome.error == "RuntimeError" and outcome.embedding is None
+    worker._done.append(outcome)
+    pipe.process(frame(2))
+    state = entity(pipe)
+    assert not state.pending and state.failed_at == 1.0  # handed back, then held off
+    assert worker_stats(pipe)["queued"] == 1
+
+
+def test_the_worker_thread_survives_a_failing_step(tmp_path):
+    worker = EmbedWorker(Echo(), BrokenTimer())
+    worker.start()
+    try:
+        for track in (1, 2):
+            worker.submit(job(track), cap=4)
+            assert worker.wait_idle(WAIT_S)
+        assert [o.error for o in worker.drain()] == ["RuntimeError", "RuntimeError"]
+        assert worker.snapshot(30.0)["state"] == "running"
+    finally:
+        worker.stop()
+
+
+def test_no_outcome_dropped_job_or_report_keeps_pixels(tmp_path, caplog):
+    worker = EmbedWorker(Echo())
+    for track in (1, 2, 3):
+        worker.submit(job(track, value=7), cap=2)  # 1 dropped at the cap
+    worker.run_one()  # 2 finishes
+    worker.cancel(3)  # 3 withdrawn
+    failing = EmbedWorker(Raising())
+    failing.submit(job(4, value=7), cap=4)
+    failing.run_one()
+    outcomes = worker.drain() + failing.drain()
+    assert len(outcomes) == 3
+    for outcome in outcomes:
+        assert outcome.job.crop.size == 0
+        assert (outcome.embedding is not None) == (not outcome.dropped and outcome.error is None)
+    assert not worker._queue and not worker._done
+    worker.submit(job(5, value=7), cap=4)
+    worker.clear()
+    assert not worker._queue and not worker._done
+    worker.submit(job(6, value=7), cap=4)
+    worker.stop()  # a waiting job comes back without its crop
+    worker.submit(job(7, value=7), cap=4)  # after stop: nothing kept
+    late = worker.drain()
+    assert [o.job.track_id for o in late] == [6, 7] and all(o.dropped for o in late)
+    assert all(o.job.crop.size == 0 for o in late) and not worker._queue
+    text = json.dumps(worker.snapshot(30.0))
+    assert "embedding" not in text and "secret detail" not in caplog.text
+
+
+def test_a_failing_box_waits_embed_retry_s_before_it_is_queued_again(tmp_path):
+    app = Raising()
+    pipe, worker = pipeline(tmp_path, app, record=False)
+    for i in range(25):
+        pipe.process(frame(i))
+        worker.run_one()
+    retry = int(pipe.cfg.embed_retry_s)
+    assert app.calls == 3  # at 1 s, then 1 + 10 and 1 + 20 s, not at every object run
+    assert pipe.stats()["entity_embeds"]["skips"]["retry"] >= 2 * (retry - 2)
+    assert worker_stats(pipe)["failed"] == 3
+
+
+def test_a_success_clears_the_retry_wait(tmp_path):
+    pipe, worker = pipeline(tmp_path, Appearance(), record=False)
+    for i in range(2):
+        pipe.process(frame(i))
+    state = entity(pipe)
+    state.failed_at = 0.5
+    worker.run_one()
+    pipe.process(frame(2))
+    assert state.failed_at is None and state.last_embed == 1.0
+
+
+def test_start_after_a_stop_that_timed_out_keeps_one_thread(tmp_path):
+    app = Held()
+    worker = EmbedWorker(app, join_timeout_s=0.05)
+    worker.start()
+    try:
+        worker.submit(job(1), cap=4)
+        assert app.started.wait(WAIT_S)
+        old = worker._thread
+        worker.stop()  # bounded: the stuck run is left, not waited for
+        assert old.is_alive()
+        worker.start()
+        assert worker._thread is old  # not doubled
+        app.release.set()
+        worker.submit(job(2), cap=4)
+        assert worker.wait_idle(WAIT_S)
+        assert [o.job.track_id for o in worker.drain()] == [1, 2]
+    finally:
+        app.release.set()
+        worker.stop()
+    assert not old.is_alive()
+
+
+def test_stop_then_start_runs_jobs_on_a_new_thread():
+    worker = EmbedWorker(Echo())
+    worker.start()
+    first = worker._thread
+    worker.stop()
+    assert not first.is_alive()
+    worker.start()
+    try:
+        assert worker._thread is not first
+        worker.submit(job(1, value=3), cap=4)
+        assert worker.wait_idle(WAIT_S)
+        (outcome,) = worker.drain()
+        assert outcome.embedding[0] == 3
+    finally:
+        worker.stop()
+
+
+@pytest.fixture
+def lowering(monkeypatch):
+    monkeypatch.setattr(priority, "is_supported", lambda: True)
+    yield
+    priority.configure(0, ())
+
+
+def test_a_user_thread_list_without_the_worker_is_warned_about(lowering, caplog):
+    priority.configure(5, ["roboemot-vision"])
+    assert priority.left_out(THREAD_NAME)
+    worker = EmbedWorker(Echo())
+    worker.start()
+    worker.stop()
+    assert f"{THREAD_NAME} is not in runtime.background_threads" in caplog.text
+    priority.configure(5, ["roboemot-vision", THREAD_NAME])
+    assert not priority.left_out(THREAD_NAME)
+    priority.configure(0, ["roboemot-vision"])
+    assert not priority.left_out(THREAD_NAME)  # nothing is lowered anyway
+
+
+# --------------------------------------------- results late by a random number of frames
+
+
+class LateWorker(EmbedWorker):
+    """Runs every job at once but hands each outcome to the vision thread 0 to ``max_lag``
+    frames later (seeded), as a slow worker would."""
+
+    def __init__(self, embedder, seed, max_lag):
+        super().__init__(embedder)
+        self.rng = np.random.default_rng(seed)
+        self.max_lag = max_lag
+        self.frame = 0.0
+        self.held = []
+
+    def drain(self):
+        for outcome in super().drain():
+            self.held.append((self.frame + int(self.rng.integers(0, self.max_lag + 1)), outcome))
+        ready = [o for at, o in self.held if at <= self.frame]
+        self.held = [(at, o) for at, o in self.held if at > self.frame]
+        return ready
+
+
+SPACED = {
+    "entity_burst_min_gap_s": 5.0,  # longer than any lag below: the next decision sees
+    "rates": CFG.vision.rates.model_copy(update={"appearance_hz": 0.2}),  # the result
+    "max_entity_embeds_per_frame": 1,
+}
+
+
+def scripted(pipe, worker, frames):
+    """Two cups and a third that comes and goes; a shown-object look from 12 s to 20 s."""
+    for i in range(frames):
+        if worker is not None:
+            worker.frame = i
+        pipe.object_detector.dets = crowd(3) if i % 9 < 6 else crowd(2)
+        pipe.governor.set_active("objects", 12 <= i < 20)
+        pipe.process(frame(i))
+        while worker is not None and worker.run_one():
+            pass
+    if worker is not None:
+        worker.frame = float("inf")
+        pipe._apply_embeds()
+
+
+def final(pipe, reg_names):
+    name = lambda owner: None if owner is None else reg_names(owner)  # noqa: E731
+    states = {
+        i: (s.votes, name(s.owner_id), s.last_embed, s.box) for i, s in pipe._entities.items()
+    }
+    history = {
+        i: [(name(v), stamp) for v, stamp in t.face] for i, t in pipe.matcher._tracks.items()
+    }
+    return states, history
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_late_results_reach_the_inline_outcome(tmp_path, seed):
+    results = []
+    for mode in ("inline", "late"):
+        app = Appearance()
+        pipe, _ = pipeline(tmp_path / mode, app, worker=False, dets=crowd(3), **SPACED)
+        worker = None
+        if mode == "late":
+            worker = pipe.embed_worker = LateWorker(app, seed, max_lag=3)
+        votes = observed(pipe)
+        scripted(pipe, worker, 30)
+        assert pipe.stats()["entity_embeds"]["skips"]["episode"] > 0  # the look took effect
+        reg = pipe.matcher.registry
+        results.append((final(pipe, lambda o, r=reg: r.get_entity(o).display_name), votes))
+    (inline_final, inline_votes), (late_final, late_votes) = results
+    assert inline_final == late_final
+    assert sorted((t, s) for t, s, _ in inline_votes) == sorted((t, s) for t, s, _ in late_votes)
+    assert any(owner for *_, owner in inline_votes)  # the record was recognised
+
+
+def test_a_late_result_of_an_ended_track_leaves_its_rebirth_alone(tmp_path):
+    app = Held()
+    pipe, worker = pipeline(tmp_path, app, record=False, object_lost_s=0.5, object_lost_periods=1.0)
+    worker.start()
+    try:
+        for i in range(2):
+            pipe.process(frame(i))
+        assert app.started.wait(WAIT_S)  # the first track's job (stamp 1 s) runs
+        (old,) = pipe._entities
+        i = until_gone(pipe, 2)
+        pipe.object_detector.dets = [CUP]
+        for k in range(i, i + 2):  # reborn at the same spot: it carries age and fields
+            pipe.process(frame(k))
+        (new,) = pipe._entities
+        reborn = entity(pipe)
+        assert new != old and reborn.born == 0.0 and reborn.last_embed is None
+        app.release.set()
+        assert worker.wait_idle(WAIT_S)
+        pipe.process(frame(i + 2))
+        assert worker_stats(pipe)["dropped_ended"] == 1  # the old state's result
+        # Only the reborn track's own result (its own capture stamp) reached it.
+        assert reborn.last_embed == i + 1.0 and reborn.born == 0.0
+    finally:
+        app.release.set()
+        worker.stop()
+
+
+# ------------------------------------------------------------------ the DINOv2 rewrite
+
+
+def pos_graph(*, side=2, scales=None, resizes=1, constant=True, attr="value", table=None):
+    """A tiny graph shaped like the export's position path: table -> Reshape -> Transpose ->
+    Resize(scales); ``side`` x ``side`` positions of width 8."""
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    width = 8
+    dims = table or [1, side * side, width]
+    pos = numpy_helper.from_array(np.zeros(dims, np.float32), "pos")
+    shape = numpy_helper.from_array(np.array([1, side, side, width], np.int64), "shape")
+    trained = (224 // 14 + 0.1) / side
+    values = np.array(scales if scales is not None else [1, 1, trained, trained], np.float32)
+    nodes = [
+        helper.make_node("Reshape", ["pos", "shape"], ["grid"]),
+        helper.make_node("Transpose", ["grid"], ["nchw"], perm=[0, 3, 1, 2]),
+    ]
+    inits = [pos, shape]
+    if constant:
+        tensor = numpy_helper.from_array(values)
+        nodes.append(helper.make_node("Constant", [], ["scales"], **{attr: tensor}))
+    else:
+        inits.append(numpy_helper.from_array(values, "scales"))
+    for k in range(resizes):
+        nodes.append(helper.make_node("Resize", ["nchw", "", "scales"], [f"out{k}"]))
+    outputs = [
+        helper.make_tensor_value_info(f"out{k}", TensorProto.FLOAT, None) for k in range(resizes)
+    ]
+    if not resizes:
+        outputs = [helper.make_tensor_value_info("nchw", TensorProto.FLOAT, None)]
+    graph = helper.make_graph(nodes, "pos", [], outputs, inits)
+    return onnx, helper.make_model(graph)
+
+
+def scales_of(model):
+    from onnx import numpy_helper
+
+    (node,) = [n for n in model.graph.node if n.op_type == "Constant"]
+    return numpy_helper.to_array(node.attribute[0].t)
+
+
+def test_the_rewrite_sets_the_scales_for_the_new_grid():
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.onnx import rescale_positions
+
+    _, model = pos_graph(side=37)
+    rescale_positions(model, 112, "m")
+    assert scales_of(model) == pytest.approx([1, 1, 8.1 / 37, 8.1 / 37])
+
+
+@pytest.mark.parametrize(
+    ("kw", "message"),
+    [
+        ({"resizes": 0}, "one position-embedding Resize"),
+        ({"resizes": 2}, "one position-embedding Resize"),
+        ({"constant": False}, "no constant scales"),
+        ({"attr": "value_floats"}, "not a constant tensor"),
+        ({"scales": [1, 1, 8.05]}, "not the 224 px ones"),
+        ({"scales": [1, 1, 2.0, 2.0]}, "not the 224 px ones"),
+        ({"table": [1, 5, 8]}, "no square position table"),
+    ],
+)
+def test_the_rewrite_refuses_a_graph_of_another_shape(kw, message):
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.models import ModelError
+    from roboemot.vision.onnx import rescale_positions
+
+    _, model = pos_graph(**kw)
+    with pytest.raises(ModelError, match=message):
+        rescale_positions(model, 112, "m")
+
+
+def test_a_wrong_token_count_is_refused():
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.models import ModelError
+    from roboemot.vision.onnx import check_tokens
+
+    class Session:
+        def __init__(self, tokens):
+            self.tokens = tokens
+
+        def run(self, outputs, feed):
+            return [np.zeros((1, self.tokens, 384), np.float32)]
+
+    check_tokens(Session(65), "x", 112, "m")  # 8 x 8 patches plus CLS
+    with pytest.raises(ModelError, match="257 tokens at 112 px"):
+        check_tokens(Session(257), "x", 112, "m")
+
+
+def test_the_embedder_session_does_not_spin_when_asked(monkeypatch):
+    ort = pytest.importorskip("onnxruntime")
+    from roboemot.vision import onnx as backends
+
+    seen = []
+
+    def session(model, options, providers):
+        seen.append(options.get_session_config_entry(backends.NO_SPINNING))
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(ort, "InferenceSession", session)
+    with pytest.raises(RuntimeError):
+        backends._session(b"", 1, spinning=False)
+    assert seen == ["0"]

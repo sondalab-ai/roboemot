@@ -94,6 +94,14 @@ def lower_current(name: str | None = None) -> None:
         _apply(name, [native_id()], increment)
 
 
+def left_out(name: str) -> bool:
+    """Whether lowering is on here (Linux, a positive increment) but ``name`` is not among the
+    configured names: a user config that lists ``runtime.background_threads`` explicitly
+    misses a thread added to the defaults later."""
+    with _lock:
+        return _nice > 0 and is_supported() and name not in _names
+
+
 def run_lowered(role: str, fn: Callable[..., T], *args: Any) -> T:
     """``fn(*args)`` on a thread named ``role`` that lowers itself first when ``role`` is
     listed (else inline): the native threads ``fn`` starts inherit the value. Returns its result

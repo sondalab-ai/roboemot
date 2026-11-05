@@ -55,7 +55,10 @@ results are applied, in the order they finished, exactly as an inline run applie
 embedding the next published observation carries); a result for a track that ended, or for a
 state a reset replaced, is discarded and counted. Without a worker (replay, unit tests) the
 embedding runs inline at the same point, so a replay stays deterministic (SPEC 14).
-``FrameReport.embeddings`` counts appearance embeddings run inline or queued.
+A job that failed on the worker (an empty crop, a backend error) holds its track back for
+``vision.embed_retry_s`` (skip reason ``retry``), so a failing box does not fail again at
+every object run. ``FrameReport.embeddings`` counts appearance embeddings run inline or,
+with a worker, queued (not run).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -189,6 +192,7 @@ class _EntityState:
     seen_box: Box | None = None  # filtered box at its last visible object run
     last_seen: float = 0.0  # capture stamp of that run
     pending: bool = False  # an embedding of it waits for the embed worker or runs there
+    failed_at: float | None = None  # capture stamp of its last failed embedding (worker)
 
 
 @dataclass(frozen=True)
@@ -223,9 +227,9 @@ NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR = (
     "floor",
 )
 NO_CONSUMER, SPACING, SETTLED, BUDGET = "no_consumer", "spacing", "settled", "budget"
-YOUNG, EPISODE, PENDING = "young", "episode", "pending"
+YOUNG, EPISODE, PENDING, RETRY = "young", "episode", "pending", "retry"
 EMBED_RUNS = (NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR)
-EMBED_SKIPS = (NO_CONSUMER, EPISODE, YOUNG, SPACING, SETTLED, BUDGET, PENDING)
+EMBED_SKIPS = (NO_CONSUMER, EPISODE, YOUNG, SPACING, SETTLED, BUDGET, PENDING, RETRY)
 EntityKey = tuple[str, str]  # (kind, readable category)
 
 
@@ -1123,6 +1127,8 @@ class VisionPipeline:
         due, reason = self._entity_reason(track, state, frame.stamp, key, consumers, role)
         if due and state.pending:
             due, reason = False, PENDING
+        if due and self._retry_wait(state, frame.stamp):
+            due, reason = False, RETRY
         if due and self._entity_budget <= 0:
             due, reason = False, BUDGET
         with self._report_lock:
@@ -1197,6 +1203,8 @@ class VisionPipeline:
             state.pending = False
             if outcome.embedding is None:
                 state.reacquired = state.reacquired or job.reacquired
+                if outcome.error is not None:
+                    state.failed_at = job.stamp  # no retry before embed_retry_s
                 continue
             self._apply_entity(
                 job.track_id,
@@ -1232,7 +1240,14 @@ class VisionPipeline:
         elif voting:
             state.votes += 1
         state.embedding, state.owner_id = embedding, identity.owner_id
-        state.last_embed, state.box = stamp, measured
+        state.last_embed, state.box, state.failed_at = stamp, measured, None
+
+    def _retry_wait(self, state: _EntityState, stamp: float) -> bool:
+        """Whether a track whose embedding failed on the worker still waits
+        ``vision.embed_retry_s`` of capture time before it is queued again."""
+        if state.failed_at is None:
+            return False
+        return stamp - state.failed_at < self.cfg.embed_retry_s - EPSILON_S
 
     @staticmethod
     def _measured(track: Track) -> Box:
