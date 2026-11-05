@@ -352,8 +352,10 @@ def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
     the platform's route entry; the realtime route through it, with the utterance's audio as its
     input (``privacy.realtime_audio``, the admin opt-in), the skip tool and the tone tool; no local
     voice; wake policy ``never`` with the voice-at-face and facing checks (facing needs
-    direction). The transcript timeout is the platform's
-    (``CloudVoiceRoute.transcript_timeout_s``)."""
+    direction). The one cloud-voice consent also covers audio the robot did not judge addressed
+    (``privacy.realtime_audio_unaddressed``, owner decision 2026-11-05), so server turns can be
+    switched on after QA; ``voice.realtime_route.turns`` is not the profile's. The transcript
+    timeout is the platform's (``CloudVoiceRoute.transcript_timeout_s``)."""
     rt = ("voice", "realtime_route")
     return {
         (ROUTES_KEY, route.name): route.entry(),
@@ -365,6 +367,7 @@ def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
         (*rt, "tone_tool"): True,
         (*rt, "transcript_timeout_s"): route.transcript_timeout_s,
         ("privacy", "realtime_audio"): True,
+        ("privacy", "realtime_audio_unaddressed"): True,
         ("voice", "backend"): "none",
         ("voice", "fallback_backend"): "none",
         ("voice", "wake_word_policy"): "never",
@@ -2004,6 +2007,7 @@ def privacy_conflicts(saved: dict, route: CloudVoiceRoute, on: bool) -> list[str
     else:
         bad = {
             "privacy.realtime_audio": lambda v: v is True,
+            "privacy.realtime_audio_unaddressed": lambda v: v is True,
             f"{rt}.enabled": lambda v: v is True,
             f"{rt}.input": lambda v: v == "audio",
         }
@@ -2096,9 +2100,12 @@ def cloud_voice_text(route: CloudVoiceRoute) -> str:
     return (
         "Cloud voice: the robot listens without a wake word, and the audio of every utterance "
         f"spoken while a person faces the robot and looks at it leaves the robot for "
-        f"{route.provider}, phone calls included. The skip tool only decides whether the robot "
-        "answers: the audio is already at the server. The robot has no local voice (Piper is "
-        "removed); going back needs a reinstall with --no-cloud-voice."
+        f"{route.provider}, phone calls included. The same consent lets the robot stream to "
+        f"{route.provider} every speech segment it hears while it is awake, not only speech "
+        "meant for it (a television, people talking to each other), once server turns are "
+        "switched on in Settings; the server then decides whether to answer. The skip tool only "
+        "decides whether the robot answers: the audio is already at the server. The robot has "
+        "no local voice (Piper is removed); going back needs a reinstall with --no-cloud-voice."
     )
 
 
@@ -2701,7 +2708,8 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         action=argparse.BooleanOptionalAction,
         help="cloud-voice profile: the robot answers by voice through the platform's realtime "
         "route; the audio of every utterance spoken while a person faces the robot and looks at "
-        "it leaves the robot (SPEC 12 opt-in). Writes the route and its settings into app.yaml, "
+        "it leaves the robot, and with server turns (Settings) every speech segment heard while "
+        "awake (SPEC 12 opt-ins). Writes the route and its settings into app.yaml, "
         "asks for the route's key when the store has none, skips Piper and its voices and "
         "removes a recorded Piper venv (default: ask on a terminal; -y does not turn it on)",
     )

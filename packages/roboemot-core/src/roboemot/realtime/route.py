@@ -202,11 +202,25 @@ def session_update(
     )
 
 
+STREAM_GATE = "server_gates"  # the audio_gate live streams go under (turns: server)
+NO_UNADDRESSED = "no_unaddressed_opt_in"  # why turns: server runs as robot turns
+
+
 def server_turns(cfg: RoboEmotConfig) -> bool:
-    """Whether the server's VAD ends the turns (``turns: server`` with ``input: audio``): the
-    audio streams live and the robot sends no commit. Text input always has robot turns."""
+    """Whether the server's VAD ends the turns: ``turns: server`` with ``input: audio`` and
+    the ``privacy.realtime_audio_unaddressed`` opt-in (SPEC 12: the robot streams audio it did
+    not judge addressed). The audio streams live and the robot sends no commit. Text input, or
+    no such opt-in, has robot turns."""
     rt = cfg.voice.realtime_route
-    return rt.turns == "server" and rt.input == "audio"
+    return turns_fallback(cfg) is None and rt.turns == "server" and rt.input == "audio"
+
+
+def turns_fallback(cfg: RoboEmotConfig) -> str | None:
+    """Why ``turns: server`` (with ``input: audio``) runs as robot turns, None when it does
+    not: the ``privacy.realtime_audio_unaddressed`` opt-in is off (``NO_UNADDRESSED``)."""
+    rt = cfg.voice.realtime_route
+    asked = rt.turns == "server" and rt.input == "audio"
+    return NO_UNADDRESSED if asked and not cfg.privacy.realtime_audio_unaddressed else None
 
 
 def has_hint(update: dict[str, Any]) -> bool:
@@ -336,6 +350,7 @@ class RealtimeRoute:
             stage: collections.deque(maxlen=LATENCY_WINDOW) for stage in protocol.LATENCY_STAGES
         }
         self._client_snapshot: dict[str, Any] = {}
+        self._turns_fallback: str | None = None  # why turns: server runs as robot turns (logged)
         self.apply_config(stack.effective())
 
     def __repr__(self) -> str:
@@ -355,6 +370,10 @@ class RealtimeRoute:
         endpoint = route_endpoint(route) if route is not None else None
         reason = self.blocked(cfg, self._extra_ok)
         self._note_egress(cfg, reason)
+        fallback = turns_fallback(cfg)
+        if fallback is not None and fallback != self._turns_fallback:
+            log.warning("realtime route: turns: server needs %s; robot turns run", fallback)
+        self._turns_fallback = fallback
         rt = cfg.voice.realtime_route
         settings = (rt.transcription_name_hint, rt.transcription_model)
         with self._lock:
@@ -1411,7 +1430,9 @@ class RealtimeRoute:
         ``voice.sample_rate_hz`` in appends of at most half the message cap, never a commit
         (the server's VAD ends the turn). Every piece passes the gate of ``send_audio`` on the
         committed configuration, atomically with its send: the session fits, ``input: audio``
-        with server turns, the ``privacy.realtime_audio`` opt-in, what ``hold()`` returns
+        with server turns (which need ``privacy.realtime_audio_unaddressed``; refused
+        ``no_unaddressed_opt_in`` without it), the ``privacy.realtime_audio`` opt-in,
+        ``audio_gate: server_gates`` (else ``gate``), what ``hold()`` returns
         (``speaking``, ``asleep``, ``cancelled``; not asked for the ``closing`` silence, which
         carries no sound) and today's upload budget, which each piece uses. The opening piece
         (``instructions`` given) goes first with a ``session.update`` carrying them, is refused
@@ -1432,9 +1453,11 @@ class RealtimeRoute:
             opening = instructions is not None
             reserve = rt.close_silence_ms / MS_PER_S if not closing else 0.0
             if not server_turns(cfg):
-                why: str | None = "turns"
+                why: str | None = turns_fallback(cfg) or "turns"
             elif not cfg.privacy.realtime_audio:
                 why = "no_opt_in"
+            elif rt.audio_gate != STREAM_GATE:
+                why = "gate"
             elif not closing and (held := hold()) is not None:
                 why = held
             elif opening and self._input_holds > 0:
@@ -1650,6 +1673,7 @@ class RealtimeRoute:
                 "input": rt.input,
                 "gate": rt.audio_gate if audio else None,  # text input: no audio gate
                 "turns": "server" if server_turns(cfg) else "robot",  # who ends a turn
+                "turns_fallback": turns_fallback(cfg),  # why turns: server runs as robot turns
                 "endpoint": snap.get("endpoint"),
                 "audio_egress": self._egress,
                 "audio_blocked": self._audio_blocked,  # why the last burst was refused

@@ -164,6 +164,7 @@ class TurnServer(FakeServer):
         self.sent: list[dict[str, Any]] = []
         self.stream_vad = stream_vad
         self.stream_turns = 0  # turns the stream VAD heard, over all sessions
+        self.commits_at_create: list[int] = []  # the stream VAD's commits at each response.create
         self._vad_item: str | None = None  # the stream VAD's turn in progress
         self._quiet_ms = 0.0
         self._speech_end = 0.0
@@ -221,6 +222,7 @@ class TurnServer(FakeServer):
                 error = {"code": PENDING, "event_id": event.get("event_id")}
                 await self._send(ws, {"type": "error", "error": error})
             elif kind == "response.create":
+                self.commits_at_create.append(len(self.sent_of("input_audio_buffer.committed")))
                 script = self.scripts[min(self.responses, len(self.scripts) - 1)]
                 self.responses += 1
                 if script == "close_before":

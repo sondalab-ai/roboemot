@@ -122,7 +122,7 @@ The cloud voice is off by default. Audio leaving the robot is an admin opt-in (S
    The installer asks for the token (`hf_token`) when the robot has none. It reads it without
    echo. With no token, it stops and changes nothing.
 
-Passing `--cloud-voice` accepts the `privacy.realtime_audio` opt-in. `-y` alone never turns the
+Passing `--cloud-voice` accepts the `privacy.realtime_audio` opt-in, and with it `privacy.realtime_audio_unaddressed`: once `voice.realtime_route.turns` is `server`, every speech segment the robot hears while awake can stream to the server, not only speech meant for the robot. The profile does not set `turns`. `-y` alone never turns the
 profile on. An unattended run must say `--cloud-voice` or `--no-cloud-voice`.
 
 The profile needs the voice pipeline, so it keeps `voice.enabled: true`, which the installer sets.
@@ -143,6 +143,7 @@ The profile writes these keys into `app.yaml`. The values come from `cloud_voice
 | `voice.realtime_route.skip_tool` | `true` | `false` |
 | `voice.realtime_route.transcript_timeout_s` | `10.0` | `4.0` |
 | `privacy.realtime_audio` | `true` | `false` |
+| `privacy.realtime_audio_unaddressed` | `true` | `false` |
 | `voice.backend` | `none` | `piper` |
 | `voice.fallback_backend` | `none` | `piper` |
 | `voice.wake_word_policy` | `never` | `unless_enrolled_in_view` |
@@ -174,7 +175,8 @@ left the robot.
    and keeps every other key. Add `--piper` to install Piper again; the models step fetches the
    text-to-speech voices again.
 2. If the web UI holds a saved value that keeps audio leaving the robot
-   (`privacy.realtime_audio: true`, `voice.realtime_route.enabled: true` or
+   (`privacy.realtime_audio: true`, `privacy.realtime_audio_unaddressed: true`,
+   `voice.realtime_route.enabled: true` or
    `voice.realtime_route.input: audio`), the installer stops and names it. Reset it in the web UI
    and run the installer again.
 3. Restart RoboEmot (`python scripts/run_on_robot.py --restart`), if the installer did not start
@@ -203,9 +205,9 @@ A lost session reconnects in the background. The reconnect waits longer after ea
 | Key | Default | Unit, range | What it does |
 | --- | --- | --- | --- |
 | `voice.realtime_route.mode` | `direct` | `direct`, `platform` | `direct` connects to the route's own URL. `platform` asks the route's `base_url` for a session first; Reachy Mini uses it. Needs restart. |
-| `voice.realtime_route.audio_gate` | `addressed` | `addressed` | Which audio may leave with `turns: robot`. Only an utterance the wake gate and the voice-at-face check accepted is sent. It is sent once it ended, never live. |
-| `voice.realtime_route.turns` | `robot` | `robot`, `server` | Who ends a turn with audio input. `robot`: the robot decides once the utterance ended, then sends its audio in one go. `server`: the audio streams while the robot hears speech, and the server decides when the turn ends. It is faster. The wake word policy does not apply: only `server_gates` decide what streams. For now the robot still asks for the answer once the transcript came. Needs restart. |
-| `voice.realtime_route.server_gates` | `[asleep, music]` | `asleep`, `music`, `other_speaker`, `at_face`, `facing` | With `turns: server`, the checks that decide whether a piece of speech streams at all. They decide before any audio leaves, and never again later. `asleep`: not while asleep. `music`: not while music plays. `other_speaker`: not another known person right after the last one heard. `at_face`: the voice comes from a visible face. `facing`: that face looks at the robot. An empty list streams everything the robot hears as speech. |
+| `voice.realtime_route.audio_gate` | `addressed` | `addressed`, `server_gates` | `server_gates` is the gate of `turns: server` and must be set for it to stream. A change needs the admin. `addressed`: which audio may leave with `turns: robot`. Only an utterance the wake gate and the voice-at-face check accepted is sent. It is sent once it ended, never live. |
+| `voice.realtime_route.turns` | `robot` | `robot`, `server` | Who ends a turn with audio input. `robot`: the robot decides once the utterance ended, then sends its audio in one go. `server`: the audio streams while the robot hears speech, and the server decides when the turn ends. It is faster. The wake word policy does not apply: only `server_gates` decide what streams. It needs `privacy.realtime_audio_unaddressed` and `audio_gate: server_gates`; without the opt-in it runs as `robot`. A change needs the admin. For now the robot still asks for the answer once the transcript came. Needs restart. |
+| `voice.realtime_route.server_gates` | `[music]` | `music`, `other_speaker`, `at_face`, `facing` | With `turns: server`, the checks that decide whether a piece of speech streams at all. They decide before any audio leaves, and never again later. Nothing streams while the robot sleeps, whatever this list says. A change needs the admin. `music`: not while music plays. `other_speaker`: not another known person right after the last one heard. `at_face`: the voice comes from a visible face. `facing`: that face looks at the robot. An empty list streams everything the robot hears as speech. |
 | `voice.realtime_route.server_gate_hold_ms` | `300.0` | ms, 0 to 2000 | With `at_face` or `facing` in `server_gates`, the speech held on the robot before those checks decide. The held audio then streams at once. |
 | `voice.realtime_route.transcription_language` | `""` | language code | Language the server transcribes in. It is sent with audio input only. Empty uses `conversation.language`. |
 | `voice.realtime_route.transcription_model` | `""` | model name | Transcription model sent to the server. It is sent with audio input only. Empty uses the server's default. |
@@ -228,8 +230,9 @@ first:
 - **Upload budget** (`voice.realtime_route.daily_upload_budget_s`, default 1800 s, so 30 minutes
   of audio per day). It counts the microphone audio sent, the added closing silence included. When
   it runs out, the robot keeps answering. It sends the local Vosk transcript as text instead of the
-  audio. The count is kept in `realtime_upload.json` in the data folder, so a restart does not reset
-  it.
+  audio. With `turns: server`, an utterance whose stream the budget cuts part way is not answered
+  (its audio already left; the robot shows the did-not-get-it cue); the next one goes as text. The
+  count is kept in `realtime_upload.json` in the data folder, so a restart does not reset it.
 - **Token budget** (`llm_routes[].daily_token_budget` of the route, default 200000 tokens per day).
   It counts the tokens the server reports for each answer, or an estimate when the server reports
   none. The installer's `pollen` entry does not set it, so the default applies. When it runs out,
@@ -507,6 +510,7 @@ the PIN.
 | Key | Default | Unit, range | What it does |
 | --- | --- | --- | --- |
 | `privacy.realtime_audio` | `false` | on/off | Opt-in. Lets addressed microphone audio leave the robot for the realtime route. The installer's `--cloud-voice` turns it on. |
+| `privacy.realtime_audio_unaddressed` | `false` | on/off | Opt-in. With `voice.realtime_route.turns: server`, lets every speech segment the robot hears while awake stream to the realtime route, not only speech meant for the robot; `server_gates` can narrow it. Without it `turns: server` runs as `robot`. The installer's `--cloud-voice` turns it on. |
 | `privacy.realtime_platform_id` | `false` | on/off | Opt-in. Lets the platform's session provider send the robot's stable platform identifier with each session request (platform mode only). The server can then link all sessions of this robot. |
 | `privacy.pseudonyms_to_cloud` | `false` | on/off | Sends pseudonyms instead of registry names to cloud routes, and puts the names back in the answer. A remote speech voice still hears the names it speaks. It blocks a cloud realtime route. Its safe direction is on: turning it off again needs the admin confirmation. |
 | `privacy.multimodal_frames` | `false` | on/off | Opt-in. Allows single camera frames to be sent to LLM routes for image questions. |

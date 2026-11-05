@@ -81,7 +81,7 @@ from .. import shutdown
 from ..config.schema import RoboEmotConfig
 from ..voice.asr import to_int16
 from . import protocol
-from .route import server_turns
+from .route import STREAM_GATE, server_turns, turns_fallback
 
 log = logging.getLogger(__name__)
 GATE = "addressed"  # the gate this input sends under (voice.realtime_route.audio_gate)
@@ -290,15 +290,21 @@ class RealtimeInput:
     def stream_refusal(self, cfg: RoboEmotConfig) -> str | None:
         """Why a speech segment that starts now cannot stream (``turns: server``; cheap, any
         thread, no lock held across it), None when it may: the route on with server turns, the
-        opt-in, the robot awake (the ``asleep`` gate) and silent, a session open, no realtime
-        turn in flight and upload budget left beyond the closing silence. The route's send gate
-        decides each piece for real."""
+        opt-ins (``turns: server`` without ``privacy.realtime_audio_unaddressed`` is
+        ``no_unaddressed_opt_in``: robot turns run), ``audio_gate: server_gates``, the robot
+        awake (always) and silent, a session open, no realtime turn in flight and upload
+        budget left beyond the closing silence. The route's send gate decides each piece for
+        real."""
         rt = cfg.voice.realtime_route
-        if not rt.enabled or not server_turns(cfg):
+        if not rt.enabled:
             return "turns"
+        if not server_turns(cfg):
+            return turns_fallback(cfg) or "turns"
         if not cfg.privacy.realtime_audio:
             return "no_opt_in"
-        if "asleep" in rt.server_gates and self._asleep():
+        if rt.audio_gate != STREAM_GATE:
+            return "gate"
+        if self._asleep():
             return "asleep"
         if self._speaking():
             return "speaking"
@@ -606,13 +612,13 @@ class RealtimeInput:
         burst.sent_ms = samples.size / job.rate_hz * MS_PER_S
 
     def _hold(self, job: InputJob, cfg: RoboEmotConfig) -> Callable[[], str | None]:
-        """What stops a piece (under the route's lock, with the send: leaf locks only)."""
-        asleep_gate = "asleep" in cfg.voice.realtime_route.server_gates
+        """What stops a piece (under the route's lock, with the send: leaf locks only). Asleep
+        always does: it is no configurable gate."""
 
         def hold() -> str | None:
             if job.done or job.cancelled or self._closed:
                 return "cancelled"
-            if asleep_gate and self._asleep():
+            if self._asleep():
                 return "asleep"
             if self._speaking():
                 return "speaking"

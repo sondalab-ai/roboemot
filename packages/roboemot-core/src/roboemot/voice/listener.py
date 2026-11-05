@@ -116,6 +116,7 @@ AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
 SERVER_GATES = ("music", "other_speaker", "at_face", "facing")  # decided by the listener
+NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
 
 
 class VoiceChunkLike(Protocol):
@@ -303,6 +304,7 @@ class VoiceListener:
             # flight, the budget...), and kept local by each server gate
             "streamed": 0,
             "streams_refused": 0,
+            "turns_fallbacks": 0,  # turns: server without privacy.realtime_audio_unaddressed
             **{f"stream_gated_{gate}": 0 for gate in SERVER_GATES},
         }
         self._stream: _Stream | None = None  # the segment in progress with server turns
@@ -766,6 +768,9 @@ class VoiceListener:
             log.warning("voice listener: realtime input: %s", type(exc).__name__)
             return None
         if why == "turns":  # robot turns: the burst path
+            return None
+        if why == NO_UNADDRESSED:  # turns: server without its opt-in: robot turns run
+            self._count_audio("turns_fallbacks")
             return None
         if why is not None:
             self._count_audio("streams_refused")
