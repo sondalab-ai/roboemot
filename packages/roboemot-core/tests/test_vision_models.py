@@ -386,7 +386,7 @@ def _optional_stage_rig(monkeypatch, tmp_path, missing):
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: "yunet")
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "sface")
     monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append("nanodet") or "nanodet")
-    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a: built.append("dino") or "dino")
+    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a, **kw: built.append("dino") or "dino")
     return onnx, built
 
 
@@ -697,6 +697,23 @@ def test_real_backends_run_end_to_end_on_a_synthetic_image(stages):
     assert app.shape == (384,) and np.linalg.norm(app) == pytest.approx(1.0, abs=1e-4)
     same = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
     other = stages.appearance_embedder.embed(img, (300.0, 200.0, 600.0, 450.0))
+    assert float(app @ same) > float(app @ other)
+
+
+@pytest.mark.models
+@pytest.mark.parametrize("px", [112, 126])
+def test_real_dinov2_runs_at_a_smaller_input_under_its_own_model_id(stages, px):
+    from roboemot.vision import onnx
+
+    path = models.check_file(CACHE, load_manifest()["dinov2-small"].files[0])
+    small = onnx.DinoV2Embedder(path, 2, px)  # checks (px / 14)^2 + 1 tokens on load
+    assert stages.appearance_embedder.model_id == "dinov2-small"
+    assert small.model_id == f"dinov2-small-{px}px"
+    img = textured_scene()
+    app = small.embed(img, (100.0, 100.0, 300.0, 300.0))
+    assert app.shape == (384,) and np.linalg.norm(app) == pytest.approx(1.0, abs=1e-4)
+    same = small.embed(img, (100.0, 100.0, 300.0, 300.0))
+    other = small.embed(img, (300.0, 200.0, 600.0, 450.0))
     assert float(app @ same) > float(app @ other)
 
 

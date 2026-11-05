@@ -27,8 +27,9 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    face is in view, a run may look at a crop around the faces (``vision.object_crop``, SPEC 5,
    13; see ``object_crop``): its boxes come back in frame pixels, and tracks outside the crop are
    left alone for that run.
-   The appearance embedding (DINOv2-S, about 1.1 s on the CM4, inline on this thread) runs only
-   when it adds information (``_entity_reason``, SPEC 5, 13): never for a kind and category no
+   The appearance embedding (DINOv2-S, about 1.2 s on the CM4) runs on the embed worker in the
+   live app, inline without one (see below), and only when it adds information
+   (``_entity_reason``, SPEC 5, 13): never for a kind and category no
    record holds and auto-enrollment does not collect; once for a new track, but only after it
    has lived ``entity_embed_min_age_s`` since its first detection (a cluttered room churns
    short tracks; a rebirth near a track that ended within ``rebirth_window_s`` keeps that
@@ -43,6 +44,21 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    without a freeze per run, and the others wait for the episode's end. The look-down crop
    follows the same track. A burst whose last vote aged past ``identity.vote_max_age_s``
    starts again. ``stats`` counts runs and skips by reason (``entity_embeds``).
+
+When and for which track an animal or object embedding is due, and the per-frame entity budget,
+are decided here either way. With an ``embed_worker`` (``EmbedWorker``, the live app) a due
+embedding is handed over as a copy of the box's pixels and ``process`` goes on: detection and
+tracking never wait for DINOv2. The track is ``pending`` until the result comes back, so it is
+never queued twice (skip reason ``pending``). At the start of every ``process`` the finished
+results are applied, in the order they finished, exactly as an inline run applies its own
+(``_apply_entity``: matcher vote with the crop's capture stamp, owner, burst count, the
+embedding the next published observation carries); a result for a track that ended, or for a
+state a reset replaced, is discarded and counted. Without a worker (replay, unit tests) the
+embedding runs inline at the same point, so a replay stays deterministic (SPEC 14).
+A job that failed on the worker (an empty crop, a backend error) holds its track back for
+``vision.embed_retry_s`` (skip reason ``retry``), so a failing box does not fail again at
+every object run. ``FrameReport.embeddings`` counts appearance embeddings run inline or,
+with a worker, queued (not run).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -76,6 +92,10 @@ beside their product ``rate_scale``. ``stage_timing`` is what each model stage a
 ``process`` call cost over ``vision.timing_window_s`` (``StageTimer``, its own clocks: the
 values never feed a decision; a stage that raises still counts as a run, its time was spent).
 Numbers only; the frame thread writes them and the report thread reads them under one lock.
+``embed_worker`` is the worker's own report (``EmbedWorker.snapshot``: queued, replaced,
+dropped at the cap, dropped because the track ended, finished, failed, waiting, busy, the queue
+wait), ``{"state": "inline"}`` without one, ``{"state": "off"}`` without an appearance
+embedder.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -109,6 +129,7 @@ from ..registry import Matcher
 from ..stats import SUMMARY_LEVELS, summarise
 from ..world import FrameSpec, Observation, angular_distance
 from ..world.frame import to_base_frame
+from .embed_worker import EmbedJob, EmbedWorker, cut
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
@@ -170,6 +191,8 @@ class _EntityState:
     born: float = 0.0  # age origin: first detection, or that of the track it is a rebirth of
     seen_box: Box | None = None  # filtered box at its last visible object run
     last_seen: float = 0.0  # capture stamp of that run
+    pending: bool = False  # an embedding of it waits for the embed worker or runs there
+    failed_at: float | None = None  # capture stamp of its last failed embedding (worker)
 
 
 @dataclass(frozen=True)
@@ -204,9 +227,9 @@ NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR = (
     "floor",
 )
 NO_CONSUMER, SPACING, SETTLED, BUDGET = "no_consumer", "spacing", "settled", "budget"
-YOUNG, EPISODE = "young", "episode"
+YOUNG, EPISODE, PENDING, RETRY = "young", "episode", "pending", "retry"
 EMBED_RUNS = (NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR)
-EMBED_SKIPS = (NO_CONSUMER, EPISODE, YOUNG, SPACING, SETTLED, BUDGET)
+EMBED_SKIPS = (NO_CONSUMER, EPISODE, YOUNG, SPACING, SETTLED, BUDGET, PENDING, RETRY)
 EntityKey = tuple[str, str]  # (kind, readable category)
 
 
@@ -279,7 +302,11 @@ class VisionPipeline:
         frame_spec: FrameSpec | None = None,
         timer: StageTimer | None = None,
         shown: ShownObjectConfig | None = None,
+        embed_worker: EmbedWorker | None = None,
     ):
+        """``embed_worker`` moves the animal and object appearance embeddings off this thread
+        (the live app, ``open_perception``); without one they run inline in ``process``, as
+        replay and the unit tests need (SPEC 14)."""
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
         self.cfg = cfg
@@ -299,6 +326,7 @@ class VisionPipeline:
         self.face_embedder = face_embedder
         self.appearance_embedder = appearance_embedder
         self.object_detector = object_detector
+        self.embed_worker = embed_worker
         self._lost_held = 0.0
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
@@ -359,6 +387,7 @@ class VisionPipeline:
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
+        self._apply_embeds()
         if self.governor.scale <= 0:
             return FrameReport(stamp)
         camera = self._camera(frame.image.shape[1], frame.image.shape[0])
@@ -427,6 +456,8 @@ class VisionPipeline:
         self._faces.clear()
         self._entities.clear()
         self._ended_entities.clear()
+        if self.embed_worker is not None:
+            self.embed_worker.clear()
         self._object_visible = []
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
@@ -447,8 +478,8 @@ class VisionPipeline:
     ) -> None:
         """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
         so do, with ``world``, the camera field of view and, with ``shown``, the shown-object
-        region the object crop follows. The thread count, the detector size and the models
-        folder are restart-only (the schema marks them).
+        region the object crop follows. The thread counts, the detector size, the appearance
+        input size and the models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
         self.object_crop.cfg = vision.object_crop
@@ -564,7 +595,17 @@ class VisionPipeline:
             "tracks": tracks,
             "objects": objects,
             "entity_embeds": entity_embeds,
+            "embed_worker": self._embed_worker_report(),
         }
+
+    def _embed_worker_report(self) -> dict[str, Any]:
+        """The embed worker's report; ``off`` without an appearance embedder, ``inline`` when
+        the embeddings run on this thread."""
+        if self.appearance_embedder is None:
+            return {"state": "off"}
+        if self.embed_worker is None:
+            return {"state": "inline"}
+        return self.embed_worker.snapshot(self.cfg.timing_window_s)
 
     def _camera(self, width: int, height: int) -> CameraModel:
         key = (width, height)
@@ -631,6 +672,8 @@ class VisionPipeline:
         a rebirth (``_new_entity``)."""
         state = self._entities.pop(track_id, None)
         self.matcher.release(track_id)
+        if state is not None and state.pending and self.embed_worker is not None:
+            self.embed_worker.cancel(track_id)
         if state is not None and state.seen_box is not None:
             self._ended_entities.append(
                 _EndedEntity(
@@ -1078,9 +1121,14 @@ class VisionPipeline:
         stale = state.last_embed is not None and (
             frame.stamp - state.last_embed > self.identity.vote_max_age_s
         )
-        if stale and state.owner_id is None and 0 < state.votes < self.cfg.embedding_burst:
+        open_burst = state.owner_id is None and 0 < state.votes < self.cfg.embedding_burst
+        if stale and open_burst and not state.pending:  # a pending vote is not stale yet
             state.votes = 0
         due, reason = self._entity_reason(track, state, frame.stamp, key, consumers, role)
+        if due and state.pending:
+            due, reason = False, PENDING
+        if due and self._retry_wait(state, frame.stamp):
+            due, reason = False, RETRY
         if due and self._entity_budget <= 0:
             due, reason = False, BUDGET
         with self._report_lock:
@@ -1093,23 +1141,113 @@ class VisionPipeline:
         restart = voting and reason in (CHANGED, REACQUIRED, FLOOR)
         self._entity_budget -= 1
         self._entity_embeds += 1
-        stamp = frame.stamp
+        if self.embed_worker is not None:
+            self._queue_entity(frame, track, state, reason, voting, restart)
+            return
         wall0, cpu0 = self.timer.start()
         try:
             embedding = self.appearance_embedder.embed(frame.image, track.box)
         finally:
             self.timer.record(APPEARANCE, wall0, cpu0)
+        self._apply_entity(
+            track.track_id, state, embedding, frame.stamp, voting, restart, self._measured(track)
+        )
+        state.reacquired = False
+
+    def _queue_entity(
+        self,
+        frame: Frame,
+        track: Track,
+        state: _EntityState,
+        reason: str,
+        voting: bool,
+        restart: bool,
+    ) -> None:
+        """Hand the embedding to the embed worker: a copy of the box's pixels with what the
+        result needs, frozen now. The track is ``pending`` until the result or a drop comes
+        back (``_apply_embeds``); its ``reacquired`` flag is spent now, as an inline run spends
+        it, and given back if the job is dropped."""
+        assert self.embed_worker is not None
+        crop, box = cut(frame.image, track.box)
+        job = EmbedJob(
+            track.track_id,
+            state,
+            crop,
+            box,
+            frame.stamp,
+            reason,
+            voting,
+            restart,
+            self._measured(track),
+            state.reacquired,
+        )
+        state.pending, state.reacquired = True, False
+        self.embed_worker.submit(job, self.cfg.embed_queue_max)
+
+    def _apply_embeds(self) -> None:
+        """Apply what the embed worker finished since the last frame, on this thread and in
+        the order it finished, exactly as an inline run would have (``_apply_entity``, with the
+        job's capture stamp). A result for a track that ended, or whose state is no longer the
+        one it was queued for (a reset reused the ID), is discarded and counted; a dropped or
+        failed job only clears the mark, so the track can be queued again."""
+        worker = self.embed_worker
+        if worker is None:
+            return
+        for outcome in worker.drain():
+            job = outcome.job
+            state = self._entities.get(job.track_id)
+            if state is not job.token:
+                if outcome.embedding is not None:
+                    worker.discarded()
+                continue
+            state.pending = False
+            if outcome.embedding is None:
+                state.reacquired = state.reacquired or job.reacquired
+                if outcome.error is not None:
+                    state.failed_at = job.stamp  # no retry before embed_retry_s
+                continue
+            self._apply_entity(
+                job.track_id,
+                state,
+                outcome.embedding,
+                job.stamp,
+                job.voting,
+                job.restart,
+                job.measured,
+            )
+
+    def _apply_entity(
+        self,
+        track_id: int,
+        state: _EntityState,
+        embedding: np.ndarray,
+        stamp: float,
+        voting: bool,
+        restart: bool,
+        measured: Box,
+    ) -> None:
+        """One appearance embedding of a track, taken at capture ``stamp``: matcher votes,
+        owner, burst count, the embedding the world model gets with the next observation, and
+        the stamp and detector box the next ``_entity_reason`` compares against."""
+        assert self.appearance_embedder is not None
         if restart:
             state.votes = 0  # it may look different now: a new burst of votes
         identity = self.matcher.observe(
-            track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
+            track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"
         )
         if state.owner_id is not None and identity.owner_id is None:
             state.votes = 0  # recognition lost: vote again
         elif voting:
             state.votes += 1
         state.embedding, state.owner_id = embedding, identity.owner_id
-        state.last_embed, state.box, state.reacquired = stamp, self._measured(track), False
+        state.last_embed, state.box, state.failed_at = stamp, measured, None
+
+    def _retry_wait(self, state: _EntityState, stamp: float) -> bool:
+        """Whether a track whose embedding failed on the worker still waits
+        ``vision.embed_retry_s`` of capture time before it is queued again."""
+        if state.failed_at is None:
+            return False
+        return stamp - state.failed_at < self.cfg.embed_retry_s - EPSILON_S
 
     @staticmethod
     def _measured(track: Track) -> Box:

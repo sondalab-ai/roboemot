@@ -6,8 +6,10 @@ they are missing, unverified or the ONNX Runtime is not installed, it logs once,
 reason and returns without a pipeline. The app keeps running and the debug report says
 ``vision: unavailable (reason)``.
 
-``VisionService`` owns the two threads of a running pipeline: the camera pump (reads frames,
-paced by ``vision.rates.camera_hz``) and the worker (``LatestFrameRunner``, latest frame wins).
+``VisionService`` owns the threads of a running pipeline: the camera pump (reads frames,
+paced by ``vision.rates.camera_hz``), the worker (``LatestFrameRunner``, latest frame wins) and,
+with an appearance embedder, the embed worker (``EmbedWorker``: DINOv2-S off the vision thread,
+so detection and tracking never wait for it, SPEC 5, 13).
 The camera is a robot driver's ``FrameSource``; this module knows nothing about a robot.
 
 The registry store has no encryption yet (M5, SPEC 12 Data): it runs with ``allow_plaintext``,
@@ -26,14 +28,16 @@ from typing import Any
 
 from .. import paths, priority, shutdown
 from ..bus import Bus
-from ..config.schema import RoboEmotConfig
+from ..config.schema import TIMING_WINDOW_MAX_S, RoboEmotConfig
 from ..registry import FileStore, Matcher, Registry
 from ..registry.enrollment import EnrollmentService
 from ..world import FrameSpec
+from .embed_worker import EmbedWorker
 from .geometry import CameraModel
 from .governor import RateGovernor
 from .pipeline import VisionPipeline
 from .runner import FrameSource, LatestFrameRunner, pump
+from .stage_timing import StageTimer
 from .types import Frame
 
 log = logging.getLogger(__name__)
@@ -70,8 +74,17 @@ class CountingSource:
 class VisionService:
     """Camera pump thread plus the worker that runs the pipeline on the newest frame."""
 
-    def __init__(self, pipeline: VisionPipeline, source: FrameSource, cfg: RoboEmotConfig) -> None:
+    def __init__(
+        self,
+        pipeline: VisionPipeline,
+        source: FrameSource,
+        cfg: RoboEmotConfig,
+        embed_worker: EmbedWorker | None = None,
+    ) -> None:
+        """``embed_worker`` is the pipeline's (``VisionPipeline.embed_worker``), started and
+        stopped with the other threads."""
         self.pipeline = pipeline
+        self.embed_worker = embed_worker
         self.cfg = cfg
         self.source = CountingSource(source)
         self.runner = LatestFrameRunner(pipeline, overlay=pipeline.preview_overlay)
@@ -92,8 +105,10 @@ class VisionService:
         return self._paused.is_set()
 
     def start(self) -> None:
-        """Start the worker and the camera thread."""
+        """Start the embed worker, the frame worker and the camera thread."""
         self._stop.clear()
+        if self.embed_worker is not None:
+            self.embed_worker.start()
         self.runner.start()
         thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
         thread.start()
@@ -104,7 +119,8 @@ class VisionService:
 
         The camera thread is joined with a timeout and a timeout is logged: a read stuck in the
         SDK cannot be interrupted, so the caller must tear the SDK down knowing it may still be
-        inside it. The worker is stopped even then.
+        inside it. The workers are stopped even then, the embed worker last (the frame worker
+        may still queue to it).
         """
         self._stop.set()
         try:
@@ -113,7 +129,11 @@ class VisionService:
                 if self._thread.is_alive():
                     log.warning("camera thread did not stop within %.0f s", JOIN_TIMEOUT_S)
         finally:
-            self.runner.stop()
+            try:
+                self.runner.stop()
+            finally:
+                if self.embed_worker is not None:
+                    self.embed_worker.stop()
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
@@ -280,6 +300,13 @@ def open_perception(
         log.warning("vision unavailable, running without it (%s)", reason)
         enrollment.set_unavailable(reason)
         return Perception(registry, matcher, enrollment, None, None, reason)
+    timer = StageTimer(TIMING_WINDOW_MAX_S)
+    appearance = stages.appearance_embedder
+    worker = (
+        None
+        if appearance is None
+        else EmbedWorker(appearance, timer, max_window_s=TIMING_WINDOW_MAX_S)
+    )
     pipeline = VisionPipeline(
         cfg.vision,
         cfg.identity,
@@ -287,13 +314,15 @@ def open_perception(
         matcher,
         face_detector=stages.face_detector,
         face_embedder=stages.face_embedder,
-        appearance_embedder=stages.appearance_embedder,
+        appearance_embedder=appearance,
         object_detector=stages.object_detector,
         governor=RateGovernor(cfg.vision.rates),
         camera_model=camera_model,
         world=cfg.world,
         frame_spec=frame_spec,
         shown=cfg.attention.shown,
+        timer=timer,
+        embed_worker=worker,
     )
     enrollment.attach(pipeline)
     return Perception(
@@ -301,7 +330,7 @@ def open_perception(
         matcher,
         enrollment,
         pipeline,
-        VisionService(pipeline, source, cfg),
+        VisionService(pipeline, source, cfg, worker),
         None,
         stages.objects_unavailable,
     )

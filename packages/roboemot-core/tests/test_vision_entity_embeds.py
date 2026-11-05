@@ -297,6 +297,8 @@ def test_counts_are_in_the_report_with_every_reason(tmp_path):
         "spacing",
         "settled",
         "budget",
+        "pending",
+        "retry",
     }
     assert all(v == 0 for part in report.values() for v in part.values())
 

@@ -2052,6 +2052,9 @@ class TrackerConfig(Strict):
 
 
 TIMING_WINDOW_MAX_S = 60.0  # vision.timing_window_s upper bound: sizes the timing rings
+DINO_PATCH_PX = 14  # DINOv2-S/14 patch side: vision.appearance_input_px is a multiple of it
+DINO_INPUT_PX = 224  # the input the shipped embeddings and records were made at
+DINO_INPUT_MIN_PX = 112  # 8 x 8 patches, the smallest size offered (smaller ones are untested)
 
 
 class ObjectGateConfig(Strict):
@@ -2334,6 +2337,52 @@ class VisionConfig(Strict):
         ge=1.05,
         le=10,
     )
+    embed_queue_max: int = param(
+        4,
+        "Animal and object appearance embeddings (DINOv2-S) run on their own thread; at most "
+        "this many wait for it, one per track (a newer one of a track replaces it). One more "
+        "drops the oldest waiting one, whose track may be queued again on a later object run",
+        ge=1,
+        le=64,
+    )
+    embed_retry_s: float = param(
+        10.0,
+        "An animal or object track whose appearance embedding failed on the embed worker (an "
+        "empty crop, a backend error) is not queued again for this much capture time, so a "
+        "failing box does not fail again at every object run",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    appearance_spinning: bool = param(
+        False,
+        "Let the appearance embedder's (DINOv2-S) ONNX Runtime threads spin-wait between "
+        "operators. Off: it runs beside the face and object detectors, and on four cores two "
+        "spinning pools take cycles from each other and from audio",
+        restart=True,
+    )
+    appearance_threads: int = param(
+        2,
+        "CPU threads of the appearance embedder (DINOv2-S), apart from vision.threads: it runs "
+        "beside the face and object detectors, so fewer threads leave them more cores while an "
+        "embedding runs, at the cost of a longer embedding",
+        ge=1,
+        le=8,
+        restart=True,
+    )
+    appearance_input_px: int = param(
+        DINO_INPUT_PX,
+        "Side of the square the appearance embedder (DINOv2-S) squashes a box to; a multiple "
+        "of its 14 px patch. Smaller is faster (the cost grows with the square of the patch "
+        "count) and coarser. Records embedded at one size never match another: a size other "
+        "than 224 is a model of its own in the registry, so enrolled animals and objects are "
+        "recognised again only after they are embedded at the new size, and the auto-enrollment "
+        "candidates collected at another size are deleted at start",
+        unit="px",
+        ge=DINO_INPUT_MIN_PX,
+        le=DINO_INPUT_PX,
+        restart=True,
+    )
     report_window: int = param(
         200,
         "Report only: ended face tracks kept for the lifetime summary",
@@ -2476,6 +2525,13 @@ class VisionConfig(Strict):
         "text; a class not listed uses its name with underscores turned into spaces (English "
         "only: localised strings are not provided yet)",
     )
+
+    @field_validator("appearance_input_px")
+    @classmethod
+    def _whole_patches(cls, v: int) -> int:
+        if v % DINO_PATCH_PX:
+            raise ValueError(f"vision.appearance_input_px must be a multiple of {DINO_PATCH_PX}")
+        return v
 
     @model_validator(mode="after")
     def _disjoint_categories(self) -> VisionConfig:
@@ -5041,7 +5097,7 @@ class RuntimeConfig(Strict):
         ge=0, le=19, restart=True,
     )  # fmt: skip
     background_threads: list[str] = param(
-        ["roboemot-vision", "vision-models", "roboemot-camera", "roboemot-light"],
+        ["roboemot-vision", "roboemot-embed", "vision-models", "roboemot-camera", "roboemot-light"],
         "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
         "Runtime pool threads the vision models start when they load. The real-time threads "
         "(MainThread, roboemot-audio, roboemot-listener, roboemot-grammar, roboemot-keywords, "

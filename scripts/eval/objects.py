@@ -190,13 +190,14 @@ def embed_all(items, cfg, name: str):
     from roboemot.vision import models as vmodels
     from roboemot.vision.onnx import DinoV2Embedder
 
-    cache = common.SCRATCH / f"dino_{name}.npz"
+    px = cfg.vision.appearance_input_px
+    cache = common.SCRATCH / (f"dino_{name}.npz" if px == 224 else f"dino_{name}_{px}px.npz")
     if cache.exists():
         data = np.load(cache)
         common.log(f"{name}: embeddings from the scratch cache")
         return data["emb"], list(data["ids"]), list(data["cats"])
     path = vmodels.check_file(common.MODELS, vmodels.load_manifest()["dinov2-small"].files[0])
-    embedder = DinoV2Embedder(path, cfg.vision.threads)
+    embedder = DinoV2Embedder(path, cfg.vision.appearance_threads, px)
     emb, ids, cats = [], [], []
     for n, (image, ident, cat) in enumerate(items()):
         height, width = image.shape[:2]

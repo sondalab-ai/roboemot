@@ -99,4 +99,4 @@ class FrameReport:
     stamp: float
     faces_detected: bool = False
     objects_detected: bool = False
-    embeddings: int = 0
+    embeddings: int = 0  # face embeds run, plus appearance embeds run inline or queued (not run)
