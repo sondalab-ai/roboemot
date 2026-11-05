@@ -2295,6 +2295,15 @@ class VisionConfig(Strict):
         ge=1,
         le=16,
     )
+    entity_embed_min_age_s: float = param(
+        3.0,
+        "An animal or object track gets its first appearance embedding (DINOv2-S, about 1.1 s "
+        "on the CM4) only once this much capture time has passed since its first detection, "
+        "so short-lived tracks of a cluttered room cost none; 0 embeds at once",
+        unit="s",
+        ge=0,
+        le=60,
+    )
     entity_burst_min_gap_s: float = param(
         1.0,
         "Minimum capture-time gap between two burst evaluations of one animal or object track",
@@ -2350,17 +2359,21 @@ class VisionConfig(Strict):
     )
     rebirth_window_s: float = param(
         5.0,
-        "Report only: a face track born at most this long (capture time) after another one "
-        "expired, near its last box, counts as a rebirth of it in the tracks report",
+        "A face track born at most this long (capture time) after another one expired, near "
+        "its last box, counts as a rebirth of it in the tracks report; an animal or object "
+        "track born this soon after another one's last sighting, near it, takes its age for "
+        "vision.entity_embed_min_age_s",
         unit="s",
         ge=0.1,
         le=60,
     )
     rebirth_distance_heights: float = param(
         1.0,
-        "Report only: largest distance between the new track's first box centre and the ended "
-        "track's last box centre, in heights of the ended box, for a rebirth. Must stay above "
-        "both vision.tracker distance gates, or an overlapped rebirth could never be counted",
+        "Largest distance between the new track's first box centre and the ended track's last "
+        "box centre, in heights of the ended box, for a rebirth (the face tracks report, and "
+        "the age an animal or object track carries for vision.entity_embed_min_age_s). Must "
+        "stay above both vision.tracker distance gates, or an overlapped rebirth could never "
+        "be counted",
         ge=0.1,
         le=10,
     )

@@ -1,8 +1,10 @@
 """SPEC 5, 6: a recognised still object keeps its identity at the scene-change gate's cadence.
 
 Defaults throughout (gate and crop on, ``identity.votes_required`` 3, ``vote_max_age_s`` 10 s),
-8 Hz frames with a still head. A cat in view for the first 10 s keeps the gate on its fixed
-schedule, so the cup on the table gets its burst of votes and is recognised; then the cat leaves
+8 Hz frames with a still head. A cat in view for the first 12 s keeps the gate on its fixed
+schedule, so the cup on the table gets its burst of votes and is recognised (its first vote
+waits for vision.entity_embed_min_age_s, and the cup, outside the face crop, is seen only on the
+full runs every vision.object_crop.full_interval_s; before the cat leaves); then the cat leaves
 and the cup's object runs fall to the gate floor, about 10 s apart.
 """
 
@@ -22,7 +24,7 @@ LOOK = 0.7 * axis(3) + np.sqrt(1 - 0.7**2) * axis(4)
 TABLE = Detection((60, 130, 100, 170), 0.8, "cup")  # left of the face crop
 LIFTED = Detection((130, 60, 170, 100), 0.8, "cup")  # in front of the chest, inside the crop
 CAT = Detection((200, 150, 300, 230), 0.8, "cat")
-CAT_LEAVES_S = 10.0
+CAT_LEAVES_S = 12.0
 STILL_UNTIL_S = 44.0  # more than three gate floors after the cat left
 LIFT_S = 44.3  # the cup is picked up just before a crop run of the look
 
