@@ -91,6 +91,7 @@ PRs:
 4. **Fewer DINOv2 embeds** (https://github.com/sondalab-ai/roboemot/pull/188). In the cluttered room, read `entity_embeds.skips.young` and `skips.episode`, `stage_timing.appearance_embed.runs_per_s`, `object_detect.runs_per_s` and `stage_drops.objects`.
    - Baseline on 2026-11-05 (before PR 188): `appearance_embed` 0.23 runs/s at 1174 ms, `object_detect` 0.87 runs/s (3 wanted while a cup was shown), `stage_drops.objects` 1033 in 3.5 min, `entity_embeds.runs.new` 30.
    - Pass: `object_detect.runs_per_s` close to `objects_active_hz` (3) while a cup is shown, and the cup episodes last while the cup is in view.
+   - Embed worker (https://github.com/sondalab-ai/roboemot/pull/191): read `roboemot.vision.embed_worker` (queue wait p50/p90, dropped, failed) and `process.wall_ms.max`, which should no longer reach about 1.2 s. Compare `vision.appearance_threads` 1 against 2 on `object_detect.runs_per_s` and the listener `realtime.share`.
 5. Optional: run `scripts/bench/run_cm4.py --only nanodet_plus_m_320,yolox_nano_416` on the robot. This is a SPEC 15 item: object detector p50 and p95 on the CM4.
 
 ## C. Wake path with the name "Neve" (PRs 179, 180)
@@ -306,7 +307,7 @@ Items marked "after QA X" wait for that QA section.
 | Make the flaky tests timing-independent, and fix the Python 3.11 `asyncio.wait_for` race that dropped a barge-in cancel. https://github.com/sondalab-ai/roboemot/pull/186 | tests, `realtime/turn.py` | done (2026-11-04) |
 | Fewer DINOv2 embeds in a cluttered room and during a look (minimum age, shown-track only by bearing, rebirth carry). https://github.com/sondalab-ai/roboemot/pull/188 | `vision/pipeline.py` | done (2026-11-05) |
 | The robot's name as the server's transcription hint, decided at connect. https://github.com/sondalab-ai/roboemot/pull/190 | `realtime/` | done (2026-11-05) |
-| Slice 2: DINOv2 on its own worker thread, with `vision.appearance_threads` and `vision.appearance_input_px`. Watch the peak vision CPU (about 4 cores while an embed runs). | `vision/embed_worker.py`, `vision/pipeline.py` | approved |
+| Slice 2: DINOv2 on its own worker thread, with `vision.appearance_threads`, `vision.appearance_input_px`, `vision.embed_retry_s` and `vision.appearance_spinning`. Watch the peak vision CPU (about 4 cores while an embed runs), and check with `ps -L -o tid,ni,comm` that `roboemot-embed` runs at nice 5. https://github.com/sondalab-ai/roboemot/pull/191 | `vision/embed_worker.py`, `vision/pipeline.py` | done (2026-11-05) |
 | Opt-in installer overclock (`--overclock`, tryboot trial, verify, promote; revert on reinstall or uninstall). https://github.com/sondalab-ai/roboemot/pull/189 | installer, SPEC 4A | done (2026-11-05) |
 | Fire-and-forget skills: a spoken reply with only `play`, `look_at` or `express_emotion` calls ends the turn, with no repeat round. The tone tool is offered in the first response only. | `skills/`, `conversation/worker.py`, SPEC 8 | approved |
 | Facing diagnostics: per-check records, per-face yaw and eye span, frame channel order, landmarks in the Live preview (`webui.preview_landmarks`). | `vision/`, `voice/direction.py`, web UI | approved |
