@@ -31,14 +31,17 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    when it adds information (``_entity_reason``, SPEC 5, 13): never for a kind and category no
    record holds and auto-enrollment does not collect; once for a new track, but only after it
    has lived ``entity_embed_min_age_s`` since its first detection (a cluttered room churns
-   short tracks), with a burst of votes only while an active record of its kind could match it
-   (again when such records change); then at ``rates.appearance_hz`` for a recognised track,
-   and for an unknown one only when its detector box changed size or shape, after a missed
-   object run, or after ``entity_reembed_floor_s``. During a shown-object episode
-   (``governor.active("objects")``, SPEC 5A) only the shown track, taken as the confirmed track
-   nearest the frame centre (``_shown_track``), may embed, and only the votes that can
-   recognise it: the gaze follows it without a freeze per run, and the others wait for the
-   episode's end. ``stats`` counts runs and skips by reason (``entity_embeds``).
+   short tracks; a rebirth near a track that ended within ``rebirth_window_s`` keeps that
+   track's age, ``_new_entity``), with a burst of votes only while an active record of its
+   kind could match it (again when such records change); then at ``rates.appearance_hz`` for a
+   recognised track, and for an unknown one only when its detector box changed size or shape,
+   after a missed object run, or after ``entity_reembed_floor_s``. During a shown-object episode
+   (``governor.active("objects")``, SPEC 5A) only the shown track, the confirmed track nearest
+   the attention target's bearing (``governor.focus``; the frame centre without one,
+   ``_shown_track``), may embed, and only the votes that can recognise it: the gaze follows it
+   without a freeze per run, and the others wait for the episode's end. The look-down crop
+   follows the same track. A burst whose last vote aged past ``identity.vote_max_age_s``
+   starts again. ``stats`` counts runs and skips by reason (``entity_embeds``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -87,6 +90,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal
 
 import numpy as np
@@ -102,7 +106,8 @@ from ..config.schema import (
 )
 from ..registry import Matcher
 from ..stats import SUMMARY_LEVELS, summarise
-from ..world import FrameSpec, Observation
+from ..world import FrameSpec, Observation, angular_distance
+from ..world.frame import to_base_frame
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
@@ -161,6 +166,27 @@ class _EntityState:
     box: Box | None = None  # detector box at the last embedding
     last_run: int = 0  # index of the last object run the track was visible on
     reacquired: bool = False  # missed an object run since its last embedding
+    born: float = 0.0  # age origin: first detection, or that of the track it is a rebirth of
+    seen_box: Box | None = None  # filtered box at its last visible object run
+    last_seen: float = 0.0  # capture stamp of that run
+
+
+@dataclass(frozen=True)
+class _EndedEntity:
+    """An animal or object track that ended, kept ``rebirth_window_s`` for the age carry."""
+
+    kind: str
+    seen_box: Box
+    last_seen: float
+    born: float
+
+
+class _Role(Enum):
+    """A track's part in a shown-object episode: none running, the shown track, or another."""
+
+    FREE = "free"
+    SHOWN = "shown"
+    OTHER = "other"
 
 
 # Why an animal or object embedding ran, or why a visible track was skipped (debug report).
@@ -289,6 +315,7 @@ class VisionPipeline:
         self._entity_embeds = 0
         self._object_runs = 0
         self._records: _Records | None = None
+        self._ended_entities: deque[_EndedEntity] = deque()
         self._embed_runs = dict.fromkeys(EMBED_RUNS, 0)
         self._embed_skips = dict.fromkeys(EMBED_SKIPS, 0)
         self._report_lock = threading.Lock()
@@ -394,6 +421,7 @@ class VisionPipeline:
         self.track_stats.reset(len(self._faces))
         self._faces.clear()
         self._entities.clear()
+        self._ended_entities.clear()
         self._object_visible = []
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
@@ -594,8 +622,43 @@ class VisionPipeline:
         return _FaceState(next(self._generations), first_seen=track.first_stamp)
 
     def _drop_entity(self, track_id: int) -> None:
-        self._entities.pop(track_id, None)
+        """Forget an ended track's state and votes; keep its place and age for a rebirth."""
+        state = self._entities.pop(track_id, None)
         self.matcher.release(track_id)
+        if state is not None and state.seen_box is not None:
+            self._ended_entities.append(
+                _EndedEntity(state.kind, state.seen_box, state.last_seen, state.born)
+            )
+
+    def _new_entity(self, track: Track, kind: str, live: list[_EntityState]) -> _EntityState:
+        """State of a newly confirmed animal or object track. When it is a rebirth of a track of
+        its kind (born after that one's last sighting, at most ``rebirth_window_s`` later, its
+        first box centre within ``rebirth_distance_heights`` heights of that one's last box), it
+        takes that track's age (``born``) and nothing else: no identity, no votes. Candidates
+        are the tracks that ended in the window and the live ones this run missed."""
+        cfg = self.cfg
+        start = track.first_stamp
+        ended = self._ended_entities
+        while ended and start - ended[0].last_seen > cfg.rebirth_window_s:
+            ended.popleft()
+        fx1, fy1, fx2, fy2 = self._measured(track)
+        cx, cy = (fx1 + fx2) / 2, (fy1 + fy2) / 2
+        best: tuple[float, _EndedEntity | _EntityState] | None = None
+        for old in [*ended, *live]:
+            if old.kind != kind or old.seen_box is None:
+                continue
+            if not 0 <= start - old.last_seen <= cfg.rebirth_window_s:
+                continue
+            x1, y1, x2, y2 = old.seen_box
+            h = y2 - y1
+            d = math.hypot(cx - (x1 + x2) / 2, cy - (y1 + y2) / 2) / h if h > 0 else math.inf
+            if d <= cfg.rebirth_distance_heights and (best is None or d < best[0]):
+                best = (d, old)
+        if best is None:
+            return _EntityState(kind, born=start)
+        if isinstance(best[1], _EndedEntity):
+            ended.remove(best[1])
+        return _EntityState(kind, born=min(start, best[1].born))
 
     # ------------------------------------------------------------------ faces
 
@@ -801,7 +864,11 @@ class VisionPipeline:
             **dict.fromkeys(self.cfg.animal_categories, "animal"),
         }
         height, width = frame.image.shape[:2]
-        things = [t.box for t in self._object_visible if t.track_id in self._entities]
+        things = [t for t in self._object_visible if t.track_id in self._entities]
+        if episode and self.governor.focus("objects") is not None:
+            # The look-down crop follows the track the attention target names, not the centre.
+            pick = self._shown_track(things, frame, camera)
+            things = [t for t in things if t.track_id == pick]
         crop = self.object_crop.choose(
             frame.stamp,
             reason,
@@ -809,7 +876,7 @@ class VisionPipeline:
             width,
             height,
             self.shown,
-            things=things,
+            things=[t.box for t in things],
             episode=episode,
         )
         wall0, cpu0 = self.timer.start()
@@ -832,25 +899,30 @@ class VisionPipeline:
         self._lost_held = self._object_lost_s()
         for track_id in result.removed_ids:
             self._drop_entity(track_id)
-        states = {
-            t.track_id: self._entities.setdefault(t.track_id, _EntityState(kinds[t.label]))
-            for t in result.visible
-        }
+        seen = {t.track_id for t in result.visible}
+        missed = [s for i, s in self._entities.items() if i not in seen]
+        for t in result.visible:
+            if t.track_id not in self._entities:
+                self._entities[t.track_id] = self._new_entity(t, kinds[t.label], missed)
+        states = {t.track_id: self._entities[t.track_id] for t in result.visible}
         self._entity_budget = self.cfg.max_entity_embeds_per_frame
         self._object_runs += 1
         self._follow_aside(result.aside)
         consumers = self._entity_consumers() if self.appearance_embedder is not None else None
         if consumers is not None:
             self._follow_records(consumers.records)
-        shown = self._shown_track(result.visible, width, height) if episode else None
+        shown = self._shown_track(result.visible, frame, camera) if episode else None
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
             key = (kinds[track.label], self.display_name(track.label))
-            role = track.track_id == shown if episode else None
+            role = _Role.FREE
+            if episode:
+                role = _Role.SHOWN if track.track_id == shown else _Role.OTHER
             self._evaluate_entity(frame, track, states[track.track_id], key, consumers, role)
         for track in result.visible:
             state = states[track.track_id]
+            state.seen_box, state.last_seen = track.box, frame.stamp
             x1, y1, x2, y2 = track.box
             azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
             obs = Observation(
@@ -867,15 +939,27 @@ class VisionPipeline:
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 
-    @staticmethod
-    def _shown_track(visible: list[Track], width: int, height: int) -> int | None:
+    def _shown_track(self, visible: list[Track], frame: Frame, camera: CameraModel) -> int | None:
         """The track taken as the shown thing during a look at it (SPEC 5, 5A), None while no
-        confirmed track is in view. Attention names a world entry, not a track, so this is a
-        proxy: the head follows the shown thing, so it is the confirmed track nearest the frame
-        centre on this run (as the look-down crop picks it). Picked again on every run, so a
-        wrong first pick (a large couch behind the person) corrects itself once the head turns
-        to the thing; a thing that passes the centre may run only its own new-track votes."""
-        near = min(visible, key=lambda t: off_centre(t.box, width, height), default=None)
+        confirmed track is in view. Attention names a world entry, not a track, and passes the
+        target's base-frame bearing (``governor.focus``): the shown track is the one whose
+        bearing, rotated into the base frame with the frame's joint state, is nearest to it.
+        Without a bearing (a caller that sets only the rate) it is the track nearest the frame
+        centre, as the head follows the thing. Picked again on every run."""
+        focus = self.governor.focus("objects")
+        if focus is None:
+            width, height = camera.width, camera.height
+            near = min(visible, key=lambda t: off_centre(t.box, width, height), default=None)
+            return None if near is None else near.track_id
+        spec = self.frame_spec or FrameSpec()
+
+        def away(t: Track) -> float:
+            x1, y1, x2, y2 = t.box
+            az, el = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
+            az, el = to_base_frame(az, el, frame.joint_state, spec)
+            return angular_distance(az, el, *focus)
+
+        near = min(visible, key=away, default=None)
         return None if near is None else near.track_id
 
     def _follow_aside(self, aside: list[Track]) -> None:
@@ -951,11 +1035,12 @@ class VisionPipeline:
         state: _EntityState,
         key: EntityKey,
         consumers: _Consumers | None,
-        shown: bool | None = None,
+        role: _Role = _Role.FREE,
     ) -> None:
         """Embed the track when ``_entity_reason`` says it is due and the frame's entity budget
-        allows; count the run or the skip by reason for the debug report. ``shown`` is None
-        outside a shown-object episode, else whether this is the track taken as the shown one."""
+        allows; count the run or the skip by reason for the debug report. ``role`` is the
+        track's part in a shown-object episode. A burst whose last vote is older than
+        ``identity.vote_max_age_s`` starts again: the matcher has dropped those votes."""
         run = self._object_runs
         if state.last_run and run - state.last_run > 1:
             state.reacquired = True
@@ -964,7 +1049,12 @@ class VisionPipeline:
             return
         if track.score < self.cfg.object_score_min:  # a weak box is no evidence of identity
             return
-        due, reason = self._entity_reason(track, state, frame.stamp, key, consumers, shown)
+        stale = state.last_embed is not None and (
+            frame.stamp - state.last_embed > self.identity.vote_max_age_s
+        )
+        if stale and state.owner_id is None and 0 < state.votes < self.cfg.embedding_burst:
+            state.votes = 0
+        due, reason = self._entity_reason(track, state, frame.stamp, key, consumers, role)
         if due and self._entity_budget <= 0:
             due, reason = False, BUDGET
         with self._report_lock:
@@ -1008,15 +1098,16 @@ class VisionPipeline:
         stamp: float,
         key: EntityKey,
         c: _Consumers,
-        shown: bool | None = None,
+        role: _Role = _Role.FREE,
     ) -> tuple[bool, str]:
         """Whether an animal or object track is due for an embedding, and why (SPEC 5, 13).
 
         Checked in this order. Nothing uses the embedding of a kind and category that no record
         holds and auto-enrollment does not collect: skipped (``no_consumer``). During a
-        shown-object episode (``shown`` not None) every track but the shown one is skipped
-        (``episode``). A new track is embedded once, but only after ``entity_embed_min_age_s``
-        of capture time since its first detection (tentative ones included), else ``young``; it
+        shown-object episode every track but the shown one is skipped (``episode``). A new track
+        is embedded once, but only after ``entity_embed_min_age_s`` of capture time since its
+        first detection (tentative ones included; a rebirth keeps the age of the track it
+        continues, ``_new_entity``), else ``young``; it
         gets a burst of votes only while an active record of its kind could match it (again
         after a re-embed of an unknown track, or when such records change). During an episode
         the shown track runs only those votes; anything else is ``episode``. After that a
@@ -1027,17 +1118,17 @@ class VisionPipeline:
         cfg = self.cfg
         if not c.wants(key):
             return False, NO_CONSUMER
-        if shown is False:
+        if role is _Role.OTHER:
             return False, EPISODE
         if state.last_embed is None:
-            if stamp - track.first_stamp < cfg.entity_embed_min_age_s - EPSILON_S:
+            if stamp - state.born < cfg.entity_embed_min_age_s - EPSILON_S:
                 return False, YOUNG
             return True, NEW
         gap = stamp - state.last_embed
         if state.owner_id is None and c.votes(key) and state.votes < cfg.embedding_burst:
             burst_gap = self.governor.stretch(cfg.entity_burst_min_gap_s, CONVERSATION)
             return (True, BURST) if gap >= burst_gap - EPSILON_S else (False, SPACING)
-        if shown:
+        if role is _Role.SHOWN:
             return False, EPISODE
         if gap < self.governor.period("appearance"):
             return False, SPACING

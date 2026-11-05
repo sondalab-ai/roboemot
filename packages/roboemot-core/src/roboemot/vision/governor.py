@@ -11,8 +11,9 @@ never queued (latest-wins).
 
 A stage with an ``<stage>_active_hz`` field may be made active (``set_active``): it then runs at
 that rate instead of ``<stage>_hz``, under the same scales. Attention does this for ``objects``
-while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it. The
-object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
+while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it, and
+passes the target's base-frame bearing (``focus``) so the pipeline knows which track is shown.
+The object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
 ``objects_active_hz`` above it, and every scale is at most 1.
 """
 
@@ -38,6 +39,7 @@ class RateGovernor:
         self._scales: dict[str, float] = {}
         self._last: dict[str, float] = {}
         self._active: set[str] = set()
+        self._focus: dict[str, tuple[float, float]] = {}
         self.dropped: dict[str, int] = {}
 
     def set_scale(self, source: str, value: float) -> None:
@@ -50,14 +52,24 @@ class RateGovernor:
         with self._lock:
             self._scales[source] = min(1.0, max(0.0, value))
 
-    def set_active(self, stage: str, on: bool) -> None:
+    def set_active(self, stage: str, on: bool, focus: tuple[float, float] | None = None) -> None:
         """Run ``stage`` at its ``<stage>_active_hz`` rate (on) or its usual rate (off); a stage
-        without that field ignores it."""
+        without that field ignores it. ``focus`` is the base-frame (azimuth, elevation) of what
+        the active rate follows, in radians; None when unknown, and always cleared when off."""
         with self._lock:
             if on:
                 self._active.add(stage)
             else:
                 self._active.discard(stage)
+            if on and focus is not None:
+                self._focus[stage] = focus
+            else:
+                self._focus.pop(stage, None)
+
+    def focus(self, stage: str) -> tuple[float, float] | None:
+        """The base-frame bearing the active ``stage`` follows (``set_active``), or None."""
+        with self._lock:
+            return self._focus.get(stage) if stage in self._active else None
 
     def active(self, stage: str) -> bool:
         """Whether ``stage`` runs at its active rate now."""

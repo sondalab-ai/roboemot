@@ -12,7 +12,20 @@ from roboemot.config.schema import CatalogueConfig, WorldConfig
 from roboemot.registry.catalogue import CatalogueService
 from roboemot.vision import Detection, Frame
 from roboemot.world import FrameSpec, WorldModel, feed_world
-from test_vision import APP_MODEL, CFG, axis, crowd, entity_rig, image
+from test_vision import (
+    APP_MODEL,
+    CFG,
+    H,
+    RecordingAppearance,
+    W,
+    axis,
+    crowd,
+    entity_rig,
+    image,
+)
+from test_vision import rig as vision_rig
+from test_vision_object_crop import CropAwareDetector, marked_image
+from test_vision_object_gate import DT
 
 NO_GATE = CFG.vision.object_gate.model_copy(update={"enabled": False})
 NO_CROP = CFG.vision.object_crop.model_copy(update={"enabled": False})  # boxes stay put
@@ -443,10 +456,132 @@ def test_a_wrong_first_pick_of_the_shown_track_corrects_itself(tmp_path):
     pipe.governor.set_active("objects", True)
     pipe.object_detector.dets = [COUCH, HELD_CUP]
     run(pipe, 10, 12)
-    assert pipe._shown_track(pipe._object_visible, 320, 240) == min(pipe._entities)  # couch
+    camera = pipe._camera(W, H)
+    pick = pipe._shown_track(pipe._object_visible, Frame(image(0), 11.0), camera)
+    assert pick == min(pipe._entities)  # no bearing: the centre fallback takes the couch
     pipe.object_detector.dets = [COUCH_TURNED, CENTRE_CUP]
     run(pipe, 12, 20)
     during = app.boxes[burst:]
     assert len(during) == burst  # the cup's new embedding and burst votes
     assert all(x2 - x1 < 100 for x1, _, x2, _ in during)  # none of them the couch
     assert len(pipe._entities) == 2  # the cup kept its track when the head turned
+
+
+def bearing_of(pipe, det):
+    """The base-frame bearing of a box centre with the head at rest (the attention target)."""
+    x1, y1, x2, y2 = det.box
+    return pipe._camera(W, H).bearing((x1 + x2) / 2, (y1 + y2) / 2)
+
+
+def test_with_crops_the_attention_bearing_picks_the_held_cup_not_the_couch(tmp_path):
+    """Review of PR 188: on look-down crop runs around a wrongly picked couch, the held cup was
+    left aside and never embedded. The target's bearing picks the cup, and the crop follows
+    it."""
+    cfg = CFG.vision.model_copy(
+        update={
+            "object_gate": NO_GATE,
+            "object_categories": ["cup", "couch"],
+        }
+    )
+    det = CropAwareDetector([COUCH])
+    app = RecordingAppearance()
+    _, _, pipe, _, _ = vision_rig(
+        tmp_path, lambda i: [], vision=cfg, object_detector=det, appearance_embedder=app
+    )
+    img = marked_image()
+    for i in range(round(6 / DT)):  # the couch alone, embedded once
+        pipe.process(Frame(img, i * DT))
+    assert len(app.boxes) == 1
+    det.things = [COUCH, HELD_CUP]
+    pipe.governor.set_active("objects", True, bearing_of(pipe, HELD_CUP))
+    start = len(det.shapes)
+    for i in range(round(6 / DT), round(16 / DT)):
+        pipe.process(Frame(img, i * DT))
+    during = app.boxes[1:]
+    assert len(during) == 1 and during[0][2] - during[0][0] < 100  # the cup, not the couch
+    assert pipe.stats()["object_input"]["crop_by"]["shown"] >= 1
+    assert any(shape != (H, W) for shape in det.shapes[start:])  # crop runs happened
+    assert skips(pipe)["episode"] > 0  # the couch waited
+    pipe.governor.set_active("objects", False)
+
+
+def test_a_flickering_track_keeps_its_age_across_rebirths(tmp_path):
+    """Review of PR 188: a cup whose track is reborn every 2 s (1.8 s median life on the robot)
+    never reached the minimum age. A rebirth carries the age, not the identity or the votes."""
+    pipe, app = rig(tmp_path, object_lost_s=0.5, object_lost_periods=1.0)
+    created, first = set(), None
+    for i in range(12):
+        pipe.object_detector.dets = [] if i % 3 == 2 else [CUP]  # seen twice, missed once
+        run(pipe, i, i + 1)
+        created |= set(pipe._entities)
+        if app.boxes and first is None:
+            first = i
+    assert len(created) >= 3  # the track was reborn
+    # No track lived past 1 s, but the reborn one at 3 s carries the age from 0 s: embedded
+    # at its first confirmed run. Each later rebirth gets its own first embedding.
+    assert first == 4 and runs(pipe)["new"] >= 1
+    assert all(s.born == 0.0 for s in pipe._entities.values())
+
+
+def test_a_rebirth_far_away_or_too_late_starts_a_new_age(tmp_path):
+    pipe, _ = rig(tmp_path, object_lost_s=0.5, object_lost_periods=1.0)
+    run(pipe, 0, 2)
+    pipe.object_detector.dets = []
+    run(pipe, 2, 3)
+    pipe.object_detector.dets = [SIDE_CUP]  # more than rebirth_distance_heights away
+    run(pipe, 3, 5)
+    (state,) = pipe._entities.values()
+    assert state.born == 3.0
+    late = int(CFG.vision.rebirth_window_s) + 2
+    pipe.object_detector.dets = []
+    run(pipe, 5, 5 + late)
+    pipe.object_detector.dets = [SIDE_CUP]
+    run(pipe, 5 + late, 7 + late)
+    (state,) = pipe._entities.values()
+    assert state.born == 5.0 + late
+
+
+def test_a_burst_stalled_past_the_vote_age_starts_again(tmp_path):
+    """Review of PR 188: a track whose burst was cut by an episode on another track kept
+    counting its old votes, which the matcher had already dropped."""
+    pipe, app = rig(tmp_path, dets=[SIDE_CUP], record="active", object_crop=NO_CROP)
+    run(pipe, 0, int(MIN_AGE) + 2)
+    (side,) = pipe._entities.values()
+    assert 0 < side.votes < CFG.vision.embedding_burst  # mid-burst
+    pipe.object_detector.dets = [SIDE_CUP, CENTRE_CUP]
+    pipe.governor.set_active("objects", True)  # a look at the centre cup
+    stall = int(CFG.identity.vote_max_age_s) + 2
+    run(pipe, int(MIN_AGE) + 2, int(MIN_AGE) + 2 + stall)
+    pipe.governor.set_active("objects", False)
+    side_before = side.last_embed
+    count = sum(1 for b in app.boxes if b[0] < 50)
+    run(pipe, int(MIN_AGE) + 2 + stall, int(MIN_AGE) + 2 + stall + 20)
+    assert side.last_embed > side_before
+    after = sum(1 for b in app.boxes if b[0] < 50) - count
+    assert after == CFG.vision.embedding_burst  # a whole new burst, not the remainder
+
+
+def test_a_shown_track_young_at_the_start_of_the_look_waits_for_its_age(tmp_path):
+    pipe, app = rig(tmp_path, dets=[CENTRE_CUP], object_crop=NO_CROP)
+    run(pipe, 0, 2)  # confirmed at 1 s: attention can start the look
+    pipe.governor.set_active("objects", True)
+    run(pipe, 2, int(MIN_AGE))
+    assert app.boxes == [] and skips(pipe)["young"] >= 2
+    run(pipe, int(MIN_AGE), int(MIN_AGE) + 1)
+    assert runs(pipe)["new"] == 1  # during the look, at the minimum age
+    pipe.governor.set_active("objects", False)
+
+
+def test_the_same_stamps_give_the_same_counts_twice(tmp_path):
+    """Replay determinism (SPEC 14): the age and the rebirth carry use capture stamps only."""
+
+    def once(path):
+        pipe, app = rig(path, record="active", object_categories=["cup", "bottle"])
+        for i in range(30):
+            pipe.object_detector.dets = [CUP, flicker(i)]
+            run(pipe, i, i + 1)
+        return skips(pipe), runs(pipe), app.boxes
+
+    first = once(tmp_path / "a")
+    assert first == once(tmp_path / "b")
+    assert first[0]["young"] > 0 and first[1]["new"] == 1

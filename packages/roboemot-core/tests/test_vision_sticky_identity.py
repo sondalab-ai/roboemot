@@ -4,7 +4,7 @@ Defaults throughout (gate and crop on, ``identity.votes_required`` 3, ``vote_max
 8 Hz frames with a still head. A cat in view for the first 12 s keeps the gate on its fixed
 schedule, so the cup on the table gets its burst of votes and is recognised (its first vote
 waits for vision.entity_embed_min_age_s, and the cup, outside the face crop, is seen only on the
-full runs every vision.object_crop.full_interval_s; it is recognised at 10 s); then the cat leaves
+full runs every vision.object_crop.full_interval_s; before the cat leaves); then the cat leaves
 and the cup's object runs fall to the gate floor, about 10 s apart.
 """
 

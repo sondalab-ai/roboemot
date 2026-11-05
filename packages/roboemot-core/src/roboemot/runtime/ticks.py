@@ -211,9 +211,13 @@ def interest_modulation(
 
 def episode_rate(governor: Any, selector: AttentionSelector, *, awake: bool = True) -> None:
     """Run object detection at its active rate exactly while a shown object was the target of
-    the last completed attention update (SPEC 5, 5A); derived on every tick, so a failed tick,
-    a sleep or a stop leaves no stale rate."""
-    governor.set_active(OBJECTS, awake and selector.episode_active)
+    the last completed attention update (SPEC 5, 5A), with the target's base-frame bearing so
+    the pipeline embeds only the shown track; derived on every tick, so a failed tick, a sleep
+    or a stop leaves no stale rate or bearing."""
+    on = awake and selector.episode_active
+    target = selector.target if on else None
+    focus = None if target is None else (target.azimuth_rad, target.elevation_rad)
+    governor.set_active(OBJECTS, on, focus)
 
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:

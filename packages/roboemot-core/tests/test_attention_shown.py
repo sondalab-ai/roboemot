@@ -730,6 +730,8 @@ def test_a_failed_attention_tick_clears_the_active_rate():
     simulate(sel, 3.0, wiggle(100.0))
     episode_rate(gov, sel)
     assert gov.active("objects")
+    target = sel.target
+    assert gov.focus("objects") == (target.azimuth_rad, target.elevation_rad)  # the shown thing
 
     def boom(*a, **k):
         raise RuntimeError("selector failed")
@@ -745,7 +747,7 @@ def test_a_failed_attention_tick_clears_the_active_rate():
     gaze = SimpleNamespace(release=lambda: None)
     assert attention_tick(3.05, world, sel, gaze, loop) is False
     episode_rate(gov, sel)
-    assert not gov.active("objects")
+    assert not gov.active("objects") and gov.focus("objects") is None
 
 
 def test_a_failing_interest_modulation_does_not_stop_the_tick():
