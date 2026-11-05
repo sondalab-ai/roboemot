@@ -58,9 +58,9 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any, Literal, Protocol
 
+from .. import timezones
 from ..affect.clips import ClipLibrary
 from ..bus import Bus, Message
 from ..config.schema import RoboEmotConfig, StateEffects
@@ -97,13 +97,18 @@ class Clock(Protocol):
 
 
 class SystemClock:
-    """Real time: ``time.monotonic`` and the local wall-clock hour."""
+    """Real time: ``time.monotonic`` and the wall-clock hour in ``timezone`` (an IANA name,
+    ``circadian.timezone``); None: the system's local time. The runner sets ``timezone`` from
+    the config at start and on hot reload."""
+
+    def __init__(self, timezone: str | None = None) -> None:
+        self.timezone = timezone
 
     def monotonic(self) -> float:
         return time.monotonic()
 
     def hour(self) -> float:
-        now = datetime.now()
+        now = timezones.now(self.timezone)
         return now.hour + now.minute / MINUTES_PER_HOUR + now.second / SECONDS_PER_HOUR
 
 
@@ -137,6 +142,7 @@ class CircadianRunner:
         self.bus = bus
         self.affect = affect
         self.clock: Clock = clock or SystemClock()
+        self._set_timezone(cfg)
         self.detection_period = detection_period
         self.engaged = engaged
         self.conversing = conversing
@@ -323,6 +329,12 @@ class CircadianRunner:
             return 0.0
         return max(0.0, self.clock.monotonic() - self._last_update)
 
+    def _set_timezone(self, cfg: RoboEmotConfig) -> None:
+        """Point a :class:`SystemClock` at ``circadian.timezone``; an injected clock (tests,
+        replay) keeps its own hour."""
+        if isinstance(self.clock, SystemClock):
+            self.clock.timezone = cfg.circadian.timezone
+
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: parameters, thresholds and primitives; the model state is kept.
 
@@ -331,6 +343,7 @@ class CircadianRunner:
         with self._lock:
             was = self.cfg.circadian
             self.cfg = cfg
+            self._set_timezone(cfg)
             after, before = cfg.circadian.nap_after_s, was.nap_after_s
             if after is not None and (before is None or after < before):
                 self.nap.restart(self.clock.monotonic())  # never a nap from a stale clock

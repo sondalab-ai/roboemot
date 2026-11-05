@@ -458,6 +458,15 @@ def api(daemon):
     return DaemonClient(Target("127.0.0.1", daemon.port))
 
 
+PC_ZONE = "Europe/Rome"
+
+
+@pytest.fixture(autouse=True)
+def pc_zone(monkeypatch):
+    """The PC's timezone, whatever the machine running the tests says (``-y`` takes it)."""
+    monkeypatch.setattr(inst.timezones, "local_name", lambda *a, **k: PC_ZONE)
+
+
 @pytest.fixture(autouse=True)
 def no_settle(monkeypatch):
     monkeypatch.setattr(reachy.time, "sleep", lambda s: None)
@@ -504,6 +513,7 @@ def options(**kw) -> Options:
         yes=True,
         vision=False,
         cloud_voice=False,
+        timezone=PC_ZONE,
     )
     return Options(**{**base, **kw})
 
@@ -825,8 +835,8 @@ def test_an_install_dry_run_over_an_owner_app_config_names_the_keys_and_writes_n
     install(dry_run=True)
     out = flat(capsys.readouterr().out)
     assert (
-        f"○ Write the app config {APP_YAML} (safety.allow_unmeasured_dynamics=true, "
-        "voice.enabled=true" in out
+        f"○ Write the app config {APP_YAML} (circadian.timezone={PC_ZONE}, "
+        "safety.allow_unmeasured_dynamics=true, voice.enabled=true" in out
     )
     assert robot.files[APP_YAML] == owner and RECORD not in robot.files
 
@@ -859,12 +869,19 @@ def test_the_default_install_enables_voice_in_the_app_config(offline, robot, dae
 
 def test_install_without_dev_still_writes_the_voice_config(offline, robot, daemon):
     install(dev=False)
-    assert yaml.safe_load(robot.app_yaml) == {"schema_version": 1, "voice": {"enabled": True}}
+    assert yaml.safe_load(robot.app_yaml) == {
+        "schema_version": 1,
+        "circadian": {"timezone": PC_ZONE},
+        "voice": {"enabled": True},
+    }
 
 
-def test_no_voice_writes_no_voice_key_and_no_file_without_dev(offline, robot, daemon):
+def test_no_voice_without_dev_writes_only_the_timezone(offline, robot, daemon):
     install(dev=False, voice=False)
-    assert robot.app_yaml is None
+    assert yaml.safe_load(robot.app_yaml) == {
+        "schema_version": 1,
+        "circadian": {"timezone": PC_ZONE},
+    }
 
 
 def test_no_voice_defaults_piper_and_the_models_to_off(offline, robot, daemon):
@@ -921,7 +938,7 @@ def test_the_dry_run_prints_what_the_app_config_will_contain_and_writes_nothing(
     assert (dict(robot.files), set(robot.dirs)) == before
 
 
-def test_the_dry_run_with_no_voice_and_no_dev_says_there_are_no_installer_keys(
+def test_the_dry_run_with_no_voice_and_no_dev_names_only_the_timezone(
     offline, robot, daemon, capsys
 ):
     inst.run_install(
@@ -930,12 +947,13 @@ def test_the_dry_run_with_no_voice_and_no_dev_says_there_are_no_installer_keys(
         ROOT,
     )
     out = capsys.readouterr().out
-    assert "no installer keys" in out and "voice.enabled" not in out
+    assert f"circadian.timezone={PC_ZONE}" in flat(out) and "voice.enabled" not in out
     assert APP_YAML not in robot.files
 
 
 def test_verification_fails_when_the_app_config_lacks_voice(offline, robot, monkeypatch):
-    monkeypatch.setattr(inst, "app_config_text", lambda config: "schema_version: 1\n")
+    text = f"schema_version: 1\ncircadian:\n  timezone: {PC_ZONE}\n"
+    monkeypatch.setattr(inst, "app_config_text", lambda config: text)
     with pytest.raises(WizardError, match="has voice.enabled=None, expected voice.enabled=True"):
         install(dev=False)
 
@@ -1409,7 +1427,8 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert "✓ Dry run passed" in out and "Summary  " in out
     assert (
         "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
-        "--robot reachy-mini-wireless --dev --piper --no-cloud-voice --no-vision --models --yes"
+        f"--robot reachy-mini-wireless --timezone {PC_ZONE} --dev --piper --no-cloud-voice "
+        "--no-vision --models --yes"
     ) in out
     assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
@@ -1451,7 +1470,8 @@ def test_install_upgrades_shared_packages_only_when_allowed(offline, robot, daem
 
 
 def test_install_fails_when_dev_config_mismatches(offline, robot, monkeypatch):
-    monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
+    text = f"circadian: {{timezone: {PC_ZONE}}}\nvoice: {{enabled: true}}\n"
+    monkeypatch.setattr(inst, "app_config_text", lambda config: text)
     with pytest.raises(WizardError, match="expected safety.allow_unmeasured_dynamics=True"):
         install()
 
@@ -1463,10 +1483,12 @@ def test_install_fails_when_daemon_does_not_list_app(offline, daemon):
 
 
 def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
-    monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
+    text = f"circadian: {{timezone: {PC_ZONE}}}\nvoice: {{enabled: true}}\n"
+    monkeypatch.setattr(inst, "app_config_text", lambda config: text)
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
-         "--no-start", "--no-startup-app", "--no-piper", "--no-models", "--no-cloud-voice"],
+         "--no-start", "--no-startup-app", "--no-piper", "--no-models", "--no-cloud-voice",
+         "--timezone", PC_ZONE],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
@@ -1891,6 +1913,7 @@ FULL = dict(
     piper=False,
     models=False,  # the epic's models step: its own flag, like --piper
     cloud_voice=False,
+    timezone=PC_ZONE,
 )
 
 
@@ -1904,6 +1927,7 @@ FULL = dict(
         ("models", "--models"),
         ("start", "--start"),
         ("startup", "--startup-app"),
+        ("timezone", "--timezone"),
     ],
 )
 def test_without_a_terminal_a_missing_flag_stops_before_the_robot_is_touched(
@@ -1991,8 +2015,12 @@ def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, m
 
 def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
     opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
-    inst.run_install(opts, typed("y\n", "\n", "\n", "\n"), ROOT)  # dev; cloud, models, key: no
-    assert f"--robot {RID} --dev --no-piper --no-cloud-voice" in capsys.readouterr().out
+    inst.run_install(
+        opts, typed("y\n", "\n", "\n", "\n", "\n"), ROOT
+    )  # dev; zone; cloud, models, key
+    assert f"--robot {RID} --timezone {PC_ZONE} --dev --no-piper --no-cloud-voice" in (
+        capsys.readouterr().out
+    )
 
 
 def test_the_installer_modules_import_without_the_palette():
@@ -2069,11 +2097,12 @@ def test_non_interactive_ui_never_takes_a_default():
 def test_actions_that_change_the_robot_default_to_no(offline, robot, daemon, monkeypatch, capsys):
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
     robot.dev_cfg = False  # Enter at the dev question: production config
-    ui = typed(*["\n"] * 7)  # Enter at every question
+    ui = typed(*["\n"] * 8)  # Enter at every question
     inst.run_install(Options(host="127.0.0.1", user="pollen", robot=RID), ui, ROOT)
     err = capsys.readouterr().err
     for question in (
         "Install in dev mode? [y/N]",
+        f"Timezone of the robot's home? [{PC_ZONE}]",
         "Turn on cloud voice (audio leaves the robot)? [y/N]",
         "Install Piper for on-board speech (own virtualenv)? [y/N]",
         "Start roboemot now? [y/N]",
@@ -3435,6 +3464,7 @@ def test_a_reinstall_without_cloud_voice_removes_only_the_keys_it_wrote(
     cfg = yaml.safe_load(robot.app_yaml)
     assert cfg == {
         "schema_version": 1,
+        "circadian": {"timezone": PC_ZONE},
         "safety": {"allow_unmeasured_dynamics": True},
         "voice": {"enabled": True, "language": "en"},
         "webui": {"port": 8080},
@@ -3839,3 +3869,59 @@ def test_a_record_with_unreadable_profile_keys_is_refused():
     for bad in ("voice", [["voice", 1]], [[]], [["voice", ""]]):
         with pytest.raises(WizardError, match="app_config_keys"):
             InstallRecord.from_json({**base, "app_config_keys": bad})
+
+
+# ---------------------------------------------------------------- timezone (SPEC 7A)
+
+
+def test_yes_takes_the_pc_zone_and_writes_it_into_the_app_config(offline, robot, daemon):
+    install(timezone=None)
+    assert yaml.safe_load(robot.files[APP_YAML])["circadian"]["timezone"] == PC_ZONE
+
+
+def test_the_flag_sets_the_zone_and_the_next_line_repeats_it(offline, robot, daemon, capsys):
+    install(timezone="Asia/Tokyo", dry_run=True)
+    out = flat(capsys.readouterr().out)
+    assert "Chose the timezone Asia/Tokyo" in out and "--timezone Asia/Tokyo" in out
+    assert inst.parse_args(["--timezone", "Asia/Tokyo"]).timezone == "Asia/Tokyo"
+
+
+def test_an_unknown_zone_flag_stops_before_the_robot_is_touched(offline, robot, daemon):
+    with pytest.raises(WizardError, match="Unknown timezone"):
+        install(timezone="Mars/Olympus")
+    assert daemon.mutations == []
+
+
+def test_yes_without_a_pc_zone_needs_the_flag(offline, robot, daemon, monkeypatch):
+    monkeypatch.setattr(inst.timezones, "local_name", lambda *a, **k: None)
+    with pytest.raises(MissingFlag) as e:
+        install(timezone=None)
+    assert e.value.flag == "--timezone" and robot.commands == []
+
+
+def test_the_terminal_answer_ignores_case_and_enter_takes_the_pc_zone():
+    names = ["Europe/Rome", "Europe/Riga"]
+    assert typed("europe/riga\n").ask_completed("Zone?", PC_ZONE, names, flag="--timezone") == (
+        "Europe/Riga"
+    )
+    assert typed("\n").ask_completed("Zone?", PC_ZONE, names, flag="--timezone") == PC_ZONE
+
+
+def test_three_unknown_answers_end_the_question():
+    ui = typed("Mars\n", "Venus\n", "Pluto\n")
+    with pytest.raises(NoValidAnswer) as e:
+        ui.ask_completed("Zone?", PC_ZONE, [PC_ZONE], flag="--timezone")
+    assert e.value.fix.endswith("--timezone")
+
+
+def test_tab_completes_a_zone_from_what_was_typed():
+    import readline
+
+    from roboemot.install.ui import _completion
+
+    before = readline.get_completer()
+    with _completion(["Europe/Rome", "Europe/Riga", "Asia/Tokyo"], True) as read:
+        complete = readline.get_completer()
+        assert read is not None
+        assert [complete("europe/r", i) for i in range(3)] == ["Europe/Riga", "Europe/Rome", None]
+    assert readline.get_completer() is before
