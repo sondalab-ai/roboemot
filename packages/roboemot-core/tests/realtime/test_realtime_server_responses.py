@@ -411,7 +411,7 @@ def test_a_cut_stream_on_a_server_without_item_ids_is_never_answered(ears):  # n
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
         cut_by_speaking(ear)
         assert wait_until(lambda: snap(ear)["input_resets"] == 1)  # S1a: reset, no ids
-        assert wait_until(lambda: server.auto_responses)
+        wait_until(lambda: server.auto_responses, 1.0)  # the reset may come first: none sent
         # a fragment if it came before the reset, an old session's after it, or never sent
         never_played(ear, server, seen=False)
 
