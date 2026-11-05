@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,11 +20,12 @@ from roboemot.vision.facing import eye_span
 from roboemot.vision.geometry import letterbox_scale
 from roboemot.vision.pipeline import FACE_REPORT_MAX, VisionPipeline
 from roboemot.vision.types import Detection, Frame, FrameReport
-from roboemot.voice.direction import DirectionSample, FaceRef, VoiceDirection
+from roboemot.voice.direction import DirectionSample, FaceRef, VoiceDirection, matched_yaw
 from roboemot.voice.facing import CpuLoad, FacingCheck
 from roboemot.voice.pipeline import face_ref, measured_yaw
 from roboemot.voice.wake import AT_FACE, NOT_FACING
 from roboemot.world import Entry, Observation, WorldModel
+from roboemot.world.frame import wrap_angle
 
 OWNER_AZ, PHOTO_AZ = math.radians(10.0), math.radians(20.0)
 OWNER_YAW, PHOTO_YAW = 0.0, math.radians(70.0)
@@ -88,7 +90,7 @@ def test_the_record_names_the_owner_when_the_voice_is_nearest_the_owner():
     assert face["azimuth_deg"] == pytest.approx(10.0) and face["yaw_deg"] == pytest.approx(0.0)
     assert face["age_s"] == pytest.approx(0.1) and face["eye_px"] == pytest.approx(20.0)
     assert rec["yaw_deg"] == pytest.approx(0.0) and rec["yaw_samples"] == 4
-    assert rec["eye_px"] == pytest.approx(20.0)
+    assert "eye_px" not in rec  # per face only (faces[].eye_px)
     assert rec["bearing_deg"] == pytest.approx(11.0) and rec["offset_deg"] == pytest.approx(1.0)
     assert rec["head_yaw_deg"] == pytest.approx(12.0)
     assert rec["body_yaw_deg"] == pytest.approx(5.0)
@@ -105,7 +107,9 @@ def test_a_photo_nearer_the_sound_bearing_is_the_face_matched():
     (rec,) = d.snapshot()["facing"]["recent"]
     assert [f["entry_id"] for f in rec["faces"]] == ["e-photo"]
     assert rec["yaw_deg"] == pytest.approx(70.0) and rec["outcome"] == "not_facing"
-    assert rec["offset_deg"] == pytest.approx(2.0) and rec["eye_px"] == pytest.approx(6.0)
+    assert rec["offset_deg"] == pytest.approx(2.0) and rec["faces"][0]["eye_px"] == pytest.approx(
+        6.0
+    )
 
 
 def test_a_voice_behind_the_head_reads_near_180_against_the_head_yaw():
@@ -181,7 +185,40 @@ def test_face_ref_and_measured_yaw_read_the_entry_and_the_gaze_dofs():
     assert measured_yaw(motion, GazeMap("h", "p")) == (0.2, None)
     assert measured_yaw(None, GazeMap("h", "p")) == (None, None)
     broken = SimpleNamespace(motion_sample=lambda: 1 / 0)
-    assert measured_yaw(broken, GazeMap("h", "p")) == (None, None)
+    assert measured_yaw(broken, GazeMap("h", "p", "b")) == (None, None)
+    assert measured_yaw(SimpleNamespace(motion_sample=lambda: None), GazeMap("h", "p")) == (
+        None,
+        None,
+    )
+    unmeasured = SimpleNamespace(motion_sample=lambda: MotionSample(0.0, {}, None, False, False))
+    assert measured_yaw(unmeasured, GazeMap("h", "p", "b")) == (None, None)
+
+
+def old_matched_yaw(sample, tolerance_rad):
+    """``matched_yaw`` as it was before ``matched_index`` was split out (origin/main d93f4df)."""
+    if sample.bearing_rad is None or not sample.faces_rad:
+        return None
+    offsets = [abs(wrap_angle(sample.bearing_rad - f)) for f in sample.faces_rad]
+    nearest = min(range(len(offsets)), key=offsets.__getitem__)
+    if offsets[nearest] > tolerance_rad or nearest >= len(sample.faces_yaw_rad):
+        return None
+    return sample.faces_yaw_rad[nearest]
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_matched_yaw_is_the_old_formula_on_random_samples(seed):
+    rng = random.Random(seed)
+    for _ in range(200):
+        n = rng.randint(0, 4)
+        faces = tuple(rng.uniform(-math.pi, math.pi) for _ in range(n))
+        yaws = tuple(
+            None if rng.random() < 0.2 else rng.uniform(-1.5, 1.5)
+            for _ in range(rng.randint(0, n))  # also fewer yaws than faces
+        )
+        bearing = None if rng.random() < 0.1 else rng.uniform(-math.pi, math.pi)
+        sample = DirectionSample(bearing, faces, False, faces_yaw_rad=yaws)
+        tol = rng.uniform(0.0, 1.0)
+        assert matched_yaw(sample, tol) == old_matched_yaw(sample, tol)
 
 
 # ---- vision: eye span through the letterbox, per-face report, frame facts, preview marks
@@ -230,9 +267,9 @@ def pipeline(tmp_path, dets):
     return pipe, seen
 
 
-def run_frames(pipe, n=6, width=1280, height=720):
+def run_frames(pipe, n=6, width=1280, height=720, start=0):
     report = None
-    for i in range(n):
+    for i in range(start, start + n):
         report = pipe.process(Frame(np.zeros((height, width, 3), np.uint8), i * 0.125))
     return report
 
@@ -312,11 +349,47 @@ def test_the_preview_has_landmarks_only_when_the_flag_is_on(tmp_path):
     assert pipe.preview_overlay(FrameReport(0.0)).marks == ()  # no face run on that frame
 
 
-def test_the_landmark_flag_is_off_by_default_and_switches_at_runtime():
-    from roboemot.config.stack import ConfigStack
+def test_a_frame_without_landmarks_clears_the_reported_span_and_the_world_keeps_its_own(
+    tmp_path,
+):
+    dets = [face(span=80.0)]
+    pipe, seen = pipeline(tmp_path, dets)
+    run_frames(pipe, n=4)
+    dets[0] = Detection(dets[0].box, 0.9, landmarks=None)  # matched, but no landmarks
+    run_frames(pipe, n=2, start=4)
+    (row,) = pipe.stats()["faces"]
+    assert row["eye_px"] is None and row["yaw_deg"] is None
+    assert seen[-1].facing_eye_px is None
+    world = WorldModel(RoboEmotConfig().world)
+    for obs in seen:
+        world.observe(obs)
+    (e,) = world.entries
+    assert e.facing_eye_px == pytest.approx(20.0)  # the last span the landmarks gave
 
-    stack = ConfigStack()
-    wanted = lambda: stack.effective().webui.live.video_landmarks  # noqa: E731 (as assembly)
+
+def test_a_track_without_a_detection_has_no_eye_span(tmp_path):
+    pipe, _ = pipeline(tmp_path, [face(span=80.0)])
+    run_frames(pipe, n=4)
+    track = pipe._visible[0]
+    state = pipe._faces[track.track_id]
+    assert state.eye_px == pytest.approx(20.0)
+    coasting = SimpleNamespace(detection=None)
+    pipe._track_yaw(coasting, state, 10.0, 0.25)
+    assert state.eye_px is None and state.yaw is None
+
+
+def test_the_landmark_wiring_reads_the_effective_config_and_needs_the_preview():
+    from roboemot.config.stack import ConfigStack
+    from roboemot.runtime.assembly import preview_landmarks
+
+    assert RoboEmotConfig().webui.live.video_landmarks is False
+    plain = preview_landmarks(ConfigStack())
+    assert plain() is False
+    no_preview = ConfigStack()
+    no_preview.set("webui.live.video_landmarks", True)
+    assert preview_landmarks(no_preview)() is False  # no effect without the preview
+    stack = ConfigStack(app={"webui": {"live": {"enabled": True, "video": True}}})
+    wanted = preview_landmarks(stack)
     assert wanted() is False
     stack.set("webui.live.video_landmarks", True)
     assert wanted() is True

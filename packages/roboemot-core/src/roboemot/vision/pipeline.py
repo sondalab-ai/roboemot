@@ -368,7 +368,7 @@ class VisionPipeline:
         self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
         self.motion_wanted: Callable[[], bool] = lambda: False
         self.landmarks_wanted: Callable[[], bool] = lambda: False
-        self._frame_size: tuple[int, int] | None = None
+        self._frame_size: tuple[int, int] | None = None  # one reference swap; report thread reads
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}

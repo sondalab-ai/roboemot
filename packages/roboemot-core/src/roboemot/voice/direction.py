@@ -428,7 +428,6 @@ def facing_record(
             }
             for eid, f in ranked
         ],
-        "eye_px": _rounded(_median(ranked[0][1]["eye"])) if ranked else None,
         "bearing_deg": _deg(_median(bearings)),
         "offset_deg": _deg(_median(offsets)),
         "head_yaw_deg": _deg(_median(heads)),

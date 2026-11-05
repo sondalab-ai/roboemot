@@ -138,6 +138,18 @@ def ducked_channels(expression: ExpressionRenderer, circ: CircadianRunner) -> fr
     return expression.channels | (circ.motion.channels if circ.motion else frozenset())
 
 
+def preview_landmarks(stack: ConfigStack) -> Callable[[], bool]:
+    """The pipeline's ``landmarks_wanted`` (SPEC 11A): the effective ``webui.live`` at each
+    preview frame, so a runtime switch applies at once. On only with the preview itself
+    (``enabled`` and ``video``); the runner asks only while a viewer watches."""
+
+    def wanted() -> bool:
+        live = stack.effective().webui.live
+        return live.enabled and live.video and live.video_landmarks
+
+    return wanted
+
+
 def assemble(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -308,8 +320,7 @@ def assemble(
     if perception.pipeline is not None:  # light from the frames vision already captures
         perception.pipeline.light_tap = circ.sampler.offer
         perception.pipeline.motion_wanted = circ.wants_scene_motion  # a nap's motion watch
-        # the preview's landmark dots (SPEC 11A), read at each preview frame: a runtime switch
-        perception.pipeline.landmarks_wanted = lambda: stack.effective().webui.live.video_landmarks
+        perception.pipeline.landmarks_wanted = preview_landmarks(stack)
     light_reader = host.light_reader = IdleLightReader(circ.sampler, source)
     host.enrollment = perception.enrollment
     pipeline = perception.pipeline
