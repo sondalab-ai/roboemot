@@ -347,6 +347,8 @@ class TurnServer(FakeServer):
                 task = asyncio.ensure_future(self._vad_transcript(ws, item, " ".join(texts)))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+        if self._vad_item is None:  # a later committed burst starts after this audio
+            self._burst_start = self.buffer_ms
 
     def _silence_ms(self) -> float:
         updates = self.of("session.update")

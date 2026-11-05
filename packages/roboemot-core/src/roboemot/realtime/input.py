@@ -260,10 +260,9 @@ class RealtimeInput:
         self._end: tuple[int, float] = (-1, 0.0)
         self._reset_gen = -1  # the last session this input reset: its late events are dropped
         self.held = 0  # bursts that waited for a realtime turn to end
-        # live streams (turns: server) still collecting the server's items, oldest first; once
-        # one opened, the input events go to them (turns is a restart field)
+        # live streams (turns: server) still collecting the server's items, oldest first; a
+        # session's input events go to them while it has some and no burst (_streams_hold)
         self._streams: list[_Burst] = []
-        self._streaming = False
         self._ops: queue.Queue[tuple[str, InputJob, Any] | None] = queue.Queue()
         self._stream_thread: threading.Thread | None = None
         self._clock: Callable[[], float] = time.monotonic  # when a stream ended (the sweep)
@@ -348,7 +347,6 @@ class RealtimeInput:
             if self._closed:
                 job._end(refused="closed")
                 return job
-            self._streaming = True
             if self._stream_thread is None:
                 self._stream_thread = threading.Thread(
                     target=self._stream_loop, name="realtime-stream", daemon=True
@@ -679,7 +677,7 @@ class RealtimeInput:
         session (None: the current one): it belongs to the burst in flight on that session when
         its position is at or after the burst's start; a transcript of no burst is deleted."""
         gen = self.route.generation if generation is None else generation
-        if self._streaming:
+        if self._streams_hold(gen):
             self._stream_event(event, gen)
             return
         delete: list[tuple[str, int]] = []
@@ -781,6 +779,16 @@ class RealtimeInput:
         oldest = next((k for k in burst.order if isinstance(k, tuple) and k in burst.open), None)
         if oldest is not None:  # the oldest open item without an id
             burst.stopped(oldest, event.audio_ms)
+
+    def _streams_hold(self, gen: int) -> bool:
+        """Whether session ``gen``'s input events go to the live streams: some of its streams
+        still collect items and no burst of it is set. Decided per event, so a mode that changes
+        at runtime (the unaddressed opt-in turned off) takes the burst path at its next burst."""
+        with self._lock:
+            burst = self._burst
+            if burst is not None and burst.generation == gen:
+                return False
+            return any(s.generation == gen for s in self._streams)
 
     def _stream_event(self, event: protocol.ServerEvent, gen: int) -> None:
         """``on_event`` for live streams (module docstring): a start goes to the oldest stream

@@ -314,6 +314,27 @@ def test_server_turns_without_the_unaddressed_opt_in_run_as_robot_turns(ears):  
         assert audio["turns_fallbacks"] == 1 and audio["streamed"] == 0
 
 
+def test_the_opt_in_turned_off_at_runtime_brings_robot_turns_back_at_once(ears):  # noqa: F811
+    """Turning the consent off needs no admin and no restart: the next utterance is a burst
+    whose server events reach it (not the streams of before)."""
+    with TurnServer(stream_vad=True, heard=[["ciao"]]) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert ear.rt.route.snapshot()["streams"] == 1
+        ear.rt.stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.stack.set("voice.realtime_route.audio_gate", "addressed", source="t", admin=True)
+        ear.r.listener.apply_config(ear.rt.stack.effective())
+        server.stream_vad = False  # the fake answers bursts on their commit only
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 2, 10.0)
+        u = ear.utterances[1]
+        assert u.text == "ciao" and u.realtime is not None and not u.local_only
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        snap = ear.rt.route.snapshot()
+        assert snap["turns"] == "robot" and snap["audio_sent"] == 1 and snap["streams"] == 1
+
+
 def test_a_stream_needs_the_server_gates_audio_gate(ears):  # noqa: F811
     with TurnServer(stream_vad=True) as server:
         ear = ears(server, rt={"turns": "server"}, app=OPT_INS, script=["come stai"])
