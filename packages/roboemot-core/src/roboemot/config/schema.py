@@ -655,6 +655,15 @@ class CircadianConfig(Strict):
         ge=300,
         le=86400,
     )
+    nap_resume_after_s: float = param(
+        180.0,
+        "After a day nap ended on a nap_wake_on_* stimulus (light, motion, a loud sound) with no "
+        "face, addressed speech or conversation since, the robot naps again after this much idle "
+        "time from the end of wake_hold_s instead of nap_after_s. Below nap_after_s",
+        unit="s",
+        ge=60,
+        le=3600,
+    )
     nap_wake_on_light: bool = param(
         True,
         "A day nap ends when the confirmed room light rises (dark to dim or bright, dim to "
@@ -772,6 +781,8 @@ class CircadianConfig(Strict):
             raise ValueError(f"circadian.states missing {sorted(missing)}")
         if self.resting_threshold <= self.drowsy_threshold:
             raise ValueError("circadian.resting_threshold must exceed drowsy_threshold")
+        if self.nap_after_s is not None and self.nap_resume_after_s >= self.nap_after_s:
+            raise ValueError("circadian.nap_resume_after_s must be below nap_after_s")
         for t in self.quiet_hours:
             h, _, m = t.partition(":")
             if not (h.isdigit() and m.isdigit() and int(h) < 24 and int(m) < 60):

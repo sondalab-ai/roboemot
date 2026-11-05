@@ -172,13 +172,16 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       Candidates: spectral subtraction with a noise profile per motion state, the playback signal as an
       echo reference for all consumers (not only barge-in), or a small learned denoiser. Measure the CPU on
       the CM4 first (SPEC 8, 10, 12; no audio is stored).
-- [ ] Resume a day nap sooner after a stimulus wake (owner, 2026-11-05, approved). When a nap ends on
+- [x] Resume a day nap sooner after a stimulus wake (owner, 2026-11-05, approved). When a nap ends on
       `loud`, `light` or `motion`, and no face, presence or addressed speech follows, the robot naps again
       after a short idle time, not after the full `circadian.nap_after_s` (1800 s), as any creature in
       the dark would.
       Add a config field, for example `circadian.nap_resume_after_s`, of a few minutes, used only after a
       stimulus wake. A wake by a face, by speech or by quiet hours keeps the full idle time.
       Count it in `nap.resumes` (SPEC 7A, Day nap; 11A).
+      Done: `circadian.nap_resume_after_s` (180 s, below `nap_after_s`), counted from the end of the
+      wake hold; presence holds a due nap off as before, a confirmed face, addressed speech or a
+      conversation brings back `nap_after_s`.
 - [ ] `reflexes.rules` and `soothe.variants` show as keyed lists in the settings catalogue but are not in
       `KEYED_LISTS` (`config/stack.py`), so every layer replaces them whole (found in CV-14, 2026-11-03).
 - [ ] Startle on the robot under load: the audio hub gives the reflex only the newest chunk of a pass, so a
@@ -198,6 +201,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       a production race. 3.11's `asyncio.wait_for` returned a queued event and swallowed a barge-in's
       cancel in the same loop iteration (no `response.cancel`, the turn ended `ok`). `ResponseRun.run`,
       the chat stream, skill calls and the TTS backends now use `asyncio.timeout` (SPEC 8).
+- [ ] `test_speech.py::test_a_dropped_sentence_does_not_repeat_a_delivery_of_its_reply` failed once under
+      machine load (2026-11-05). Not reproduced, cause unknown. Check whether it waits on wall-clock time.
+- [ ] `test_app_llm_traits.py::test_shutdown_does_not_wait_for_a_stuck_route` failed once in a full local run
+      (10.7 s against its 10 s wall-time bound, 2026-11-05). On `main` its call phase already takes 8.1-9.1 s,
+      so the margin is thin. Make it timing-independent, or review the bound.
 - [x] `test_realtime_turns.py::test_a_barge_in_while_a_skill_runs_answers_the_queued_calls`: it barged in once
       the server had sent `response.done`, before the route took it, so the cut cancelled a response still
       live on the route. It now waits for the route's `responses` count.
