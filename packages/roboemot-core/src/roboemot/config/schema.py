@@ -1515,6 +1515,16 @@ class PrivacyConfig(Strict):
         "visible face, but with it off or no sound direction a television can be addressed",
         opt_in=True,
     )
+    realtime_audio_unaddressed: bool = param(
+        False,
+        "Allow microphone audio the robot has not judged addressed to leave the robot to the "
+        "realtime route (voice.realtime_route.turns: server, with realtime_audio on too): every "
+        "speech segment the robot hears while awake and that passes the listed server_gates "
+        "streams while it is heard, whoever speaks and to whomever (a phone call, people "
+        "talking to each other, a television), a child included. Without it turns: server "
+        "runs as robot turns (SPEC 12)",
+        opt_in=True,
+    )
     realtime_platform_id: bool = param(
         False,
         "Let the platform's session provider send the robot's platform identifier with each "
@@ -3735,10 +3745,49 @@ class RealtimeRouteConfig(Strict):
         "audio (the utterance's audio, transcribed by the server; needs the "
         "privacy.realtime_audio opt-in, else the local pipeline answers)",
     )
-    audio_gate: Literal["addressed"] = param(
+    audio_gate: Literal["addressed", "server_gates"] = param(
         "addressed",
-        "Which utterances' audio may leave the robot with input: audio. addressed: only an "
-        "utterance the local wake gate and voice-at-face check accepted, sent once it ended",
+        "Which utterances' audio may leave the robot with input: audio. addressed (robot "
+        "turns): only an utterance the local wake gate and voice-at-face check accepted, sent "
+        "once it ended. server_gates (turns: server, needs privacy.realtime_audio_unaddressed): "
+        "a speech segment the robot hears while awake and the server_gates let through, "
+        "streamed while it is heard. Audio goes only when this matches the turns that run; a "
+        "change needs the admin",
+        admin_only=True,
+    )
+    turns: Literal["robot", "server"] = param(
+        "robot",
+        "Who ends a turn with input: audio. robot: the local wake gate decides once the "
+        "utterance ended, then its audio goes as one burst with a commit. server: audio "
+        "streams while the local VAD hears speech that passed server_gates (the wake word "
+        "policy and the follow-up window do not gate it), and the server's VAD ends the turn: "
+        "the robot sends no commit. It needs privacy.realtime_audio_unaddressed and "
+        "audio_gate: server_gates (without the opt-in robot turns run). Until barge-in and "
+        "server-created answers land, the robot still asks for the answer once the transcript "
+        "came. Applies at once; a change needs the admin",
+        admin_only=True,
+    )
+    server_gates: list[Literal["music", "other_speaker", "at_face", "facing"]] = param(
+        ["music"],
+        "With turns: server, the local checks that decide whether a speech segment streams at "
+        "all, before any of its audio leaves; none is checked again later. Nothing streams "
+        "while the robot sleeps, whatever this says. music: not while music plays; "
+        "other_speaker: not another known person right after the one heard last "
+        "(voice.fastpath.addressed_window_s); at_face: the voice comes from a visible face; "
+        "facing: that face looks at the robot (voice.facing). A listed gate whose detector is "
+        "off (music.enabled, voice.direction.enabled, voice.facing.enabled) keeps every "
+        "segment local. An empty list streams every segment the VAD hears while awake. A "
+        "change needs the admin",
+        admin_only=True,
+    )
+    server_gate_hold_ms: float = param(
+        300.0,
+        "With turns: server and at_face or facing in server_gates: speech held on the robot "
+        "before those checks decide, so the voice direction has samples; the held audio then "
+        "streams at once. The other gates decide at the speech start",
+        unit="ms",
+        ge=0,
+        le=2000,
     )
     transcript_timeout_s: float = param(
         4.0,
@@ -3910,6 +3959,13 @@ class RealtimeRouteConfig(Strict):
                 f"at most {TONE_LABEL_MAX_CHARS} characters: {bad}"
             )
         return labels
+
+    @field_validator("server_gates")
+    @classmethod
+    def _gates_once(cls, gates: list[str]) -> list[str]:
+        if len(set(gates)) != len(gates):
+            raise ValueError("voice.realtime_route.server_gates repeats a gate")
+        return gates
 
     @model_validator(mode="after")
     def _close_after_server_silence(self) -> RealtimeRouteConfig:

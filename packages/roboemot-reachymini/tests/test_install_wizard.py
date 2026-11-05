@@ -3363,12 +3363,14 @@ CLOUD_KEYS = [
     "voice.realtime_route.tone_tool=true",
     "voice.realtime_route.transcript_timeout_s=10.0",
     "privacy.realtime_audio=true",
+    "privacy.realtime_audio_unaddressed=true",
     "voice.backend=none",
     "voice.fallback_backend=none",
     "voice.wake_word_policy=never",
     "voice.direction.enabled=true",
     "voice.facing.enabled=true",
 ]
+CLOUD_PRIVACY = {"realtime_audio": True, "realtime_audio_unaddressed": True}  # one consent
 OWNER_ROUTE = {
     "name": "cloud",
     "base_url": "https://llm.example/v1",
@@ -3383,6 +3385,12 @@ def cloud_install(**kw) -> None:
 
 def written_route(cfg: dict) -> dict:
     return next(r for r in cfg["llm_routes"] if r["name"] == "pollen")
+
+
+def test_the_cloud_voice_text_names_the_wider_scope_of_server_turns():
+    text = inst.cloud_voice_text(ReachyMiniWireless.cloud_voice)
+    assert "every speech segment it hears while it is awake" in text
+    assert "not only speech meant for it" in text and "decides whether to answer" in text
 
 
 def test_the_cloud_voice_flag_parses_both_ways_and_defaults_to_unanswered():
@@ -3449,10 +3457,12 @@ def test_a_cloud_voice_install_writes_its_keys_and_keeps_the_owners(
     assert cfg["voice"]["realtime_route"]["voice"] == "Serena"
     assert cfg["llm_routes"][0] == OWNER_ROUTE
     assert written_route(cfg) == ReachyMiniWireless.cloud_voice.entry()
-    assert cfg["privacy"] == {"realtime_audio": True}
+    assert cfg["privacy"] == {"realtime_audio": True, "realtime_audio_unaddressed": True}
+    assert "turns" not in cfg["voice"]["realtime_route"]  # server turns wait for the owner's QA
     assert cfg["voice"]["wake_word_policy"] == "never" and cfg["voice"]["enabled"] is True
     keys = json.loads(robot.files[RECORD])["app_config_keys"]
     assert ["llm_routes", "pollen"] in keys and ["privacy", "realtime_audio"] in keys
+    assert ["privacy", "realtime_audio_unaddressed"] in keys
     assert len(keys) == len(CLOUD_KEYS)
 
 
@@ -3612,7 +3622,7 @@ def test_a_yes_on_the_terminal_turns_cloud_voice_on_and_asks_for_the_token(
     assert not any(HF_TOKEN in c for c in robot.commands)
     assert HF_TOKEN not in robot.files[RECORD] and HF_TOKEN not in robot.app_yaml
     assert json.loads(robot.files[RECORD])["secrets"] == ["hf_token"]
-    assert yaml.safe_load(robot.app_yaml)["privacy"] == {"realtime_audio": True}
+    assert yaml.safe_load(robot.app_yaml)["privacy"] == CLOUD_PRIVACY
     assert robot.piper_pips == []
 
 
@@ -3729,6 +3739,11 @@ def saved_settings(robot, **overrides) -> None:
     ("saved", "cloud", "key"),
     [
         ({"privacy.realtime_audio": True}, False, "privacy.realtime_audio"),
+        (
+            {"privacy.realtime_audio_unaddressed": True},
+            False,
+            "privacy.realtime_audio_unaddressed",
+        ),
         ({"voice.realtime_route.input": "audio"}, False, "voice.realtime_route.input"),
         ({"voice.facing.enabled": False}, True, "voice.facing.enabled"),
         ({"voice.direction.enabled": False}, True, "voice.direction.enabled"),
@@ -3757,7 +3772,7 @@ def test_saved_settings_that_agree_with_the_choice_pass(offline, robot, daemon, 
     install(cloud_voice=False, piper=False)
     saved_settings(robot, **{"voice.facing.enabled": True, "llm_routes.cloud.model": "m"})
     install(cloud_voice=True, piper=None)
-    assert yaml.safe_load(robot.app_yaml)["privacy"] == {"realtime_audio": True}
+    assert yaml.safe_load(robot.app_yaml)["privacy"] == CLOUD_PRIVACY
 
 
 def test_yes_without_the_flag_over_a_recorded_profile_turns_it_off_and_says_so(
