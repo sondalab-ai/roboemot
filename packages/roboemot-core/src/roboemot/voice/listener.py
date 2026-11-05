@@ -52,8 +52,10 @@ streams skips Vosk, its held audio goes at once and the rest piece by piece; at 
 stream closes and its final waits for the server's transcript as a burst's does, addressed
 (no later check; the wake word policy and the follow-up window do not gate it). A segment a
 gate keeps local is heard by Vosk from its start and decided by the wake gate as without server
-turns; if addressed it goes as text. A segment cut part way (the robot speaks, a gap, a pause)
-cuts its stream.
+turns; if addressed it goes as text. A listed gate whose detector is off keeps the segment
+local (it fails closed). A segment whose stream never opened (a turn in flight, no session, a
+revoke) is decided by the wake gate too. A segment cut part way (the robot speaks, a gap, a
+pause) cuts its stream.
 
 Music (``music``, a ``MusicDetector`` while ``music.enabled``): every chunk heard while the robot
 does not speak is fed to the detector after the speaking check (the ``music`` stage); a dropped
@@ -116,6 +118,7 @@ AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
 SERVER_GATES = ("music", "other_speaker", "at_face", "facing")  # decided by the listener
+OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be off
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
 
 
@@ -195,6 +198,8 @@ class _Handoff:
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
     progress: _DecodeProgress | None = field(default=None, repr=False)  # its local decode's
     decoded_end: int | None = None  # index in ``ev.audio`` the local text was decoded up to
+    stream: bool = False  # its audio is a live stream's (turns: server)
+    announced: bool = False  # its stream's opening went, and that was counted and cued
 
 
 @dataclass
@@ -208,6 +213,8 @@ class _Stream:
     speech_s: float = 0.0  # speech heard after the start (the pre-roll not counted)
     job: Any = None
     gate: str | None = None
+    face: str | None = None  # the voice-at-face verdict the gates asked for (asked once)
+    face_info: dict[str, Any] = field(default_factory=dict)
 
 
 class _DecodeProgress:
@@ -306,6 +313,8 @@ class VoiceListener:
             "streams_refused": 0,
             "turns_fallbacks": 0,  # turns: server without privacy.realtime_audio_unaddressed
             **{f"stream_gated_{gate}": 0 for gate in SERVER_GATES},
+            # a listed gate whose detector is off or missing: it fails closed (kept local)
+            **{f"stream_gated_{gate}_off": 0 for gate in OFF_GATES},
         }
         self._stream: _Stream | None = None  # the segment in progress with server turns
         self._last_streamed: tuple[str | None, float] = (None, -math.inf)  # speaker, last speech
@@ -778,8 +787,10 @@ class VoiceListener:
         return _Stream(ev.stamp, [ev.pre_roll])
 
     def _held_gates(self) -> bool:
+        """Whether a listed gate needs the voice direction's samples, and it can take them."""
         gates = self._cfg.voice.realtime_route.server_gates
-        return any(g in HELD_GATES for g in gates) and self._direction is not None
+        d = self._direction
+        return any(g in HELD_GATES for g in gates) and d is not None and d.enabled
 
     def _stream_feed(self, samples: np.ndarray, audio_end: float) -> None:
         """One piece of the segment's audio: streamed, held for the gates, or (kept local)
@@ -807,8 +818,7 @@ class VoiceListener:
         if gate is None:
             rate = self._cfg.voice.sample_rate_hz
             s.job = self._realtime.open_stream(held, rate, clock=self._clock)
-            self._count_audio("streamed")
-            return
+            return  # counted once its opening went (_announce)
         s.gate = gate
         self._count_audio(f"stream_gated_{gate}")
         self._vosk = True
@@ -817,19 +827,32 @@ class VoiceListener:
 
     def _stream_gate(self, s: _Stream, now: float) -> str | None:
         """The first server gate (``voice.realtime_route.server_gates``) that keeps the segment
-        from streaming, None when none does. ``asleep`` is the input's own check. Without a
-        voice direction ``at_face`` and ``facing`` cannot judge and pass."""
+        from streaming, None when none does. Asleep is the input's own check, always. A listed
+        gate whose detector is off or missing fails closed (``<gate>_off``): ``music`` without
+        the music detector (``music.enabled``), ``at_face`` and ``facing`` without the voice
+        direction, ``facing`` without ``voice.facing.enabled``. The verdict of the voice-at-face
+        check is kept, so the wake gate does not ask it again."""
         gates = self._cfg.voice.realtime_route.server_gates
-        if "music" in gates and self._music_during(s.start, now):
-            return "music"
+        if "music" in gates:
+            if self.music is None or not self._cfg.music.enabled:
+                return "music_off"
+            if self._music_during(s.start, now):
+                return "music"
         if "other_speaker" in gates:
             speaker = self._speaker()
             last, last_end = self._last_streamed
             window = self._cfg.voice.fastpath.addressed_window_s
             if speaker and last and speaker != last and s.start - last_end <= window:
                 return "other_speaker"
-        if any(g in HELD_GATES for g in gates):
-            verdict = self._face()
+        held = [g for g in gates if g in HELD_GATES]
+        if held:
+            d = self._direction
+            if d is None or not d.enabled:
+                return f"{held[0]}_off"
+            if "facing" in gates and not self._cfg.voice.facing.enabled:
+                return "facing_off"
+            verdict = s.face = self._face()
+            s.face_info = dict(self._face_info)
             if verdict == NO_FACE_AT_VOICE and ("at_face" in gates or "facing" in gates):
                 return "at_face" if "at_face" in gates else "facing"
             if verdict in (NOT_FACING, NO_FACING_DATA) and "facing" in gates:
@@ -841,16 +864,27 @@ class VoiceListener:
         waits for the server's transcript until ``transcript_timeout_s``, as a burst's does.
         The listening cue begins now, not while the person still speaks."""
         rate = self._cfg.voice.sample_rate_hz
-        p = self._handoff_for(ev, None)
-        p.addressed = True  # the gates let it stream: no later check
+        p = self._handoff_for(ev, s.face)
+        p.face_info = s.face_info
+        p.addressed = True  # the gates let it stream: no later check, once its opening went
+        p.stream = True
         p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s
         p.rt = s.job
         self._realtime.close_stream(s.job, self._last_sample(ev) / rate * MS_PER_S, p.deadline)
-        self._last_streamed = (self._speaker(), ev.last_speech_stamp)
-        self._count_audio("sent")
-        self._audio_event(AUDIO_SENT, p)
         self._queue.append(p)
         self.poll_handoff()
+
+    def _announce(self, p: _Handoff) -> None:
+        """A streamed segment's opening went (the stream thread may send it after the segment
+        ended): only now is it counted (``streamed``, ``sent``), does the listening cue begin and
+        does it count as the last streamed one (``other_speaker``)."""
+        if not p.stream or p.announced or p.rt is None or not p.rt.sent:
+            return
+        p.announced = True
+        self._last_streamed = (self._speaker(), p.ev.last_speech_stamp)
+        self._count_audio("streamed")
+        self._count_audio("sent")
+        self._audio_event(AUDIO_SENT, p)
 
     def _cut_stream(self) -> None:
         """The segment in progress is dropped part way: its stream is cut (the closing silence
@@ -921,9 +955,10 @@ class VoiceListener:
         deadline = now + self._cfg.voice.grammar.handoff_timeout_s
         job = None if grammar_pass is None else self._grammar.submit(grammar_pass.run, deadline)
         held = self._fast.hold()
-        self._queue.append(
-            _Handoff(ev, text, self._language, grammar_pass, job, now, deadline, held)
-        )
+        p = _Handoff(ev, text, self._language, grammar_pass, job, now, deadline, held)
+        if s is not None and s.face is not None:  # the gates asked the voice-at-face check
+            p.face, p.face_info = s.face, s.face_info
+        self._queue.append(p)
         self.poll_handoff()
 
     def _handoff_for(self, ev: SpeechEnd, face: str | None) -> _Handoff:
@@ -1081,6 +1116,8 @@ class VoiceListener:
         grammar pass is done or its wait is over, or the realtime route's transcript came or
         its deadline passed (the listener thread calls this after every chunk and every empty
         read)."""
+        for waiting in self._queue:
+            self._announce(waiting)
         while self._queue:
             p = self._queue[0]
             if p.decode is not None:
@@ -1179,7 +1216,8 @@ class VoiceListener:
                     self._realtime.cancel(p.rt)
                 except Exception as exc:
                     log.warning("voice listener: realtime input: %s", type(exc).__name__)
-                self._audio_event(AUDIO_UNSENT, p)
+                if not p.stream or p.announced:
+                    self._audio_event(AUDIO_UNSENT, p)
             self._count_handoff("dropped_on_stop")
         self._set_active(False)
 
@@ -1269,8 +1307,14 @@ class VoiceListener:
             self._finish(p, result.text, None, frozenset(), heard, server=True)
             return None
         self._count_audio("local_fallbacks")
+        self._announce(p)
         p.rt, p.local_only = None, job.sent
-        self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
+        if p.stream and not job.sent:
+            # its stream never opened (a turn in flight, no session, a revoke): nothing left,
+            # so nothing was decided either; the wake gate decides, as with robot turns
+            p.addressed = None
+        if not p.stream or p.announced:
+            self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
         if not p.text:  # Vosk never ran: decoded off this thread, then handed off
             self._decode(p)
             return p

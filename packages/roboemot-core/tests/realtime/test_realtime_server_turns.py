@@ -7,6 +7,8 @@ once the transcript came, until the server-created answers land."""
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 from realtime_helpers import wait_until
@@ -193,13 +195,14 @@ def test_an_opt_in_revoked_mid_stream_stops_the_next_piece(ears):  # noqa: F811
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
         ear.r.feed(voice(seconds=0.5))
         assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
-        assert wait_until(lambda: appended_s(server) >= 0.45)  # the first half, all of it
-        before = len(server.audio())
         ear.rt.stack.set("privacy.realtime_audio", False, source="test", admin=True)
+        before = ear.rt.route.snapshot()["upload_s_today"]  # committed: no piece passes now
         ear.r.feed(voice(seconds=0.5))
         tail(ear)
         assert wait_until(lambda: ear.rt.route.snapshot()["stream_pieces_refused"] >= 1)
-        assert len(server.audio()) == before  # nothing more left, the closing silence neither
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        # nothing more left, the closing silence neither
+        assert ear.rt.route.snapshot()["upload_s_today"] == before
 
 
 # ------------------------------------------------------------------ upload budget
@@ -258,10 +261,13 @@ def test_the_server_gates_default_and_check():
 def test_two_segments_in_a_row_each_get_their_own_transcript(ears):  # noqa: F811
     """The second segment streams while the first one's transcript is still on its way."""
     heard = [["prima"], ["seconda"]]
-    with TurnServer(stream_vad=True, heard=heard, transcript_delay_s=0.3) as srv:
+    hold = threading.Event()
+    with TurnServer(stream_vad=True, heard=heard, hold=hold, hold_at="transcript") as srv:
         ear = ears(srv, rt=SERVER, app=OPT_INS, script=["x"])
         ear.say()
         ear.say()
+        assert wait_until(lambda: len(srv.sent_of("input_audio_buffer.committed")) == 2)
+        hold.set()  # both streams wait for their transcripts now
         assert ear.settle(lambda: len(ear.utterances) == 2, 10.0)
         assert [u.text for u in ear.utterances] == ["prima", "seconda"]
         assert [u.realtime[1] for u in ear.utterances] == [("in_1_0",), ("in_2_0",)]
@@ -288,10 +294,13 @@ def test_a_second_segment_reaches_the_server_before_the_first_turns_request(ears
     goes on has the second segment committed before the first turn's response.create, so that
     response hears both, and the second turn asks once more."""
     heard = [["prima"], ["seconda"]]
-    with TurnServer(stream_vad=True, heard=heard, transcript_delay_s=0.3) as srv:
+    hold = threading.Event()
+    with TurnServer(stream_vad=True, heard=heard, hold=hold, hold_at="transcript") as srv:
         ear = ears(srv, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
         ear.say()
         ear.say()
+        assert wait_until(lambda: len(srv.sent_of("input_audio_buffer.committed")) == 2)
+        hold.set()
         assert ear.settle(lambda: len(ear.rt.events) == 2, 15.0)
         committed = srv.sent_of("input_audio_buffer.committed")
         assert [e["item_id"] for e in committed] == ["in_1_0", "in_2_0"]
@@ -401,21 +410,262 @@ def test_a_streams_item_never_joins_a_burst_of_the_same_session(ears):  # noqa: 
         assert burst.texts == {} and not burst.job.done
 
 
-def test_a_revoked_opt_in_cancels_the_open_stream_and_sends_nothing_more(ears):  # noqa: F811
-    with TurnServer(stream_vad=True) as server:
+def test_a_revoked_opt_in_cancels_the_open_stream_and_the_next_burst_is_clean(ears):  # noqa: F811
+    """The revoked stream's audio never reaches a commit: the session is reset, so the next
+    burst (robot turns again) holds its own words only, and they are not lost."""
+    with TurnServer(stream_vad=True, heard=[["la seconda"]]) as server:
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
         ear.r.feed(voice(seconds=0.5))
         assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
-        assert wait_until(lambda: appended_s(server) >= 0.45)
         stack = ear.rt.stack
         stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        before = ear.rt.route.snapshot()["upload_s_today"]  # no piece passes the gate now
         ear.rt.route.apply_config(stack.effective())  # the runtime's hot reload
-        before = len(server.audio())
-        assert ear.rt.route.snapshot()["streams_revoked"] == 1
-        gen = ear.rt.route.generation
-        assert (gen, "in_1_0") in ear.input._dead  # deleted as soon as the server names it
+        snap = ear.rt.route.snapshot()
+        # cancelled by the reload, or cut by a queued piece the gate refused: once, either way
+        assert wait_until(lambda: ear.rt.route.snapshot()["input_resets"] == 1)
+        snap = ear.rt.route.snapshot()
+        assert snap["streams_revoked"] + snap["streams_cut"] == 1
+        ear.r.listener.apply_config(stack.effective())
         ear.r.feed(voice(seconds=0.5))
         tail(ear)
         assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
         assert ear.utterances[0].local_only  # its audio left: not answered
-        assert len(server.audio()) == before
+        assert ear.rt.route.snapshot()["upload_s_today"] == before
+        assert wait_until(lambda: ear.rt.route.up(), 10.0)  # the reset's new session
+        server.stream_vad = False  # robot turns: the fake answers the burst's commit
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 2, 10.0)
+        u = ear.utterances[1]
+        assert u.text == "la seconda" and u.realtime is not None and not u.local_only
+        assert len(server.connections) == 2
+        commit = server.connections[1]
+        assert commit is not None and len(server.of("input_audio_buffer.commit")) == 1
+
+
+# ------------------------------------------------------------------ a refused opening (fix round)
+
+
+def held_onset(ear) -> None:
+    """Speech past the VAD's start, before ``server_gate_hold_ms``: the gates have not decided
+    and nothing is queued for the stream yet."""
+    ear.r.feed(voice(seconds=0.25))
+    assert ear.r.listener._stream is not None and ear.r.listener._stream.job is None
+
+
+HOLD = {**SERVER, "server_gates": ["at_face"], "server_gate_hold_ms": 400}
+
+
+def test_an_opening_refused_for_a_turn_is_decided_by_the_wake_gate(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(
+            server, policy="always", rt=HOLD, app=OPT_INS, script=["x"], decoded="come stai",
+            bearing=FACE_RAD,
+        )  # fmt: skip
+        held_onset(ear)
+        ear.rt.route.hold_input()  # a realtime turn begins before the opening goes
+        try:
+            ear.r.feed(voice(seconds=0.75))
+            tail(ear)
+            assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        finally:
+            ear.rt.route.release_input()
+        u = ear.utterances[0]
+        assert not u.addressed and u.text == "come stai" and not u.local_only  # no wake word
+        assert appended(server) == []
+        snap = ear.r.listener.snapshot()
+        assert sum(snap["wake"]["decisions"].values()) == 1  # the wake gate decided it
+        assert snap["realtime_audio"]["streamed"] == 0 and snap["realtime_audio"]["sent"] == 0
+        assert ear.rt.route.snapshot()["streams_refused"] == 1
+
+
+def test_an_opening_refused_without_a_session_is_decided_by_the_wake_gate(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(
+            server, policy="always", rt=HOLD, app=OPT_INS, script=["x"], decoded="come stai",
+            bearing=FACE_RAD,
+        )  # fmt: skip
+        held_onset(ear)
+        ear.rt.route.close_soon("conversation_end")  # the session goes before the opening
+        ear.r.feed(voice(seconds=0.75))
+        tail(ear)
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert not ear.utterances[0].addressed
+        assert appended(server) == []
+        assert sum(ear.r.listener.snapshot()["wake"]["decisions"].values()) == 1
+
+
+def test_an_opening_after_this_inputs_reset_waits_for_the_new_session(ears):  # noqa: F811
+    with TurnServer(stream_vad=True, heard=[["dopo il reset"]]) as server:
+        ear = ears(server, rt=HOLD, app=OPT_INS, script=["x"], bearing=FACE_RAD)
+        held_onset(ear)
+        ear.input._reopening = True  # as after a sweep's reset
+        route, reopened = ear.rt.route, threading.Event()
+        reopen = route._reopen
+
+        def slow_reopen(closes):  # the reconnect is still in flight when the opening comes
+            reopened.wait(5.0)
+            reopen(closes)
+
+        route._reopen = slow_reopen
+        assert route.reset_session(route.generation)
+        ear.r.feed(voice(seconds=0.75))
+        tail(ear)
+        assert wait_until(lambda: route.snapshot()["audio_reopen_wait"] == 1)  # it waits
+        reopened.set()  # the reconnect lands
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        u = ear.utterances[0]
+        assert u.addressed and u.text == "dopo il reset" and u.realtime is not None
+        assert len(server.connections) == 2
+
+
+def test_a_revoke_while_the_opening_is_queued_sends_nothing(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, policy="always", rt=SERVER, app=OPT_INS, script=["x"])
+        ear.r.listener._cfg = ear.rt.stack.effective()
+        gate, sweep = threading.Event(), ear.input._sweep
+        ear.input._sweep = lambda cfg: (gate.wait(5.0), sweep(cfg))[1]  # the opening waits
+        ear.r.feed(voice(seconds=0.5))
+        assert ear.r.listener._stream is not None and ear.r.listener._stream.job is not None
+        stack = ear.rt.stack
+        stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.route.apply_config(stack.effective())
+        gate.set()
+        ear.r.feed(voice(seconds=0.5))
+        tail(ear)
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert appended(server) == []
+        assert not ear.utterances[0].addressed  # the wake gate decided: no wake word
+        assert sum(ear.r.listener.snapshot()["wake"]["decisions"].values()) == 1
+
+
+# ------------------------------------------------------------------ sessions and fallbacks
+
+
+def test_a_reconnect_between_pieces_cuts_the_stream(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        assert ear.rt.route.reset_session(ear.rt.route.generation)
+        assert wait_until(lambda: ear.rt.route.up(), 10.0)
+        before = len(server.of("input_audio_buffer.append"))
+        ear.r.feed(voice(seconds=0.5))
+        tail(ear)
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert ear.rt.route.snapshot()["streams_cut"] == 1
+        assert len(server.of("input_audio_buffer.append")) == before  # none on the new session
+
+
+def test_the_fallback_with_the_stream_gate_set_is_robot_turns(ears):  # noqa: F811
+    """turns: server and audio_gate: server_gates without the unaddressed opt-in: bursts."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, script=["x"], bearing=FACE_RAD)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        u = ear.utterances[0]
+        assert u.realtime is not None and u.text == "ciao Neve come stai"
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        assert ear.rt.route.snapshot()["turns_fallback"] == "no_unaddressed_opt_in"
+
+
+# ------------------------------------------------------------------ gates fail closed
+
+
+def test_the_music_gate_with_the_detector_off_keeps_the_segment_local(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        app = {**OPT_INS, "music": {"enabled": False}}
+        ear = ears(server, rt=SERVER, app=app, script=["come stai"])
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert appended(server) == []
+        assert ear.r.listener.snapshot()["realtime_audio"]["stream_gated_music_off"] == 1
+
+
+def test_the_facing_gate_with_the_facing_check_off_keeps_the_segment_local(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        rt = {**SERVER, "server_gates": ["facing"]}
+        ear = ears(server, rt=rt, app=OPT_INS, script=["come stai"], bearing=FACE_RAD)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert appended(server) == []
+        assert ear.r.listener.snapshot()["realtime_audio"]["stream_gated_facing_off"] == 1
+
+
+def test_the_facing_gate_keeps_a_face_looking_away_local(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        rt = {**SERVER, "server_gates": ["facing"]}
+        app = {**OPT_INS, "voice": {"wake_word_policy": "never", "facing": {"enabled": True}}}
+        ear = ears(server, rt=rt, app=app, script=["x"], bearing=FACE_RAD, yaw=0.7)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert appended(server) == []
+        snap = ear.r.listener.snapshot()
+        assert snap["realtime_audio"]["stream_gated_facing"] == 1
+        assert sum(snap["direction"]["checks"].values()) == 1  # the wake gate reused the verdict
+
+
+def test_the_other_speaker_gate_keeps_another_known_person_local(ears):  # noqa: F811
+    with TurnServer(stream_vad=True, heard=[["prima"]]) as server:
+        rt = {**SERVER, "server_gates": ["other_speaker"]}
+        ear = ears(server, rt=rt, app=OPT_INS, script=["x"])
+        ear.r.listener._speaker_id = lambda: "anna"
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        ear.r.listener._speaker_id = lambda: "bruno"
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 2, 10.0)
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["streamed"] == 1 and audio["stream_gated_other_speaker"] == 1
+
+
+# ------------------------------------------------------------------ short segments, cuts
+
+
+def test_a_segment_shorter_than_the_hold_is_decided_at_its_end(ears):  # noqa: F811
+    rt = {**SERVER, "server_gates": ["at_face"], "server_gate_hold_ms": 2000}
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=rt, app=OPT_INS, script=["x"], bearing=FACE_RAD)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        cfg = ear.rt.stack.effective()
+        assert appended_s(server) == pytest.approx(streamed_s(cfg), abs=0.15)  # decided late
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=rt, app=OPT_INS, script=["come stai"], bearing=OFF_FACE_RAD)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert appended(server) == []
+        assert ear.r.listener.snapshot()["realtime_audio"]["stream_gated_at_face"] == 1
+
+
+def test_a_chunk_gap_cuts_the_stream_in_progress(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        ear.r.feed(voice(seconds=0.1), gap=True)  # lost audio: the segment is dropped
+        assert wait_until(lambda: ear.rt.route.snapshot()["streams_cut"] == 1)
+        assert wait_until(lambda: server.of("conversation.item.delete"))  # its words go
+        assert server.of("conversation.item.delete")[0]["item_id"] == "in_1_0"
+
+
+def test_an_old_stream_never_covered_resets_the_session_at_the_next_opening(ears):  # noqa: F811
+    from roboemot.realtime.input import InputJob, _Burst
+
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen, cfg = ear.input, ear.rt.route.generation, ear.rt.stack.effective()
+        caps = {"silence_ms": 600.0, "max_items": 8, "max_chars": 2000}
+        late = cfg.voice.realtime_route.transcript_timeout_s + 1.0
+        heard = _Burst(InputJob(np.zeros(0), RATE), gen, utt_ms=900.0, sent_ms=900.0, **caps)
+        heard.add("s1")
+        heard.open.add("s1")  # started, never stopped: not covered
+        silent = _Burst(InputJob(np.zeros(0), RATE), gen, utt_ms=900.0, sent_ms=900.0, **caps)
+        for stream in (heard, silent):
+            stream.closed, stream.ended_at = True, inp._clock() - late
+        inp._streams += [silent]
+        inp._sweep(cfg)
+        assert inp._streams == [] and ear.rt.route.snapshot()["input_resets"] == 0  # nothing heard
+        inp._streams += [heard]
+        inp._sweep(cfg)
+        assert inp._streams == [] and ear.rt.route.snapshot()["input_resets"] == 1

@@ -3739,6 +3739,11 @@ def saved_settings(robot, **overrides) -> None:
     ("saved", "cloud", "key"),
     [
         ({"privacy.realtime_audio": True}, False, "privacy.realtime_audio"),
+        (
+            {"privacy.realtime_audio_unaddressed": True},
+            False,
+            "privacy.realtime_audio_unaddressed",
+        ),
         ({"voice.realtime_route.input": "audio"}, False, "voice.realtime_route.input"),
         ({"voice.facing.enabled": False}, True, "voice.facing.enabled"),
         ({"voice.direction.enabled": False}, True, "voice.direction.enabled"),

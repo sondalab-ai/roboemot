@@ -1519,10 +1519,10 @@ class PrivacyConfig(Strict):
         False,
         "Allow microphone audio the robot has not judged addressed to leave the robot to the "
         "realtime route (voice.realtime_route.turns: server, with realtime_audio on too): every "
-        "speech segment the robot hears while awake and the on server_gates let through streams "
-        "while it is heard, whoever speaks and to whomever (a phone call, people talking to "
-        "each other, a television), a child included. Without it turns: server runs as robot "
-        "turns (SPEC 12)",
+        "speech segment the robot hears while awake and that passes the listed server_gates "
+        "streams while it is heard, whoever speaks and to whomever (a phone call, people "
+        "talking to each other, a television), a child included. Without it turns: server "
+        "runs as robot turns (SPEC 12)",
         opt_in=True,
     )
     realtime_platform_id: bool = param(
@@ -3764,8 +3764,7 @@ class RealtimeRouteConfig(Strict):
         "the robot sends no commit. It needs privacy.realtime_audio_unaddressed and "
         "audio_gate: server_gates (without the opt-in robot turns run). Until barge-in and "
         "server-created answers land, the robot still asks for the answer once the transcript "
-        "came. A change needs the admin",
-        restart=True,
+        "came. Applies at once; a change needs the admin",
         admin_only=True,
     )
     server_gates: list[Literal["music", "other_speaker", "at_face", "facing"]] = param(
@@ -3775,8 +3774,10 @@ class RealtimeRouteConfig(Strict):
         "while the robot sleeps, whatever this says. music: not while music plays; "
         "other_speaker: not another known person right after the one heard last "
         "(voice.fastpath.addressed_window_s); at_face: the voice comes from a visible face; "
-        "facing: that face looks at the robot (voice.facing). An empty list streams every "
-        "segment the VAD hears while awake. A change needs the admin",
+        "facing: that face looks at the robot (voice.facing). A listed gate whose detector is "
+        "off (music.enabled, voice.direction.enabled, voice.facing.enabled) keeps every "
+        "segment local. An empty list streams every segment the VAD hears while awake. A "
+        "change needs the admin",
         admin_only=True,
     )
     server_gate_hold_ms: float = param(

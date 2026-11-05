@@ -215,6 +215,12 @@ def server_turns(cfg: RoboEmotConfig) -> bool:
     return turns_fallback(cfg) is None and rt.turns == "server" and rt.input == "audio"
 
 
+def close_samples(rate_hz: int, cfg: RoboEmotConfig) -> int:
+    """The samples of a stream's closing silence (``close_silence_ms`` at ``rate_hz``): the
+    zeros sent and the budget kept for them are the same count."""
+    return round(rate_hz * cfg.voice.realtime_route.close_silence_ms / MS_PER_S)
+
+
 def turns_fallback(cfg: RoboEmotConfig) -> str | None:
     """Why ``turns: server`` (with ``input: audio``) runs as robot turns, None when it does
     not: the ``privacy.realtime_audio_unaddressed`` opt-in is off (``NO_UNADDRESSED``)."""
@@ -1382,7 +1388,7 @@ class RealtimeRoute:
                 why = "no_opt_in"
             elif server_turns(cfg):
                 why = "turns"  # the server ends the turns: audio only streams (stream_audio)
-            elif rt.audio_gate != gate:
+            elif rt.audio_gate not in (gate, STREAM_GATE):  # robot turns run: either gate
                 why = "gate"
             elif self._uploaded() + seconds > rt.daily_upload_budget_s:
                 why = "upload_budget"
@@ -1427,6 +1433,7 @@ class RealtimeRoute:
         closing: bool = False,
         hold: Callable[[], str | None] = lambda: None,
         track: Callable[[int], None] | None = None,
+        generation: int | None = None,
     ) -> str | None:
         """Send one piece of a live stream (``turns: server``, SPEC 8 and 12): PCM16 at
         ``voice.sample_rate_hz`` in appends of at most half the message cap, never a commit
@@ -1440,20 +1447,25 @@ class RealtimeRoute:
         (``instructions`` given) goes first with a ``session.update`` carrying them, is refused
         while a realtime turn is in flight (``turn``) and keeps ``close_silence_ms`` of the
         budget in reserve, so the stream's closing silence always fits; ``track(generation)``
-        runs with it. The day's count is saved with the opening and the closing piece. None
-        when it was queued, else the reason it was refused (nothing sent)."""
+        runs with it. A later piece names its stream's session (``generation``): on another
+        one (a reconnect between pieces) it is refused ``no_session``. The day's count is saved
+        with the opening and the closing piece. None when it was queued, else the reason it was
+        refused (nothing sent)."""
 
         def piece(cfg: RoboEmotConfig) -> tuple[str | None, Any]:
             rt = cfg.voice.realtime_route
             client = self._client
             if client is None or client.state != "connected":
                 return "no_session", None
+            if generation is not None and generation != self.generation:
+                return "no_session", None  # the stream's session is gone: not on a new one
             if not self._fits(cfg, client):
                 self._counts["sends_refused"] += 1
                 return "refused", self._detach()
-            seconds = len(pcm) / PCM_SAMPLE_BYTES / cfg.voice.sample_rate_hz
+            rate = cfg.voice.sample_rate_hz
+            seconds = len(pcm) / PCM_SAMPLE_BYTES / rate
             opening = instructions is not None
-            reserve = rt.close_silence_ms / MS_PER_S if not closing else 0.0
+            reserve = 0.0 if closing else close_samples(rate, cfg) / rate
             if not server_turns(cfg):
                 why: str | None = turns_fallback(cfg) or "turns"
             elif not cfg.privacy.realtime_audio:
@@ -1502,6 +1514,12 @@ class RealtimeRoute:
         elif why is not None:
             self._count("stream_pieces_refused")
         return why
+
+    def save_upload(self) -> None:
+        """Save the day's upload seconds now (a stream cut or revoked part way)."""
+        with self._lock:
+            day, seconds = self._upload_day, self._upload_s
+        self._save_upload(day, seconds)
 
     def _uploaded(self) -> float:
         """Seconds of audio sent today (``_lock`` held). Only a later date starts from zero: a
