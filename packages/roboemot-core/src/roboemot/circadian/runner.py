@@ -50,6 +50,10 @@ frames arrive on their own threads between updates, so the handler checks the qu
 not restart the idle clock (see :mod:`.nap`). Each start and wake is a decision event (``nap``:
 ``start``, ``face``, ``speech``, ``light``, ``motion``, ``loud``) and the debug report counts the
 wakes by reason.
+
+After a stimulus wake with no face, addressed speech or conversation since, the next nap needs
+only ``circadian.nap_resume_after_s`` of idle time after the wake hold (owner decision
+2026-11-05); the debug report counts those naps in ``resumes``.
 """
 
 from __future__ import annotations
@@ -345,7 +349,10 @@ class CircadianRunner:
             self.cfg = cfg
             self._set_timezone(cfg)
             after, before = cfg.circadian.nap_after_s, was.nap_after_s
-            if after is not None and (before is None or after < before):
+            lowered = cfg.circadian.nap_resume_after_s < was.nap_resume_after_s
+            if after is not None and (
+                before is None or after < before or (lowered and self.nap.resuming)
+            ):
                 self.nap.restart(self.clock.monotonic())  # never a nap from a stale clock
             if not was.enabled and cfg.circadian.enabled:
                 self.nap.restart(self.clock.monotonic())
@@ -455,6 +462,7 @@ class CircadianRunner:
             started = self.nap.step(
                 t,
                 after_s=c.nap_after_s,
+                resume_after_s=c.nap_resume_after_s,
                 quiet=in_window(hour, c.quiet_hours),
                 blocked=self._nap_blocked(dt, engaged),  # engaged holds off, never wakes
                 held=c.presence_keeps_awake and self.present(),
@@ -514,6 +522,9 @@ class CircadianRunner:
                     "idle_s": round(self.nap.idle_s, 1),  # as of the last update
                     "naps": self.nap.naps,
                     "wakes": dict(self.nap.wakes),
+                    "resume_after_s": c.nap_resume_after_s,
+                    "resuming": self.nap.resuming,
+                    "resumes": self.nap.resumes,
                 },
                 "present": self.present(),
                 "hold": None if hold is None else {"state": hold[0], "left_s": round(hold[1], 1)},

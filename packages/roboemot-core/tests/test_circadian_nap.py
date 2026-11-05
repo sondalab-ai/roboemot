@@ -11,7 +11,7 @@ import pytest
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
 from roboemot.circadian.replay import RecordingSink, ReplayClock
-from roboemot.config import ConfigStack
+from roboemot.config import ConfigError, ConfigStack
 from roboemot.reflex.engine import SoundLoud
 from roboemot.vision.scene_motion import ScenePercept
 
@@ -598,3 +598,143 @@ def test_a_loud_sound_during_the_robots_own_motion_does_not_wake_the_nap():
     reflexes.settle_audio(2.0)  # still again, past the tail
     reflexes.engine.offer_audio_level(LOUD, reflexes.t)
     woke(x, "loud")
+
+
+# ------------------------------------------------- resume after a stimulus wake (2026-11-05)
+
+
+def test_the_resume_default_is_a_few_minutes_and_valid_for_every_nap_after_s():
+    assert config().circadian.nap_resume_after_s == 180.0
+    assert config(nap_after_s=300.0).circadian.nap_resume_after_s < 300.0
+
+
+@pytest.mark.parametrize("resume", [300.0, 600.0])
+def test_the_resume_must_be_below_nap_after_s(resume):
+    with pytest.raises(ConfigError, match="nap_resume_after_s"):
+        config(nap_after_s=300.0, nap_resume_after_s=resume)
+    assert config(nap_after_s=None, nap_resume_after_s=resume).circadian.nap_after_s is None
+
+
+@pytest.mark.parametrize("name", sorted(STIMULI))
+def test_a_stimulus_wake_with_nobody_following_naps_again_after_the_resume_time(name):
+    """2026-11-05: a loud onset woke a nap with nobody in the room and the robot stayed awake for
+    the full nap_after_s. The idle clock counts from the end of the wake hold, as for activity."""
+    x = napping(rig())
+    STIMULI[name](x)
+    woke(x, name)
+    c = x.cfg.circadian
+    assert set(run(x, c.wake_hold_s + c.nap_resume_after_s - 3 * STEP)) == {"awake"}
+    run(x, 5 * STEP)
+    assert x.r.model.state == "resting" and x.r.model.reason == "nap"
+    snap = x.r.snapshot()["nap"]
+    assert snap["naps"] == 2 and snap["resumes"] == 1
+    assert snap["resume_after_s"] == c.nap_resume_after_s
+    assert x.events[-1] == ("nap", "start")
+
+
+def test_a_light_wake_with_nobody_following_also_resumes_soon():
+    x = napping_lit(rig())
+    past_grace(x)
+    lit(x, x.cfg.light.confirm_s + 2 * STEP, BRIGHT)
+    assert x.r.model.state == "awake" and x.events[-1] == ("nap", "light")
+    c = x.cfg.circadian
+    assert set(lit(x, c.wake_hold_s + c.nap_resume_after_s - 3 * STEP, BRIGHT)) == {"awake"}
+    lit(x, 5 * STEP, BRIGHT)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
+
+
+def confirmed_face(x) -> None:
+    """Two sightings from two frames one second apart: a confirmed face."""
+    face(x, stamp=x.clock.t)
+    x.clock.advance(1.0)
+    face(x, stamp=x.clock.t)
+
+
+@pytest.mark.parametrize("person", ["face", "speech", "conversation"])
+def test_a_person_after_the_stimulus_wake_brings_back_nap_after_s(person):
+    talking = [False]
+    x = napping(rig(conversing=lambda: talking[0]))
+    loud(x)
+    woke(x, "loud")
+    run(x, 6 * STEP)  # inside the wake hold
+    if person == "face":
+        confirmed_face(x)
+    elif person == "speech":
+        say(x, addressed=True)
+    else:
+        talking[0] = True
+        run(x, STEP)
+        talking[0] = False
+    held = x.r.model.hold_remaining()
+    assert held is not None
+    assert "resting" not in run(x, held[1] + x.cfg.circadian.nap_after_s - 3 * STEP)
+    run(x, x.cfg.circadian.presence_window_s + 5 * STEP)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 0
+
+
+def test_a_face_during_the_resume_idle_time_brings_back_nap_after_s():
+    x = napping(rig())
+    motion(x)
+    woke(x, "motion")
+    c = x.cfg.circadian
+    run(x, c.wake_hold_s + c.nap_resume_after_s / 2)
+    assert x.r.model.state == "awake"
+    confirmed_face(x)
+    assert "resting" not in run(x, c.nap_after_s - 3 * STEP)
+    run(x, c.presence_window_s + 5 * STEP)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 0
+
+
+@pytest.mark.parametrize("call", [lambda r: r.wake(), lambda r: r.hold("awake", 10)])
+def test_a_wake_or_hold_from_outside_after_a_stimulus_wake_brings_back_nap_after_s(call):
+    x = napping(rig())
+    loud(x)
+    woke(x, "loud")
+    call(x.r)
+    run(x, STEP)
+    held = x.r.model.hold_remaining()[1]
+    assert "resting" not in run(x, held + x.cfg.circadian.nap_after_s - 3 * STEP)
+
+
+def test_the_night_ends_a_pending_resume():
+    """A stimulus wake shortly before the quiet hours, the resume time not yet over at 22:30:
+    the next morning uses nap_after_s (the idle time before 22:30 still counts, as always)."""
+    x = napping(rig(hour=21.75, nap_resume_after_s=900.0))
+    loud(x)
+    woke(x, "loud")
+    while x.clock.hour() < 7.0 or x.clock.hour() > 22.0:
+        run(x, 60, step=60)
+    assert "resting" not in run(x, x.cfg.circadian.nap_resume_after_s)
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    assert x.r.snapshot()["nap"]["resumes"] == 0
+
+
+def test_repeated_loud_onsets_never_loop_faster_than_the_resume_time():
+    """A loud onset every two minutes for two hours: each wake holds the robot awake for
+    wake_hold_s, then it naps again after nap_resume_after_s; never a tight wake/nap loop."""
+    x = napping(rig())
+    c = x.cfg.circadian
+    starts = [x.r.nap.started]
+    for _ in range(60):
+        loud(x)
+        run(x, 120)
+        if x.r.nap.started != starts[-1]:
+            starts.append(x.r.nap.started)
+    assert len(starts) >= 5
+    for a, b in zip(starts, starts[1:], strict=False):
+        assert b - a >= c.wake_hold_s + c.nap_resume_after_s
+    snap = x.r.snapshot()["nap"]
+    assert snap["naps"] == len(starts) and snap["resumes"] == len(starts) - 1
+
+
+def test_lowering_the_resume_time_while_resuming_never_fires_from_a_stale_clock():
+    x = napping(rig(nap_resume_after_s=900.0))
+    loud(x)
+    woke(x, "loud")
+    c = x.cfg.circadian
+    run(x, c.wake_hold_s + 600)
+    x.r.apply_config(config(nap_resume_after_s=300.0))
+    assert "resting" not in run(x, 300 - 3 * STEP)
+    run(x, 5 * STEP)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1

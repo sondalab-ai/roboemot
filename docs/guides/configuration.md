@@ -477,6 +477,7 @@ robot still answers in every state, only more quietly.
 | `circadian.presence_window_s` | `60.0` | s, 1 to 3600 | People seen, recognised or attended to within this time count as present. |
 | `circadian.wake_hold_s` | `300.0` | s, 10 to 3600 | How long the wake word keeps a resting robot awake. |
 | `circadian.nap_after_s` | `1800.0` | s, 300 to 86400, or `null` | Day nap: with no face in view and no speech addressed to the robot for this long, outside quiet hours, the robot rests (reason `nap`) until a face or addressed speech wakes it for `wake_hold_s`. A television does not count. Only time outside quiet hours adds up. `null` turns naps off. |
+| `circadian.nap_resume_after_s` | `180.0` | s, 60 to 3600, below `nap_after_s` | After a nap that a light, motion or a loud sound ended, with no face, addressed speech or conversation since, the robot naps again after this much idle time (counted from the end of `wake_hold_s`) instead of `nap_after_s`. |
 | `circadian.peak_hour` | `15.0` | h, 0 to 24 | Hour of the day at which alertness peaks. |
 | `circadian.drowsy_threshold` | `0.55` | 0 to 1 | Sleepiness above which the robot is drowsy. |
 | `circadian.resting_threshold` | `0.75` | 0 to 1 | Sleepiness above which the robot rests. |

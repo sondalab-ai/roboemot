@@ -15,6 +15,13 @@ owner decision 2026-11-03). A stimulus only ends a nap in progress: while awake 
 idle clock alone, because none of them is a person engaging with the robot (a television's bang,
 a car passing the window, clouds, the robot's own moves), and a busy room would otherwise never
 let it nap. ``wakes`` counts the wakes by reason for the debug report.
+
+After a stimulus wake the next nap comes sooner (owner decision 2026-11-05): it needs only
+``resume_after_s`` (``circadian.nap_resume_after_s``) of idle time instead of ``after_s``, counted
+like the other from the end of the wake hold, unless a person follows: activity (a confirmed face,
+addressed speech, a conversation) or a wake or hold from outside brings back ``after_s``. The
+quiet hours and naps off end the pending resume too, so the next day starts with the full idle
+time. Presence still holds a due resumed nap off. ``resumes`` counts the naps started this way.
 """
 
 from __future__ import annotations
@@ -31,6 +38,8 @@ class DayNap:
         self.idle_s = 0.0
         self.started: float | None = None  # time the nap in progress started
         self.wakes = dict.fromkeys(WAKE_REASONS, 0)  # count by reason, for the debug report
+        self.resumes = 0  # naps started after resume_after_s, for the debug report
+        self.resuming = False  # the last wake was a stimulus and no person has followed
         self._last: float | None = None  # last counted time; None while paused or not started
         self._face: tuple[float, float] | None = None  # (clock time, frame stamp) of a face
 
@@ -49,6 +58,7 @@ class DayNap:
         or ``speech``): the clock restarts. Returns whether a nap was in progress (the caller
         wakes the robot); that wake is counted under ``reason``."""
         self.restart(t)
+        self.resuming = False
         woke, self.napping = self.napping, False
         if woke:
             self.wakes[reason] += 1
@@ -56,21 +66,36 @@ class DayNap:
 
     def stimulus(self, t: float, reason: str) -> bool:
         """The light rising, motion or a loud sound at ``t`` (``reason``): ends a nap in progress
-        like activity and returns True; while awake it does nothing (module docstring)."""
-        return self.napping and self.activity(t, reason)
+        like activity, arms the resume and returns True; while awake it does nothing (module
+        docstring)."""
+        if not (self.napping and self.activity(t, reason)):
+            return False
+        self.resuming = True
+        return True
 
     def cancel(self, t: float) -> None:
         """A wake or a hold from outside (the app, the web UI): no nap, the clock restarts."""
-        self.napping = False
+        self.napping = self.resuming = False
         self.restart(t)
 
     def step(
-        self, t: float, *, after_s: float | None, quiet: bool, blocked: bool, held: bool
+        self,
+        t: float,
+        *,
+        after_s: float | None,
+        resume_after_s: float,
+        quiet: bool,
+        blocked: bool,
+        held: bool,
     ) -> bool:
         """One update at ``t``. Returns whether a nap starts now.
 
-        ``after_s`` is ``circadian.nap_after_s`` (None: naps off), ``quiet`` the quiet hours,
-        ``blocked`` a reason no nap is possible now, ``held`` presence that holds one off."""
+        ``after_s`` is ``circadian.nap_after_s`` (None: naps off), ``resume_after_s``
+        ``circadian.nap_resume_after_s`` (used after a stimulus wake), ``quiet`` the quiet hours,
+        ``blocked`` a reason no nap is possible now (the clock restarts, a pending resume stays:
+        the wake hold blocks), ``held`` presence that holds one off."""
+        if quiet or after_s is None:
+            self.resuming = False  # the night or naps off: the next nap needs after_s again
         if self.napping:
             if quiet or after_s is None:
                 self.napping = False  # quiet hours rest the robot anyway; null: naps off now
@@ -85,9 +110,11 @@ class DayNap:
         if self._last is not None:
             self.idle_s += max(0.0, t - self._last)
         self._last = t
-        if self.idle_s < after_s or held:
+        if self.idle_s < (resume_after_s if self.resuming else after_s) or held:
             return False
         self.napping = True
         self.naps += 1
+        self.resumes += self.resuming
+        self.resuming = False
         self.started = t
         return True
