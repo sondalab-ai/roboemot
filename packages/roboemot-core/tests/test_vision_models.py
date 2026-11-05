@@ -450,6 +450,17 @@ def test_a_missing_vittrack_keeps_the_object_stage_and_says_why(monkeypatch, tmp
     assert onnx.load_stages(tmp_path, off, appearance=False).object_tracker is None
 
 
+def test_an_opencv_without_trackervit_keeps_the_object_stage(monkeypatch, tmp_path):
+    """OpenCV before 4.9 has no TrackerVit: the real VitTracker says so, nothing else drops."""
+    cv2 = pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, _ = _optional_stage_rig(monkeypatch, tmp_path, None)
+    monkeypatch.delattr(cv2, "TrackerVit_Params")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
+    assert (stages.object_detector, stages.appearance_embedder) == ("nanodet", "dino")
+    assert stages.object_tracker is None and "TrackerVit" in stages.object_track_unavailable
+
+
 def test_the_vittrack_entry_is_pinned_to_a_commit():
     spec = load_manifest()["vittrack"]
     (file,) = spec.files
