@@ -53,7 +53,8 @@ wakes by reason.
 
 After a stimulus wake with no face, addressed speech or conversation since, the next nap needs
 only ``circadian.nap_resume_after_s`` of idle time after the wake hold (owner decision
-2026-11-05); the debug report counts those naps in ``resumes``.
+2026-11-05); the end of a platform sleep and a rest of the rhythm's own drop that, as activity
+does. The debug report counts those naps in ``resumes``.
 """
 
 from __future__ import annotations
@@ -241,6 +242,7 @@ class CircadianRunner:
         with self._lock:
             self._asleep = False
             self.nap.restart(self.clock.monotonic())
+            self.nap.disarm()  # the next nap needs nap_after_s again
 
     def _on_target(self, msg: Message) -> None:
         if msg.payload is not None:
@@ -477,6 +479,8 @@ class CircadianRunner:
                 presence_active=self.present(),
                 nap=self.nap.napping,
             )
+            if st.state == "resting" and self.model.reason == "sleepiness":
+                self.nap.disarm()  # the rhythm's own rest: the next nap needs nap_after_s again
             changed = st.state != prev or self._applied is None
             if changed and self.affect is not None:
                 self.affect.set_circadian(self.model.effects())

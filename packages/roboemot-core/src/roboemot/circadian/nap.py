@@ -21,7 +21,9 @@ After a stimulus wake the next nap comes sooner (owner decision 2026-11-05): it 
 like the other from the end of the wake hold, unless a person follows: activity (a confirmed face,
 addressed speech, a conversation) or a wake or hold from outside brings back ``after_s``. The
 quiet hours and naps off end the pending resume too, so the next day starts with the full idle
-time. Presence still holds a due resumed nap off. ``resumes`` counts the naps started this way.
+time, and so do the end of a platform sleep and a rest of the rhythm's own (the caller's
+:meth:`disarm`). Presence and attention on a person hold a due resumed nap off but keep the resume
+armed (owner decision 2026-11-05). ``resumes`` counts the naps started this way.
 """
 
 from __future__ import annotations
@@ -73,6 +75,11 @@ class DayNap:
         self.resuming = True
         return True
 
+    def disarm(self) -> None:
+        """The next nap needs the full ``after_s`` again (a platform sleep ended, the rhythm's
+        own rest): a pending resume is dropped; the idle clock is left alone."""
+        self.resuming = False
+
     def cancel(self, t: float) -> None:
         """A wake or a hold from outside (the app, the web UI): no nap, the clock restarts."""
         self.napping = self.resuming = False
@@ -114,7 +121,8 @@ class DayNap:
             return False
         self.napping = True
         self.naps += 1
-        self.resumes += self.resuming
-        self.resuming = False
+        if self.resuming:
+            self.resumes += 1
+            self.resuming = False
         self.started = t
         return True

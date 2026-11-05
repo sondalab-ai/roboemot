@@ -738,3 +738,79 @@ def test_lowering_the_resume_time_while_resuming_never_fires_from_a_stale_clock(
     assert "resting" not in run(x, 300 - 3 * STEP)
     run(x, 5 * STEP)
     assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
+
+
+def stimulus_woken(x) -> SimpleNamespace:
+    """A nap, then a loud onset ends it: a resume is pending."""
+    napping(x)
+    loud(x)
+    woke(x, "loud")
+    assert x.r.snapshot()["nap"]["resuming"] is True
+    return x
+
+
+def full_idle_time_again(x) -> None:
+    """The next nap is not a resumed one: none within nap_after_s - nap_resume_after_s of now
+    (well past the resume time; the clock may have started a few ticks ago)."""
+    c = x.cfg.circadian
+    assert "resting" not in run(x, c.nap_after_s - c.nap_resume_after_s)
+    while x.r.model.reason != "nap":
+        run(x, STEP)
+    assert x.r.snapshot()["nap"]["resumes"] == 0
+
+
+def test_the_end_of_a_platform_sleep_ends_a_pending_resume():
+    x = stimulus_woken(rig())
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    run(x, 3600)
+    x.bus.publish("robot.awake", None, x.clock.t)
+    assert x.r.snapshot()["nap"]["resuming"] is False
+    full_idle_time_again(x)
+
+
+def test_a_rest_of_the_rhythms_own_ends_a_pending_resume():
+    x = stimulus_woken(rig(hour=15.0, peak_hour=3.0, initial_sleep_pressure=0.0))
+    x.r.model.s = 1.0  # sleep pressure up: the rhythm rests the robot after the wake hold
+    while x.r.model.reason != "sleepiness":
+        run(x, STEP)
+    assert x.r.snapshot()["nap"]["resuming"] is False
+    x.r.model.s = 0.0
+    while x.r.model.state == "resting":
+        run(x, STEP)
+    full_idle_time_again(x)
+
+
+def test_turning_naps_off_ends_a_pending_resume():
+    x = stimulus_woken(rig())
+    x.r.apply_config(config(nap_after_s=None))
+    run(x, STEP)
+    assert x.r.snapshot()["nap"]["resuming"] is False
+    x.r.apply_config(config())
+    run(x, x.cfg.circadian.wake_hold_s)
+    full_idle_time_again(x)
+
+
+def test_presence_holds_a_due_resumed_nap_off_until_it_ends():
+    x = stimulus_woken(rig())
+    c = x.cfg.circadian
+    run(x, c.wake_hold_s + c.nap_resume_after_s - 3 * STEP)
+    face(x)  # one sighting: presence for the window, not activity
+    assert set(run(x, c.presence_window_s - STEP)) == {"awake"}
+    assert x.r.snapshot()["nap"]["resuming"] is True
+    run(x, 3 * STEP)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
+
+
+def test_attention_on_a_person_keeps_a_pending_resume_armed():
+    """Owner decision 2026-11-05: attention (and an unconfirmed face) holds a nap off but does
+    not bring back nap_after_s."""
+    engaged = [False]
+    x = stimulus_woken(rig(engaged=lambda: engaged[0]))
+    c = x.cfg.circadian
+    engaged[0] = True
+    assert set(run(x, c.wake_hold_s + 2 * c.nap_resume_after_s)) == {"awake"}
+    assert x.r.snapshot()["nap"]["resuming"] is True
+    engaged[0] = False
+    assert set(run(x, c.nap_resume_after_s - 3 * STEP)) == {"awake"}
+    run(x, 5 * STEP)
+    assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
