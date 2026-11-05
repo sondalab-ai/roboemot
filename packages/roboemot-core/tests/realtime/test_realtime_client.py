@@ -307,7 +307,7 @@ def test_closing_a_connecting_client_never_hangs_the_connect():
         auth_headers=dict,
     )
 
-    async def hang(update):
+    async def hang(update, fallback=None):
         await asyncio.Event().wait()
 
     client._connect = hang  # type: ignore[method-assign]

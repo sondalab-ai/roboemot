@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import copy
 import datetime as dt
 import importlib.util
 import itertools
@@ -118,6 +119,7 @@ UPLOAD_FILE_MODE = 0o600  # the day's upload seconds (data folder)
 PENDING_CALLS = "function_call_output_pending"
 # events that carry no data (send_control): everything else goes through the send gate
 CONTROL_EVENTS = (protocol.RESPONSE_CANCEL, protocol.ITEM_DELETE, protocol.ITEM_TRUNCATE)
+HINTED_KEPT = 16  # hinted session.update events a refusal can still name (a few per turn)
 
 
 class _Token:
@@ -168,14 +170,17 @@ def select_provider(cfg: RoboEmotConfig, robot_id: str, manifest: Any) -> Sessio
     return provider
 
 
-def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> dict[str, Any]:
+def session_update(
+    cfg: RoboEmotConfig, instructions: str, tools: Any = None, hint: str | None = None
+) -> dict[str, Any]:
     """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate (null at
     the native 16 kHz, which Pollen's server requires) and out at the server's own, the voice,
     server VAD that never answers or interrupts on its own and ends a turn after
     ``server_silence_ms``, with ``input: audio`` the input transcription's language
-    (``transcription_language``, else ``conversation.language``) and model (left out when
-    empty), and the tools (left as they are when None). The route and the realtime check
-    (``realtime.check``) send the same one."""
+    (``transcription_language``, else ``conversation.language``), model (left out when empty)
+    and ``hint`` as its ``prompt`` (the robot's name, :meth:`RealtimeRoute.hint`; left out when
+    None), and the tools (left as they are when None). The route and the realtime check
+    (``realtime.check``, no hint) send the same one."""
     rt, vad = cfg.voice.realtime_route, cfg.voice.vad
     audio = rt.input == "audio"
     return protocol.session_update(
@@ -194,7 +199,26 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
         if audio
         else None,
         transcription_model=(rt.transcription_model or None) if audio else None,
+        transcription_prompt=hint if audio else None,
     )
+
+
+def has_hint(update: dict[str, Any]) -> bool:
+    """Whether a ``session.update`` carries the transcription hint (``prompt``)."""
+    audio = update.get("session", {}).get("audio", {})
+    return "prompt" in audio.get("input", {}).get("transcription", {})
+
+
+def without_hint(update: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``update`` without the transcription hint and without its ``event_id`` (the
+    resend gets an id of its own); the transcription object goes when nothing else is in it."""
+    out = copy.deepcopy(update)
+    out.pop("event_id", None)
+    audio_in = out["session"]["audio"]["input"]
+    audio_in["transcription"].pop("prompt", None)
+    if not audio_in["transcription"]:
+        del audio_in["transcription"]
+    return out
 
 
 def streak_delay(n: int, policy: Any) -> float:
@@ -279,6 +303,16 @@ class RealtimeRoute:
         self._retry_thread: threading.Thread | None = None  # the last worker (tests join it)
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.base_instructions: Callable[[], str] = lambda: ""
+        # the robot's name as the wake word resolves it, sanitised and capped ('' without one):
+        # the transcription hint (``voice.realtime_route.transcription_name_hint``, SPEC 8)
+        self.transcription_name: Callable[[], str] = lambda: ""
+        # the route whose server refused the hint: it is not sent to that route again
+        self._hint_refused: LLMRoute | None = None
+        # hinted session.update events of this session by event id -> the same without the hint
+        # (a refusal that names one is resent without it); a leaf lock, as session_update also
+        # runs under _lock (the audio burst)
+        self._hinted: collections.OrderedDict[str, dict[str, Any]] = collections.OrderedDict()
+        self._hint_lock = threading.Lock()
         # the function tools the current session was last given (session.update), by name: the
         # instructions carry a tool's rule only while the session holds the tool (SPEC 8)
         self.tools_offered: frozenset[str] = frozenset()
@@ -514,6 +548,8 @@ class RealtimeRoute:
         client, token = self._client, self._token
         self._client = self._token = None
         self._outputs.clear()  # their errors would come from a client that no longer counts
+        with self._hint_lock:
+            self._hinted.clear()
         if token is None:
             return client, []
         token.detached = True
@@ -580,13 +616,17 @@ class RealtimeRoute:
                 self._connecting, self._connecting_token = client, token
                 self.state, self.reason = "connecting", None
             self.tools_offered = frozenset()  # a new session holds no tool
-            update = self.session_update(cfg, self.base_instructions())
+            update = session_update(cfg, self.base_instructions(), hint=self.hint(cfg))
+            # a server that refuses the hinted update gets this one instead (the client resends)
+            fallback = {"fallback": without_hint(update)} if has_hint(update) else {}
             try:
-                ok = client.connect(update)
+                ok = client.connect(update, **fallback)
             finally:
                 with self._lock:
                     self._connecting = self._connecting_token = None
             snap = client.snapshot()
+            if fallback:
+                self._hint_at_connect(route, snap, ok)
             if not ok:  # the client's close hook already reported the failure
                 with self._lock:
                     self._client_snapshot = snap
@@ -676,12 +716,55 @@ class RealtimeRoute:
         box.append(client)
         return client
 
-    def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
-        """``session.update`` for this route (:func:`session_update`); with ``tools`` it records
-        their names (``tools_offered``), None leaves the session's tools as they are."""
+    def session_update(
+        self, cfg: RoboEmotConfig, instructions: str, tools: Any = None, name: str | None = None
+    ) -> Any:
+        """``session.update`` for this route (:func:`session_update`) with the transcription
+        hint (:meth:`hint`; ``name``: the robot's name read beforehand, None reads it now); with
+        ``tools`` it records their names (``tools_offered``), None leaves the session's tools as
+        they are. A hinted update gets the route's own ``event_id``, kept with its unhinted
+        copy, so a refusal that names it is resent without the hint (``_error``)."""
         if tools is not None:
             self.tools_offered = frozenset(t["name"] for t in tools)
-        return session_update(cfg, instructions, tools)
+        update = session_update(cfg, instructions, tools, self.hint(cfg, name))
+        if has_hint(update):
+            event_id = f"{EVENT_PREFIX}{next(self._events)}"
+            update["event_id"] = event_id
+            with self._hint_lock:
+                self._hinted[event_id] = without_hint(update)
+                while len(self._hinted) > HINTED_KEPT:
+                    self._hinted.popitem(last=False)
+        return update
+
+    def hint(self, cfg: RoboEmotConfig, name: str | None = None) -> str | None:
+        """The transcription hint: the robot's name alone (``transcription_name``, the wake
+        word's resolution, or ``name`` when given), with ``input: audio`` and
+        ``transcription_name_hint`` on; None without a name (the generic wake phrases only) or
+        once this route's server refused it. The name alone is a valid prompt for every
+        transcription model: a keyword list for whisper-1, free text for gpt-4o-transcribe,
+        and no sentence in one language biases the transcript of another."""
+        rt = cfg.voice.realtime_route
+        if not rt.transcription_name_hint or rt.input != "audio":
+            return None
+        route = self.route(cfg)
+        if route is None or route == self._hint_refused:
+            return None
+        return (self.transcription_name() if name is None else name) or None
+
+    def _hint_at_connect(self, route: LLMRoute, snap: dict[str, Any], ok: bool) -> None:
+        """Count the hint of a connect's ``session.update`` (sent once it left); a session that
+        came up only after the client resent it without the hint (``update_fallback``) means
+        the server refuses the hint: it is not sent to this route again (SPEC 8)."""
+        refused = ok and bool(snap.get("update_fallback"))
+        with self._lock:
+            if snap.get("sent", 0) > 0:
+                self._counts["hint_sent"] += 1
+            if refused:
+                self._counts["hint_refused"] += 1
+                self._hint_refused = route
+        if refused:
+            log.warning("realtime: the server refused the transcription hint; sent without it")
+            self.events("session", "hint_refused", at="connect")
 
     def _set_state(self, state: str, reason: str | None) -> None:
         with self._lock:
@@ -1040,11 +1123,22 @@ class RealtimeRoute:
         (``function_call_output_pending``, also one whose request is no longer tracked) and an
         error about a settling tool result (``send_output``: the call may still be open) reset
         the session (``pending_call_resets``, the reset streak's backoff applies): the server
-        would refuse every later response on it."""
+        would refuse every later response on it. An error that names a hinted
+        ``session.update`` of the current session (``session_update``) means the server refuses
+        the transcription hint: that update is resent once without it and the route sends no
+        hint again (``hint_refused``)."""
         with self._lock:
             if not self._current(token):
                 self._counts["stale_callbacks"] += 1
                 return
+            unhinted = None
+            if (token is None or token is self._token) and self._client is not None:
+                # (the connecting client resends its own update: connect's fallback)
+                with self._hint_lock:
+                    unhinted = self._hinted.pop(event.event_id or "", None)
+                if unhinted is not None:
+                    self._counts["hint_refused"] += 1
+                    self._hint_refused = self._client.route
             tok = token or self._token
             req = next(
                 (r for r in self._pending if r.event_id == event.event_id and r.token is tok),
@@ -1060,6 +1154,11 @@ class RealtimeRoute:
                 # marked before the run hears the error: its fallback cue then names the reset
                 self.last_reset = ("pending_calls", self.clock())
         self.events("session", "server_error", code=event.code, request=req is not None)
+        if unhinted is not None:
+            log.warning("realtime: the server refused the transcription hint; resent without it")
+            self.events("session", "hint_refused", at="update")
+            self._gated(unhinted)  # once: the route sends no hint from now on
+            return
         if req is None:
             self._count("outputs_refused" if output else "errors_unrelated")
         else:
@@ -1192,6 +1291,8 @@ class RealtimeRoute:
                 return False, self._detach()
             if track is not None:
                 track()
+            if event.get("type") == protocol.SESSION_UPDATE and has_hint(event):
+                self._counts["hint_sent"] += 1
             client.send(event)  # only queued on the client's loop: never blocks
             return True, None
 
@@ -1239,6 +1340,7 @@ class RealtimeRoute:
         only leaf locks) or ``refused`` (the session no longer fits: closed). ``track(generation)``
         runs with the send, under this lock: the session the burst goes to (the audio input
         reads where that session's input buffer ends in the same step, under its own lock)."""
+        name = self.transcription_name()  # read before the lock: it may ask the platform
 
         def burst(cfg: RoboEmotConfig) -> tuple[str | None, Any]:
             rt = cfg.voice.realtime_route
@@ -1269,7 +1371,10 @@ class RealtimeRoute:
             self._upload_s += seconds
             if track is not None:
                 track(self.generation)
-            client.send(self.session_update(cfg, instructions))  # only queued: never blocks
+            update = self.session_update(cfg, instructions, name=name)
+            if has_hint(update):
+                self._counts["hint_sent"] += 1
+            client.send(update)  # only queued: never blocks
             step = (
                 rt.max_message_bytes // APPEND_SHARE_OF_CAP // PCM_SAMPLE_BYTES * PCM_SAMPLE_BYTES
             )
@@ -1473,6 +1578,10 @@ class RealtimeRoute:
                 # an unreadable count is "spent": shown as the budget (the report is JSON)
                 "upload_s_today": min(self._uploaded(), rt.daily_upload_budget_s),
                 "upload_budget_s": rt.daily_upload_budget_s,
+                "transcription_hint": {
+                    "sent": counts.get("hint_sent", 0),
+                    "refused": counts.get("hint_refused", 0),
+                },
                 "latency_ms": {
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),
                     "transcript": summarise(list(self._transcript_ms), LATENCY_LEVELS),

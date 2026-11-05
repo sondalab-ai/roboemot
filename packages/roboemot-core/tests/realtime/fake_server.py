@@ -16,6 +16,10 @@
 - ``stop_reading``: after ``session.updated`` the server stops reading the socket;
 - ``redirect``: the handshake is answered with 302 to ``redirect_to``.
 
+``refuse_prompt``: a ``session.update`` whose input transcription carries a ``prompt`` is
+answered with an ``error`` (``unknown_parameter``; its ``event_id`` names the update unless
+``echo_error_id`` is off) instead of ``session.updated``, as a server without the field would.
+
 ``delete_reply`` answers ``conversation.item.delete``: ``none`` (the default: nothing),
 ``deleted`` (``conversation.item.deleted`` naming the item) or ``error`` (an ``error`` echoing
 the delete's ``event_id``, its message quoting the request).
@@ -60,7 +64,10 @@ class FakeServer:
         redirect_to: str = "",
         oversize_bytes: int = 0,
         delete_reply: str = "none",
+        refuse_prompt: bool = False,
+        echo_error_id: bool = True,
     ) -> None:
+        self.refuse_prompt, self.echo_error_id = refuse_prompt, echo_error_id
         self.mode, self.host, self.redirect_to = mode, host, redirect_to
         self.delete_reply = delete_reply
         self.oversize_bytes = oversize_bytes
@@ -149,6 +156,14 @@ class FakeServer:
 
     async def _on_session_update(self, ws: ServerConnection, event: dict[str, Any]) -> None:
         if self.mode == "no_session":
+            return
+        audio_in = event.get("session", {}).get("audio", {}).get("input", {})
+        if self.refuse_prompt and "prompt" in audio_in.get("transcription", {}):
+            error = {"type": "invalid_request_error", "code": "unknown_parameter"}
+            error["message"] = ERROR_MESSAGE
+            if self.echo_error_id:
+                error["event_id"] = event.get("event_id")
+            await self._send(ws, {"type": "error", "error": error})
             return
         if self.mode == "error_first":
             await self._send(

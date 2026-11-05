@@ -163,6 +163,7 @@ class RealtimeClient:
         self._server_error: tuple[str | None, str | None] = (None, None)
         self._sent_types: collections.OrderedDict[str, str] = collections.OrderedDict()
         self._platform_id_sent = False  # the last allocation request carried the identifier
+        self._update_fallback = False  # the session came up on connect's fallback update
         self.state = "idle"
         self.reason: str | None = None
         self._counts: collections.Counter[str] = collections.Counter()
@@ -212,13 +213,18 @@ class RealtimeClient:
             done.set_result(False)
             return done
 
-    def connect(self, session_update: dict[str, Any]) -> bool:
+    def connect(
+        self, session_update: dict[str, Any], fallback: dict[str, Any] | None = None
+    ) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
         client thread). False on any failure, with ``reason`` set to a code. The wait is bounded
         by ``connect_timeout_s`` (plus ``send_timeout_s`` for the socket's own close): a close
-        from another thread stops the loop, and the connect's future would never resolve."""
+        from another thread stops the loop, and the connect's future would never resolve.
+        ``fallback``: the update sent once, on the same socket, when the server answers the first
+        with an ``error`` (the only event sent yet, so the error is about it); the snapshot's
+        ``update_fallback`` says it was sent."""
         self.start()
-        future = self._submit(self._connect(session_update))
+        future = self._submit(self._connect(session_update, fallback))
         s = self.settings
         try:
             return bool(future.result(s.connect_timeout_s + s.send_timeout_s))
@@ -270,6 +276,7 @@ class RealtimeClient:
                 "local": target.local if target else None,
                 "key_sent": target.send_key if target else False,
                 "platform_id_sent": self._platform_id_sent,
+                "update_fallback": self._update_fallback,
                 "key_hosts": list(self.provider.key_hosts),
                 "failures": dict(self._failures),
                 "malformed": dict(self._malformed),
@@ -314,11 +321,14 @@ class RealtimeClient:
         value = self._auth_headers().get(AUTH_HEADER)
         return {AUTH_HEADER: value} if value else {}
 
-    async def _connect(self, session_update: dict[str, Any]) -> bool:
+    async def _connect(
+        self, session_update: dict[str, Any], fallback: dict[str, Any] | None = None
+    ) -> bool:
         await self._close(None)
         with self._lock:
             self.state, self.reason, self._target = "connecting", None, None
             self._refused_host = None
+            self._update_fallback = False
             self._server_error = (None, None)
             self._sent_types.clear()
             self._counts["connects"] += 1
@@ -334,11 +344,8 @@ class RealtimeClient:
                     raise _SessionRefused("pseudonyms")
                 if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
                     raise _SessionRefused("reconfigured")
-                update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **session_update}
-                self._note_sent(update)
-                await ws.send(protocol.encode(update))
-                self._count("sent")
-                await self._await_session(ws)
+                await self._send_update(ws, session_update)
+                await self._await_session(ws, fallback)
         except _KeyUnavailable:
             log.warning("realtime route %s: its key is not available", self.route.name)
             self._fail("key_unavailable")
@@ -420,13 +427,39 @@ class RealtimeClient:
             logger=WIRE_LOG,
         )
 
-    async def _await_session(self, ws: ClientConnection) -> None:
-        """Read until ``session.updated``; a server error before it refuses the session."""
+    async def _send_update(self, ws: ClientConnection, update: dict[str, Any]) -> None:
+        """Send a connect's ``session.update``, with an ``event_id`` of the client's own unless
+        it carries one."""
+        update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **update}
+        self._note_sent(update)
+        await ws.send(protocol.encode(update))
+        self._count("sent")
+
+    async def _await_session(
+        self, ws: ClientConnection, fallback: dict[str, Any] | None = None
+    ) -> None:
+        """Read until ``session.updated``; a server error before it refuses the session, unless
+        a ``fallback`` update is left: that one is sent (once, through the owner's gate again)
+        and the wait goes on."""
         while True:
             event = self._parse(await ws.recv())
             self._deliver(event)
             if event.type == protocol.SESSION_UPDATED:
                 return
+            if isinstance(event, protocol.ServerError) and fallback is not None:
+                if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
+                    raise _SessionRefused("reconfigured")
+                log.info(
+                    "realtime route %s: server error %s on session.update; sent again without "
+                    "the optional fields",
+                    self.route.name,
+                    event.code,
+                )
+                await self._send_update(ws, fallback)
+                fallback = None
+                with self._lock:
+                    self._update_fallback = True
+                continue
             if isinstance(event, protocol.ServerError):
                 log.warning(
                     "realtime route %s: server error %s about %s",
