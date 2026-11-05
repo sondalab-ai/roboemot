@@ -35,6 +35,17 @@ together, from the measured pose, once each one's pose has stayed inside ``still
 anchor for the grace (the loop checks the motors first; off means asleep); a unit that yielded on
 its own resumes on its own. The recent events, with the largest tick gap and the overruns of the
 confirming run, stay in the debug report.
+
+**Unreachable target** (robot run 2026-11-05: the rest posture drove the head into the body, the
+loop yielded, resumed after the grace and pushed again, every ~6.8 s all night). A unit that
+diverges again within ``repeat_window_s`` of its resume, on the same joint, toward the same arbiter
+target and stopped at the same place (both within ``same_target_*``), repeats; after
+``unreachable_repeats`` repeats it holds: it writes the measured pose once (the platform's goal
+leaves the obstacle), then nothing, and never resumes on a timer. It takes control back when the
+blocked joint's target moves further than ``same_target_*`` from the blocked one (never while the
+watchdog holds: that target is transient). The blocked record stays: the same target coming back
+is held at its first divergence. A hold is not external control (``yielding``); the other units
+resume as usual. Motors off forgets it all.
 """
 
 from __future__ import annotations
@@ -68,6 +79,25 @@ class Unit:
     yield_t: float = 0.0  # when it started yielding
     still_since: float | None = None
     anchor: dict[str, float] | None = None
+    holding: bool = False  # yielding because its target cannot be reached (no resume on a timer)
+    resumed_t: float | None = None
+    last_stop: Stop | None = None  # its own last divergence
+    blocked: Stop | None = None  # the last target found unreachable
+    repeats: int = 0
+    progress: float = 0.0  # furthest the joint of last_stop went past it toward its target
+
+
+@dataclass(frozen=True)
+class Stop:
+    """Where a joint stopped short of (or away from) the arbiter target it was driven to."""
+
+    joint: str
+    target: float
+    measured: float
+
+    def past(self, value: float) -> float:
+        """How far ``value`` lies beyond the stop, toward the target (negative: back)."""
+        return math.copysign(1.0, self.target - self.measured) * (value - self.measured)
 
 
 def yield_units(dofs: dict[str, Dof], constraints: list[Constraint]) -> list[Unit]:
@@ -134,6 +164,8 @@ class ExternalControl:
         self.rate_hz = rate_hz
         self._kind = {n: "m" if d.kind == "translation" else "rad" for n, d in dofs.items()}
         self.events = 0
+        self.unreachable = 0
+        self.unreachable_last: dict[str, Any] | None = None
         self.recent: deque[dict[str, Any]] = deque(maxlen=cfg.recent_events)
         self.held: frozenset[str] = frozenset()
         self._last_tick: float | None = None
@@ -169,6 +201,9 @@ class ExternalControl:
         self._band = {
             n: cfg.still_band_m if k == "m" else cfg.still_band_rad for n, k in self._kind.items()
         }
+        self._same = {
+            n: cfg.same_target_m if k == "m" else cfg.same_target_rad for n, k in self._kind.items()
+        }
         self._drift = {n: band / size for n, band in self._band.items()}  # per tick: "moving"
         older = size + math.ceil(cfg.max_state_age_s * self.rate_hz)
         for name in self._kind:  # resized, keeping the commands and where the path came from
@@ -190,7 +225,9 @@ class ExternalControl:
 
     @property
     def yielding(self) -> bool:
-        return bool(self.held)
+        """External control: a unit yields to something else (a hold on an unreachable target
+        does not count, its dofs are still in ``held``)."""
+        return any(u.yielding and not u.holding for u in self.units)
 
     def reset(self, measured: dict[str, float]) -> None:
         """The loop re-aligned to the measured pose: commands start from there."""
@@ -204,6 +241,8 @@ class ExternalControl:
         """Motors off: asleep, nothing yields (the loop writes nothing anyway)."""
         for unit in self.units:
             unit.yielding, unit.run, unit.still_since, unit.anchor = False, 0, None, None
+            unit.holding, unit.resumed_t, unit.last_stop, unit.blocked = False, None, None, None
+            unit.repeats, unit.progress = 0, 0.0
         for window in self._windows.values():
             window.reset(None)
         self._update_held()
@@ -229,12 +268,21 @@ class ExternalControl:
             if window is not None and name not in self.held:
                 window.push(value)
 
-    def judge(self, now: float, measured: dict[str, float], overruns: int) -> list[Unit]:
-        """Compare a new sample with the windowed commands; returns the units that yield now."""
+    def judge(
+        self,
+        now: float,
+        measured: dict[str, float],
+        overruns: int,
+        goal: dict[str, float] | None = None,
+    ) -> list[Unit]:
+        """Compare a new sample with the windowed commands; returns the units that yield now.
+        ``goal`` is the arbiter's target this tick (before the fade and the limiter): a
+        divergence toward a target found unreachable makes its unit hold (module docstring)."""
         started: list[Unit] = []
         for unit in self.units:
             if unit.yielding:
                 continue
+            self._track(unit, measured)
             worst = self._worst(unit, now, measured)
             if worst is None:
                 unit.run = 0
@@ -254,6 +302,10 @@ class ExternalControl:
                 for each in [unit, *[u for u in others if u is not unit]]:
                     self._start_yield(each, now, measured)
                     started.append(each)
+                    if each is not unit:
+                        each.last_stop = None  # it yielded for another unit: no repeat of its own
+                target = (goal or {}).get(joint)
+                held = target is not None and self._repeat(unit, now, joint, target, measured)
                 self.events += 1
                 self.recent.append(
                     {
@@ -262,6 +314,9 @@ class ExternalControl:
                         "joint": joint,
                         "error": error,
                         "tolerance": tolerance,
+                        "target": target,
+                        "measured": measured[joint],
+                        "unreachable": held,
                         "samples": unit.run,
                         "run_s": run_s,
                         "max_gap_s": unit.run_gap_s,
@@ -270,6 +325,57 @@ class ExternalControl:
                 )
                 unit.run = 0
         return started
+
+    def _repeat(
+        self, unit: Unit, now: float, joint: str, target: float, measured: dict[str, float]
+    ) -> bool:
+        """Record ``unit``'s divergence; True when it now holds on an unreachable target. A
+        repeat never got past its previous stop since the resume: a hand that moves a head
+        which had reached its target is no repeat, wherever it leaves it."""
+        stop = Stop(joint, target, measured[joint])
+        recent = unit.resumed_t is not None and now - unit.resumed_t <= self.cfg.repeat_window_s
+        stuck = unit.progress <= self._same[joint]
+        known = self._same_stop(unit.blocked, stop)
+        if known or (recent and stuck and self._same_stop(unit.last_stop, stop)):
+            unit.repeats += 1
+        else:
+            unit.repeats = 0
+        unit.last_stop, unit.progress = stop, 0.0
+        if not known and unit.repeats < self.cfg.unreachable_repeats:
+            return False
+        unit.holding, unit.blocked, unit.repeats = True, stop, 0
+        self.unreachable += 1
+        self.unreachable_last = {
+            "t": now,
+            "group": unit.name,
+            "joint": joint,
+            "target": target,
+            "measured": stop.measured,
+        }
+        return True
+
+    def _track(self, unit: Unit, measured: dict[str, float]) -> None:
+        """While written: how far the joint of the last stop got past it; a blocked target the
+        joint got past by more than ``same_target_*`` was reachable after all and is dropped."""
+        last = unit.last_stop
+        if last is not None and last.joint in measured:
+            unit.progress = max(unit.progress, last.past(measured[last.joint]))
+        stop = unit.blocked
+        if (
+            stop is not None
+            and stop.joint in measured
+            and stop.past(measured[stop.joint]) > self._same[stop.joint]
+        ):
+            unit.blocked = None
+
+    def _same_stop(self, a: Stop | None, b: Stop) -> bool:
+        same = self._same[b.joint]
+        return (
+            a is not None
+            and a.joint == b.joint
+            and abs(a.target - b.target) <= same
+            and abs(a.measured - b.measured) <= same
+        )
 
     def _worst(
         self, unit: Unit, now: float, measured: dict[str, float]
@@ -363,14 +469,29 @@ class ExternalControl:
                 unit.still_since = now
         ready: list[Unit] = []
         for unit in yielding:
+            if unit.holding:
+                continue  # never on a timer: it waits for a new target (``release``)
             peers = [v for v in yielding if abs(v.yield_t - unit.yield_t) <= grace_s]
             starts = [v.still_since for v in peers]
             if None not in starts and now - max(s for s in starts if s is not None) >= grace_s:
                 ready.append(unit)
         return ready
 
-    def resume(self, unit: Unit, measured: dict[str, float]) -> None:
+    def release(self, goal: dict[str, float]) -> list[Unit]:
+        """The holding units whose blocked joint's target moved further than ``same_target_*``
+        from the blocked one: they may take control back."""
+        return [
+            u
+            for u in self.units
+            if u.holding
+            and (stop := u.blocked) is not None
+            and stop.joint in goal
+            and abs(goal[stop.joint] - stop.target) > self._same[stop.joint]
+        ]
+
+    def resume(self, unit: Unit, measured: dict[str, float], now: float | None = None) -> None:
         unit.yielding, unit.still_since, unit.anchor, unit.run = False, None, None, 0
+        unit.holding, unit.resumed_t = False, now
         for name in unit.dofs:
             self._windows[name].reset(measured.get(name))
             self._ref[name] = None
@@ -379,7 +500,7 @@ class ExternalControl:
     # ---- report (SPEC 12A)
 
     def snapshot(self, now: float) -> dict[str, object]:
-        yielding = [u for u in self.units if u.yielding]
+        yielding = [u for u in self.units if u.yielding and not u.holding]
         still = [now - u.still_since for u in yielding if u.still_since is not None]
         return {
             "external": bool(yielding),
@@ -396,4 +517,7 @@ class ExternalControl:
             "external_peak_speed_m_s": self.peak["speed_m"],
             "external_last_event": dict(self.recent[-1]) if self.recent else None,
             "external_recent_events": [dict(e) for e in self.recent],
+            "unreachable": self.unreachable,
+            "unreachable_held": sorted(u.name for u in self.units if u.holding),
+            "unreachable_last": dict(self.unreachable_last) if self.unreachable_last else None,
         }

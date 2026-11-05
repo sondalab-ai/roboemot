@@ -185,6 +185,10 @@ PRs:
    - Pass: the modes card shows "Pisolino", "Riposo" or "Assonnato" to match the state.
    - Pass: the status line agrees with the modes badge.
    - Source: `/api/live` `modes.rest`.
+5. **Rest posture and the head (unreachable-target rule).** During a day nap and at night (quiet hours), watch the head and the `roboemot.motion` section of the debug report. On 2026-11-05 the old rest pitch (20 degrees) drove the head into the body every ~6.8 s all night. The rest pitch is now 3 degrees, not yet checked on the hardware.
+   - Pass: the head lowers a little and stays still. It never knocks on the body.
+   - Pass: `external_events` does not grow while the robot rests, and `motion.unreachable` stays 0.
+   - If `unreachable` is above 0, the head met something: send `unreachable_last` (joint, target, measured) and the last `external_recent_events` (they now carry `target` and `measured`). Pass then: one push at most per rest-target change, then `unreachable_held` names the head and the head stays still. A wake or a face to look at moves the head again.
 
 ## G. Music and the wake word (PR 184: slices 181 and 183)
 

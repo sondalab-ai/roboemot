@@ -458,6 +458,22 @@ fallback caps above.
 
 The stop keyword, the soft stop and the hard stop work in every state, asleep or awake.
 
+**A pose the robot cannot reach** (SPEC 12A, External control). When the robot's measured pose
+stops following the commands, the motion loop lets go for a while (a hand on the head, the
+platform's own go-to-sleep) and takes control back once the pose has been still for
+`motion.platform_move_grace_s`. If it then drives the same joint toward the same target and
+stops at the same place again, something blocks it (the head meets the body). The loop then
+holds where the joint stopped and does not try again until that joint's target changes (a wake,
+a face to look at, another rest pose). The debug report counts it in `roboemot.motion`
+`unreachable`, with the joint, the target and where the joint stopped in `unreachable_last`.
+
+| Key | Default | Unit, range | Safe direction | What it does |
+| --- | --- | --- | --- | --- |
+| `motion.external.repeat_window_s` | `5.0` | s, 0.5 to 60 | higher | A second stop at the same place this soon after taking control back is a repeat. |
+| `motion.external.same_target_rad` | `0.05` | rad, 0.005 to 0.5 | none | Two targets, or two stops, closer than this are the same; a held joint resumes when its target moves further than this. |
+| `motion.external.same_target_m` | `0.005` | m, 0.0005 to 0.05 | none | The same for translations. |
+| `motion.external.unreachable_repeats` | `1` | 1 to 10 | lower | Repeats before the loop holds. |
+
 ## 5. Circadian rhythm, quiet hours and presence
 
 SPEC 7A.

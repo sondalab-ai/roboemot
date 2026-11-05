@@ -1106,6 +1106,35 @@ class ExternalControlConfig(Strict):
         "The same for translations",
         unit="m", ge=0.0005, le=0.05,
     )  # fmt: skip
+    repeat_window_s: float = param(
+        5.0,
+        "Unreachable target: a unit that diverges again within this time after it resumed, on "
+        "the same joint, toward the same target and stopped at the same place (within "
+        "same_target_*), repeats its divergence: something it cannot pass (the body) blocks "
+        "the target. Longer than the time a resumed push takes to be caught (the travel, plus "
+        "lag_window_s + max_state_age_s + confirm_s)",
+        unit="s", ge=0.5, le=60.0, conservative="higher",
+    )  # fmt: skip
+    same_target_rad: float = param(
+        0.05,
+        "Unreachable target: two angular targets, or two measured stops, closer than this are "
+        "the same; a held unit takes control back once its blocked joint's target moves "
+        "further than this from the blocked one",
+        unit="rad", ge=0.005, le=0.5,
+    )  # fmt: skip
+    same_target_m: float = param(
+        0.005,
+        "The same for translations",
+        unit="m", ge=0.0005, le=0.05,
+    )  # fmt: skip
+    unreachable_repeats: int = param(
+        1,
+        "Unreachable target: after this many repeats in a row the unit holds where it stopped "
+        "(it writes that pose once, then nothing) until the blocked joint's target changes, "
+        "instead of resuming toward it after the grace. The same target coming back later is "
+        "held at its first divergence",
+        ge=1, le=10, conservative="lower",
+    )  # fmt: skip
 
 
 class MotionConfig(Strict):

@@ -37,7 +37,9 @@ period meanwhile (``driver.status_period_s``) and once more before resuming. A u
 the measured pose, once its pose has been still for ``motion.platform_move_grace_s`` with the
 motors on (that grace must outlast the platform's delay before it switches the motors off after a
 sleep move, plus one status period); motors off at any point means asleep. A hand pushing the
-head is the same: the loop yields and resumes after it settles.
+head is the same: the loop yields and resumes after it settles. A target the robot cannot reach
+(the head meets the body) diverges again right after the resume: the unit then holds where it
+stopped until its target changes (``external`` module docstring, Unreachable target).
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, MotionCore
-from .external import ExternalControl
+from .external import ExternalControl, Unit
 from .state import MeasuredPair, MotionSample, MotionState
 
 MS_PER_S = 1000.0
@@ -255,6 +257,7 @@ class MotionLoop:
             if not failed:
                 self._hook_error = None
             out = self.core.tick(now, dt)
+            goal = self.core.arbiter.goal  # the arbiter's target this tick, before the fade
             held = ext.held
             targets = {k: v for k, v in out.items() if k not in held} if held else out
             if targets:
@@ -265,12 +268,13 @@ class MotionLoop:
                 self._measured = (last_t, last, now, measured)  # one store: readers see a pair
                 if held:
                     self._follow(measured, held)
-                    self._watch_external(now, measured)
-                started = ext.judge(now, measured, self.overruns)
+                    self._watch_external(now, measured, goal)
+                started = ext.judge(now, measured, self.overruns, goal)
                 if started:
                     self._follow(measured, ext.held)
                     names = ", ".join(u.name for u in started)
                     log.info("motion: external control of the robot detected (%s), yielding", names)
+                    self._hold_where_stopped(now, measured, [u for u in started if u.holding])
             ext.push(out)
             self.ticks += 1
             self._tick_stamp = now
@@ -291,19 +295,43 @@ class MotionLoop:
         self.core.limiter.reset(state)
         self.core.arbiter.last = {**self.core.arbiter.last, **state}
 
-    def _watch_external(self, now: float, measured: dict[str, float]) -> None:
-        """Resume the yield units that have been still for the grace, after one more look at
-        the motor status (the cached one: the platform may have switched them off since)."""
+    def _watch_external(
+        self, now: float, measured: dict[str, float], goal: dict[str, float]
+    ) -> None:
+        """Resume the yield units that have been still for the grace, and the units held on an
+        unreachable target whose target changed (not while the watchdog holds: its target is
+        transient), after one more look at the motor status (the cached one: the platform may
+        have switched them off since)."""
         ready = self.external_ctl.watch(now, measured, self.platform_move_grace_s)
+        if not self.core.holding:
+            ready += self.external_ctl.release(goal)
         if not ready:
             return
         if self._call(self.driver.motors_enabled) is False:
             self._motors_now(False)
             return
         for unit in ready:
-            self.external_ctl.resume(unit, measured)
+            self.external_ctl.resume(unit, measured, now)
             self._follow(measured, frozenset(unit.dofs))
-            log.info("motion: %s still, resuming control", unit.name)
+            log.info("motion: %s resuming control", unit.name)
+
+    def _hold_where_stopped(
+        self, now: float, measured: dict[str, float], units: list[Unit]
+    ) -> None:
+        """Write the measured pose once for units that hold on an unreachable target: a
+        position-controlled platform keeps its last goal, which would press on the obstacle
+        all night (SPEC 12: more conservative than not writing)."""
+        pose = {k: measured[k] for u in units for k in u.dofs if k in measured}
+        if not pose:
+            return
+        self._call(self.driver.write_pose_targets, now, pose)
+        for unit in units:
+            if (stop := unit.blocked) is None:
+                continue
+            log.warning(
+                "motion: %s cannot reach %s = %.3f (stopped at %.3f), holding until it changes",
+                unit.name, stop.joint, stop.target, stop.measured,
+            )  # fmt: skip
 
     def _motors_now(self, enabled: bool) -> None:
         """Track the motor state the platform reports (caller holds the lock)."""

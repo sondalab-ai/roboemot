@@ -173,7 +173,7 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
         assert wait_for(lambda: rested(commanded, min_pitch), timeout=10), commanded
         rest_pose = dict(commanded)
         assert wait_for(lambda: states()[-1] == "awake" and len(spans) >= 3, timeout=45), states()
-        assert wait_for(lambda: commanded["head.pitch"] < 0.1, timeout=10)  # posture let go of
+        assert wait_for(lambda: commanded["head.pitch"] < min_pitch, timeout=10)  # let go of
         wall = time.monotonic() - started
         feed_log = list(fed)
     finally:
