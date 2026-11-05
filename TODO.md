@@ -172,6 +172,13 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       Candidates: spectral subtraction with a noise profile per motion state, the playback signal as an
       echo reference for all consumers (not only barge-in), or a small learned denoiser. Measure the CPU on
       the CM4 first (SPEC 8, 10, 12; no audio is stored).
+- [ ] Resume a day nap sooner after a stimulus wake (owner, 2026-11-05, approved). When a nap ends on
+      `loud`, `light` or `motion`, and no face, presence or addressed speech follows, the robot naps again
+      after a short idle time, not after the full `circadian.nap_after_s` (1800 s), as any creature in
+      the dark would.
+      Add a config field, for example `circadian.nap_resume_after_s`, of a few minutes, used only after a
+      stimulus wake. A wake by a face, by speech or by quiet hours keeps the full idle time.
+      Count it in `nap.resumes` (SPEC 7A, Day nap; 11A).
 - [ ] `reflexes.rules` and `soothe.variants` show as keyed lists in the settings catalogue but are not in
       `KEYED_LISTS` (`config/stack.py`), so every layer replaces them whole (found in CV-14, 2026-11-03).
 - [ ] Startle on the robot under load: the audio hub gives the reflex only the newest chunk of a pass, so a
