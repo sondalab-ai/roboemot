@@ -161,6 +161,17 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] The bot should sleep during the day after long inactivity (keep it accurate) (CV-16, PR 158: `circadian.nap_after_s`)
 - [x] When the robot is alone, it should stop moving around, only if there is someone on the. view field or a sound should resume (subtle movement are expected though) (CV-16, PR 158: `world.scan.alone_after_s`)
 - [ ] Test mirror neural net
+- [ ] Teach the robot its own noise and remove it from the incoming sound (owner, 2026-11-05). Learn a
+      profile of the robot's self-noise: fan, motors and servo whine per motion speed, and its own playback
+      (soothe hums, cues, speech). Then subtract or gate it in the mic channel before the VAD, the loud-onset
+      and new-voice reflexes, the nap wakes, the music detector and the realtime upload.
+      Why: on 2026-11-05 a day nap ended on `nap.wakes.loud` with nobody in the room, and `startle-loud`
+      fired 244 times in about 7 h. Self-noise is a suspect.
+      Today only partial guards exist: the barge-in echo reference, the reflex `motion` and `own_speech`
+      gates, and holding the soothe hum while someone speaks.
+      Candidates: spectral subtraction with a noise profile per motion state, the playback signal as an
+      echo reference for all consumers (not only barge-in), or a small learned denoiser. Measure the CPU on
+      the CM4 first (SPEC 8, 10, 12; no audio is stored).
 - [ ] `reflexes.rules` and `soothe.variants` show as keyed lists in the settings catalogue but are not in
       `KEYED_LISTS` (`config/stack.py`), so every layer replaces them whole (found in CV-14, 2026-11-03).
 - [ ] Startle on the robot under load: the audio hub gives the reflex only the newest chunk of a pass, so a
