@@ -29,11 +29,16 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    left alone for that run.
    The appearance embedding (DINOv2-S, about 1.1 s on the CM4, inline on this thread) runs only
    when it adds information (``_entity_reason``, SPEC 5, 13): never for a kind and category no
-   record holds and auto-enrollment does not collect; once for a new track, with a burst of
-   votes only while an active record of its kind could match it (again when such records
-   change); then at ``rates.appearance_hz`` for a recognised track, and for an unknown one only
-   when its detector box changed size or shape, after a missed object run, or after
-   ``entity_reembed_floor_s``. ``stats`` counts runs and skips by reason (``entity_embeds``).
+   record holds and auto-enrollment does not collect; once for a new track, but only after it
+   has lived ``entity_embed_min_age_s`` since its first detection (a cluttered room churns
+   short tracks), with a burst of votes only while an active record of its kind could match it
+   (again when such records change); then at ``rates.appearance_hz`` for a recognised track,
+   and for an unknown one only when its detector box changed size or shape, after a missed
+   object run, or after ``entity_reembed_floor_s``. During a shown-object episode
+   (``governor.active("objects")``, SPEC 5A) only the shown track, taken as the confirmed track
+   nearest the frame centre (``_shown_track``), may embed, and only the votes that can
+   recognise it: the gaze follows it without a freeze per run, and the others wait for the
+   episode's end. ``stats`` counts runs and skips by reason (``entity_embeds``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -101,7 +106,7 @@ from ..world import FrameSpec, Observation
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
-from .object_crop import CropSchedule
+from .object_crop import CropSchedule, off_centre
 from .object_gate import ObjectGate
 from .scene_motion import SceneMotionWatch, ScenePercept
 from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
@@ -168,8 +173,9 @@ NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR = (
     "floor",
 )
 NO_CONSUMER, SPACING, SETTLED, BUDGET = "no_consumer", "spacing", "settled", "budget"
+YOUNG, EPISODE = "young", "episode"
 EMBED_RUNS = (NEW, BURST, RECOGNISED, CHANGED, REACQUIRED, FLOOR)
-EMBED_SKIPS = (NO_CONSUMER, SPACING, SETTLED, BUDGET)
+EMBED_SKIPS = (NO_CONSUMER, EPISODE, YOUNG, SPACING, SETTLED, BUDGET)
 EntityKey = tuple[str, str]  # (kind, readable category)
 
 
@@ -283,6 +289,7 @@ class VisionPipeline:
         self._entity_embeds = 0
         self._object_runs = 0
         self._records: _Records | None = None
+        self._shown_id: int | None = None  # the track taken as the shown thing in an episode
         self._embed_runs = dict.fromkeys(EMBED_RUNS, 0)
         self._embed_skips = dict.fromkeys(EMBED_SKIPS, 0)
         self._report_lock = threading.Lock()
@@ -389,6 +396,7 @@ class VisionPipeline:
         self._faces.clear()
         self._entities.clear()
         self._object_visible = []
+        self._shown_id = None
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
@@ -836,11 +844,13 @@ class VisionPipeline:
         consumers = self._entity_consumers() if self.appearance_embedder is not None else None
         if consumers is not None:
             self._follow_records(consumers.records)
+        shown = self._shown_track(result.visible, width, height, episode)
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
             key = (kinds[track.label], self.display_name(track.label))
-            self._evaluate_entity(frame, track, states[track.track_id], key, consumers)
+            role = track.track_id == shown if episode else None
+            self._evaluate_entity(frame, track, states[track.track_id], key, consumers, role)
         for track in result.visible:
             state = states[track.track_id]
             x1, y1, x2, y2 = track.box
@@ -858,6 +868,23 @@ class VisionPipeline:
                 extent_rad=_extent(camera, track.box),
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
+
+    def _shown_track(
+        self, visible: list[Track], width: int, height: int, episode: bool
+    ) -> int | None:
+        """The track taken as the shown thing during a look at it (SPEC 5, 5A); None outside one
+        or while no confirmed track is in view. Attention names a world entry, not a track, so
+        this is a proxy: the head follows the shown thing, so it is the confirmed track nearest
+        the frame centre (as the look-down crop picks it). The choice is kept while that track
+        lives, so a thing passing the centre does not take its place, and made again only once
+        it is gone."""
+        if not episode:
+            self._shown_id = None
+            return None
+        if self._shown_id not in self._entities:
+            near = min(visible, key=lambda t: off_centre(t.box, width, height), default=None)
+            self._shown_id = None if near is None else near.track_id
+        return self._shown_id
 
     def _follow_aside(self, aside: list[Track]) -> None:
         """A crop run did not look at the tracks left outside the crop: they were not missed,
@@ -932,9 +959,11 @@ class VisionPipeline:
         state: _EntityState,
         key: EntityKey,
         consumers: _Consumers | None,
+        shown: bool | None = None,
     ) -> None:
         """Embed the track when ``_entity_reason`` says it is due and the frame's entity budget
-        allows; count the run or the skip by reason for the debug report."""
+        allows; count the run or the skip by reason for the debug report. ``shown`` is None
+        outside a shown-object episode, else whether this is the track taken as the shown one."""
         run = self._object_runs
         if state.last_run and run - state.last_run > 1:
             state.reacquired = True
@@ -943,7 +972,7 @@ class VisionPipeline:
             return
         if track.score < self.cfg.object_score_min:  # a weak box is no evidence of identity
             return
-        due, reason = self._entity_reason(track, state, frame.stamp, key, consumers)
+        due, reason = self._entity_reason(track, state, frame.stamp, key, consumers, shown)
         if due and self._entity_budget <= 0:
             due, reason = False, BUDGET
         with self._report_lock:
@@ -981,26 +1010,43 @@ class VisionPipeline:
         return track.detection.box if track.detection is not None else track.box
 
     def _entity_reason(
-        self, track: Track, state: _EntityState, stamp: float, key: EntityKey, c: _Consumers
+        self,
+        track: Track,
+        state: _EntityState,
+        stamp: float,
+        key: EntityKey,
+        c: _Consumers,
+        shown: bool | None = None,
     ) -> tuple[bool, str]:
         """Whether an animal or object track is due for an embedding, and why (SPEC 5, 13).
 
-        Nothing uses the embedding of a kind and category that no record holds and
-        auto-enrollment does not collect: skipped. A new track is embedded once; it gets a burst
-        of votes only while an active record of its kind could match it (again after a re-embed
-        of an unknown track, or when such records change). After that a recognised track keeps
-        ``rates.appearance_hz``; an unknown one is embedded again only when its box changed size
-        or shape, when it was out of sight for an object run, or after ``entity_reembed_floor_s``.
+        Checked in this order. Nothing uses the embedding of a kind and category that no record
+        holds and auto-enrollment does not collect: skipped (``no_consumer``). During a
+        shown-object episode (``shown`` not None) every track but the shown one is skipped
+        (``episode``). A new track is embedded once, but only after ``entity_embed_min_age_s``
+        of capture time since its first detection (tentative ones included), else ``young``; it
+        gets a burst of votes only while an active record of its kind could match it (again
+        after a re-embed of an unknown track, or when such records change). During an episode
+        the shown track runs only those votes; anything else is ``episode``. After that a
+        recognised track keeps ``rates.appearance_hz``; an unknown one is embedded again only
+        when its box changed size or shape, when it was out of sight for an object run, or after
+        ``entity_reembed_floor_s``.
         """
         cfg = self.cfg
         if not c.wants(key):
             return False, NO_CONSUMER
+        if shown is False:
+            return False, EPISODE
         if state.last_embed is None:
+            if stamp - track.first_stamp < cfg.entity_embed_min_age_s - EPSILON_S:
+                return False, YOUNG
             return True, NEW
         gap = stamp - state.last_embed
         if state.owner_id is None and c.votes(key) and state.votes < cfg.embedding_burst:
             burst_gap = self.governor.stretch(cfg.entity_burst_min_gap_s, CONVERSATION)
             return (True, BURST) if gap >= burst_gap - EPSILON_S else (False, SPACING)
+        if shown:
+            return False, EPISODE
         if gap < self.governor.period("appearance"):
             return False, SPACING
         if state.owner_id is not None:

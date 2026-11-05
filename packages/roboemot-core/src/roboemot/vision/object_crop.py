@@ -145,7 +145,7 @@ def crop_for(
     return _square((min(lefts), min(tops), max(rights), max(bottoms)), width, height, cfg)
 
 
-def _off_centre(box: Box, width: int, height: int) -> float:
+def off_centre(box: Box, width: int, height: int) -> float:
     """Distance in pixels from the centre of ``box`` to the centre of the frame."""
     x1, y1, x2, y2 = box
     return math.hypot((x1 + x2 - width) / 2, (y1 + y2 - height) / 2)
@@ -159,7 +159,7 @@ def crop_around_thing(
     above ``full_frame_share``."""
     if not things:
         return None
-    x1, y1, x2, y2 = min(things, key=lambda box: _off_centre(box, width, height))
+    x1, y1, x2, y2 = min(things, key=lambda box: off_centre(box, width, height))
     pad = cfg.shown_margin_heights * (y2 - y1)
     return _square((x1 - pad, y1 - pad, x2 + pad, y2 + pad), width, height, cfg)
 

@@ -860,7 +860,9 @@ def entity_rig(tmp_path, dets, *, record=None, world=None, **update):
 
 
 def test_a_weak_object_hit_runs_no_entity_embedding(tmp_path):
-    pipe, app = entity_rig(tmp_path, [cup(0.8)], record="active")  # a burst stays open
+    pipe, app = entity_rig(  # a burst stays open; embedded at the first confirmed sighting
+        tmp_path, [cup(0.8)], record="active", entity_embed_min_age_s=0.0
+    )
     got = []
     pipe.bus.subscribe("percept.entity", got.append)
     for stamp in (0.0, 1.0):
@@ -907,7 +909,7 @@ def test_entities_have_their_own_embed_budget_and_never_take_the_faces_share(tmp
 
 def test_a_crowd_of_entities_takes_turns_oldest_embedding_first(tmp_path):
     pipe, app = entity_rig(tmp_path, crowd(6))
-    for i in range(8):
+    for i in range(int(CFG.vision.entity_embed_min_age_s) + 6):
         pipe.process(Frame(image(i), float(i)))
     first_six = app.boxes[:6]
     assert len(set(first_six)) == 6, "a track was embedded twice before every track had a turn"
@@ -965,7 +967,7 @@ def test_unconfirmed_object_tracks_publish_nothing_and_cost_no_embedding(tmp_pat
 
 
 def test_object_confirm_hits_one_publishes_at_the_first_sighting(tmp_path):
-    pipe, app = entity_rig(tmp_path, crowd(1), object_confirm_hits=1)
+    pipe, app = entity_rig(tmp_path, crowd(1), object_confirm_hits=1, entity_embed_min_age_s=0.0)
     pipe.process(Frame(image(0), 0.0))
     assert len(app.boxes) == 1 and len(pipe._entities) == 1
 

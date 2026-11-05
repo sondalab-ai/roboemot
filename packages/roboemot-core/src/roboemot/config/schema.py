@@ -2295,6 +2295,15 @@ class VisionConfig(Strict):
         ge=1,
         le=16,
     )
+    entity_embed_min_age_s: float = param(
+        3.0,
+        "An animal or object track gets its first appearance embedding (DINOv2-S, about 1.1 s "
+        "on the CM4) only once this much capture time has passed since its first detection, "
+        "so short-lived tracks of a cluttered room cost none; 0 embeds at once",
+        unit="s",
+        ge=0,
+        le=60,
+    )
     entity_burst_min_gap_s: float = param(
         1.0,
         "Minimum capture-time gap between two burst evaluations of one animal or object track",
