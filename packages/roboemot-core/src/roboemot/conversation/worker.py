@@ -228,7 +228,8 @@ class _Turn:
     rt_tones: dict[str, str] = field(default_factory=dict)  # the round's note_tone call results
     server: Any = None  # server turns: the _ServerTurn whose server-created response it follows
     rt_hold: bool = False  # it holds the audio input (from its first response.create)
-    messages: list[dict[str, Any]] | None = None  # its history entry, once written (_finish)
+    # its history entry, once written (_finish)
+    messages: list[dict[str, Any]] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -241,6 +242,7 @@ class _ServerTurn:
     offer: Any
     turn: _Turn | None = None
     words: list[Utterance] = field(default_factory=list, repr=False)
+    adopted: bool = False  # its run follows the response: else it is released (stopped)
 
 
 @dataclass
@@ -353,8 +355,13 @@ class ConversationWorker:
         # utterances whose stream no server turn took yet; the skills, choices and conversation
         # state the last stream's opening offered (what the server's own answer may call)
         self._claims: collections.OrderedDict[Any, _ServerTurn] = collections.OrderedDict()
-        self._unclaimed: collections.OrderedDict[Any, Utterance] = collections.OrderedDict()
-        self._server_offer: tuple[list[Skill], dict[str, Any], str | None] | None = None
+        # (the utterance, when it came: the worker's clock)
+        self._unclaimed: collections.OrderedDict[Any, tuple[Utterance, float]] = (
+            collections.OrderedDict()
+        )
+        # what _serve took off the queue and has not finished yet (a turn in service, before
+        # it sets _active_turn): a server response then is refused as one while a turn runs
+        self._serving: Any = None
         if realtime is not None:
             realtime.base_instructions = self._base_instructions
             realtime.server_turn = self._server_response
@@ -388,7 +395,7 @@ class ConversationWorker:
             self._pending.clear()
         for utterance in dropped:  # never answered: they no longer hold the listening cue
             if isinstance(utterance, _ServerTurn):  # its response is cancelled, never played
-                self.realtime.abandon(utterance.offer.request, 0)
+                self.realtime.release(utterance.offer.request)
                 continue
             self._heard_done(utterance)
 
@@ -612,6 +619,7 @@ class ConversationWorker:
         while not self._closed:
             with self._lock:
                 item = self._pending.popleft() if self._pending else None
+                self._serving = item[0] if item is not None else None
             if item is None:
                 await self._wake.wait()
                 self._wake.clear()
@@ -626,6 +634,9 @@ class ConversationWorker:
             except Exception as exc:  # one bad turn must not end the worker
                 self._counts["errors"] += 1
                 log.warning("conversation: turn failed (%s)", type(exc).__name__)
+            finally:
+                with self._lock:
+                    self._serving = None
 
     # ----------------------------------------------------------------- one turn
 
@@ -1017,9 +1028,7 @@ class ConversationWorker:
         if server is not None:
             # the server answers with what the stream's opening gave it: the executor checks
             # the choices that opening showed (SPEC 11)
-            with self._lock:
-                shown = self._server_offer
-            offered, choices, functions, toned = self._rt_tools(turn, shown)
+            offered, choices, functions, toned = self._rt_tools(turn, server.offer.job.shown)
         else:
             offered, choices, functions, toned = self._rt_tools(turn)
             sent = route.send(
@@ -1079,6 +1088,7 @@ class ConversationWorker:
                 ask = in_cap or (skip and not turn.rounds) or (toning and not turn.rounds)
                 choice = "auto" if ask else "none" if offered or skip or toning else None
                 if adopt is not None:  # the server's own response: the robot asked nothing
+                    server.adopted = True
                     reply = await run.adopt(adopt)
                     adopt = None
                 else:
@@ -1184,22 +1194,33 @@ class ConversationWorker:
         toned = [tone_tool(rt_cfg.tone_labels)] if tone else []
         return offered, choices, functions, toned
 
-    def _stream_session(self) -> tuple[str, Any]:
-        """What a stream's opening ``session.update`` carries with server turns (the stream
-        thread): the instructions and tools a turn would send (parts 1 to 5 with the skip rule
-        and the conversation state, the replay after a reconnect, the mood; the skills, the
-        skip and tone tools), since the server answers with them on its own. The skills, their
-        choices and the conversation state are kept for the server turn that follows. Whatever
-        fails here, the opening goes with parts 1 to 4 and the session's tools as they are
-        (counted ``stream_session_fallbacks``): a stream never stops on it."""
+    def _stream_session(self, job: Any) -> tuple[str, Any]:
+        """What a stream's opening ``session.update`` carries with server turns (asked on the
+        stream thread, built on the worker's loop, which alone reads the affect, register,
+        profile and scene): the instructions and tools a turn would send (parts 1 to 5 with the
+        skip rule and the conversation state, the replay after a reconnect, the mood; the
+        skills, the skip and tone tools), since the server answers with them on its own. The
+        skills, their choices and the conversation state are kept on the stream's ``job``
+        (``shown``) for its server turn. Whatever fails here, or a loop busy past
+        ``connect_timeout_s``, the opening goes with parts 1 to 4 and the session's tools as
+        they are (counted ``stream_session_fallbacks``): a stream never stops on it."""
+        loop = self._loop
         try:
-            return self._stream_session_now()
+            if loop is None:
+                raise RuntimeError("no loop")
+            wait = self.stack.effective().voice.realtime_route.connect_timeout_s
+            future = asyncio.run_coroutine_threadsafe(self._stream_session_on_loop(job), loop)
+            try:
+                return future.result(wait)
+            except BaseException:
+                future.cancel()
+                raise
         except Exception as exc:
             log.warning("conversation: stream session: %s", type(exc).__name__)
             self._counts["stream_session_fallbacks"] += 1
             return self._base_instructions(), None
 
-    def _stream_session_now(self) -> tuple[str, list[dict[str, Any]]]:
+    async def _stream_session_on_loop(self, job: Any) -> tuple[str, list[dict[str, Any]]]:
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
@@ -1209,8 +1230,7 @@ class ConversationWorker:
             turn.conversation = self._conversation_state(utterance, cfg, now)
         offered, choices, functions, toned = self._rt_tools(turn)
         instructions = self._rt_instructions(turn, self._delivery(turn))
-        with self._lock:
-            self._server_offer = (offered, choices, turn.conversation)
+        job.shown = (offered, choices, turn.conversation)
         return instructions, functions + toned
 
     def _server_response(self, offer: Any) -> bool:
@@ -1225,11 +1245,15 @@ class ConversationWorker:
         cap = conv.history_turns + conv.pending_utterances
         with self._lock:
             queued = next((u for u, _ in self._pending if isinstance(u, _ServerTurn)), None)
-            active = self._active_turn
-            if active is not None or queued is not None:
-                host = queued if active is None else active.server
-                if host is None and active is not None:  # a robot turn: the words join it
-                    host = _ServerTurn(None, turn=active)
+            active, serving = self._active_turn, self._serving
+            host: _ServerTurn | None
+            if active is not None or queued is not None or serving is not None:
+                if active is not None:  # a robot turn's words join it too
+                    host = active.server or _ServerTurn(None, turn=active)
+                elif isinstance(serving, _ServerTurn):
+                    host = serving
+                else:
+                    host = queued  # None: a robot turn about to start, its words join nothing
                 words = self._claim(offer.job, host, cap) if host is not None else None
                 taken = False
             else:
@@ -1237,6 +1261,8 @@ class ConversationWorker:
                 words = self._claim(offer.job, host, cap)
                 self._pending.appendleft((host, NOT_RECORDED))  # type: ignore[arg-type]
                 taken = True
+            if host is not None:  # answered, or joined to a turn: its items leave with it
+                offer.job.answered = True
         if words is not None and host is not None and host.turn is not None:
             self._attach(host.turn, words)
         if taken:
@@ -1253,7 +1279,8 @@ class ConversationWorker:
         self._claims[job] = st
         while len(self._claims) > cap:
             self._claims.popitem(last=False)
-        words = self._unclaimed.pop(job, None)
+        waiting = self._unclaimed.pop(job, None)
+        words = waiting[0] if waiting is not None else None
         if words is not None and st.turn is None:
             st.words.append(words)
             return None
@@ -1262,25 +1289,51 @@ class ConversationWorker:
     def _server_words(self, utterance: Utterance) -> None:
         """The transcript of a stream the server answers on its own (listener thread): it joins
         the turn that took that stream's response, also once that turn ended, or waits for it
-        (the transcript may come first). At most ``conversation.pending_utterances`` wait; the
-        oldest then goes unanswered (``server_unanswered``: its server items are deleted)."""
-        limit = self.stack.effective().conversation.pending_utterances
+        (the transcript may come first), at most ``server_answer_wait_s`` and at most
+        ``conversation.pending_utterances`` of them: past either it goes unanswered
+        (``_unanswered``)."""
+        rt_cfg = self.stack.effective()
+        limit = rt_cfg.conversation.pending_utterances
+        wait = rt_cfg.voice.realtime_route.server_answer_wait_s
         dropped: list[Utterance] = []
         with self._lock:
             st = self._claims.get(utterance.stream)
             if st is None:
-                self._unclaimed[utterance.stream] = utterance
+                self._unclaimed[utterance.stream] = (utterance, self.clock())
                 while len(self._unclaimed) > limit:
-                    dropped.append(self._unclaimed.popitem(last=False)[1])
+                    dropped.append(self._unclaimed.popitem(last=False)[1][0])
             elif st.turn is None:
                 st.words.append(utterance)
             turn = st.turn if st is not None else None
         if turn is not None:
             self._attach(turn, utterance)
+        loop = self._loop
+        if st is None and loop is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(loop.call_later, wait, self._expire_unclaimed)
         for old in dropped:
-            self._counts["server_unanswered"] += 1
-            self._drop_audio(old)
-            self._heard_done(old)
+            self._unanswered(old)
+
+    def _expire_unclaimed(self) -> None:
+        """The loop's timer: a streamed utterance whose transcript came and whose answer did not
+        within ``server_answer_wait_s`` goes unanswered (``_unanswered``)."""
+        wait = self.stack.effective().voice.realtime_route.server_answer_wait_s
+        now = self.clock()
+        with self._lock:
+            old = [k for k, (_, at) in self._unclaimed.items() if now - at >= wait]
+            gone = [self._unclaimed.pop(k)[0] for k in old]
+        for utterance in gone:
+            self._unanswered(utterance)
+
+    def _unanswered(self, utterance: Utterance) -> None:
+        """A streamed utterance no server answer took (none came in time, it was a fragment's
+        or ambiguous, the server ignores create_response): its server items are deleted, the
+        listening cue ends and the did-not-get-it cue shows (``server_unanswered``)."""
+        self._counts["server_unanswered"] += 1
+        self._drop_audio(utterance)
+        self._heard_done(utterance)
+        self.events("unanswered", "no_server_answer")
+        self.cues.play("not_heard", "no_server_answer")
 
     def _attach(self, turn: _Turn, utterance: Utterance) -> None:
         """Join a stream's words to the server turn that answered it (any thread): the user's
@@ -1310,7 +1363,19 @@ class ConversationWorker:
         barge-in), with no ``response.create`` of the robot but a skill's follow-up. Its words
         come with the stream's transcript, now or later (``_attach``); its latency starts at the
         segment's last speech (the listener's). A turn whose session went before anything
-        played says the fallback line: no words reached the robot, so no chat route answers."""
+        played says the fallback line: no words reached the robot, so no chat route answers.
+        A response its run never adopted (a failure, a cut first) is released: it stops at the
+        server and its items go."""
+        try:
+            await self._answer_server_turn(st)
+        finally:
+            if not st.adopted:
+                self.realtime.release(st.offer.request)
+            with self._lock:
+                if st.turn is not None and self._active_turn is st.turn and not st.turn.done:
+                    self._active_turn = None  # it failed before _finish: no turn runs now
+
+    async def _answer_server_turn(self, st: _ServerTurn) -> None:
         offer, now = st.offer, self.clock()
         job, cfg = offer.job, self.stack.effective()
         self.apply_config(cfg)
@@ -1344,8 +1409,8 @@ class ConversationWorker:
         turn.began, turn.stamps["heard"] = now, heard
         if self.transcript is not None:
             turn.ring_gen = self.transcript.current()
+        shown = job.shown
         with self._lock:
-            shown = self._server_offer
             if shown is not None and cfg.voice.realtime_route.skip_tool:
                 turn.conversation = shown[2]
             self._active_turn = turn

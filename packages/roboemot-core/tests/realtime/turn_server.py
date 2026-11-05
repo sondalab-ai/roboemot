@@ -65,7 +65,10 @@ is the turn's ``heard`` list, joined. With ``vad_answers`` it also answers each 
 by itself, right after ``committed``, with the next script (as a server with
 ``create_response: true`` does, or one that ignores ``false``; ``auto_responses`` lists their
 ids), before or after the transcript (``transcript_delay_s``); ``answer_delay_s`` holds each
-of those answers back that long.
+of those answers back that long. ``end_positions`` off leaves its ``audio_end_ms`` out too.
+``refuse_cancel_id`` answers a ``response.cancel`` that names a ``response_id`` with an
+``error`` ``unknown_or_invalid_event`` (no event id) and cancels nothing, as Pollen's server
+answers unexpected values; ``ignore_cancel`` ignores every cancel (the reply streams on).
 
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
@@ -140,6 +143,8 @@ class TurnServer(FakeServer):
         statuses: list[str] | None = None,
         stream_vad: bool = False,
         answer_delay_s: float = 0.0,
+        refuse_cancel_id: bool = False,
+        ignore_cancel: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -171,6 +176,7 @@ class TurnServer(FakeServer):
         self.sent: list[dict[str, Any]] = []
         self.stream_vad = stream_vad
         self.answer_delay_s = answer_delay_s
+        self.refuse_cancel_id, self.ignore_cancel = refuse_cancel_id, ignore_cancel
         self.stream_turns = 0  # turns the stream VAD heard, over all sessions
         self.commits_at_create: list[int] = []  # the stream VAD's commits at each response.create
         self._vad_item: str | None = None  # the stream VAD's turn in progress
@@ -235,6 +241,11 @@ class TurnServer(FakeServer):
                 self.commits_at_create.append(len(self.sent_of("input_audio_buffer.committed")))
                 if not await self._start(ws, event.get("event_id")):
                     return
+            elif kind == "response.cancel" and self.ignore_cancel:
+                pass
+            elif kind == "response.cancel" and self.refuse_cancel_id and "response_id" in event:
+                refused = {"code": "unknown_or_invalid_event"}
+                await self._send(ws, {"type": "error", "error": refused})
             elif kind == "response.cancel" and event.get("response_id") in self._cancels:
                 self._cancels[event["response_id"]].set()
             elif kind == "response.cancel" and self._cancel is not None:
@@ -361,7 +372,8 @@ class TurnServer(FakeServer):
                 committed: dict[str, Any] = {"type": "input_audio_buffer.committed"}
                 if self.ids:
                     stopped["item_id"] = committed["item_id"] = item
-                stopped["audio_end_ms"] = int(self._speech_end)
+                if self.end_positions:
+                    stopped["audio_end_ms"] = int(self._speech_end)
                 await self._send(ws, stopped)
                 await self._send(ws, committed)
                 if self.vad_answers:  # it answers the turn it ended by itself

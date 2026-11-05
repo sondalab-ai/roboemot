@@ -3815,6 +3815,16 @@ class RealtimeRouteConfig(Strict):
         ge=100,
         le=5000,
     )
+    server_answer_wait_s: float = param(
+        5.0,
+        "With turns: server, how long the server's own answer to a stream is waited for once "
+        "the server ended its turn (or the stream ended or was cut): the robot's own requests "
+        "wait meanwhile, and a streamed utterance whose transcript came but no answer gets the "
+        "did-not-get-it cue this long after its transcript",
+        unit="s",
+        ge=1,
+        le=30,
+    )
     local_decode_timeout_s: float = param(
         10.0,
         "Longest wait for the local decode of an utterance that skipped Vosk and still needs a "

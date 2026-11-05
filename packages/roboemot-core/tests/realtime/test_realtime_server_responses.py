@@ -8,16 +8,26 @@ response for an answered stream, or one while a turn's response runs, is a dupli
 
 from __future__ import annotations
 
+import math
 import threading
 
 import numpy as np
+import pytest
 from realtime_helpers import wait_until
+from roboemot.realtime import protocol
+from roboemot.realtime.input import InputJob, _Burst, _Owed
 from roboemot.realtime.route import session_update
 from test_realtime_follow_up import LOOK, SKILLS, Env
 from test_realtime_listener import ears  # noqa: F401 (fixture)
 from test_realtime_server_turns import HEARD, OPT_INS, SERVER, tail
 from test_voice_listener import voice
 from turn_server import REPLY, TurnServer
+
+
+def stream_job():
+    job = InputJob(np.zeros(0), 16000)
+    job.stream = True
+    return job
 
 
 def detect(update: dict) -> dict:
@@ -195,17 +205,22 @@ def test_the_turn_latency_runs_from_the_end_of_speech_in_both_modes(ears):  # no
         ear.say()
         assert ear.settle(lambda: turns(ear) == 1, 10.0)
         latency = snap(ear)["latency_ms"]
-        assert latency["turn"]["count"] == 1 and latency["first_audio"]["count"] == 1
-        # from the segment's last speech as the listener heard it (the Ear's own clock here)
-        job = next(iter(ear.rt.worker._claims))
-        assert job.start_stamp < job.speech_end <= ear.r.now
+        assert latency["turn"]["count"] == 1
         assert set(latency["turn"]) == set(latency["first_audio"]) == {"count", "p50", "p95", "max"}
+        # from the segment's last speech as the listener heard it (carried by its stream, so
+        # known before any transcript) to the first audio handed to the speech output
+        job = next(iter(ear.rt.worker._claims))
+        last = ear.rt.worker._last
+        assert job.start_stamp < job.speech_end <= ear.r.now and last["heard"] == job.speech_end
+        expected = (last["token"] - job.speech_end) * 1000
+        assert latency["turn"]["p50"] == pytest.approx(expected)
     with TurnServer() as server:  # robot turns, text in
         ear2 = ears(server, script=["x"])
         ear2.rt.turn("ciao")
         latency = snap(ear2)["latency_ms"]
+        last = ear2.rt.worker._last
         assert latency["turn"]["count"] == 1
-        assert latency["turn"]["p50"] == latency["first_audio"]["p50"]  # one measure
+        assert latency["turn"]["p50"] == pytest.approx((last["token"] - last["heard"]) * 1000)
 
 
 def test_the_listening_cue_ends_when_the_answer_starts(ears):  # noqa: F811
@@ -276,7 +291,10 @@ def test_a_server_response_while_the_turns_answer_runs_is_a_duplicate(ears):  # 
         assert ear.rt.speech.snapshot()["spoken"] == 1  # one answer played
         assert wait_until(lambda: ear.rt.history()[0][0]["content"] == "prima seconda")
         assert {"in_1_0", "in_2_0"} <= set(ear.rt.history()[0][0]["rt"][1])
-        assert server.of("conversation.item.delete") == []
+        # the dropped answer's own items go at its response.done; the person's words stay
+        assert wait_until(lambda: server.of("conversation.item.delete"))
+        deleted = {e["item_id"] for e in server.of("conversation.item.delete")}
+        assert deleted <= {"item_2", "fc_2"} and not deleted & {"in_1_0", "in_2_0"}
 
 
 def test_a_second_response_for_an_answered_stream_is_a_duplicate(ears):  # noqa: F811
@@ -345,7 +363,8 @@ def test_a_stream_revoked_before_its_answer_is_never_answered(ears):  # noqa: F8
         stack.set("privacy.realtime_audio_unaddressed", False, source="test")
         ear.rt.route.apply_config(stack.effective())
         assert wait_until(lambda: server.auto_responses)
-        never_played(ear, server)
+        # robot turns now: the owed speech went with the revoke, the late answer is nobody's
+        never_played(ear, server, seen=False)
 
 
 def test_a_revoked_stream_on_a_live_session_is_a_fragment(ears):  # noqa: F811
@@ -409,20 +428,18 @@ def test_a_whole_stream_on_a_server_without_item_ids_is_answered(ears):  # noqa:
 def test_a_server_that_ends_the_turn_inside_the_segment_answered_a_fragment(ears):  # noqa: F811
     """The claim's coverage: the server's end lies before the segment's end (more speech came
     after it), so its answer is a fragment."""
-    from roboemot.realtime.input import InputJob, _Burst, _Owed
-
     with TurnServer() as server:
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
         inp, gen = ear.input, ear.rt.route.generation
-        job = InputJob(np.zeros(0), 16000)
-        job.stream = True
-        stream = _Burst(job, gen, utt_ms=2000.0, silence_ms=600.0)
-        inp._owed.append(_Owed(gen, stream, 800, inp._clock()))  # ended at 0.8 s of 2 s
-        assert inp.claim(gen, 5.0).verdict == "fragment"
-        inp._owed.append(_Owed(gen, stream, 1500, inp._clock()))  # within the end silence
-        assert inp.claim(gen, 5.0).verdict == "answer"
-        inp._owed.append(_Owed(gen, stream, None, inp._clock()))  # no end position: never
-        assert inp.claim(gen, 5.0).verdict == "fragment"
+
+        def verdict(end_ms):
+            stream = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+            inp._owed.append(_Owed(gen, stream, end_ms, inp._clock()))
+            return inp.claim(gen, 5.0).verdict
+
+        assert verdict(800) == "fragment"  # ended at 0.8 s of 2 s
+        assert verdict(1500) == "answer"  # within the end silence
+        assert verdict(None) == "fragment"  # no end position: never whole
 
 
 # ------------------------------------------------------------------ tools
@@ -543,3 +560,260 @@ def test_a_server_response_while_a_robot_turn_runs_joins_its_words_to_that_turn(
                           stream=job)  # fmt: skip
         assert worker.submit(words)
         assert worker._active_turn.utterance.text == "prima seconda"
+
+
+# ------------------------------------------------------------------ review round 2 (PR 196)
+
+
+def test_two_fresh_owed_entries_fail_closed(ears):  # noqa: F811
+    """Finding 1: the server skipped A's answer (an error, an active response), C was cut and
+    its closing silence ended a turn; C's response must not be taken for A's."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        whole = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+        cut = _Burst(stream_job(), gen, start_ms=3000.0, utt_ms=800.0, silence_ms=600.0, cut=True)
+        now = inp._clock()
+        inp._owed += [_Owed(gen, whole, 1900, now), _Owed(gen, cut, 3900, now)]
+        assert inp.claim(gen, 5.0).verdict == "fragment"
+        assert not whole.job.claimed  # nothing was taken for A
+
+
+def test_an_error_with_no_request_poisons_the_oldest_owed_speech(ears):  # noqa: F811
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        stream = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+        inp._owed.append(_Owed(gen, stream, 1900, inp._clock()))
+        refusal = protocol.ServerError("error", "conversation_already_has_active_response")
+        ear.rt.route._error(refusal, None)
+        assert inp.claim(gen, 5.0).verdict == "fragment"
+
+
+def test_a_cut_stream_is_unsettled_until_the_server_reports_it(ears):  # noqa: F811
+    """Finding 2: after a cut, before the server's speech_stopped, a robot request must wait."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, route = ear.input, ear.rt.route
+        cut = _Burst(stream_job(), route.generation, utt_ms=800.0, silence_ms=600.0, cut=True)
+        cut.sent_ms, cut.end_at = 800.0, inp._clock()
+        inp._streams = [cut]
+        assert inp.unsettled(route.generation, 5.0) and route.busy()
+        cut.end_at -= route.stack.effective().voice.realtime_route.server_answer_wait_s
+        assert not route.busy()  # bounded: the server had its time
+
+
+def test_a_request_past_the_wait_while_the_server_may_answer_resets_the_session(ears):  # noqa: F811
+    """Finding 2: the 5 s escape of wait_in_order never binds a robot request to a session the
+    server may still answer on its own: the session is reset."""
+    import asyncio
+
+    from roboemot.realtime.turn import wait_in_order
+
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        route = ear.rt.route
+        ear.r.feed(voice(seconds=0.5))  # a stream that still streams
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        assert route.busy()
+        ticks = iter(range(1000))
+        asyncio.run(wait_in_order(route, lambda: float(next(ticks))))  # past stall at once
+        assert wait_until(lambda: snap(ear)["unsettled_resets"] == 1)
+
+
+def test_a_response_while_its_stream_still_streams_is_judged_at_its_end(ears):  # noqa: F811
+    """Finding 3a: the server ended the turn on the streamed trailing silence before the
+    listener closed the stream: the response is held, then judged whole at the close."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        judged = []
+        inp.route = type("R", (), {"judged": lambda self, job, v, items: judged.append(v)})()
+        s = _Burst(stream_job(), gen, utt_ms=math.inf, silence_ms=600.0)
+        s.sent_ms = 2000.0
+        inp._streams = [s]
+        inp._owed.append(_Owed(gen, s, 1900, inp._clock()))
+        assert inp.claim(gen, 5.0).verdict == "wait" and inp.unsettled(gen, 5.0)
+        s.utt_ms = 2000.0  # the close
+        inp._judge(s)
+        assert judged == ["answer"]
+        cut = _Burst(stream_job(), gen, utt_ms=math.inf, silence_ms=600.0)
+        inp._owed.append(_Owed(gen, cut, 900, inp._clock()))
+        assert inp.claim(gen, 5.0).verdict == "wait"
+        cut.cut = True
+        inp._judge(cut)
+        assert judged == ["answer", "fragment"]
+
+
+def test_a_held_response_plays_once_its_stream_ends_whole(ears):  # noqa: F811
+    """End to end through the route: the server's VAD (its silence as short as the local
+    one) ends the turn on the streamed trailing silence, and its response comes before the
+    stream thread runs the listener's close: it is held, then answered at the close."""
+    with TurnServer(stream_vad=True, vad_answers=True, heard=[[HEARD]]) as server:
+        end_ms = 500.0
+        rt = {**SERVER, "server_silence_ms": end_ms}
+        app = {**OPT_INS, "voice": {"vad": {"end_silence_ms": end_ms}}}
+        ear = ears(server, rt=rt, app=app, script=["x"], to_worker=True)
+        op = ear.input._stream_op
+
+        def close_after_the_answer(kind, job, arg):
+            if kind == "close":
+                assert wait_until(lambda: server.sent_of("response.created"))
+                assert wait_until(lambda: ear.rt.route._held)  # held while it streams
+            op(kind, job, arg)
+
+        ear.input._stream_op = close_after_the_answer
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1 and len(ear.utterances) == 1, 10.0)
+        assert snap(ear)["server_responses"] == 1 and pushed(ear) > 0
+        assert not ear.rt.route._held
+
+
+def late_answer_cfg() -> dict:
+    return {**SERVER, "server_answer_wait_s": 1.0}
+
+
+def test_a_late_answer_is_dropped_and_the_person_gets_the_not_heard_cue(ears):  # noqa: F811
+    """Finding 3b: the server answers past server_answer_wait_s: its answer is nobody's, the
+    transcript waits no longer, and the person sees the did-not-get-it cue."""
+    with TurnServer(stream_vad=True, vad_answers=True, answer_delay_s=1.5) as server:
+        ear = ears(server, rt=late_answer_cfg(), app=OPT_INS, script=["x"], to_worker=True)
+        ear.say()
+        assert ear.settle(lambda: "not_heard" in ear.rt.cues.played, 10.0)
+        assert wait_until(lambda: server.auto_responses and snap(ear)["server_duplicates"] == 1)
+        assert pushed(ear) == 0 and ear.rt.worker.snapshot()["server_unanswered"] == 1
+        assert "in_1_0" in {e["item_id"] for e in server.of("conversation.item.delete")}
+        assert not ear.rt.worker._unclaimed
+
+
+def test_a_server_that_never_answers_gets_the_not_heard_cue(ears):  # noqa: F811
+    """Finding 3c: a server that ignores create_response: no answer, no stuck transcript."""
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=late_answer_cfg(), app=OPT_INS, script=["x"], to_worker=True)
+        ear.say()
+        assert ear.settle(lambda: "not_heard" in ear.rt.cues.played, 10.0)
+        assert not ear.rt.worker._unclaimed and server.of("response.create") == []
+        assert "in_1_0" in {e["item_id"] for e in server.of("conversation.item.delete")}
+
+
+def test_a_server_without_end_positions_answers_nothing_and_shows_the_cue(ears):  # noqa: F811
+    """Finding 3d: no audio_end_ms, end to end: its answer is a fragment, and the listener's
+    transcript deadline shows the did-not-get-it cue (the stream is never covered)."""
+    with TurnServer(stream_vad=True, vad_answers=True, end_positions=False) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        ear.say()
+        assert wait_until(lambda: snap(ear)["server_fragments"] == 1)
+        ear.r.now += ear.rt.stack.effective().voice.realtime_route.transcript_timeout_s + 1
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert ear.utterances[0].local_only  # not answered: the not_heard cue (listener)
+        assert pushed(ear) == 0 and not ear.rt.worker._unclaimed
+
+
+def test_a_refused_cancel_id_keeps_the_dropped_answer_silent_and_cleans_it_up(ears):  # noqa: F811
+    """Finding 9: the server refuses response_id on response.cancel; the duplicate streams
+    on at the server, never plays, and its items go at its response.done."""
+    heard = [["prima"], ["seconda"]]
+    with TurnServer(
+        stream_vad=True, heard=heard, vad_answers=True, deltas=10, gap_s=0.1,
+        refuse_cancel_id=True,
+    ) as server:  # fmt: skip
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        ear.say()
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1 and len(ear.utterances) == 2, 15.0)
+        assert snap(ear)["server_duplicates"] == 1 and snap(ear)["errors_unrelated"] >= 1
+        assert ear.rt.speech.snapshot()["spoken"] == 1
+        assert wait_until(lambda: "item_2" in {
+            e["item_id"] for e in server.of("conversation.item.delete")
+        })  # fmt: skip
+
+
+def test_a_dropped_answer_with_audio_and_a_call_has_both_items_deleted(ears):  # noqa: F811
+    """Finding 4: a fragment's response that streams on (the cancel ignored) made an audio
+    item and a call before its done: both go, so no call stays open."""
+    with TurnServer(
+        ["audio_then_tool"], tool_name="look_at", stream_vad=True, vad_answers=True,
+        ignore_cancel=True, strict_calls=True,
+    ) as server:  # fmt: skip
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        cut_by_speaking(ear)
+        assert wait_until(lambda: snap(ear)["server_fragments"] == 1)
+        assert wait_until(lambda: {"item_1", "fc_1"} <= {
+            e["item_id"] for e in server.of("conversation.item.delete")
+        })  # fmt: skip
+        assert pushed(ear) == 0 and server.open_calls == {}
+
+
+def test_a_failure_before_the_run_adopts_releases_the_response(ears):  # noqa: F811
+    """Finding 7: the server turn fails before its run follows the response: the response is
+    cancelled and the next answer still plays."""
+    with TurnServer(stream_vad=True, vad_answers=True, deltas=10, gap_s=0.05) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        worker, real = ear.rt.worker, ear.rt.worker._realtime_turn
+        calls = []
+
+        async def fail_once(turn):
+            calls.append(turn)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return await real(turn)
+
+        worker._realtime_turn = fail_once
+        ear.say()
+        assert wait_until(lambda: worker.snapshot().get("errors", 0) == 1)
+        assert wait_until(lambda: server.of("response.cancel"))
+        assert worker._active_turn is None and pushed(ear) == 0
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1 and pushed(ear) > 0, 10.0)
+
+
+def test_a_server_response_while_serve_starts_a_turn_is_refused(ears):  # noqa: F811
+    """Finding 6: _serve took a server turn off the queue but has not set _active_turn yet:
+    a second whole stream's response is a duplicate, its words join that turn."""
+    from roboemot.conversation.worker import _ServerTurn
+    from roboemot.realtime.route import Request, ServerResponse
+
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        worker = ear.rt.worker
+        first = _ServerTurn(ServerResponse(Request("", None, 0.0), 0, stream_job(), ()))
+        with worker._lock:
+            worker._serving = first
+        job = stream_job()
+        offer = ServerResponse(Request("", None, 0.0), ear.rt.route.generation, job, ())
+        assert not worker._server_response(offer)
+        assert worker._claims[job] is first and job.answered
+        with worker._lock:
+            worker._serving = None
+
+
+def test_a_revoke_while_the_servers_answer_plays_stops_it(ears):  # noqa: F811
+    with TurnServer(stream_vad=True, vad_answers=True, deltas=30, gap_s=0.1) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        ear.say()
+        assert wait_until(lambda: pushed(ear) > 0, 10.0)
+        stack = ear.rt.stack
+        stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.route.apply_config(stack.effective())
+        assert wait_until(lambda: snap(ear)["revoke_resets"] == 1)
+        assert wait_until(lambda: ear.rt.sink.stops >= 1)  # the answer stops playing
+        assert ear.settle(lambda: turns(ear) == 1, 10.0)
+
+
+def test_a_stray_response_with_streams_off_counts_as_unrequested(ears):  # noqa: F811
+    with TurnServer(unrequested=True) as server:
+        rt = {**SERVER, "audio_gate": "addressed"}  # turns: server, but no stream may go
+        ear = ears(server, rt=rt, app=OPT_INS, script=["x"])
+        assert wait_until(lambda: snap(ear)["unrequested"] == 1)
+        assert snap(ear)["server_duplicates"] == 0
+
+
+def test_robot_turns_back_clear_the_owed_speech(ears):  # noqa: F811
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen, stack = ear.input, ear.rt.route.generation, ear.rt.stack
+        stream = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+        inp._owed.append(_Owed(gen, stream, 1900, inp._clock()))
+        stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.route.apply_config(stack.effective())
+        assert inp._owed == [] and inp.claim(gen, 5.0) is None

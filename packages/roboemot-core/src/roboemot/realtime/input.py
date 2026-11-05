@@ -95,8 +95,10 @@ from .route import (
     DUPLICATE,
     FRAGMENT,
     STREAM_GATE,
+    WAIT,
     close_samples,
     server_turns,
+    streams_allowed,
     turns_fallback,
 )
 
@@ -151,7 +153,12 @@ class InputJob:
         # the listener's clock), set when it ended; the server turn's latency starts there
         self.start_stamp: float | None = None
         self.speech_end: float | None = None
-        self.answered = False  # a server-created response answers it: its items are the turn's
+        # a server-created response answers it, or its words joined a turn (set by the worker
+        # once it took them): its items are that turn's, never deleted here
+        self.answered = False
+        # what its opening showed the server (the worker's: skills, choices, conversation state)
+        self.shown: Any = None
+        self.claimed = False  # a server response was claimed for it: a second is a duplicate
 
     def __repr__(self) -> str:
         return f"InputJob(done={self.done}, refused={self.refused!r})"
@@ -211,6 +218,12 @@ class _Burst:
     ended_at: float | None = None
     sent_ms: float = 0.0  # a stream's audio sent so far (its length when it is cut)
     cut: bool = False  # a stream cut part way: set before its closing silence, never answered
+    # server turns (S1b): when it ended or was cut (the input's clock: the server may still
+    # answer it for server_answer_wait_s); a response the server created for it, and where
+    # the server ended it, while it still streamed (judged when it ends: ``_judge``)
+    end_at: float | None = None
+    held_end: int | None = None
+    holding: bool = False
 
     def holds(self, position: int | None) -> bool:
         """Whether an item that starts at ``position`` of the input buffer is this burst's
@@ -266,6 +279,7 @@ class _Owed:
     stream: _Burst | None
     end_ms: int | None
     at: float
+    poisoned: bool = False  # an error with no request of the robot's may have been its answer
 
 
 @dataclass(frozen=True)
@@ -635,6 +649,8 @@ class RealtimeInput:
             return
         with self._lock:  # before the closing silence: the server ends the turn on it (claim)
             burst.utt_ms = float(arg)
+            burst.end_at = self._clock()
+        self._judge(burst)  # a response held while it streamed: its end is known now
         self._closing(job, burst, cfg)  # "close": the segment ended
         with self._lock:
             finished, delete, undeletable = self._results([burst])
@@ -672,7 +688,7 @@ class RealtimeInput:
                 self._streams.append(burst)  # before the send: its first event may come at once
 
         self._await_reopen(job, rt.connect_timeout_s)
-        instructions, tools = self.route.stream_session()  # what the server's own answer reads
+        instructions, tools = self.route.stream_session(job)  # what the server's own answer reads
         why = self.route.stream_audio(
             self._pcm(samples),
             instructions=instructions,
@@ -730,6 +746,8 @@ class RealtimeInput:
         (``claim``) and never plays."""
         with self._lock:
             burst.cut = True
+            burst.end_at = self._clock()
+        self._judge(burst)  # a response held while it streamed answers a fragment
         closed = self._closing(job, burst, cfg)
         with self._lock:
             burst.utt_ms = burst.sent_ms
@@ -785,13 +803,20 @@ class RealtimeInput:
     # ----------------------------------------------------------------- server turns (S1b)
 
     def claim(self, generation: int, max_age_s: float) -> Claim | None:
-        """A ``response.created`` on ``generation``'s session (client thread): the stream
-        speech the server ended longest ago and has not answered yet is what it answers, and
-        it may be answered (``ANSWER``, then marked answered), never (``FRAGMENT``: see
-        ``_whole``) or not again (``DUPLICATE``: the stream has its answer). None when no stream
-        speech waits: the robot's own request, or a second response. Speech the server ended
-        ``max_age_s`` (``first_token_timeout_s``) ago or more waits no longer: a server answers
-        its end of turn at once or never."""
+        """A ``response.created`` on ``generation``'s session (client thread): what the server
+        created it for. The owed stream speech it ended longest ago (``speech_stopped``), and:
+
+        - ``ANSWER``: that stream ended whole (``_whole``);
+        - ``WAIT``: it still streams (the server ended its turn on the trailing silence before
+          the listener closed it): the response is held and judged when it ends (``_judge``);
+        - ``FRAGMENT``: cut, cancelled, revoked, ended by the server inside the segment, or no
+          stream holds it; also, failing closed, when more than one owed entry is fresh (a
+          response the server skipped makes order matching unsafe) or the entry was poisoned
+          by an error with no request of the robot's (``poison``);
+        - ``DUPLICATE``: a response was already claimed for that stream.
+
+        None when no stream speech waits: the robot's own request, or a second response. Speech
+        the server ended ``max_age_s`` (``server_answer_wait_s``) ago or more waits no longer."""
         now = self._clock()
         with self._lock:
             self._owed = [
@@ -799,14 +824,37 @@ class RealtimeInput:
             ]
             if not self._owed:
                 return None
+            ambiguous = len(self._owed) > 1
             owed = self._owed.pop(0)
             s = owed.stream
-            if s is None or not self._whole(s, owed.end_ms):
+            if ambiguous or owed.poisoned or s is None:
                 return Claim(FRAGMENT)
-            if s.job.answered:
+            if s.job.claimed:
                 return Claim(DUPLICATE, s.job)
-            s.job.answered = True
-            return Claim(ANSWER, s.job, tuple(k for k in s.order if isinstance(k, str)))
+            s.job.claimed = True
+            items = tuple(k for k in s.order if isinstance(k, str))
+            if self._streaming(s):
+                s.held_end, s.holding = owed.end_ms, True
+                return Claim(WAIT, s.job, items)
+            if not self._whole(s, owed.end_ms):
+                return Claim(FRAGMENT)
+            return Claim(ANSWER, s.job, items)
+
+    def poison(self, generation: int) -> None:
+        """An ``error`` with no request of the robot's (client thread): it may be the server
+        refusing to answer the oldest owed stream speech, so that entry no longer matches a
+        response (its claim fails closed)."""
+        with self._lock:
+            owed = next((o for o in self._owed if o.generation == generation), None)
+            if owed is not None:
+                owed.poisoned = True
+
+    def _streaming(self, s: _Burst) -> bool:
+        """Stream ``s`` still streams (lock held): the listener has not ended it yet, and
+        nothing cut, cancelled or revoked it."""
+        job = s.job
+        alive = not (s.cut or s.closed or job.cancelled or job.epoch != self._epoch)
+        return alive and s.utt_ms == math.inf
 
     def _whole(self, s: _Burst, end_ms: int | None) -> bool:
         """Whether the server ended stream ``s`` at its end (lock held): the listener ended the
@@ -822,19 +870,37 @@ class RealtimeInput:
             return False
         return end_ms >= s.start_ms + s.utt_ms - s.silence_ms
 
+    def _judge(self, s: _Burst) -> None:
+        """Stream ``s`` ended (closed, cut, cancelled or revoked): a server response held for it
+        (``WAIT``) is judged now, whole or a fragment, and the route told (``judged``)."""
+        with self._lock:
+            if not s.holding:
+                return
+            s.holding = False
+            whole = self._whole(s, s.held_end)
+            items = tuple(k for k in s.order if isinstance(k, str))
+        self.route.judged(s.job, ANSWER if whole else FRAGMENT, items)
+
     def unsettled(self, generation: int, max_age_s: float) -> bool:
         """Whether the server may still create a response on its own on ``generation``'s
-        session: a stream there still streams, or stream speech it ended less than
-        ``max_age_s`` ago has no response yet. The robot's own request waits meanwhile
-        (``RealtimeRoute.busy``), so the two are never taken for each other."""
+        session: owed stream speech less than ``max_age_s`` (``server_answer_wait_s``) old, a
+        response held for a stream that still streams, or a stream there that sent audio and is
+        not covered yet, while it streams and for ``max_age_s`` after it ended or was cut (the
+        server's ``speech_stopped`` for it may still be on its way). The robot's own request
+        waits meanwhile (``RealtimeRoute.busy``), so the two are never taken for each other."""
         now = self._clock()
         with self._lock:
             if any(o.generation == generation and now - o.at < max_age_s for o in self._owed):
                 return True
-            return any(
-                s.generation == generation and s.utt_ms == math.inf and not s.closed
-                for s in self._streams
-            )
+            for s in self._streams:
+                if s.generation != generation or s.sent_ms <= 0:
+                    continue
+                if s.holding:
+                    return True
+                recent = s.end_at is None or now - s.end_at < max_age_s
+                if recent and not s.covered():
+                    return True
+            return False
 
     # ----------------------------------------------------------------- client thread
 
@@ -968,12 +1034,11 @@ class RealtimeInput:
         their items deleted on the server; nothing more of them is sent (counted
         ``streams_revoked``), and an open still queued is refused (``_epoch``). The server would
         keep their audio in its input buffer for the next commit, so the session is reset."""
-        rt = cfg.voice.realtime_route
-        allowed = server_turns(cfg) and cfg.privacy.realtime_audio and rt.audio_gate == STREAM_GATE
-        if allowed:
+        if streams_allowed(cfg):
             return
         with self._lock:
             self._epoch += 1
+            self._owed.clear()  # robot turns: no response is the server's own any more
             streams = [s for s in self._streams if not s.closed]
         revoked = []
         for stream in streams:
@@ -1163,7 +1228,11 @@ class RealtimeInput:
                     burst.utt_ms = burst.sent_ms
                 delete, undeletable = self._retire(burst)
                 burst.ended_at = self._clock()
+                if burst.end_at is None:
+                    burst.end_at = burst.ended_at
                 self._prune()
+        if burst is not None:
+            self._judge(burst)  # cancelled or revoked: a held response answers a fragment
         job._end()
         if job.stream and job.sent and not self._closed:
             # the pieces since its opening count after a restart too; disk, so never on the

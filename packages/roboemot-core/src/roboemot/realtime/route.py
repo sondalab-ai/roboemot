@@ -145,10 +145,16 @@ class Request:
     recorder: Any | None = None  # its run after it abandoned it: still records its calls
     last_event: float = 0.0  # when its last event came (expiry ages from it)
     charged: bool = False  # charged once already (at its done, refusal, expiry or close)
+    # a server-created response the robot dropped (server turns): the items it made before the
+    # cancel landed are deleted at its response.done, on its session (``generation``)
+    dropped: bool = False
+    items: list[str] = field(default_factory=list, repr=False)
+    generation: int = -1
 
 
 # what the audio input says of a response the server created on its own (``RealtimeInput.claim``)
 ANSWER = "answer"  # a stream that ended whole: its response is the turn's
+WAIT = "wait"  # a stream that still streams: its response is held and judged when it ends
 FRAGMENT = "fragment"  # a stream cut, revoked or still streaming: never answered
 DUPLICATE = "duplicate"  # a stream already answered, or a turn's response still running
 
@@ -246,6 +252,14 @@ def close_samples(rate_hz: int, cfg: RoboEmotConfig) -> int:
     """The samples of a stream's closing silence (``close_silence_ms`` at ``rate_hz``): the
     zeros sent and the budget kept for them are the same count."""
     return round(rate_hz * cfg.voice.realtime_route.close_silence_ms / MS_PER_S)
+
+
+def streams_allowed(cfg: RoboEmotConfig) -> bool:
+    """Whether live streams may go (server turns, the ``privacy.realtime_audio`` opt-in and
+    ``audio_gate: server_gates``): only then is a response the server created on its own one
+    of a stream's (``RealtimeInput.claim``)."""
+    rt = cfg.voice.realtime_route
+    return server_turns(cfg) and cfg.privacy.realtime_audio and rt.audio_gate == STREAM_GATE
 
 
 def turns_fallback(cfg: RoboEmotConfig) -> str | None:
@@ -390,9 +404,11 @@ class RealtimeRoute:
         # (``server_turn(ServerResponse) -> bool``: taken, or refused while a turn runs);
         # None (no worker) drops every such response
         self.server_turn: Callable[[ServerResponse], bool] | None = None
+        # responses held while their stream still streams, by the stream's job (``judged``)
+        self._held: dict[int, Request] = {}
         # what a stream's opening session.update carries: the instructions and tools a turn
         # would send (the worker's), so the server's own answer reads them
-        self.stream_session: Callable[[], tuple[str, Any]] = lambda: (
+        self.stream_session: Callable[[Any], tuple[str, Any]] = lambda job: (
             self.base_instructions(),
             None,
         )
@@ -443,6 +459,17 @@ class RealtimeRoute:
             self._reconnect_soon(closes)
         if self.input is not None:  # live streams no longer allowed are cancelled (SPEC 12)
             self.input.apply_config(cfg)
+        if not streams_allowed(cfg):
+            # a revoke while the server's own answer to a stream runs: the session is reset, so
+            # that answer stops (as an S1a revoke stops the stream itself)
+            with self._lock:
+                answering = any(
+                    not r.event_id and r.run is not None and r.token is self._token
+                    for r in self._live.values()
+                )
+                generation = self.generation
+            if answering:
+                self._reset("revoked", "revoke_resets", generation)
 
     def _fits(self, cfg: RoboEmotConfig, client: Any) -> bool:
         """Whether ``cfg`` would open ``client``'s session (``_lock`` held): the route is not
@@ -898,8 +925,8 @@ class RealtimeRoute:
             sink, generation = self.input, self.generation
         if sink is None:
             return False
-        first, _ = self.timeouts()
-        return bool(sink.unsettled(generation, first))
+        wait = self.stack.effective().voice.realtime_route.server_answer_wait_s
+        return bool(sink.unsettled(generation, wait))
 
     def expire(self) -> None:
         """Abandoned requests with no event for the route's ``stall_timeout_s`` are given up:
@@ -907,7 +934,10 @@ class RealtimeRoute:
         its ``response.created`` on the current session resets it: its late
         ``response.created`` could otherwise take the next request's place (no order
         guessing). The first reset reopens at once; while the server answers nothing, each
-        further one waits the ``connectivity.network`` backoff before the next connect."""
+        further one waits the ``connectivity.network`` backoff before the next connect. With
+        server turns, a session the server may still answer on its own (``unsettled``) after
+        that wait is reset too (``unsettled_resets``): a request of the robot's sent now could
+        be taken for the server's own response, or the reverse."""
         _, stall = self.timeouts()
         now = self.clock()
         with self._lock:
@@ -916,10 +946,14 @@ class RealtimeRoute:
             for r in (*never, *live):
                 self._forget(r)
             reset = any(r.token is not None and r.token is self._token for r in never)
-            generation = self.generation
+            generation, sink = self.generation, self.input
         self._give_up([*never, *live])
         if reset:
             self._reset("expired", "resets", generation)
+            return
+        wait = self.stack.effective().voice.realtime_route.server_answer_wait_s
+        if sink is not None and sink.unsettled(generation, wait):
+            self._reset("unsettled", "unsettled_resets", generation)
 
     def _reset(self, reason: str, counter: str, generation: int) -> bool:
         """Close ``generation``'s session and open a new one in the background, when it is
@@ -1182,16 +1216,18 @@ class RealtimeRoute:
                 self._count("stale_callbacks")
 
     def _created(self, event: protocol.ResponseCreated, token: _Token | None) -> None:
-        """Bind a ``response.created``. With server turns the audio input says first whether
-        the server created it on its own for a stream's committed speech (``claim``): a stream
-        that ended whole is answered by it (the worker's server turn takes it, a
-        ``HeldResponse`` keeping its events until the run does); one cut, revoked or still
-        streaming is a fragment; a second response for an answered stream, or one while a turn
-        runs, is a duplicate. Otherwise it is the oldest request the robot sent on that
-        session. Anything else (a fragment, a duplicate, a response nobody asked for) is
-        cancelled and its events are dropped: it never reaches the speaker."""
+        """Bind a ``response.created``. While live streams are allowed the audio input says
+        first whether the server created it on its own for a stream's committed speech
+        (``claim``): a stream that ended whole is answered by it (the worker's server turn
+        takes it, a ``HeldResponse`` keeping its events until the run does); one that still
+        streams is held and judged when it ends (``judged``); one cut, revoked or ambiguous is
+        a fragment; a second response for a stream, or one while a turn runs, is a duplicate.
+        Otherwise it is the oldest request the robot sent on that session. Anything else (a
+        fragment, a duplicate, a response nobody asked for) is cancelled and its events are
+        dropped: it never reaches the speaker."""
         rid = event.response_id or f"anon_{next(self._ids)}"
         now = self.clock()
+        cfg = self.stack.effective()  # never under _lock
         with self._lock:
             if not self._current(token):
                 self._counts["stale_callbacks"] += 1
@@ -1199,8 +1235,9 @@ class RealtimeRoute:
             connecting = token is not None and token is self._connecting_token
             generation = self.generation + 1 if connecting else self.generation
             sink = self.input
-        first, _ = self.timeouts()
-        claim = sink.claim(generation, first) if sink is not None else None
+        own = streams_allowed(cfg) and sink is not None
+        wait = cfg.voice.realtime_route.server_answer_wait_s
+        claim = sink.claim(generation, wait) if own else None
         held: HeldResponse | None = None
         with self._lock:
             if not self._current(token):  # detached in between
@@ -1212,36 +1249,56 @@ class RealtimeRoute:
             if req is not None:
                 self._pending.remove(req)
             else:  # the server answered on its own
-                if claim is not None and claim.verdict == ANSWER and self.server_turn is not None:
+                if claim is not None and claim.verdict in (ANSWER, WAIT) and self.server_turn:
                     held = HeldResponse()
-                req = Request("", held, now, token=tok)
+                req = Request("", held, now, token=tok, generation=generation)
+                if claim is not None and claim.verdict == WAIT and held is not None:
+                    self._held[id(claim.job)] = req
             req.response_id, req.last_event = rid, now
             self._live[rid] = req
             run = req.run
-            # a cancel goes to the client that created it
-            client = self._client if tok is self._token else self._connecting
         if held is not None and claim is not None:
             held.deliver(event)  # first: the run that takes it reads its id
-            if self._offer(ServerResponse(req, generation, claim.job, claim.items)):
-                self._count("server_responses")
-                return
-            reason = DUPLICATE  # a turn runs: its words join that turn (the worker)
-        elif run is not None:
+            if claim.verdict == WAIT:
+                return  # judged when its stream ends (judged)
+            self._take_answer(req, generation, claim.job, claim.items)
+            return
+        if run is not None:
             run.deliver(event)
             return
-        elif req.event_id:
+        if req.event_id:
             reason = "abandoned"  # the robot's request, its run cut before it began
         elif claim is not None:
             reason = claim.verdict
-        elif server_turns(self.stack.effective()):
-            reason = DUPLICATE  # nothing owed on a server-turns session: a second response
+        else:  # nothing owed: a second response on a streams session, else nobody asked
+            reason = DUPLICATE if own else "unrequested"
+        self._drop(req, reason)
+
+    def judged(self, job: Any, verdict: str, items: tuple[str, ...]) -> None:
+        """A response held while its stream still streamed (``WAIT``), judged now that the
+        stream ended (any thread): the stream's answer, or a fragment. One whose session went
+        meanwhile was settled with it: nothing more."""
+        with self._lock:
+            req = self._held.pop(id(job), None)
+            live = req is not None and req.token is not None and req.token is self._token
+        if req is None or not live:
+            return
+        if verdict == ANSWER:
+            self._take_answer(req, req.generation, job, items)
         else:
-            reason = "unrequested"
-        self._drop(req, None if req.event_id else rid, client, reason)
+            self._drop(req, verdict)
+
+    def _take_answer(self, req: Request, generation: int, job: Any, items: Any) -> None:
+        """A stream's whole answer: the worker's server turn takes it, or it is a duplicate
+        (a turn runs; its words join that turn) and dropped."""
+        if self._offer(ServerResponse(req, generation, job, tuple(items))):
+            self._count("server_responses")
+        else:
+            self._drop(req, DUPLICATE)
 
     def _offer(self, offer: ServerResponse) -> bool:
-        """Hand a server-created response to the worker (client thread); False when it is
-        refused (a turn runs) or the worker raised."""
+        """Hand a server-created response to the worker; False when it is refused (a turn runs)
+        or the worker raised."""
         take = self.server_turn
         if take is None:
             return False
@@ -1251,24 +1308,48 @@ class RealtimeRoute:
             log.warning("realtime route: server turn: %s", type(exc).__name__)
             return False
 
-    def _drop(self, req: Request, rid: str | None, client: Any, reason: str) -> None:
+    def release(self, req: Request) -> None:
+        """A server-created response the worker took but never followed (a failure or a cut
+        before its run adopted it): dropped like a fragment's, so it stops and its items go
+        (now when it already ended, else at its ``response.done``)."""
+        self._drop(req, "abandoned")
+
+    def _drop(self, req: Request, reason: str) -> None:
         """A response no run follows: its events are dropped (none reaches the speaker), it is
-        cancelled and charged at its ``response.done``. The cancel names it (``response_id``)
-        only when the server created it while a response with a run is live on that session:
-        a bare cancel could then stop the turn's answer instead (otherwise the plain subset)."""
+        cancelled and charged at its ``response.done``; a server-created one's items are deleted
+        then (``_response_event``). The cancel names it (``response_id``) only when the server
+        created it while another response the robot follows (live or sent) is on that session:
+        a bare cancel could then stop that one instead (otherwise the plain subset event). A
+        held one's items kept so far join them, or go now when it already ended."""
+        held = req.run if isinstance(req.run, HeldResponse) else None
+        kept = held.item_ids() if held is not None else []
         with self._lock:
             req.run = None
+            server = not req.event_id
+            req.dropped = server
             others = any(
                 r is not req and r.run is not None and r.token is req.token
-                for r in self._live.values()
+                for r in (*self._live.values(), *self._pending)
             )
-            rid = rid if others else None
+            in_flight = req.response_id is not None and self._live.get(req.response_id) is req
+            if req.token is self._token:
+                client = self._client
+            elif req.token is self._connecting_token:
+                client = self._connecting
+            else:
+                client = None  # its session is gone, and its response with it
+            rid = req.response_id if server and others else None
+            gone = kept if not in_flight else []
+            if in_flight:
+                req.items += [i for i in kept if i not in req.items]
+        if gone:
+            self.delete_items(req.generation, gone)
         if reason in (FRAGMENT, DUPLICATE):
             self._count("server_fragments" if reason == FRAGMENT else "server_duplicates")
             self.events("turn", "server_response_dropped", why=reason)
         elif reason == "unrequested":
             self._count("unrequested")
-        if client is not None:
+        if client is not None and in_flight:
             client.send(protocol.response_cancel(rid))
 
     def _error(self, event: protocol.ServerError, token: _Token | None) -> None:
@@ -1297,6 +1378,10 @@ class RealtimeRoute:
                 # marked before the run hears the error: its fallback cue then names the reset
                 self.last_reset = ("pending_calls", self.clock())
         self.events("session", "server_error", code=event.code, request=req is not None)
+        if req is None and not output and self.input is not None:
+            # it may be the server refusing to answer owed stream speech: that entry no longer
+            # matches a response (order matching fails closed)
+            self.input.poison(generation)
         if req is None:
             self._count("outputs_refused" if output else "errors_unrelated")
         else:
@@ -1329,11 +1414,22 @@ class RealtimeRoute:
                     self._resets_in_row = 0  # the server answers: the reset streak ends
             run = req.run if req is not None else None
             recorder = req.recorder if req is not None and run is None else None
+            gone: list[str] = []
+            if req is not None and req.dropped:
+                item = getattr(event, "item_id", None)
+                if item and item not in req.items:
+                    req.items.append(item)
+                if done:
+                    gone, req.items = list(req.items), []
         if recorder is not None and isinstance(event, protocol.FunctionCall):
             recorder.note_call(event)  # a call after the cut still needs its output
         if done:
             self.network.report_realtime(True)  # real traffic: the session works
             self._account(event, req)
+        if gone and req is not None:
+            # a dropped response's audio and call items: the next answer must not read them,
+            # and a call left open would refuse every later response (SPEC 8)
+            self.delete_items(req.generation, gone)
         if req is None:
             self._count("foreign_events")
             return
@@ -1894,6 +1990,8 @@ COUNTERS = (
     "resets",
     "input_resets",
     "pending_call_resets",  # a response refused for a tool call left open: session reset
+    "unsettled_resets",  # the server could still answer a stream past the robot's wait: reset
+    "revoke_resets",  # a revoke while the server's own answer ran: reset, its audio stops
     "outputs_refused",  # the server refused a settling tool result (the session is reset)
 )
 
