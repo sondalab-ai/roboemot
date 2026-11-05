@@ -31,7 +31,7 @@ The fixes are listed in the code follow-ups below.
 Owner rules: an agent does not move the motors, does not start or restart RoboEmot, and asks before any SSH write to the robot. The SSH password is never stored.
 
 1. On the Mac: `git pull --ff-only` on `main` (at least `d93f4df`, PR 190; take the newest `main`), then `pip install --no-deps -e packages/roboemot-core -e packages/roboemot-reachymini`.
-2. Run `python scripts/install_on_robot.py --dry-run --cloud-voice --host 192.168.88.198`, then the same command without `--dry-run`. If the Mac says "No route to host", run `sudo arp -s 192.168.88.198 88:a2:9e:8d:58:b5`.
+2. Run `python scripts/install_on_robot.py --dry-run --cloud-voice --host 192.168.88.198`, then the same command without `--dry-run`. Optional, once: add `--overclock` (PR 189). The wizard checks the hardware, writes a trial config, and asks before it reboots the robot into it. Read `system.cpu.freq_max_mhz` (1800) and `temperatures.throttling` afterwards, and run the B step 3 cost check once at 1.5 GHz and once at 1.8 GHz. If the Mac says "No route to host", run `sudo arp -s 192.168.88.198 88:a2:9e:8d:58:b5`.
 3. Start with `python scripts/run_on_robot.py --host 192.168.88.198`. Do not use `--restart` right after an install. Wait about 2 minutes before you talk: the listener lags while the models load.
 4. Check in the web UI Settings: `vision.objects_enabled` is on, and `voice.barge_in.onset_enabled` is on (it was turned off during an earlier QA). Until the facing fix lands, turn `voice.facing.enabled` off for every section except C.
 5. Take each debug report from the web UI Diagnostics tab. The SSH report (`robot_ssh.py --debug`) has no runtime sections. Name each file after its check (for example `B-cup.json`).
@@ -276,7 +276,7 @@ Items marked "after QA X" wait for that QA section.
 | --- | --- | --- |
 | With `voice.enabled` off (the default), the `turn-to-voice` reflex never fires, because it needs the speech detector. Accept, or give it a fallback? https://github.com/sondalab-ai/roboemot/pull/182 | `reflex/engine.py`, SPEC 10 | decision |
 | Startle under load: a bang shorter than one chunk can be missed when the audio hub runs late. Keep this, or pass the loudest chunk of the pass (a SPEC change)? | `TODO.md`, SPEC 10 | decision |
-| CPU headroom: the owner chose an opt-in installer overclock to 1.8 GHz with a tryboot trial (2026-11-05). A Coral or Hailo-8L accelerator was ruled out for this robot. A CM5 swap stays open. https://github.com/sondalab-ai/roboemot/pull/189 | installer, SPEC 4A | approved |
+| CPU headroom: the owner chose an opt-in installer overclock to 1.8 GHz with a tryboot trial (2026-11-05). A Coral or Hailo-8L accelerator was ruled out for this robot. A CM5 swap stays open. https://github.com/sondalab-ai/roboemot/pull/189 | installer, SPEC 4A | done (2026-11-05) |
 | Let the server start its answer before the robot's transcript round trip, as Pollen's app does. The owner approved server-driven turns (2026-11-05): a `voice.realtime_route.turns: server` mode with server VAD creating and interrupting responses, speech-gated streaming, the skip tool as the addressing filter, and Pollen-like barge-in (duck to 25 %, stop on the server's `speech_started`). Slices S1–S3. | SPEC 8, 12, 13 | approved |
 | Try `voice.mood_source: llm_tagged`, because the owner found the delivery flat. | SPEC 8 | proposed |
 | Put the shown object into the conversation context. | `docs/plans/2026-11-03-vision-cost-handoff.md` section 4 | proposed |
@@ -307,7 +307,7 @@ Items marked "after QA X" wait for that QA section.
 | Fewer DINOv2 embeds in a cluttered room and during a look (minimum age, shown-track only by bearing, rebirth carry). https://github.com/sondalab-ai/roboemot/pull/188 | `vision/pipeline.py` | done (2026-11-05) |
 | The robot's name as the server's transcription hint, decided at connect. https://github.com/sondalab-ai/roboemot/pull/190 | `realtime/` | done (2026-11-05) |
 | Slice 2: DINOv2 on its own worker thread, with `vision.appearance_threads` and `vision.appearance_input_px`. Watch the peak vision CPU (about 4 cores while an embed runs). | `vision/embed_worker.py`, `vision/pipeline.py` | approved |
-| Opt-in installer overclock (`--overclock`, tryboot trial, verify, promote; revert on reinstall or uninstall). | installer, SPEC 4A | approved |
+| Opt-in installer overclock (`--overclock`, tryboot trial, verify, promote; revert on reinstall or uninstall). https://github.com/sondalab-ai/roboemot/pull/189 | installer, SPEC 4A | done (2026-11-05) |
 | Fire-and-forget skills: a spoken reply with only `play`, `look_at` or `express_emotion` calls ends the turn, with no repeat round. The tone tool is offered in the first response only. | `skills/`, `conversation/worker.py`, SPEC 8 | approved |
 | Facing diagnostics: per-check records, per-face yaw and eye span, frame channel order, landmarks in the Live preview (`webui.preview_landmarks`). | `vision/`, `voice/direction.py`, web UI | approved |
 | Server-driven turns S1–S3 (see the decision above). | `realtime/`, `conversation/worker.py`, `voice/` | approved |
