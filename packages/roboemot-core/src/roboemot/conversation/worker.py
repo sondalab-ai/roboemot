@@ -1077,6 +1077,7 @@ class ConversationWorker:
                 mute_on=SKIP_TOOL if skip and not turn.rounds else None,
                 on_late=lambda items, t=turn: self._late_items(t, items),
                 passive=frozenset({TONE_TOOL}) if tone else frozenset(),
+                server_turn=server is not None,
             )
             round_from = len(turn.spoken)
             turn.rt_round = (calls, results, round_from)

@@ -150,6 +150,7 @@ class Request:
     dropped: bool = False
     items: list[str] = field(default_factory=list, repr=False)
     generation: int = -1
+    server_turn: bool = False  # a server turn's own request (a skill's follow-up)
 
 
 # what the audio input says of a response the server created on its own (``RealtimeInput.claim``)
@@ -405,7 +406,7 @@ class RealtimeRoute:
         # None (no worker) drops every such response
         self.server_turn: Callable[[ServerResponse], bool] | None = None
         # responses held while their stream still streams, by the stream's job (``judged``)
-        self._held: dict[int, Request] = {}
+        self._held: dict[Any, Request] = {}
         # what a stream's opening session.update carries: the instructions and tools a turn
         # would send (the worker's), so the server's own answer reads them
         self.stream_session: Callable[[Any], tuple[str, Any]] = lambda job: (
@@ -464,8 +465,9 @@ class RealtimeRoute:
             # that answer stops (as an S1a revoke stops the stream itself)
             with self._lock:
                 answering = any(
-                    not r.event_id and r.run is not None and r.token is self._token
-                    for r in self._live.values()
+                    (not r.event_id or r.server_turn) and r.run is not None
+                    for r in (*self._live.values(), *self._pending)
+                    if r.token is self._token
                 )
                 generation = self.generation
             if answering:
@@ -897,6 +899,7 @@ class RealtimeRoute:
         *,
         input_chars: int = 0,
         generation: int | None = None,
+        server_turn: bool = False,
     ) -> Request | None:
         """Send ``response.create`` for ``run`` (its ``deliver``/``closed`` get the response's
         events) through the send gate; None when there is no session or the gate refuses it
@@ -905,7 +908,7 @@ class RealtimeRoute:
         now = self.clock()
         event_id = f"{EVENT_PREFIX}{next(self._events)}"
         estimate = (len(instructions) + input_chars) // CHARS_PER_TOKEN
-        req = Request(event_id, run, now, estimate, last_event=now)
+        req = Request(event_id, run, now, estimate, last_event=now, server_turn=server_turn)
         event = protocol.response_create(instructions, tool_choice, event_id=event_id)  # type: ignore[arg-type]
 
         def track() -> None:  # under _lock, with the send
@@ -1253,14 +1256,18 @@ class RealtimeRoute:
                     held = HeldResponse()
                 req = Request("", held, now, token=tok, generation=generation)
                 if claim is not None and claim.verdict == WAIT and held is not None:
-                    self._held[id(claim.job)] = req
+                    self._held[claim.job] = req
             req.response_id, req.last_event = rid, now
             self._live[rid] = req
             run = req.run
         if held is not None and claim is not None:
             held.deliver(event)  # first: the run that takes it reads its id
             if claim.verdict == WAIT:
-                return  # judged when its stream ends (judged)
+                # judged when its stream ends (judged); a stream that ended between the claim
+                # and the hold's registration above was judged with nobody to hear it
+                if claim.job.judged is not None:
+                    self.judged(claim.job, claim.job.judged, claim.items)
+                return
             self._take_answer(req, generation, claim.job, claim.items)
             return
         if run is not None:
@@ -1279,7 +1286,7 @@ class RealtimeRoute:
         stream ended (any thread): the stream's answer, or a fragment. One whose session went
         meanwhile was settled with it: nothing more."""
         with self._lock:
-            req = self._held.pop(id(job), None)
+            req = self._held.pop(job, None)
             live = req is not None and req.token is not None and req.token is self._token
         if req is None or not live:
             return
@@ -1378,9 +1385,10 @@ class RealtimeRoute:
                 # marked before the run hears the error: its fallback cue then names the reset
                 self.last_reset = ("pending_calls", self.clock())
         self.events("session", "server_error", code=event.code, request=req is not None)
-        if req is None and not output and self.input is not None:
-            # it may be the server refusing to answer owed stream speech: that entry no longer
-            # matches a response (order matching fails closed)
+        if req is None and not output and event.event_id is None and self.input is not None:
+            # about no client event: it may be the server declining to answer owed stream
+            # speech (an active response); that entry is resolved (an error that names an
+            # event the robot sent, a delete or a truncate, is about that event)
             self.input.poison(generation)
         if req is None:
             self._count("outputs_refused" if output else "errors_unrelated")

@@ -159,6 +159,7 @@ class InputJob:
         # what its opening showed the server (the worker's: skills, choices, conversation state)
         self.shown: Any = None
         self.claimed = False  # a server response was claimed for it: a second is a duplicate
+        self.judged: str | None = None  # the verdict on a response held for it (``_judge``)
 
     def __repr__(self) -> str:
         return f"InputJob(done={self.done}, refused={self.refused!r})"
@@ -279,7 +280,6 @@ class _Owed:
     stream: _Burst | None
     end_ms: int | None
     at: float
-    poisoned: bool = False  # an error with no request of the robot's may have been its answer
 
 
 @dataclass(frozen=True)
@@ -811,9 +811,10 @@ class RealtimeInput:
           the listener closed it): the response is held and judged when it ends (``_judge``);
         - ``FRAGMENT``: cut, cancelled, revoked, ended by the server inside the segment, or no
           stream holds it; also, failing closed, when more than one owed entry is fresh (a
-          response the server skipped makes order matching unsafe) or the entry was poisoned
-          by an error with no request of the robot's (``poison``);
-        - ``DUPLICATE``: a response was already claimed for that stream.
+          response the server skipped makes order matching unsafe);
+        - ``DUPLICATE``: a response was already claimed for that stream (one still held for it
+          is released as a fragment instead: the server ended the stream again later, so the
+          held one answered part of it, and this one is judged in its place).
 
         None when no stream speech waits: the robot's own request, or a second response. Speech
         the server ended ``max_age_s`` (``server_answer_wait_s``) ago or more waits no longer."""
@@ -827,27 +828,41 @@ class RealtimeInput:
             ambiguous = len(self._owed) > 1
             owed = self._owed.pop(0)
             s = owed.stream
-            if ambiguous or owed.poisoned or s is None:
+            if ambiguous or s is None:
                 return Claim(FRAGMENT)
-            if s.job.claimed:
+            released = s.holding  # the server split it: the held response was a part of it
+            if s.job.claimed and not released:
                 return Claim(DUPLICATE, s.job)
-            s.job.claimed = True
             items = tuple(k for k in s.order if isinstance(k, str))
-            if self._streaming(s):
-                s.held_end, s.holding = owed.end_ms, True
-                return Claim(WAIT, s.job, items)
-            if not self._whole(s, owed.end_ms):
-                return Claim(FRAGMENT)
-            return Claim(ANSWER, s.job, items)
+            if released:
+                s.holding, s.job.judged = False, FRAGMENT
+            claim = self._judge_claim(s, owed.end_ms, items)
+        if released:
+            self.route.judged(s.job, FRAGMENT, items)
+        return claim
+
+    def _judge_claim(self, s: _Burst, end_ms: int | None, items: tuple[str, ...]) -> Claim:
+        """The verdict on a fresh claim for stream ``s`` (lock held): held while it streams,
+        else whole or a fragment; a fragment leaves the stream unclaimed (a later end of the
+        same stream may still answer it)."""
+        if self._streaming(s):
+            s.job.claimed = True
+            s.held_end, s.holding, s.job.judged = end_ms, True, None
+            return Claim(WAIT, s.job, items)
+        if not self._whole(s, end_ms):
+            return Claim(FRAGMENT)
+        s.job.claimed = True
+        return Claim(ANSWER, s.job, items)
 
     def poison(self, generation: int) -> None:
-        """An ``error`` with no request of the robot's (client thread): it may be the server
-        refusing to answer the oldest owed stream speech, so that entry no longer matches a
-        response (its claim fails closed)."""
+        """An ``error`` about no client event (client thread): it may be the server declining
+        to answer the oldest owed stream speech (an active response), so that entry is
+        resolved now: no response is waited for (``unsettled``), and none is matched to it (a
+        response that comes anyway finds the next entry, or none: it fails closed)."""
         with self._lock:
             owed = next((o for o in self._owed if o.generation == generation), None)
             if owed is not None:
-                owed.poisoned = True
+                self._owed.remove(owed)
 
     def _streaming(self, s: _Burst) -> bool:
         """Stream ``s`` still streams (lock held): the listener has not ended it yet, and
@@ -877,9 +892,12 @@ class RealtimeInput:
             if not s.holding:
                 return
             s.holding = False
-            whole = self._whole(s, s.held_end)
+            verdict = ANSWER if self._whole(s, s.held_end) else FRAGMENT
+            s.job.judged = verdict  # the route reads it should it register the hold later
+            if verdict == FRAGMENT:
+                s.job.claimed = False  # a later end of the same stream may still answer it
             items = tuple(k for k in s.order if isinstance(k, str))
-        self.route.judged(s.job, ANSWER if whole else FRAGMENT, items)
+        self.route.judged(s.job, verdict, items)
 
     def unsettled(self, generation: int, max_age_s: float) -> bool:
         """Whether the server may still create a response on its own on ``generation``'s
@@ -1226,6 +1244,7 @@ class RealtimeInput:
                 retired = True
                 if burst.utt_ms == math.inf:  # a stream ended part way: its length is what went
                     burst.utt_ms = burst.sent_ms
+                    burst.cut = True  # only the listener's close ends a stream whole
                 delete, undeletable = self._retire(burst)
                 burst.ended_at = self._clock()
                 if burst.end_at is None:

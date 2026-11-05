@@ -3820,7 +3820,9 @@ class RealtimeRouteConfig(Strict):
         "With turns: server, how long the server's own answer to a stream is waited for once "
         "the server ended its turn (or the stream ended or was cut): the robot's own requests "
         "wait meanwhile, and a streamed utterance whose transcript came but no answer gets the "
-        "did-not-get-it cue this long after its transcript",
+        "did-not-get-it cue this long after its transcript. The robot's requests wait at "
+        "most the route's stall_timeout_s: when that is shorter and the server may still "
+        "answer, the session is reset instead of sending",
         unit="s",
         ge=1,
         le=30,

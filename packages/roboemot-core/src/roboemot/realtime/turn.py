@@ -133,8 +133,10 @@ class ResponseRun:
         mute_on: str | None = None,
         on_late: Callable[[list[str]], None] | None = None,
         passive: frozenset[str] = frozenset(),
+        server_turn: bool = False,
     ) -> None:
         self.route, self.speech = route, speech
+        self.server_turn = server_turn  # a server turn's request: a revoke stops it (route)
         self.mute_on = mute_on  # this tool as the response's first call mutes it (the skip)
         self.passive = passive  # calls that do not count as the first one (the tone tool)
         self._called = False  # a call of this response arrived (client thread)
@@ -183,6 +185,7 @@ class ResponseRun:
             tool_choice,
             input_chars=self.input_chars,
             generation=self.generation,
+            server_turn=self.server_turn,
         )
         if req is None:
             self.reply.closed = "no_session"

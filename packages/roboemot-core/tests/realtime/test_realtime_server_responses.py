@@ -579,7 +579,7 @@ def test_two_fresh_owed_entries_fail_closed(ears):  # noqa: F811
         assert not whole.job.claimed  # nothing was taken for A
 
 
-def test_an_error_with_no_request_poisons_the_oldest_owed_speech(ears):  # noqa: F811
+def test_an_error_about_no_client_event_resolves_the_oldest_owed_speech(ears):  # noqa: F811
     with TurnServer() as server:
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
         inp, gen = ear.input, ear.rt.route.generation
@@ -587,7 +587,8 @@ def test_an_error_with_no_request_poisons_the_oldest_owed_speech(ears):  # noqa:
         inp._owed.append(_Owed(gen, stream, 1900, inp._clock()))
         refusal = protocol.ServerError("error", "conversation_already_has_active_response")
         ear.rt.route._error(refusal, None)
-        assert inp.claim(gen, 5.0).verdict == "fragment"
+        # declined: nothing is waited for, and a response that comes anyway matches nothing
+        assert inp._owed == [] and inp.claim(gen, 5.0) is None and not stream.job.claimed
 
 
 def test_a_cut_stream_is_unsettled_until_the_server_reports_it(ears):  # noqa: F811
@@ -817,3 +818,139 @@ def test_robot_turns_back_clear_the_owed_speech(ears):  # noqa: F811
         stack.set("privacy.realtime_audio_unaddressed", False, source="test")
         ear.rt.route.apply_config(stack.effective())
         assert inp._owed == [] and inp.claim(gen, 5.0) is None
+
+
+# ------------------------------------------------------------------ re-review follow-ups (PR 196)
+
+
+class Judged:
+    """A route stand-in that records the input's verdicts on held responses."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def judged(self, job, verdict, items) -> None:
+        self.calls.append(verdict)
+
+
+def held_stream(ear, end_ms: int, sent_ms: float = 1500.0):
+    """A stream that still streams, with a server response held for it (WAIT)."""
+    inp, gen = ear.input, ear.rt.route.generation
+    s = _Burst(stream_job(), gen, utt_ms=math.inf, silence_ms=600.0)
+    s.sent_ms = sent_ms
+    inp._streams = [s]
+    inp._owed.append(_Owed(gen, s, end_ms, inp._clock()))
+    assert inp.claim(gen, 5.0).verdict == "wait"
+    return s
+
+
+def test_a_held_stream_closed_by_a_failure_is_a_fragment(ears):  # noqa: F811
+    """L1: the stream thread fails mid-segment (or the session goes): _close ends it part
+    way, so the response held for it answers a fragment, never a whole segment."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        judged = Judged()
+        ear.input.route = judged
+        s = held_stream(ear, 1400)  # the server ended on quiet inside the 1.5 s streamed
+        ear.input._close(s.job)  # the stream thread's exception handler: no cancel
+        assert judged.calls == ["fragment"]
+
+
+def test_a_stream_the_server_splits_is_answered_once(ears):  # noqa: F811
+    """L2: the server ends a stream inside the segment (held), then again at its end: the
+    earlier hold is released as a fragment, and the later response is the stream's answer."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        judged = Judged()
+        inp.route = judged
+        s = held_stream(ear, 800)
+        inp._owed.append(_Owed(gen, s, 2900, inp._clock()))  # the server's second end
+        assert inp.claim(gen, 5.0).verdict == "wait"  # the stream's answer, held again
+        assert judged.calls == ["fragment"]  # the first one released
+        s.utt_ms = 3000.0  # the close
+        inp._judge(s)
+        assert judged.calls == ["fragment", "answer"]
+
+
+def test_a_stream_judged_a_fragment_can_still_be_answered_later(ears):  # noqa: F811
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        judged = Judged()
+        inp.route = judged
+        s = held_stream(ear, 800)
+        s.utt_ms = 3000.0
+        inp._judge(s)  # the close judged the hold: the server ended inside the segment
+        assert judged.calls == ["fragment"] and not s.job.claimed
+        inp._owed.append(_Owed(gen, s, 2900, inp._clock()))
+        assert inp.claim(gen, 5.0).verdict == "answer"
+
+
+def test_a_judgement_racing_the_holds_registration_is_not_lost(ears):  # noqa: F811
+    """L3: the stream ends between the claim (WAIT) and the route registering its hold:
+    the route judges it itself once registered, so the answer plays."""
+    with TurnServer(stream_vad=True, vad_answers=True, heard=[[HEARD]]) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        inp, claim = ear.input, ear.input.claim
+
+        def claim_then_end(gen, wait):
+            s = next(b for b in inp._streams if b.generation == gen)
+            utt, s.utt_ms = s.utt_ms, math.inf  # still streaming at the claim
+            result = claim(gen, wait)
+            s.utt_ms = utt
+            inp._judge(s)  # the close lands before the route registers the hold
+            return result
+
+        inp.claim = claim_then_end
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1 and pushed(ear) > 0, 10.0)
+        assert snap(ear)["server_responses"] == 1 and not ear.rt.route._held
+
+
+def test_an_error_about_a_client_event_does_not_poison_the_owed_speech(ears):  # noqa: F811
+    """L4a: an error that echoes an event the robot sent (a delete, a truncate) is about that
+    event, not a declined answer."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        stream = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+        inp._owed.append(_Owed(gen, stream, 1900, inp._clock()))
+        ear.rt.route._error(protocol.ServerError("error", "item_not_found", "ev_7"), None)
+        assert inp.claim(gen, 5.0).verdict == "answer"
+
+
+def test_a_declined_answer_does_not_hold_or_reset_a_skill_follow_up(ears):  # noqa: F811
+    """L4b: the server declines an answer (no event id) while a server turn runs: that owed
+    speech is resolved at once, so the turn's follow-up neither waits nor resets."""
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, route, gen = ear.input, ear.rt.route, ear.rt.route.generation
+        stream = _Burst(stream_job(), gen, utt_ms=2000.0, silence_ms=600.0)
+        stream.add("in_9")
+        stream.stopped("in_9", 1900)
+        stream.sent_ms = 2000.0
+        inp._streams = [stream]
+        inp._owed.append(_Owed(gen, stream, 1900, inp._clock()))
+        assert route.busy()
+        declined = protocol.ServerError("error", "conversation_already_has_active_response")
+        route._error(declined, None)
+        assert not route.busy()
+        route.expire()
+        assert snap(ear)["unsettled_resets"] == 0
+
+
+def test_a_revoke_during_a_server_turns_follow_up_stops_it(ears):  # noqa: F811
+    """L5: the server's answer called a skill that needs a follow-up; the revoke lands while
+    the robot's follow-up request is out: the session is reset."""
+    with TurnServer(
+        ["audio_then_tool", "silent"], tool_name="recall", stream_vad=True, vad_answers=True
+    ) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        tooled(ear)
+        ear.say()
+        assert wait_until(lambda: len(server.of("response.create")) == 1, 10.0)
+        stack = ear.rt.stack
+        stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.route.apply_config(stack.effective())
+        assert wait_until(lambda: snap(ear)["revoke_resets"] == 1)
