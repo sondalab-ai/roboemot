@@ -438,7 +438,7 @@ class HeldResponse:
     def item_ids(self) -> list[str]:
         """The server items of the events kept so far (none once a run took them)."""
         with self._lock:
-            ids = [getattr(arg, "item_id", None) for name, arg in self._kept if name != "closed"]
+            ids = [protocol.response_item(arg) for name, arg in self._kept if name == "deliver"]
         return list(dict.fromkeys(i for i in ids if i))
 
     def deliver(self, event: protocol.ServerEvent) -> None:

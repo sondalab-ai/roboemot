@@ -534,3 +534,11 @@ def parse(frame: str | bytes, max_bytes: int) -> ServerEvent:
         return _event(kind, data)
     except _Bad as bad:
         return Malformed("malformed", bad.reason)
+
+
+def response_item(event: ServerEvent) -> str | None:
+    """The server item a response event is about (its audio, transcript or call item), None
+    for any other event."""
+    if isinstance(event, AudioDelta | AudioDone | ReplyTranscript | FunctionCall):
+        return event.item_id
+    return None

@@ -365,13 +365,15 @@ def test_a_skip_mutes_and_deletes_the_streamed_words(ears):  # noqa: F811
 
 def test_a_second_segment_reaches_the_server_before_the_first_turns_answer(ears):  # noqa: F811
     """S1a's double request is gone (S1b): a person who pauses and goes on has both segments
-    committed before the first answer; the server answers each turn it ended by itself, and
-    the robot asks for nothing on top."""
+    committed while the first answer still plays (a slow answer: deterministic); the second
+    response is a duplicate, never played, its words join the first turn, and the robot asks
+    for nothing on top."""
     heard = [["prima"], ["seconda"]]
     hold = threading.Event()
     with TurnServer(
-        stream_vad=True, heard=heard, hold=hold, hold_at="transcript", vad_answers=True
-    ) as srv:
+        stream_vad=True, heard=heard, hold=hold, hold_at="transcript", vad_answers=True,
+        deltas=10, gap_s=0.1,
+    ) as srv:  # fmt: skip
         ear = ears(srv, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
         ear.say()
         ear.say()
@@ -381,8 +383,11 @@ def test_a_second_segment_reaches_the_server_before_the_first_turns_answer(ears)
         committed = srv.sent_of("input_audio_buffer.committed")
         assert [e["item_id"] for e in committed] == ["in_1_0", "in_2_0"]
         assert srv.of("response.create") == [] and srv.commits_at_create == []
+        assert wait_until(lambda: ear.rt.worker.snapshot().get("turns", 0) == 1, 10.0)
         snap = ear.rt.route.snapshot()
-        assert snap["server_responses"] + snap["server_duplicates"] == 2
+        assert snap["server_responses"] == 1 and snap["server_duplicates"] == 1
+        assert ear.rt.speech.snapshot()["spoken"] == 1
+        assert wait_until(lambda: ear.rt.history()[0][0]["content"] == "prima seconda")
 
 
 # ------------------------------------------------------------------ consent (SPEC 12)

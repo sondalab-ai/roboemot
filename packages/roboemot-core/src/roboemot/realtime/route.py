@@ -1416,7 +1416,7 @@ class RealtimeRoute:
             recorder = req.recorder if req is not None and run is None else None
             gone: list[str] = []
             if req is not None and req.dropped:
-                item = getattr(event, "item_id", None)
+                item = protocol.response_item(event)
                 if item and item not in req.items:
                     req.items.append(item)
                 if done:
