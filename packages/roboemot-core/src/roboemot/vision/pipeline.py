@@ -147,7 +147,15 @@ from .facing import eye_span, head_yaw, smoothed
 from .geometry import CameraModel, letterbox_scale
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .object_crop import CropSchedule, off_centre
-from .object_follow import ASLEEP, DISABLED, EPISODE_END, RESET, TRACK_ENDED, ShownFollower
+from .object_follow import (
+    ASLEEP,
+    DISABLED,
+    EPISODE_END,
+    PAUSED,
+    RESET,
+    TRACK_ENDED,
+    ShownFollower,
+)
 from .object_gate import ObjectGate
 from .scene_motion import SceneMotionWatch, ScenePercept
 from .stage_timing import (
@@ -444,6 +452,7 @@ class VisionPipeline:
         self._expire(stamp)
         self._apply_embeds()
         if self.governor.scale <= 0:
+            self.follower.stop(PAUSED)
             return FrameReport(stamp)
         camera = self._camera(frame.image.shape[1], frame.image.shape[0])
         self._budget = self.cfg.max_embeds_per_frame
@@ -1137,10 +1146,17 @@ class VisionPipeline:
             self._publish_entity(frame, camera, track, states[track.track_id])
 
     def _publish_entity(
-        self, frame: Frame, camera: CameraModel, track: Track, state: _EntityState
+        self,
+        frame: Frame,
+        camera: CameraModel,
+        track: Track,
+        state: _EntityState,
+        tracker_score: float | None = None,
     ) -> None:
         """Publish an animal or object track's ``percept.entity`` for ``frame`` (its filtered
-        box) and keep that box as its last sighting."""
+        box) and keep that box as its last sighting. A sighting of the single-object tracker
+        (``tracker_score``) publishes the lower of that score and the detector's last."""
+        score = track.score if tracker_score is None else min(track.score, tracker_score)
         state.seen_box, state.last_seen = track.box, frame.stamp
         x1, y1, x2, y2 = track.box
         azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
@@ -1152,7 +1168,7 @@ class VisionPipeline:
             elevation_rad=elevation,
             category=self.display_name(track.label),
             identity=state.owner_id,
-            confidence=min(1.0, max(0.0, track.score)),
+            confidence=min(1.0, max(0.0, score)),
             embedding=state.embedding,
             extent_rad=_extent(camera, track.box),
         )
@@ -1165,7 +1181,8 @@ class VisionPipeline:
         object track and published like a detector sighting. The follow ends with the look,
         when the switch goes off or when the track is gone."""
         follower = self.follower
-        if follower.target is None:
+        target = follower.target
+        if target is None:
             return
         if not episode:
             follower.stop(EPISODE_END)
@@ -1175,10 +1192,10 @@ class VisionPipeline:
             return
         if ran or not self.governor.allow(OBJECT_TRACK, frame.stamp):
             return
-        target = follower.target
-        box = follower.step(frame.image, frame.stamp)
-        if box is None:
+        stepped = follower.step(frame.image, frame.stamp)
+        if stepped is None or not follower.current(target):
             return
+        box, score = stepped
         track = self.object_tracker.follow(target, box, frame.stamp)
         state = self._entities.get(target)
         if track is None or state is None:
@@ -1186,7 +1203,7 @@ class VisionPipeline:
             return
         if track not in self._object_visible:
             self._object_visible = sorted([*self._object_visible, track], key=lambda t: t.track_id)
-        self._publish_entity(frame, camera, track, state)
+        self._publish_entity(frame, camera, track, state, score)
 
     def _shown_track(self, visible: list[Track], frame: Frame, camera: CameraModel) -> int | None:
         """The track taken as the shown thing during a look at it (SPEC 5, 5A), None while no

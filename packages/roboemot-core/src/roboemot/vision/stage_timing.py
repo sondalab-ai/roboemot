@@ -2,10 +2,11 @@
 
 ``StageTimer`` keeps, per stage, a fixed ring of (end time, wall seconds, CPU seconds). Keys:
 ``face_detect`` (YuNet), ``face_embed`` (SFace), ``object_detect`` (NanoDet),
-``appearance_embed`` (DINOv2), ``object_track`` (VitTrack, the shown object between NanoDet
-runs) and ``process``, the whole ``VisionPipeline.process`` call of one
-frame (frames the governor lets through without a stage included). The report never carries the
-word "embedding" (privacy guard of the perception tests), hence ``_embed``.
+``appearance_embed`` (DINOv2), ``object_track`` (VitTrack updates, the shown object between
+NanoDet runs), ``object_track_init`` (VitTrack starts, on a NanoDet frame) and ``process``,
+the whole ``VisionPipeline.process`` call of one frame (frames the governor lets through
+without a stage included). The report never carries the word "embedding" (privacy guard of
+the perception tests), hence ``_embed``.
 
 ``runs`` is the count since start. Every other field is taken over the last
 ``vision.timing_window_s`` of wall time: ``runs_per_s``, ``wall_ms`` per run (p50, p90, max;
@@ -48,8 +49,9 @@ EMBEDDING = "face_embed"
 OBJECTS = "object_detect"
 APPEARANCE = "appearance_embed"
 OBJECT_TRACK = "object_track"
+OBJECT_TRACK_INIT = "object_track_init"
 PROCESS = "process"
-STAGES = (DETECTION, EMBEDDING, OBJECTS, APPEARANCE, OBJECT_TRACK, PROCESS)
+STAGES = (DETECTION, EMBEDDING, OBJECTS, APPEARANCE, OBJECT_TRACK, OBJECT_TRACK_INIT, PROCESS)
 MS_PER_S = 1000.0
 FIELDS = 3  # end time, wall seconds, CPU seconds
 

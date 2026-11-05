@@ -2263,6 +2263,15 @@ class ObjectTrackConfig(Strict):
         ge=0,
         le=1,
     )
+    box_area_ratio_max: float = param(
+        4.0,
+        "A tracker box whose area is more than this many times, or less than one over this "
+        "many times, that of the last detector box it was started on or confirmed by is a "
+        "drift (a lost tracker can grow its box to the whole frame at a high score): the "
+        "follow ends and the box is never published. So is a box whose centre left the frame",
+        ge=1.1,
+        le=100,
+    )
 
 
 class SceneMotionConfig(Strict):

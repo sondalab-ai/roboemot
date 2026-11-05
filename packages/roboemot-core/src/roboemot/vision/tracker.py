@@ -29,9 +29,10 @@ track of its label within ``pickup_heights`` of its height (a thing lifted into 
 its track); the track jumps to the detection.
 
 Between detector runs a single-object tracker may follow one track (the shown object, SPEC 5):
-``follow`` folds its box into that track's filter like a measurement and counts as a sighting
-(``last_stamp``, matched at the last update), so the track neither expires nor drifts away on
-its constant velocity while the detector misses it, and the next detection associates with it.
+``follow`` takes its box as that track's position and the move since as its velocity
+(``Track._follow``) and counts as a sighting (``last_stamp``, matched at the last update, so a
+weak detection may continue it), so the track neither expires nor lags behind while the
+detector misses it, and the next detection associates with it.
 It never changes the hits, the score or the detection: only the detector confirms a track.
 
 Track IDs come from an allocator that can be shared between trackers, so IDs are unique across
@@ -193,6 +194,21 @@ class Track:
     def _correct(self, det: Detection) -> None:
         self._correct_box(det.box)
 
+    def _follow(self, box: Box, stamp: float) -> None:
+        """Take a single-object tracker's box as the position, and the move from the last
+        position over the time since as the velocity: the tracker sees every few frames
+        while the filter's velocity, tuned for detections, learns a fast move too slowly for
+        the next detection to associate (a cup at 160 px/s lagged it by 0.7 box widths). The
+        covariance is updated as for a measurement. Twice at one stamp changes nothing."""
+        dt = stamp - self._stamp
+        before = self._mean[:MEASURE_DIM].copy()
+        self._predict(stamp)
+        self._correct_box(box)
+        position = _cxcywh(box)
+        self._mean[:MEASURE_DIM] = position
+        if dt > 0:
+            self._mean[MEASURE_DIM:] = (position - before) / dt
+
     def _correct_box(self, box: Box) -> None:
         h = max(self._mean[HEIGHT], 1.0)
         meas_cov = np.eye(MEASURE_DIM) * (POSITION_STD * h) ** 2
@@ -302,8 +318,7 @@ class Tracker:
         track = next((t for t in self._tracks if t.track_id == track_id), None)
         if track is None or not track.confirmed:
             return None
-        track._predict(stamp)
-        track._correct_box(box)
+        track._follow(box, stamp)
         track.last_stamp, track._matched_last = stamp, True
         return track
 

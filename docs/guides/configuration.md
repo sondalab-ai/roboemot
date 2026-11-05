@@ -552,6 +552,7 @@ says why (`roboemot.vision.object_track`, `state: unavailable` with the `reason`
 | `vision.object_track.score_min` | `0.3` | 0 to 1 | Below this tracker score the thing counts as lost, and the tracker stops. |
 | `vision.object_track.confirm_max_s` | `3.0` | s, 0.2 to 30 | The tracker stops when the detector has not seen the thing for this long. |
 | `vision.object_track.reseed_iou` | `0.5` | 0 to 1 | When the detector's box and the tracker's box overlap less than this, the tracker starts again on the detector's box. |
+| `vision.object_track.box_area_ratio_max` | `4.0` | 1.1 to 100 | A tracker box this many times larger (or smaller) than the detector's box is a drift: the tracker stops. So does a box whose centre leaves the picture. |
 
 **Privacy.** The tracker keeps a small picture of the thing in memory while it follows it. It is
 never stored or logged.

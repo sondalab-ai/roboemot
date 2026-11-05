@@ -474,7 +474,9 @@ class VitTracker:
         self._tracker.init(image, (x1, y1, x2 - x1, y2 - y1))
 
     def update(self, image: np.ndarray) -> tuple[Box, float]:
-        """The followed box in ``image`` (xyxy, original pixels) and the tracker's score."""
+        """The followed box in ``image`` (xyxy, original pixels) and the tracker's score.
+        Verified on OpenCV 5.0.0 (``opencv-python-headless`` 5.0.0.93): a lost target keeps
+        ``ok`` true with a drifting box, so only the score is read."""
         _, (x, y, w, h) = self._tracker.update(image)
         score = float(self._tracker.getTrackingScore())
         return (float(x), float(y), float(x + w), float(y + h)), score
