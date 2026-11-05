@@ -52,7 +52,9 @@ that long apart: a late second segment. ``ids`` off leaves every ``item_id`` out
 that does not send them); ``ids_per_session`` numbers the items per connection, so an id
 repeats across sessions. ``tool_names`` (when set) names the call of each response in turn
 (the last repeats) instead of ``tool_name``; ``call_args`` (call id -> arguments) overrides
-``tool_args`` for one call. ``sent`` records every event the server sent.
+``tool_args`` for one call. ``statuses`` (when set) is the ``response.done`` status of each
+response in turn that would end ``completed`` (the last repeats), for example ``incomplete``
+(a token cap). ``sent`` records every event the server sent.
 
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
@@ -122,6 +124,7 @@ class TurnServer(FakeServer):
         hold: threading.Event | None = None,
         hold_at: str = "transcript",
         hold_max_s: float = HOLD_MAX_S,
+        statuses: list[str] | None = None,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -135,6 +138,7 @@ class TurnServer(FakeServer):
         self.tool_name, self.tool_args = tool_name, tool_args
         self.tool_names, self.stall_s = tool_names, stall_s
         self.call_args = call_args or {}
+        self.statuses = statuses
         self.strict_calls = strict_calls
         self.reject_outputs = reject_outputs
         self.open_calls: dict[str, str] = {}  # call id -> its item id, on this connection
@@ -412,6 +416,8 @@ class TurnServer(FakeServer):
         )
 
     async def _done(self, ws: ServerConnection, rid: str, status: str) -> None:
+        if status == "completed" and self.statuses:
+            status = self.statuses[min(self.responses - 1, len(self.statuses) - 1)]
         response: dict[str, Any] = {"id": rid, "status": status}
         if self.usage is not None:
             response["usage"] = {"total_tokens": self.usage}

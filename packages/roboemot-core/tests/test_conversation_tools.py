@@ -659,7 +659,8 @@ def test_text_and_a_gesture_end_the_turn_after_one_request(tooled):
     assert rig.speech.texts() == ["Ciao!", "Sono curiosa."]
     snap = rig.worker.snapshot()
     assert snap["follow_ups_skipped"] == 1 and snap["tool_calls"] == 1
-    assert rig.events[0]["outcome"] == "ok" and rig.events[0]["rounds"] == 0
+    assert rig.events[0]["outcome"] == "ok"
+    assert rig.events[0]["rounds"] == 1  # a tool round, with no request after it
     rig.turn("due")
     roles = [(m["role"], m.get("content")) for m in srv.bodies[1]["messages"][1:]]
     assert roles == [
@@ -704,3 +705,42 @@ def test_text_a_gesture_and_a_failed_look_end_the_turn(tooled):
     tools = [m for m in rig.worker._turns[0] if m["role"] == "tool"]
     assert [m["tool_call_id"] for m in tools] == ["c1", "c2"]
     assert json.loads(tools[1]["content"])["error"] == "invalid_arguments"
+
+
+def test_a_model_that_would_gesture_every_round_is_asked_once(tooled):
+    """The robot-run case on the chat path: a script of three rounds of speech and ``play``."""
+    again = ["Cosa si deve fare? ", C(0, "c", "play", {"gesture": "joy"})]
+    rig, srv, env = tooled(again, again, again, ["Basta."])
+    rig.turn("hey ciao neve")
+    assert len(srv.bodies) == 1 and env.played == ["joy"]
+    assert rig.speech.texts() == ["Cosa si deve fare?"]
+    assert rig.worker.snapshot()["follow_ups_skipped"] == 1
+
+
+def test_stop_talking_beside_a_gesture_is_no_skipped_follow_up(tooled):
+    rig, srv, env = tooled(
+        ["Va bene. ", C(0, "c1", "play", {"gesture": "joy"}), C(1, "c2", "stop_talking", {})],
+        ["Ancora."],
+    )
+    rig.turn("basta")
+    assert len(srv.bodies) == 1 and env.played == ["joy"]
+    assert rig.events[0]["outcome"] == "stopped"
+    assert rig.worker.snapshot().get("follow_ups_skipped", 0) == 0
+
+
+def test_a_gesture_beside_a_preference_that_was_not_asked_keeps_the_loop(tooled):
+    """``remember_preference`` keeps ``follow_up``: when it did not ask (the registry refused),
+    its result goes back and the model is asked again."""
+    rig, srv, env = tooled(
+        [
+            "Certo. ",
+            C(0, "c1", "play", {"gesture": "joy"}),
+            C(1, "c2", "remember_preference", {"key": "colore", "value": "blu"}),
+        ],
+        ["Non posso ricordarlo."],
+        store=Store(allowed=False),
+    )
+    rig.turn("ricordati il blu")
+    assert len(srv.bodies) == 2
+    assert json.loads(srv.bodies[1]["messages"][-1]["content"]) == {"status": "not_allowed"}
+    assert rig.worker.snapshot().get("follow_ups_skipped", 0) == 0

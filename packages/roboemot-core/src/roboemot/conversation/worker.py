@@ -1040,9 +1040,12 @@ class ConversationWorker:
             # more response, once, without the tool (SPEC 8, Tone tool)
             noted = TONE_NOTED in tones.values()  # an invalid-only tone round is not retried
             retry = not (ended or calls or reply.audio or turn.tone_retry) and noted
-            # spoke and only gestured: one more response would only say it again (SPEC 8)
+            # spoke and only gestured: one more response would only say it again (SPEC 8). A
+            # response the server ended otherwise (incomplete: token cap, content filter) may
+            # have been cut mid-sentence: it keeps the follow-up
             spoke = reply.audio or len(turn.spoken) > round_from
-            quiet = not ended and spoke and self._fire_and_forget(calls, choices)
+            finished = reply.status == "completed"
+            quiet = not ended and finished and spoke and self._fire_and_forget(calls, choices)
             more = not ended and not quiet and (bool(calls) or retry)
             done = [(c.id, r.content) for c, r in zip(calls, results, strict=True)]
             for call_id, content in [*done, *tones.items()]:
@@ -1057,17 +1060,16 @@ class ConversationWorker:
             if not more:
                 if quiet:
                     self._end_after_speech(turn, calls, results)
-                    turn.rt_round = None
                 elif turn.rounds and not (ended or turn.spoken):
                     turn.outcome = "no_text"
                     self._say_fallback(turn)
                 return True
+            turn.rt_round = None  # its calls are answered and go into the exchange below
             # not a tool round: the tool and its rule go for this one response, which is still
             # the turn's first round (turn.rounds 0): nothing acted yet, so a skip there stands
             if retry:
                 turn.tone_retry = True
                 self._counts["tone_retry"] += 1  # how often the model spoke only after the tone
-                turn.rt_round = None
                 update = route.session_update(
                     turn.cfg, self._base_instructions(tone_rule=False), functions
                 )
@@ -1078,7 +1080,6 @@ class ConversationWorker:
             said = " ".join(turn.spoken[round_from:]) or None
             turn.exchange += self._exchange(calls, results, turn.rounds, said)
             turn.exchange_spoken = len(turn.queued)
-            turn.rt_round = None
             if toned and not turn.tone_retry and turn.rounds == 1:
                 # note_tone is for the first response only: a later round would invite a second
                 # call for the same utterance (SPEC 8, Tone tool); the next turn offers it again
@@ -1104,11 +1105,15 @@ class ConversationWorker:
     def _end_after_speech(
         self, turn: _Turn, calls: list[ToolCall], results: list[ToolOutcome]
     ) -> None:
-        """A round that spoke and called only fire-and-forget skills ends the turn: its calls and
-        results join the exchange with ``content: None`` and the speech stays for the closing
-        assistant message (``exchange_spoken`` unchanged), so a barge-in on audio still playing
-        trims it as for any reply. Counted ``follow_ups_skipped``."""
-        turn.exchange += self._exchange(calls, results, turn.rounds + 1, None)
+        """A round that spoke and called only fire-and-forget skills ends the turn: it is a tool
+        round (``rounds``) with no request after it. Its calls and results join the exchange
+        with ``content: None`` and the speech stays for the closing assistant message
+        (``exchange_spoken`` unchanged), so a barge-in on audio still playing trims it as for
+        any reply. Audio with no transcript leaves no closing message (and no tail to trim), as
+        for a reply without tools: the history holds words only, never a placeholder the model
+        would read as its own. Counted ``follow_ups_skipped``."""
+        turn.rounds += 1
+        turn.exchange += self._exchange(calls, results, turn.rounds, None)
         self._counts["follow_ups_skipped"] += 1
 
     def _realtime_lost(self, turn: _Turn) -> bool:
