@@ -71,6 +71,18 @@ RESPONSE_STATUSES = ("completed", "cancelled", "incomplete", "failed")
 LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
 LATENCY_STAGES = ("vad_decision", "stt", "llm", "tts_ttfa", "e2e")
 ID_MAX_CHARS = 256  # longest item, response or call id kept (servers use about 30)
+# Server error codes about the account, not the request (OpenAI's realtime and REST codes): a
+# connect's update is never resent without its optional parts after one of them (SPEC 8).
+ACCOUNT_ERRORS = frozenset(
+    {
+        "invalid_api_key",
+        "authentication_error",
+        "permission_denied",
+        "insufficient_quota",
+        "rate_limit_exceeded",
+        "billing_hard_limit_reached",
+    }
+)
 ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 EVENT_TYPE = re.compile(r"[a-z0-9_.]{1,128}")
 
@@ -91,12 +103,14 @@ def session_update(
     tools: list[dict[str, Any]] | None = None,
     transcription_language: str | None = None,
     transcription_model: str | None = None,
+    transcription_prompt: str | None = None,
 ) -> dict[str, Any]:
     """``session.update``: instructions, PCM16 in and out (a rate of None asks for the server's
-    native rate, a speech-to-speech extension), the voice (left out when empty: the
-    server's default), server VAD with its threshold and end silence, the input transcription's
-    language and model (each left out when empty, the object too when both are), and the
-    function tools (realtime format, ``function_tools``) with ``tool_choice: "auto"``."""
+    native rate, a speech-to-speech extension), the voice (left out when empty: the server's
+    default), server VAD with its threshold and end silence, the input transcription's
+    language, model and ``prompt`` (a vocabulary hint; each left out when empty, the object
+    too when all are), and the function tools (realtime format, ``function_tools``) with
+    ``tool_choice: "auto"``."""
     output: dict[str, Any] = {"format": {"type": AUDIO_FORMAT, "rate": output_rate_hz}}
     if voice:
         output["voice"] = voice
@@ -105,6 +119,8 @@ def session_update(
         transcription["language"] = transcription_language
     if transcription_model:
         transcription["model"] = transcription_model
+    if transcription_prompt:
+        transcription["prompt"] = transcription_prompt
     session: dict[str, Any] = {
         "type": "realtime",
         "instructions": instructions,

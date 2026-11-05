@@ -324,6 +324,8 @@ class ConversationWorker:
         self._tagged_noted = False
         if realtime is not None:
             realtime.base_instructions = self._base_instructions
+            # the transcription hint is the name the prompt and the wake word use (SPEC 8)
+            realtime.transcription_name = lambda: self._prompt_name(self.stack.effective())
         self.apply_config(stack.effective())
 
     # ----------------------------------------------------------------- lifecycle

@@ -71,6 +71,14 @@ def test_session_update_sends_the_transcription_language_and_model_only_when_set
     assert _update(transcription_model="m")["transcription"] == {"model": "m"}
 
 
+def test_session_update_sends_the_transcription_prompt_only_when_set():
+    assert "transcription" not in _update(transcription_prompt="")
+    assert _update(transcription_language="it", transcription_prompt="Neve")["transcription"] == {
+        "language": "it",
+        "prompt": "Neve",
+    }
+
+
 def test_client_builders():
     assert p.audio_append(b"\x01\x00") == {
         "type": "input_audio_buffer.append",

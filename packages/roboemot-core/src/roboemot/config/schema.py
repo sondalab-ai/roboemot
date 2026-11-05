@@ -3758,6 +3758,15 @@ class RealtimeRouteConfig(Strict):
         "audio.input.transcription.model, sent with input: audio only); empty leaves it out, so "
         "the server's default applies. Sent as given, not validated",
     )
+    transcription_name_hint: bool = param(
+        True,
+        "Send the robot's name (the wake word's name: voice.wake_word, else the platform's) as "
+        "the server's transcription hint (session.update audio.input.transcription.prompt, sent "
+        "with input: audio only), so the server's speech recognition writes the name and not a "
+        "phrase it knows. No name, no hint. Decided at each connect: a name that arrives later "
+        "applies from the next one. A server that refuses the hint gets the update again without "
+        "it, and that endpoint gets no hint until the switch or the transcription model changes",
+    )
     prebuffer_ms: float = param(
         200.0,
         "Reply audio held before playback starts, against network jitter",

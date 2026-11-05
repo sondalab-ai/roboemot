@@ -26,7 +26,7 @@ class LocalStub:
         self.on_close = kw.get("on_close", lambda reason: None)
         self.sent: list[dict] = []
 
-    def connect(self, update):
+    def connect(self, update, **kw):
         self.state = "connected"
         return True
 

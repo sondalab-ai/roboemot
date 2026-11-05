@@ -7,7 +7,8 @@
   for ``response.create``: ``response.created``, one audio delta, the reply transcript and
   ``response.done``;
 - ``error_first``: an ``error`` (its message quotes the request, its ``event_id`` names the
-  ``session.update``) instead of ``session.updated``;
+  ``session.update``, its code ``error_code``) instead of ``session.updated``;
+- ``error_once``: as ``error_first`` for the first ``session.update`` of each connection only;
 - ``no_session``: never answers ``session.update``;
 - ``stall``: ``response.created`` then nothing; ``silent``: nothing after ``response.create``;
 - ``unknown_only``: after ``response.create``, an unknown event every 0.05 s for 1 s;
@@ -15,6 +16,10 @@
 - ``oversize``: after ``session.updated``, one message of ``oversize_bytes``;
 - ``stop_reading``: after ``session.updated`` the server stops reading the socket;
 - ``redirect``: the handshake is answered with 302 to ``redirect_to``.
+
+``refuse_prompt``: a ``session.update`` whose input transcription carries a ``prompt`` is
+answered with an ``error`` (``unknown_parameter``; its ``event_id`` names the update unless
+``echo_error_id`` is off) instead of ``session.updated``, as a server without the field would.
 
 ``delete_reply`` answers ``conversation.item.delete``: ``none`` (the default: nothing),
 ``deleted`` (``conversation.item.deleted`` naming the item) or ``error`` (an ``error`` echoing
@@ -60,7 +65,12 @@ class FakeServer:
         redirect_to: str = "",
         oversize_bytes: int = 0,
         delete_reply: str = "none",
+        refuse_prompt: bool = False,
+        echo_error_id: bool = True,
+        error_code: str = "bad_session",
     ) -> None:
+        self.error_code = error_code
+        self.refuse_prompt, self.echo_error_id = refuse_prompt, echo_error_id
         self.mode, self.host, self.redirect_to = mode, host, redirect_to
         self.delete_reply = delete_reply
         self.oversize_bytes = oversize_bytes
@@ -72,6 +82,7 @@ class FakeServer:
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self.connections: list[ServerConnection] = []
+        self._by_conn: dict[int, list[dict[str, Any]]] = {}
 
     @property
     def url(self) -> str:
@@ -121,12 +132,17 @@ class FakeServer:
     async def _send(self, ws: ServerConnection, event: dict[str, Any]) -> None:
         await ws.send(json.dumps(event))
 
+    def _of(self, ws: ServerConnection) -> list[dict[str, Any]]:
+        """The client events this connection sent so far."""
+        return self._by_conn.setdefault(id(ws), [])
+
     async def _handler(self, ws: ServerConnection) -> None:
         self.connections.append(ws)
         await self._send(ws, {"type": "session.created", "session": {}})
         async for frame in ws:
             event = json.loads(frame)
             self.received.append(event)
+            self._of(ws).append(event)
             kind = event.get("type")
             if kind == "session.update":
                 await self._on_session_update(ws, event)
@@ -150,14 +166,23 @@ class FakeServer:
     async def _on_session_update(self, ws: ServerConnection, event: dict[str, Any]) -> None:
         if self.mode == "no_session":
             return
-        if self.mode == "error_first":
+        audio_in = event.get("session", {}).get("audio", {}).get("input", {})
+        if self.refuse_prompt and "prompt" in audio_in.get("transcription", {}):
+            error = {"type": "invalid_request_error", "code": "unknown_parameter"}
+            error["message"] = ERROR_MESSAGE
+            if self.echo_error_id:
+                error["event_id"] = event.get("event_id")
+            await self._send(ws, {"type": "error", "error": error})
+            return
+        first = sum(e.get("type") == "session.update" for e in self._of(ws)) == 1
+        if self.mode == "error_first" or (self.mode == "error_once" and first):
             await self._send(
                 ws,
                 {
                     "type": "error",
                     "error": {
                         "type": "invalid_request_error",
-                        "code": "bad_session",
+                        "code": self.error_code,
                         "message": ERROR_MESSAGE,
                         "event_id": event.get("event_id"),
                     },
