@@ -17,6 +17,7 @@ class NoRestartPlatform:
     app_name = "bare"
     restart = None
     cloud_voice = None
+    overclock = None
 
     def __init__(self) -> None:
         self.calls: list[str] = []

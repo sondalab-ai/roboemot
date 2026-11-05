@@ -296,6 +296,11 @@ class Ui:
         """A command under a step (``label:`` in ``dim``), never wrapped: it is copied."""
         print(self._cont(f"{self.paint(label + ':', 'dim')} {command}"), flush=True)
 
+    def verbatim(self, lines: list[str]) -> None:
+        """Lines under a step exactly as given (a diff): indented, never wrapped or painted."""
+        for line in lines:
+            print(self._cont(line), flush=True)
+
     def next(self, command: str) -> None:
         print(_term.next_line(command, mode=self.mode(sys.stdout)), flush=True)
 

@@ -1,12 +1,16 @@
 """SSH and scp to the robot through one multiplexed connection (SPEC 4A, Packaging).
 
 The master connection is opened interactively once, so ssh asks for the password at most
-once per run. The control socket lives in a short directory under ``/tmp``: its path must stay
-under 104 bytes, and the macOS ``$TMPDIR`` is too long.
+once per run (again after a reboot the installer asked for). A root command (``run_root``) runs
+``sudo`` over that connection with the terminal handed straight to ssh, so sudo's prompt and the
+password typed at it never pass through this process. The control socket lives in a short
+directory under ``/tmp``: its path must stay under 104 bytes, and the macOS ``$TMPDIR`` is too
+long.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +21,8 @@ from .ui import WizardError, last_line
 CONTROL_PERSIST_S = 120
 CONNECT_TIMEOUT_S = 10
 LOST_CONNECTION = 255  # ssh's own exit code: it could not connect or authenticate
+SUDO_PROMPT = "[sudo] password for %u on the robot: "  # %u: sudo puts the robot user's name
+AUTH_REFUSED = "Permission denied"  # ssh's message for a host that answers but wants a password
 
 
 @dataclass
@@ -111,6 +117,42 @@ class Remote:
             self._raise(command, proc.returncode, output, None)
         return output
 
+    def run_root(self, script: str, tty: bool) -> int:
+        """Run the shell ``script`` as root with ``sudo`` and return its exit code.
+
+        ``tty``: on a terminal, ssh gets a terminal (``-t``) and inherits this process's stdin,
+        stdout and stderr untouched, so sudo asks for the password on the owner's terminal and
+        the typed password goes from the keyboard to sudo through ssh alone: it is never read,
+        stored, logged or put on a command line here. Without a terminal it runs ``sudo -n``,
+        which fails instead of asking. The script is the command's only argument; nothing is
+        sent on stdin.
+        """
+        sudo = ["sudo", "-p", SUDO_PROMPT] if tty else ["sudo", "-n"]
+        command = shlex.join([*sudo, "sh", "-c", script])
+        if tty:
+            return subprocess.run(["ssh", *self._opts(), "-t", self.target, command]).returncode
+        return subprocess.run(
+            ["ssh", *self._opts(), self.target, command],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        ).returncode
+
+    def reachable(self) -> bool:
+        """Whether the robot answers on SSH again (after a reboot), without the control socket
+        and without asking anything: True when a fresh login works or the host asks for a
+        password (``connect`` then asks the owner)."""
+        proc = subprocess.run(
+            [
+                "ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}", self.target, "true",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )  # fmt: skip
+        return proc.returncode == 0 or AUTH_REFUSED in proc.stderr
+
     def connect(self) -> None:
         """Open the master connection interactively, so a password prompt reaches the user."""
         proc = subprocess.run(
@@ -142,6 +184,12 @@ class Remote:
         subprocess.run(
             ["ssh", *self._opts(), "-O", "exit", self.target], capture_output=True, check=False
         )
+
+    def disconnect(self) -> None:
+        """Drop the master connection that a reboot ended, so the next ``connect`` logs in
+        again interactively (``BatchMode`` is off until then)."""
+        self.close()
+        self.connected = False
 
 
 __all__ = ["Remote"]

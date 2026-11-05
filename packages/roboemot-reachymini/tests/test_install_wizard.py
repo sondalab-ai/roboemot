@@ -513,6 +513,7 @@ def options(**kw) -> Options:
         yes=True,
         vision=False,
         cloud_voice=False,
+        overclock=False,
         timezone=PC_ZONE,
     )
     return Options(**{**base, **kw})
@@ -647,6 +648,7 @@ def test_the_default_install_adds_the_vision_extra_and_the_vision_weights(offlin
             start=False,
             startup=False,
             cloud_voice=False,
+            overclock=False,
         ),
         quiet_ui(yes=True),
         ROOT,
@@ -665,6 +667,7 @@ def test_the_dry_run_says_vision_will_be_installed(offline, robot, daemon, capsy
             yes=True,
             dry_run=True,
             cloud_voice=False,
+            overclock=False,
         ),
         quiet_ui(yes=True),
         ROOT,
@@ -1428,7 +1431,7 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert (
         "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
         f"--robot reachy-mini-wireless --timezone {PC_ZONE} --dev --piper --no-cloud-voice "
-        "--no-vision --models --yes"
+        "--no-overclock --no-vision --models --yes"
     ) in out
     assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
@@ -1488,7 +1491,7 @@ def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
          "--no-start", "--no-startup-app", "--no-piper", "--no-models", "--no-cloud-voice",
-         "--timezone", PC_ZONE],
+         "--no-overclock", "--timezone", PC_ZONE],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
@@ -1913,6 +1916,7 @@ FULL = dict(
     piper=False,
     models=False,  # the epic's models step: its own flag, like --piper
     cloud_voice=False,
+    overclock=False,
     timezone=PC_ZONE,
 )
 
@@ -2014,7 +2018,9 @@ def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, m
 
 
 def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
-    opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
+    opts = Options(
+        host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True, overclock=False
+    )
     inst.run_install(
         opts, typed("y\n", "\n", "\n", "\n", "\n"), ROOT
     )  # dev; zone; cloud, models, key
@@ -2098,7 +2104,7 @@ def test_actions_that_change_the_robot_default_to_no(offline, robot, daemon, mon
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
     robot.dev_cfg = False  # Enter at the dev question: production config
     ui = typed(*["\n"] * 8)  # Enter at every question
-    inst.run_install(Options(host="127.0.0.1", user="pollen", robot=RID), ui, ROOT)
+    inst.run_install(Options(host="127.0.0.1", user="pollen", robot=RID, overclock=False), ui, ROOT)
     err = capsys.readouterr().err
     for question in (
         "Install in dev mode? [y/N]",

@@ -19,6 +19,8 @@ Facts from the daemon source (reachy_mini 1.12, checked on the robot):
 - Cloud voice (``--cloud-voice``, SPEC 4A Installer, SPEC 8): Pollen's realtime server, reached
   through its allocator on Hugging Face in platform mode (``roboemot_reachymini.realtime``); the
   key is a Hugging Face token stored as ``hf_token`` (``docs/realtime-voice-setup.md``).
+- Overclock (``--overclock``, SPEC 4A Installer): the CM4 at 1.8 GHz through ``tryboot``
+  (``roboemot_reachymini.overclock``), only where every support check passes.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from .daemon import (
     DaemonClient,
     DaemonError,
 )
+from .overclock import ReachyOverclock
 
 APPS_VENV = "/venvs/apps_venv"
 DAEMON_PYTHON = "/venvs/mini_daemon/bin/python"
@@ -144,6 +147,7 @@ class ReachyMiniWireless:
     extras = ("voice", "realtime")  # realtime: websockets, already in the apps venv
     clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
     cloud_voice = CLOUD_VOICE
+    overclock = ReachyOverclock(REBOOT_HINT)  # CM4 at 1.8 GHz, where every check passes
 
     def __init__(self, port: int = DEFAULT_PORT) -> None:
         self.port = port

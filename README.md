@@ -93,6 +93,7 @@ python scripts/install_on_robot.py             # install, verify, optionally sta
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --uninstall # put the robot back as it was
 python scripts/install_on_robot.py --no-vision --no-models --no-clear-caches   # skip optional steps, see below
+python scripts/install_on_robot.py --overclock --overclock-reboot   # opt-in: CM4 at 1.8 GHz through a trial boot, see below
 ```
 
 To log in afterwards, `python scripts/robot_ssh.py` finds the robot the same way and opens a shell;
@@ -113,8 +114,8 @@ asked, it stops the running app (one app at a time), wakes the robot, starts Rob
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
 flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`,
-`--voice`, `--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes` (the boolean ones also
-have a `--no-` form).
+`--voice`, `--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--cloud-voice`,
+`--overclock`, `--overclock-reboot`, `--yes` (the boolean ones also have a `--no-` form).
 
 What goes onto the robot besides the two wheels:
 
@@ -149,6 +150,29 @@ What goes onto the robot besides the two wheels:
   installs (the app, the voice and vision extras, and a new apps venv), and a rerun of the models
   step counts only the files not yet downloaded. Other caches
   (`~/.cache/huggingface`, `~/.cache/pip`) are left alone.
+- **Overclock (opt-in, `--overclock`).** The CM4 runs at 1.5 GHz and sits near 99 % CPU with
+  vision on. With `--overclock` the installer sets `arm_freq=1800` (1.8 GHz) under a `[cm4]`
+  filter in one marked block at the end of `/boot/firmware/config.txt`, with no voltage setting
+  (the firmware scales the voltage itself) and no `force_turbo` (the clock still scales down when
+  idle). It does so only when every check passes: the board is a Compute Module 4,
+  `vcgencmd get_throttled` shows no under-voltage, capping or throttling since boot, the SoC is
+  below 70 °C, the firmware is recent enough, and `config.txt` sets no clock or voltage of its
+  own. Otherwise it says which check failed and changes nothing. On a terminal it asks, after a
+  warning that recovering a CM4 that does not boot needs `rpiboot` from a computer; the default
+  is no, `-y` does not turn it on, and an unattended run needs `--overclock` or
+  `--no-overclock`. With a bootloader that has `tryboot`, the block first goes into
+  `/boot/firmware/tryboot.txt` (a copy of `config.txt` plus the block), and the installer asks
+  separately, default no, whether to reboot into it once (`--overclock-reboot` answers it
+  unattended; without a terminal and without the flag it does not reboot). The reboot stops
+  RoboEmot and the daemon, and the motors lose power, so the head may drop. If the robot does not
+  come back within 5 minutes, a power cycle boots the unchanged `config.txt`, and the next run
+  cleans up. When it is back, the installer checks that the trial config booted, that
+  `arm_freq` is 1800 and no throttling flag is set, and that the SoC is below 70 °C. Then it moves
+  the block into `config.txt` (no second reboot), or removes the trial config. With an older
+  bootloader it writes `config.txt` directly and prints how to reboot. Writing `/boot/firmware`
+  runs `sudo` over SSH, and sudo asks for the password on your terminal. A reinstall without
+  `--overclock` and `--uninstall` remove exactly that block. A block you have edited is left
+  alone, and the installer prints the difference. The dry run prints the checks and the diff.
 
 The installer leaves the robot as it found it. It keeps the package versions already in the
 shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
