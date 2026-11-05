@@ -33,7 +33,8 @@ item, as the platform's server does (robot run 2026-11-02); each connection star
 keeps its call open (a call item the cancel left missing, or a response still active).
 
 ``unrequested`` sends a ``response.created`` nobody asked for right after ``session.updated``.
-A ``response.cancel`` stops the reply in progress with ``response.done`` ``cancelled``.
+A ``response.cancel`` stops the reply it names (``response_id``), else the latest one, with
+``response.done`` ``cancelled``.
 
 The server's VAD (``heard``, one list of transcripts per committed burst, the last one
 repeats) answers each ``input_audio_buffer.commit``: one ``speech_started`` and
@@ -59,7 +60,11 @@ response in turn that would end ``completed`` (the last repeats), for example ``
 ``stream_vad`` makes the VAD listen to the appended audio itself, as for live streams (turns:
 server): a turn starts at the first loud block and ends after the session's
 ``silence_duration_ms`` of quiet, with no commit from the robot (``_vad_feed``); its transcript
-is the turn's ``heard`` list, joined.
+is the turn's ``heard`` list, joined. With ``vad_answers`` it also answers each turn it ended
+by itself, right after ``committed``, with the next script (as a server with
+``create_response: true`` does, or one that ignores ``false``; ``auto_responses`` lists their
+ids), before or after the transcript (``transcript_delay_s``); ``answer_delay_s`` holds each
+of those answers back that long.
 
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
@@ -133,6 +138,7 @@ class TurnServer(FakeServer):
         hold_max_s: float = HOLD_MAX_S,
         statuses: list[str] | None = None,
         stream_vad: bool = False,
+        answer_delay_s: float = 0.0,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -163,6 +169,7 @@ class TurnServer(FakeServer):
         self.session_bursts = 0  # bursts committed on the current connection
         self.sent: list[dict[str, Any]] = []
         self.stream_vad = stream_vad
+        self.answer_delay_s = answer_delay_s
         self.stream_turns = 0  # turns the stream VAD heard, over all sessions
         self.commits_at_create: list[int] = []  # the stream VAD's commits at each response.create
         self._vad_item: str | None = None  # the stream VAD's turn in progress
@@ -172,7 +179,9 @@ class TurnServer(FakeServer):
         self.bursts = 0
         self._burst_start = 0.0
         self.responses = 0
+        self.auto_responses: list[str] = []  # the ids of the responses its VAD created
         self._cancel: asyncio.Event | None = None
+        self._cancels: dict[str, asyncio.Event] = {}  # response id -> its cancel
         self._tasks: set[asyncio.Task] = set()
 
     async def _send(self, ws: ServerConnection, event: dict[str, Any]) -> None:
@@ -223,17 +232,10 @@ class TurnServer(FakeServer):
                 await self._send(ws, {"type": "error", "error": error})
             elif kind == "response.create":
                 self.commits_at_create.append(len(self.sent_of("input_audio_buffer.committed")))
-                script = self.scripts[min(self.responses, len(self.scripts) - 1)]
-                self.responses += 1
-                if script == "close_before":
-                    await ws.close()
+                if not await self._start(ws, event.get("event_id")):
                     return
-                self._cancel = asyncio.Event()
-                task = asyncio.ensure_future(
-                    self._respond(ws, script, self._cancel, event.get("event_id"))
-                )
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
+            elif kind == "response.cancel" and event.get("response_id") in self._cancels:
+                self._cancels[event["response_id"]].set()
             elif kind == "response.cancel" and self._cancel is not None:
                 self._cancel.set()
             elif kind == "input_audio_buffer.append" and self.stream_vad:
@@ -252,6 +254,24 @@ class TurnServer(FakeServer):
                 task = asyncio.ensure_future(self._hear(ws, number, texts, delay, start, end))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+
+    async def _start(
+        self, ws: ServerConnection, event_id: str | None, delay_s: float = 0.0
+    ) -> bool:
+        """Start the next script's response on its own task; False when it closed the
+        socket (``close_before``)."""
+        script = self.scripts[min(self.responses, len(self.scripts) - 1)]
+        self.responses += 1
+        if script == "close_before":
+            await ws.close()
+            return False
+        self._cancel = self._cancels[f"resp_{self.responses}"] = asyncio.Event()
+        task = asyncio.ensure_future(
+            self._respond(ws, script, self._cancel, event_id, self.responses, delay_s)
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return True
 
     async def _hear(
         self,
@@ -343,6 +363,10 @@ class TurnServer(FakeServer):
                 stopped["audio_end_ms"] = int(self._speech_end)
                 await self._send(ws, stopped)
                 await self._send(ws, committed)
+                if self.vad_answers:  # it answers the turn it ended by itself
+                    self.auto_responses.append(f"resp_{self.responses + 1}")
+                    if not await self._start(ws, None, self.answer_delay_s):
+                        return
                 texts = self.heard[min(self.stream_turns - 1, len(self.heard) - 1)]
                 task = asyncio.ensure_future(self._vad_transcript(ws, item, " ".join(texts)))
                 self._tasks.add(task)
@@ -397,10 +421,18 @@ class TurnServer(FakeServer):
             )
 
     async def _respond(
-        self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None
+        self,
+        ws: ServerConnection,
+        script: str,
+        cancel: asyncio.Event,
+        event_id: str | None,
+        number: int,
+        delay_s: float = 0.0,
     ) -> None:
-        rid = f"resp_{self.responses}"
-        item = f"item_{self.responses}"
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        rid = f"resp_{number}"
+        item = f"item_{number}"
         if script == "silent":
             return
         if script in ("updated_then_refused", "unrelated_error"):

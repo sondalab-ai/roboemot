@@ -187,6 +187,26 @@ class ResponseRun:
         if req is None:
             self.reply.closed = "no_session"
             return self.reply
+        return await self._follow(req, first, stall)
+
+    async def adopt(self, request: Any) -> Reply:
+        """Follow a response the server created on its own (server turns, SPEC 8): no
+        ``response.create``; ``request`` is the route's, whose ``run`` (a :class:`HeldResponse`)
+        kept its events until now. A request the route gave up meanwhile ends ``no_session``."""
+        self._loop = asyncio.get_running_loop()
+        self._queue = asyncio.Queue()
+        held = request.run
+        if not isinstance(held, HeldResponse):
+            self.reply.closed = "no_session"
+            return self.reply
+        self._request = request
+        held.attach(self)
+        first, stall = self.route.timeouts()
+        return await self._follow(request, first, stall)
+
+    async def _follow(self, req: Any, first: float, stall: float) -> Reply:
+        """Follow ``req``'s response to its end (``run`` and ``adopt``)."""
+        assert self._queue is not None
         created = False
         try:
             while True:
@@ -384,6 +404,45 @@ class ResponseRun:
             job = next((j for j, item in self.reply.jobs if item == event.item_id), None)
         if job is not None:
             self.speech.mark_question(job)
+
+
+class HeldResponse:
+    """The events of a response the server created on its own (server turns, SPEC 8), kept
+    until the worker's run takes them (``attach``), then passed on in their order: the client's
+    thread delivers, the worker's loop attaches, one lock orders both. The route treats it as
+    the request's run (``deliver``, ``closed``, ``note_call``)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._kept: list[tuple[str, Any]] = []
+        self._run: ResponseRun | None = None
+
+    def __repr__(self) -> str:
+        return f"HeldResponse(attached={self._run is not None})"
+
+    def attach(self, run: ResponseRun) -> None:
+        """``run`` takes the response: what was kept goes to it first, in order."""
+        with self._lock:
+            for name, arg in self._kept:
+                getattr(run, name)(arg)
+            self._kept.clear()
+            self._run = run
+
+    def _pass(self, name: str, arg: Any) -> None:
+        with self._lock:
+            if self._run is None:
+                self._kept.append((name, arg))
+            else:
+                getattr(self._run, name)(arg)
+
+    def deliver(self, event: protocol.ServerEvent) -> None:
+        self._pass("deliver", event)
+
+    def closed(self, reason: str) -> None:
+        self._pass("closed", reason)
+
+    def note_call(self, event: protocol.FunctionCall) -> None:
+        self._pass("note_call", event)
 
 
 async def wait_in_order(route: Any, clock: Callable[[], float]) -> None:

@@ -2,8 +2,8 @@
 ``voice.realtime_route.turns: server`` a speech segment that passed the server gates streams
 while it is heard, the server's VAD ends the turn and the robot sends no commit. The gates
 decide only whether a segment streams, before any of its audio leaves; the upload budget and
-the opt-in hold on every piece. The answer is still asked for by the robot (``response.create``)
-once the transcript came, until the server-created answers land."""
+the opt-in hold on every piece. The server answers on its own (S1b: its created responses are
+in ``test_realtime_server_responses.py``)."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def streamed_s(cfg, speech_s: float = 1.0) -> float:
 
 
 def test_a_segment_streams_while_it_is_heard_and_the_robot_sends_no_commit(ears):  # noqa: F811
-    with TurnServer(stream_vad=True, heard=[[HEARD]]) as server:
+    with TurnServer(stream_vad=True, heard=[[HEARD]], vad_answers=True) as server:
         ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
         ear.r.feed(voice(seconds=0.5))
         # the speech is not over, and its audio is at the server already
@@ -56,7 +56,7 @@ def test_a_segment_streams_while_it_is_heard_and_the_robot_sends_no_commit(ears)
         assert u.realtime == (ear.rt.route.generation, ("in_1_0",))
         assert ear.r.asr.started == []  # Vosk skipped: the server transcribes
         assert server.of("input_audio_buffer.commit") == []  # the server's VAD ended the turn
-        assert len(server.of("response.create")) == 1  # the robot still asks (until S1b)
+        assert server.of("response.create") == []  # S1b: the server answers on its own
         assert server.of("conversation.item.create") == []  # the words are the server's item
         kinds = server.kinds()
         first = kinds.index("input_audio_buffer.append")
@@ -352,7 +352,7 @@ def test_two_segments_in_a_row_each_get_their_own_transcript(ears):  # noqa: F81
 def test_a_skip_mutes_and_deletes_the_streamed_words(ears):  # noqa: F811
     from roboemot.realtime.turn import SKIP_TOOL
 
-    with TurnServer(["tool"], tool_name=SKIP_TOOL, stream_vad=True) as srv:
+    with TurnServer(["tool"], tool_name=SKIP_TOOL, stream_vad=True, vad_answers=True) as srv:
         rt = {**SERVER, "skip_tool": True}
         ear = ears(srv, rt=rt, app=OPT_INS, script=["x"], to_worker=True)
         ear.say()
@@ -363,22 +363,26 @@ def test_a_skip_mutes_and_deletes_the_streamed_words(ears):  # noqa: F811
         assert ear.rt.history() == []
 
 
-def test_a_second_segment_reaches_the_server_before_the_first_turns_request(ears):  # noqa: F811
-    """Known S1a behaviour, replaced by S1b's server-created answers: a person who pauses and
-    goes on has the second segment committed before the first turn's response.create, so that
-    response hears both, and the second turn asks once more."""
+def test_a_second_segment_reaches_the_server_before_the_first_turns_answer(ears):  # noqa: F811
+    """S1a's double request is gone (S1b): a person who pauses and goes on has both segments
+    committed before the first answer; the server answers each turn it ended by itself, and
+    the robot asks for nothing on top."""
     heard = [["prima"], ["seconda"]]
     hold = threading.Event()
-    with TurnServer(stream_vad=True, heard=heard, hold=hold, hold_at="transcript") as srv:
+    with TurnServer(
+        stream_vad=True, heard=heard, hold=hold, hold_at="transcript", vad_answers=True
+    ) as srv:
         ear = ears(srv, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
         ear.say()
         ear.say()
         assert wait_until(lambda: len(srv.sent_of("input_audio_buffer.committed")) == 2)
         hold.set()
-        assert ear.settle(lambda: len(ear.rt.events) == 2, 15.0)
+        assert ear.settle(lambda: len(ear.utterances) == 2, 15.0)
         committed = srv.sent_of("input_audio_buffer.committed")
         assert [e["item_id"] for e in committed] == ["in_1_0", "in_2_0"]
-        assert srv.commits_at_create == [2, 2]  # both held when the first answer was asked
+        assert srv.of("response.create") == [] and srv.commits_at_create == []
+        snap = ear.rt.route.snapshot()
+        assert snap["server_responses"] + snap["server_duplicates"] == 2
 
 
 # ------------------------------------------------------------------ consent (SPEC 12)
