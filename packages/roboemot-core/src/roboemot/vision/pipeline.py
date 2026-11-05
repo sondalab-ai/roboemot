@@ -91,7 +91,8 @@ values never feed a decision; a stage that raises still counts as a run, its tim
 Numbers only; the frame thread writes them and the report thread reads them under one lock.
 ``embed_worker`` is the worker's own report (``EmbedWorker.snapshot``: queued, replaced,
 dropped at the cap, dropped because the track ended, finished, failed, waiting, busy, the queue
-wait), or ``{"state": "inline"}`` without one.
+wait), ``{"state": "inline"}`` without one, ``{"state": "off"}`` without an appearance
+embedder.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -473,8 +474,8 @@ class VisionPipeline:
     ) -> None:
         """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
         so do, with ``world``, the camera field of view and, with ``shown``, the shown-object
-        region the object crop follows. The thread count, the detector size and the models
-        folder are restart-only (the schema marks them).
+        region the object crop follows. The thread counts, the detector size, the appearance
+        input size and the models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
         self.object_crop.cfg = vision.object_crop
@@ -590,12 +591,17 @@ class VisionPipeline:
             "tracks": tracks,
             "objects": objects,
             "entity_embeds": entity_embeds,
-            "embed_worker": (
-                {"state": "inline"}
-                if self.embed_worker is None
-                else self.embed_worker.snapshot(self.cfg.timing_window_s)
-            ),
+            "embed_worker": self._embed_worker_report(),
         }
+
+    def _embed_worker_report(self) -> dict[str, Any]:
+        """The embed worker's report; ``off`` without an appearance embedder, ``inline`` when
+        the embeddings run on this thread."""
+        if self.appearance_embedder is None:
+            return {"state": "off"}
+        if self.embed_worker is None:
+            return {"state": "inline"}
+        return self.embed_worker.snapshot(self.cfg.timing_window_s)
 
     def _camera(self, width: int, height: int) -> CameraModel:
         key = (width, height)

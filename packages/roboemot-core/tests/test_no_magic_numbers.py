@@ -134,6 +134,7 @@ BEHAVIOUR_MODULES = [
     "vision/object_crop.py",
     "vision/scene_change.py",
     "vision/scene_motion.py",
+    "vision/embed_worker.py",
     "vision/onnx.py",
     "vision/pipeline.py",
     "vision/replay.py",

@@ -386,6 +386,8 @@ def test_the_queue_wait_is_reported_from_the_worker_clock():
 def test_the_inline_pipeline_reports_its_mode(tmp_path):
     pipe, _ = pipeline(tmp_path, Appearance(), worker=False)
     assert pipe.stats()["embed_worker"] == {"state": "inline"}
+    pipe.appearance_embedder = None  # objects off: no DINOv2 anywhere
+    assert pipe.stats()["embed_worker"] == {"state": "off"}
 
 
 # ------------------------------------------------------------------ replay, the app
