@@ -258,6 +258,8 @@ class RealtimeInput:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._reopening = False  # this input reset the session: a burst waits for the new one
+        self._stream_reopening = False  # ... the same for a stream's opening
+        self._idless = -1  # the last session that reported an input item without an id
         # where the server's input buffer ends, as (session, its last audio_end_ms)
         self._end: tuple[int, float] = (-1, 0.0)
         self._reset_gen = -1  # the last session this input reset: its late events are dropped
@@ -548,6 +550,9 @@ class RealtimeInput:
     def _stream_op(self, kind: str, job: InputJob, arg: Any) -> None:
         """One stream operation, in the order the listener queued them (stream thread). A job
         opened before a reload that forbade streams (``_epoch``) sends nothing more."""
+        if kind == "save":  # the day's upload count, off the listener thread (disk)
+            self.route.save_upload()
+            return
         if self._closed:
             job._end(refused="closed")
             return
@@ -576,7 +581,7 @@ class RealtimeInput:
             else:  # refused part way (the robot speaks, the budget, the opt-in, a new session)
                 self._cut(job, burst, cfg)
             return
-        if kind == "cut":
+        if kind == "cut" or job.done:  # a cut, or a close of a job cancelled meanwhile
             self._cut(job, burst, cfg)
             return
         self._closing(job, burst, cfg)  # "close": the segment ended
@@ -612,6 +617,8 @@ class RealtimeInput:
                     burst.placed = False
                 else:
                     burst.start_ms = end_ms if session == generation else 0.0
+                # with the send: a revoke from now on knows the stream holds audio (its reset)
+                burst.sent_ms = samples.size / job.rate_hz * MS_PER_S
                 self._streams.append(burst)  # before the send: its first event may come at once
 
         self._await_reopen(job, rt.connect_timeout_s)
@@ -624,17 +631,20 @@ class RealtimeInput:
         if why is not None:
             job._end(refused=why)
             return
-        burst.sent_ms = samples.size / job.rate_hz * MS_PER_S
+        with self._lock:
+            ended = job.done and not burst.closed
+        if ended:  # cancelled between its send and here: it never got its burst retired
+            self._cut(job, burst, cfg)
 
     def _await_reopen(self, job: InputJob, limit_s: float) -> None:
         """Wait (bounded) for the reconnect of a reset this input made, once."""
-        if self._reopening and not self.route.connected and self.route.opening():
+        if self._stream_reopening and not self.route.connected and self.route.opening():
             self.route.count("audio_reopen_wait")
             end = self._clock() + limit_s
             while not self.route.connected and self.route.opening() and self._clock() < end:
                 if job.wait(HOLD_POLL_S) or self._closed:
                     break
-        self._reopening = False
+        self._stream_reopening = False
 
     def _hold(self, job: InputJob) -> Callable[[], str | None]:
         """What stops a piece (under the route's lock, with the send: leaf locks only). Asleep
@@ -662,22 +672,25 @@ class RealtimeInput:
     def _cut(self, job: InputJob, burst: _Burst, cfg: RoboEmotConfig) -> None:
         """End a stream part way: its closing silence, then the job ends without a transcript
         and its items are deleted. Without the closing silence the server would keep the audio
-        in its input buffer for the next commit: the session is reset instead."""
+        in its input buffer for the next commit, and on a session whose items have no id the
+        cut turn's transcript could not be deleted: the session is reset instead."""
         closed = self._closing(job, burst, cfg)
         with self._lock:
             burst.utt_ms = burst.sent_ms
-        self.route.count("streams_cut")
-        self._close(job)
-        if not closed:
-            self._reset_for(burst)
+            idless = self._idless == burst.generation
+        if self._close(job):  # counted once: a revoke may have closed it meanwhile
+            self.route.count("streams_cut")
+        if not closed or idless:
+            self._reset_for(burst, force=True)
 
-    def _reset_for(self, burst: _Burst) -> None:
-        """Reset the session of a stream that sent audio the server will never end and that is
-        not covered: its buffered audio and late items die with the session (as a burst's)."""
+    def _reset_for(self, burst: _Burst, *, force: bool = False) -> None:
+        """Reset the session of a stream that sent audio its server will never end (``force``:
+        no closing silence went, or its items cannot be deleted) or that is not covered: its
+        buffered audio and late items die with the session (as a burst's)."""
         with self._lock:
-            needed = burst.sent_ms > 0 and not burst.covered()
+            needed = burst.sent_ms > 0 and (force or not burst.covered())
         if needed and self.route.reset_session(burst.generation):
-            self._reopening = True
+            self._stream_reopening = True
             with self._lock:
                 self._reset_gen = max(self._reset_gen, burst.generation)
                 self._dead = {k: None for k in self._dead if k[0] > burst.generation}
@@ -852,13 +865,15 @@ class RealtimeInput:
         with self._lock:
             self._epoch += 1
             streams = [s for s in self._streams if not s.closed]
+        revoked = []
         for stream in streams:
             stream.job.cancelled = True
-            self._close(stream.job)
+            if self._close(stream.job):  # a cut on the stream thread may have closed it first
+                revoked.append(stream)
         for stream in streams:
-            self._reset_for(stream)
-        if streams:
-            self.route.count("streams_revoked", len(streams))
+            self._reset_for(stream, force=True)  # no closing silence goes now
+        if revoked:
+            self.route.count("streams_revoked", len(revoked))
 
     def _stream_event(self, event: protocol.ServerEvent, gen: int) -> None:
         """``on_event`` for live streams (module docstring): a start goes to the oldest stream
@@ -870,8 +885,11 @@ class RealtimeInput:
             if gen <= self._reset_gen:
                 return  # a reset session's event still in flight: it ended with the session
             streams = [s for s in self._streams if s.generation == gen]
+            cut = None
             if isinstance(event, protocol.SpeechBoundary):
                 self._stream_boundary(event, gen, streams)
+                if event.item_id is None:  # learnt after a cut: that turn cannot be deleted
+                    cut = next((s for s in streams if s.closed and s.job.result is None), None)
             elif isinstance(event, protocol.InputTranscript) and event.final:
                 item = event.item_id
                 owner = next((s for s in streams if item is not None and item in s.order), None)
@@ -890,6 +908,8 @@ class RealtimeInput:
                     self._transcript(owner, item, event.text)
             finished, gone, lost = self._results(streams)
         self._conclude(finished, delete + gone, undeletable + lost)
+        if cut is not None:
+            self._reset_for(cut, force=True)
 
     def _stream_boundary(
         self, event: protocol.SpeechBoundary, gen: int, streams: list[_Burst]
@@ -897,6 +917,8 @@ class RealtimeInput:
         """A ``speech_started``/``stopped`` of session ``gen`` for the live streams (lock
         held)."""
         item = event.item_id
+        if item is None:
+            self._idless = gen  # its items cannot be deleted: a cut resets it
         if event.type == protocol.SPEECH_STARTED:
             head = next((s for s in streams if not s.covered()), None)
             if head is not None and not head.placed:  # the older ones are covered: it is next
@@ -1009,27 +1031,32 @@ class RealtimeInput:
         unnamed = sum(1 for k in burst.order if isinstance(k, tuple))
         return burst.job, Heard(text, items, burst.generation, unnamed)
 
-    def _close(self, job: InputJob) -> None:
+    def _close(self, job: InputJob) -> bool:
         """End ``job`` without a transcript; its burst's items are deleted, now for those
-        heard and on arrival for the others."""
+        heard and on arrival for the others. Whether this call retired its burst."""
         delete: list[tuple[str, int]] = []
         undeletable = 0
+        retired = False
         with self._lock:
             burst = self._burst if self._burst is not None and self._burst.job is job else None
             if burst is None:
                 burst = next((s for s in self._streams if s.job is job), None)
             if burst is not None and not burst.closed:
+                retired = True
                 if burst.utt_ms == math.inf:  # a stream ended part way: its length is what went
                     burst.utt_ms = burst.sent_ms
                 delete, undeletable = self._retire(burst)
                 burst.ended_at = self._clock()
                 self._prune()
         job._end()
-        if job.stream and job.sent:
-            self.route.save_upload()  # the pieces since its opening count after a restart too
+        if job.stream and job.sent and not self._closed:
+            # the pieces since its opening count after a restart too; disk, so never on the
+            # caller's thread (the listener's): the stream thread saves it
+            self._ops.put(("save", job, None))
         if undeletable:
             self.route.count("audio_items_undeletable", undeletable)
         self._delete(delete)
+        return retired
 
     def _retire(self, burst: _Burst) -> tuple[list[tuple[str, int]], int]:
         """Close ``burst`` without a result (lock held): its items with a transcript are to be

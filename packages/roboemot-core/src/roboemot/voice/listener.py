@@ -864,8 +864,13 @@ class VoiceListener:
         waits for the server's transcript until ``transcript_timeout_s``, as a burst's does.
         The listening cue begins now, not while the person still speaks."""
         rate = self._cfg.voice.sample_rate_hz
-        p = self._handoff_for(ev, s.face)
-        p.face_info = s.face_info
+        face, info = s.face, s.face_info
+        if face is None and self._direction is not None and self._direction.enabled:
+            # asked now, on this segment's own samples: should its opening be refused, the wake
+            # gate decides later, after the next segment's start replaced them
+            face, info = self._face(), dict(self._face_info)
+        p = self._handoff_for(ev, face)
+        p.face_info = info
         p.addressed = True  # the gates let it stream: no later check, once its opening went
         p.stream = True
         p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s

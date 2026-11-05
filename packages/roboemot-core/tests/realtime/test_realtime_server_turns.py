@@ -196,13 +196,87 @@ def test_an_opt_in_revoked_mid_stream_stops_the_next_piece(ears):  # noqa: F811
         ear.r.feed(voice(seconds=0.5))
         assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
         ear.rt.stack.set("privacy.realtime_audio", False, source="test", admin=True)
-        before = ear.rt.route.snapshot()["upload_s_today"]  # committed: no piece passes now
+        # the reload bumps the route's revision: a piece that read the old config re-reads it,
+        # so none passes from here on
+        ear.rt.route.apply_config(ear.rt.stack.effective())
+        before = ear.rt.route.snapshot()["upload_s_today"]
         ear.r.feed(voice(seconds=0.5))
         tail(ear)
-        assert wait_until(lambda: ear.rt.route.snapshot()["stream_pieces_refused"] >= 1)
         assert ear.settle(lambda: len(ear.utterances) == 1)
+        snap = ear.rt.route.snapshot()
+        assert snap["streams_revoked"] + snap["streams_cut"] == 1  # the reload, or a queued piece
         # nothing more left, the closing silence neither
-        assert ear.rt.route.snapshot()["upload_s_today"] == before
+        assert snap["upload_s_today"] == before
+
+
+# ------------------------------------------------------------------ second review round
+
+
+def test_a_refused_opening_is_decided_on_its_own_voice_direction(ears):  # noqa: F811
+    """Default gates (no hold gate): the opening of an off-face segment is refused, and its
+    local decode is slow; the next segment, at a face, starts before that decode ends. The
+    wake gate must judge the first one on its own samples: it stays unaddressed."""
+    with TurnServer(stream_vad=True, heard=[["seconda"]]) as server:
+        ear = ears(
+            server, rt=SERVER, app=OPT_INS, script=["x"], decoded="la tv parla",
+            bearing=OFF_FACE_RAD, background=True, decode_s=0.5,
+        )  # fmt: skip
+        gate, sweep = threading.Event(), ear.input._sweep
+        ear.input._sweep = lambda cfg: (gate.wait(5.0), sweep(cfg))[1]  # the opening waits
+        ear.r.feed(voice(seconds=0.5))
+        job = ear.r.listener._stream.job
+        ear.rt.route.hold_input()  # a turn begins: the opening is refused (turn)
+        gate.set()
+        assert wait_until(lambda: job.done and job.refused == "turn")
+        ear.rt.route.release_input()
+        ear.r.feed(voice(seconds=0.5))
+        tail(ear)
+        ear.bearing = FACE_RAD  # the next speaker is at a face
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 2, 10.0)
+        first, second = ear.utterances
+        assert first.text == "la tv parla" and not first.addressed
+        assert second.addressed and second.text == "seconda"
+
+
+def test_a_revoke_right_after_the_opening_went_resets_the_session(ears):  # noqa: F811
+    """The opening's send and its return are apart (the upload count's save): a revoke in
+    between still knows the stream holds audio."""
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        route, stack = ear.rt.route, ear.rt.stack
+        save, fired = route._save_upload, []
+
+        def revoke_then_save(*args):
+            if not fired:
+                fired.append(True)
+                stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+                route.apply_config(stack.effective())
+            save(*args)
+
+        route._save_upload = revoke_then_save
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: route.snapshot()["streams_revoked"] == 1)  # counted last
+        assert route.snapshot()["input_resets"] == 1
+
+
+def test_a_cut_on_a_session_without_item_ids_resets_it(ears):  # noqa: F811
+    """Without ids the cut turn's transcript cannot be deleted: the next stream must not land
+    on a session that may still answer it."""
+    with TurnServer(stream_vad=True, ids=False, heard=[["dopo"]]) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        ear.input._speaking = lambda: True  # the robot starts speaking: the stream is cut
+        ear.r.feed(voice(seconds=0.3))
+        assert wait_until(lambda: ear.rt.route.snapshot()["streams_cut"] == 1)
+        assert wait_until(lambda: ear.rt.route.snapshot()["input_resets"] == 1)
+        ear.input._speaking = lambda: False
+        tail(ear)
+        assert wait_until(lambda: ear.rt.route.up(), 10.0)
+        ear.say()
+        assert ear.settle(lambda: any(u.text == "dopo" for u in ear.utterances), 10.0)
+        assert len(server.connections) == 2
 
 
 # ------------------------------------------------------------------ upload budget
@@ -499,7 +573,7 @@ def test_an_opening_after_this_inputs_reset_waits_for_the_new_session(ears):  # 
     with TurnServer(stream_vad=True, heard=[["dopo il reset"]]) as server:
         ear = ears(server, rt=HOLD, app=OPT_INS, script=["x"], bearing=FACE_RAD)
         held_onset(ear)
-        ear.input._reopening = True  # as after a sweep's reset
+        ear.input._stream_reopening = True  # as after a sweep's reset
         route, reopened = ear.rt.route, threading.Event()
         reopen = route._reopen
 
@@ -669,3 +743,83 @@ def test_an_old_stream_never_covered_resets_the_session_at_the_next_opening(ears
         inp._streams += [heard]
         inp._sweep(cfg)
         assert inp._streams == [] and ear.rt.route.snapshot()["input_resets"] == 1
+
+
+# ------------------------------------------------------------------ a stream ends once
+
+
+def revoke(ear) -> None:
+    stack = ear.rt.stack
+    stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+    ear.rt.route.apply_config(stack.effective())
+
+
+def test_a_revoke_inside_a_cut_ends_the_stream_once_as_revoked(ears):  # noqa: F811
+    """Forced: the robot starts speaking, a piece is refused and the cut sends its closing
+    silence; the revoke lands right then, before the cut retires the stream."""
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        route, send, fired = ear.rt.route, ear.rt.route.stream_audio, []
+
+        def revoke_in_the_cut(pcm, **kw):
+            if kw.get("closing") and not fired:
+                fired.append(True)
+                revoke(ear)  # the reload ends the stream first
+            return send(pcm, **kw)
+
+        route.stream_audio = revoke_in_the_cut
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        ear.input._speaking = lambda: True  # the next piece is refused: a cut
+        ear.r.feed(voice(seconds=0.3))
+        assert wait_until(lambda: fired and ear.input._ops.empty())
+        assert wait_until(lambda: route.snapshot()["streams_revoked"] == 1)
+        snap = route.snapshot()
+        assert (snap["streams_revoked"], snap["streams_cut"]) == (1, 0)
+
+
+def test_a_cut_before_the_revoke_ends_the_stream_once_as_cut(ears):  # noqa: F811
+    """Forced the other way: the cut retires the stream, then the revoke finds it over."""
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, close, fired = ear.input, ear.input._close, []
+
+        def close_then_revoke(job):
+            retired = close(job)
+            if job.stream and not fired:  # the cut retired it: the revoke lands before its count
+                fired.append(True)
+                revoke(ear)
+            return retired
+
+        inp._close = close_then_revoke
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        inp._speaking = lambda: True
+        ear.r.feed(voice(seconds=0.3))
+        assert wait_until(lambda: route_snapshot(ear)["streams_cut"] == 1)
+        assert wait_until(lambda: bool(fired))
+        snap = route_snapshot(ear)
+        assert (snap["streams_revoked"], snap["streams_cut"]) == (0, 1)
+
+
+def route_snapshot(ear) -> dict:
+    return ear.rt.route.snapshot()
+
+
+def test_a_cut_learnt_idless_only_afterwards_still_resets_the_session(ears):  # noqa: F811
+    """Forced: the cut runs before the robot has heard the server's id-less speech_started;
+    that event, once it comes, still resets the session."""
+    with TurnServer(stream_vad=True, ids=False) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, deliver, held = ear.input, ear.input.on_event, []
+        inp.on_event = lambda event, gen=None: held.append((event, gen))  # not heard yet
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        inp._speaking = lambda: True
+        ear.r.feed(voice(seconds=0.3))
+        assert wait_until(lambda: route_snapshot(ear)["streams_cut"] == 1)
+        assert route_snapshot(ear)["input_resets"] == 0  # nothing said it was id-less yet
+        inp.on_event = deliver
+        for event, gen in held:
+            deliver(event, gen)
+        assert wait_until(lambda: route_snapshot(ear)["input_resets"] == 1)
