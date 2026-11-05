@@ -63,7 +63,8 @@ class Replaced:
     after: str  # the version this installer left
 
 
-OVERCLOCK_STATES = ("trial", "trying", "on")  # trial written, trial boot asked, block in place
+# trial written, trial boot asked, promote begun (finished on the next run), block in place
+OVERCLOCK_STATES = ("trial", "trying", "promoting", "on")
 
 
 @dataclass
@@ -72,8 +73,8 @@ class OverclockRecord:
     the boot config, ``block`` the exact text with its markers, ``backup`` the file as it was
     before the first write (for the owner's recovery by hand: never written back as root).
     ``trial`` is the trial config (a copy of ``backup`` plus the block) while ``state`` is
-    ``trial`` (written, or its write did not finish) or ``trying`` (its one boot asked); ``on``:
-    the block is in ``path``."""
+    ``trial`` (written, or its write did not finish), ``trying`` (its one boot asked) or
+    ``promoting`` (the move into ``path`` began); ``on``: the block is in ``path``."""
 
     path: str
     block: str

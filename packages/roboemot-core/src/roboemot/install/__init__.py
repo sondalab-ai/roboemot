@@ -2499,8 +2499,15 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         remove_app_config(ui, remote, record, dry)
         remove_data_dir(ui, remote, record, dry)
         if record.overclock is not None:
-            on = record.overclock.state == "on"
             save = (lambda entry: None) if dry else overclock_saver(remote, platform, record)
+            if record.overclock.state != "on":  # a promote cut short: finish it, then revert
+                record.overclock = (
+                    overclocking.finish_promote(
+                        ui, remote, platform.overclock, oc_plan, record.overclock, dry, save
+                    )
+                    or record.overclock
+                )
+            on = record.overclock.state == "on"
             removed = overclocking.remove(
                 ui, remote, platform.overclock, oc_plan, record.overclock, dry, save
             )

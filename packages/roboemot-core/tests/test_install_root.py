@@ -213,3 +213,38 @@ def test_exit_codes_say_whether_anything_may_have_changed(rc, kind, why):
     with pytest.raises(kind) as e:
         oc_mod.root_write(Ui(False, False), Robot(rc), False, [("/b/c", "x\n", "y\n")])
     assert why in e.value.why
+
+
+def test_a_check_only_change_pins_a_file_it_does_not_write(boot, tmp_path):
+    cfg, trial = str(boot / "config.txt"), str(boot / "tryboot.txt")
+    pinned = [(trial, None, "a=1\nb=2\n"), (cfg, "a=1\n", "a=1\n")]
+    script = oc_mod.root_script(pinned, bins(tmp_path))
+    assert f"{cfg}{oc_mod.NEW_SUFFIX}" not in script
+    (boot / "config.txt").write_text("a=1\nowner=edit\n")  # changed since it was read
+    assert sh(script) == oc_mod.CHANGED_RC and not (boot / "tryboot.txt").exists()
+    (boot / "config.txt").write_text("a=1\n")
+    assert sh(script) == 0 and (boot / "tryboot.txt").read_text() == "a=1\nb=2\n"
+
+
+def test_a_missing_binary_stops_the_script_before_anything(boot, tmp_path):
+    missing = {**bins(tmp_path), "base64": str(tmp_path / "no-such-base64")}
+    rc = sh(oc_mod.root_script([(str(boot / "config.txt"), "a=1\n", "b=2\n")], missing))
+    assert rc == oc_mod.MISSING_RC and (boot / "config.txt").read_text() == "a=1\n"
+
+
+@pytest.mark.parametrize(
+    ("rc", "what"),
+    [
+        (oc_mod.MISSING_RC, "A binary is missing on the robot"),
+        (oc_mod.TOO_LONG_RC, "The root command could not run"),
+    ],
+)
+def test_missing_binaries_and_unrunnable_commands_change_nothing(rc, what):
+    with pytest.raises(oc_mod.RootUnchanged, match=what):
+        oc_mod.root_write(Ui(False, False), Robot(rc), False, [("/b/c", "x\n", "y\n")])
+
+
+def test_a_boot_config_too_large_for_the_command_is_refused_before_sudo():
+    huge = "x=1\n" * (oc_mod.MAX_SCRIPT_BYTES // 4)
+    with pytest.raises(oc_mod.RootUnchanged, match="too large"):
+        oc_mod.root_write(Ui(False, False), Robot(0), False, [("/b/c", huge, huge + "y\n")])

@@ -344,7 +344,8 @@ def oc(**kw) -> OverclockRecord:
 
 
 @pytest.mark.parametrize(
-    "entry", [oc(), oc(state="trying"), oc(state="on", trial=None), oc(backup="")]
+    "entry",
+    [oc(), oc(state="trying"), oc(state="promoting"), oc(state="on", trial=None), oc(backup="")],
 )
 def test_the_overclock_entry_round_trips_with_its_backup(entry):
     r = rec(overclock=entry)

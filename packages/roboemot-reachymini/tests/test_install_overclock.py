@@ -97,6 +97,7 @@ class BootRobot(FakeRobot):
         self.bootloader = "2025/02/12 10:51:52\nversion 1 (release)\ntimestamp 1739357512"
         self.passwordless = True
         self.sudo_fails = False
+        self.reboot_fails = False  # the reboot command itself fails
         self.roots: list[tuple[str, bool]] = []
         self.reboots: list[str] = []
         self.boot_id = "boot-1"
@@ -147,7 +148,9 @@ class BootRobot(FakeRobot):
         if self.sudo_fails:
             return oc_mod.SUDO_DENIED_RC
         if script.startswith(reachy_oc.REBOOT):
-            return self._reboot(script)
+            command, _, tail = script.partition(" || ")
+            assert tail == f"exit {oc_mod.REBOOT_FAILED_RC}", script
+            return oc_mod.REBOOT_FAILED_RC if self.reboot_fails else self._reboot(command)
         for f in self.folder.iterdir():
             f.unlink()
         for path, text in self.boot.items():
@@ -828,3 +831,86 @@ def test_no_root_script_reads_a_staged_file(offline_boot, daemon):
     scripts = [script for script, _ in offline_boot.roots]
     assert scripts and not any("/tmp/" in script for script in scripts)
     assert offline_boot.leftovers == []
+
+
+# ---------------------------------------------------------------- a promote cut short
+
+
+def failing_rm(robot_: BootRobot, name: str) -> None:
+    """Make the root script's ``rm`` fail for ``name`` only (the trial config's delete after
+    the promote's rename), as a disk error or a cut connection would."""
+    tool = robot_.root / "rm-fails"
+    real = robot_.bins["rm"]
+    tool.write_text(f'#!/bin/sh\ncase "$*" in *{name}) exit 1;; esac\nexec {real} "$@"\n')
+    tool.chmod(0o755)
+    robot_.bins = {**robot_.bins, "rm": str(tool)}
+
+
+@pytest.mark.parametrize("reboot_between", [False, True])
+def test_a_promote_cut_after_the_rename_is_finished_by_the_rerun(
+    offline_boot, daemon, capsys, reboot_between
+):
+    real_bins = dict(offline_boot.bins)
+    failing_rm(offline_boot, "tryboot.txt")
+    with pytest.raises(oc_mod.RootPartial, match="Root command failed"):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "promoting"
+    assert offline_boot.boot == {CONFIG: overclocked(), TRIAL: overclocked()}
+    offline_boot.bins = real_bins
+    if reboot_between:
+        offline_boot._reboot(reachy_oc.REBOOT)  # a plain boot: no tryboot flag now
+    capsys.readouterr()
+    install(overclock_reboot=False)
+    out = flat(capsys.readouterr().out)
+    assert "Promoted the overclock" in out and "an earlier run's promote" in out
+    assert "unchanged /boot/firmware/config.txt" not in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    rec = offline_boot.record["overclock"]
+    assert rec["state"] == "on" and rec["block"] == reachy_oc.BLOCK and rec["trial"] is None
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+
+
+def test_uninstall_finishes_a_promote_cut_short_and_removes_the_block(offline_boot, daemon):
+    real_bins = dict(offline_boot.bins)
+    failing_rm(offline_boot, "tryboot.txt")
+    with pytest.raises(oc_mod.RootPartial):
+        install(overclock_reboot=True)
+    offline_boot.bins = real_bins
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and RECORD not in offline_boot.files
+
+
+# ---------------------------------------------------------------- the last review's low items
+
+
+def test_the_trial_write_pins_the_boot_config(offline_boot, daemon):
+    install(overclock_reboot=False)
+    script = offline_boot.roots[0][0]
+    assert oc_mod.sha256(ORIGINAL) in script  # config.txt checked by root, not written
+    assert f"{CONFIG}{oc_mod.NEW_SUFFIX}" not in script
+
+
+def test_an_unattended_reinstall_that_keeps_the_overclock_needs_no_root(offline_boot, daemon):
+    promoted(offline_boot)
+    offline_boot.passwordless = False  # sudo would ask, and there is no terminal
+    roots = list(offline_boot.roots)
+    install(overclock_reboot=False)
+    assert offline_boot.roots == roots and offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_an_own_leftover_trial_with_an_older_block_is_replaced(offline_boot, daemon, monkeypatch):
+    old = reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1750")
+    monkeypatch.setattr(reachy_oc, "KNOWN_BLOCKS", (reachy_oc.BLOCK, old))
+    monkeypatch.setattr(reachy_oc.ReachyOverclock, "known_blocks", (reachy_oc.BLOCK, old))
+    offline_boot.boot[TRIAL] = ORIGINAL + old  # an earlier release's write, record lost
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_a_failed_reboot_command_is_not_called_a_sudo_refusal(offline_boot, daemon):
+    offline_boot.reboot_fails = True
+    with pytest.raises(oc_mod.RootUnchanged, match="The reboot failed"):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial"
