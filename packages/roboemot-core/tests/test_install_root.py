@@ -141,7 +141,9 @@ def test_the_script_writes_and_deletes_and_leaves_no_temporary_file(boot, tmp_pa
 
 def test_new_text_travels_in_the_script_not_in_a_file(boot, tmp_path):
     script = oc_mod.root_script([(str(boot / "x"), None, "kernel=ok\n")], bins(tmp_path))
-    assert "/tmp" not in script and "kernel=ok" not in script  # base64, decoded by root
+    # no staging folder (the target path itself may sit under /tmp in a test)
+    assert "roboemot-install." not in script and "mktemp" not in script
+    assert "kernel=ok" not in script  # base64, decoded by root
 
 
 def test_a_target_changed_since_it_was_read_exits_unchanged(boot, tmp_path):
