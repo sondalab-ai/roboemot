@@ -1,8 +1,8 @@
 # Configuration guide for the robot owner
 
 This guide covers the settings an owner is most likely to change: the cloud voice, the local
-voice, the LLM routes, safety, the circadian rhythm and the privacy switches. It ends with a
-troubleshooting list for the Live tab.
+voice, the LLM routes, safety, the circadian rhythm, the privacy switches and the following of a
+shown object. It ends with a troubleshooting list for the Live tab.
 
 Every default, unit and range below comes from the configuration schema,
 `packages/roboemot-core/src/roboemot/config/schema.py`. The schema is the source of truth. If this
@@ -527,6 +527,34 @@ These rules hold whatever the switches say:
 - API keys are never logged, shown or returned. A route whose `${secret:name}` cannot be read is
   not called.
 - The debug report holds codes and numbers, never text, audio or names.
+
+## 7. Following a shown object
+
+SPEC 5 (Detect-then-track of the shown object), SPEC 13.
+
+### What it does
+
+When you show the robot a thing (a cup in your hand), it looks at the thing and follows it. The
+object detector (NanoDet) runs only about 3 times a second during such a look, and it can miss a
+frame. Between two detector runs a small tracker (VitTrack) follows the shown thing, so the gaze
+stays on it while it moves. The detector still decides what the thing is: each detector run
+confirms the tracker or starts it again. The tracker follows only the one shown thing, and only
+during a look.
+
+The tracker needs its model file. `roboemot models fetch --all` (and the installer) downloads it.
+Without the file, or with an OpenCV older than 4.9, the robot runs as before, and the debug report
+says why (`roboemot.vision.object_track`, `state: unavailable` with the `reason`).
+
+| Key | Default | Unit, range | What it does |
+| --- | --- | --- | --- |
+| `vision.object_track.enabled` | `true` | on/off | Runs the tracker during a look at a shown thing, when its model file is there. |
+| `vision.rates.object_track_hz` | `5.0` | Hz, 0.5 to 30 | How often the tracker runs between detector runs. The robot's state (resting, speaking) lowers it like every vision rate. A run takes about 50 ms on a Raspberry Pi 4 (the opencv_zoo benchmark; not measured on the robot yet). |
+| `vision.object_track.score_min` | `0.3` | 0 to 1 | Below this tracker score the thing counts as lost, and the tracker stops. |
+| `vision.object_track.confirm_max_s` | `3.0` | s, 0.2 to 30 | The tracker stops when the detector has not seen the thing for this long. |
+| `vision.object_track.reseed_iou` | `0.5` | 0 to 1 | When the detector's box and the tracker's box overlap less than this, the tracker starts again on the detector's box. |
+
+**Privacy.** The tracker keeps a small picture of the thing in memory while it follows it. It is
+never stored or logged.
 
 ## Troubleshooting
 

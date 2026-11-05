@@ -44,6 +44,14 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    without a freeze per run, and the others wait for the episode's end. The look-down crop
    follows the same track. A burst whose last vote aged past ``identity.vote_max_age_s``
    starts again. ``stats`` counts runs and skips by reason (``entity_embeds``).
+4. Detect-then-track (``object_follow``, SPEC 5, 13): during a look, with an
+   ``object_tracker`` (VitTrack) and ``vision.object_track.enabled``, each object run seeds,
+   confirms or re-seeds a single-object tracker on the shown track, and on the frames between
+   runs (at most ``rates.object_track_hz``) the tracker's box is folded into that track
+   (``Tracker.follow``) and published as its ``percept.entity``, so the world entry stays fresh
+   and the gaze follows the thing while the detector misses it. Without the tracker (model
+   missing, OpenCV without ``TrackerVit``) the pipeline runs as before and ``object_track`` in
+   the report says why.
 
 When and for which track an animal or object embedding is due, and the per-frame entity budget,
 are decided here either way. With an ``embed_worker`` (``EmbedWorker``, the live app) a due
@@ -139,14 +147,24 @@ from .facing import eye_span, head_yaw, smoothed
 from .geometry import CameraModel, letterbox_scale
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .object_crop import CropSchedule, off_centre
+from .object_follow import ASLEEP, DISABLED, EPISODE_END, RESET, TRACK_ENDED, ShownFollower
 from .object_gate import ObjectGate
 from .scene_motion import SceneMotionWatch, ScenePercept
-from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
+from .stage_timing import (
+    APPEARANCE,
+    DETECTION,
+    EMBEDDING,
+    OBJECT_TRACK,
+    OBJECTS,
+    PROCESS,
+    StageTimer,
+)
 from .stages import (
     AppearanceEmbedder,
     FaceDetector,
     FaceEmbedder,
     ObjectDetector,
+    SingleObjectTracker,
 )
 from .track_stats import TrackDiagnostics, head_pose
 from .tracker import Track, Tracker
@@ -331,10 +349,14 @@ class VisionPipeline:
         timer: StageTimer | None = None,
         shown: ShownObjectConfig | None = None,
         embed_worker: EmbedWorker | None = None,
+        object_tracker: SingleObjectTracker | None = None,
+        object_track_unavailable: str | None = None,
     ):
         """``embed_worker`` moves the animal and object appearance embeddings off this thread
         (the live app, ``open_perception``); without one they run inline in ``process``, as
-        replay and the unit tests need (SPEC 14)."""
+        replay and the unit tests need (SPEC 14). ``object_tracker`` follows the shown object
+        between object runs (``object_follow``); ``object_track_unavailable`` says why there
+        is none, for the report."""
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
         self.cfg = cfg
@@ -391,6 +413,9 @@ class VisionPipeline:
         self._object_low_detections = 0
         self._object_low_continued = 0
         self.timer = timer or StageTimer(TIMING_WINDOW_MAX_S)
+        self.follower = ShownFollower(
+            object_tracker, cfg.object_track, self.timer, object_track_unavailable
+        )
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -423,7 +448,7 @@ class VisionPipeline:
         camera = self._camera(frame.image.shape[1], frame.image.shape[0])
         self._budget = self.cfg.max_embeds_per_frame
         self._entity_embeds = 0
-        faces = objects = False
+        faces = objects = episode = False
         if self.governor.allow("detection", stamp):
             self._process_faces(frame, camera)
             faces = True
@@ -443,6 +468,7 @@ class VisionPipeline:
             if reason is not None:
                 self._process_objects(frame, camera, reason, episode)
                 objects = True
+        self._follow_shown(frame, camera, episode, objects)
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
 
@@ -489,6 +515,7 @@ class VisionPipeline:
         if self.embed_worker is not None:
             self.embed_worker.clear()
         self._object_visible = []
+        self.follower.stop(RESET)
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
@@ -513,6 +540,7 @@ class VisionPipeline:
         """
         self.cfg, self.identity = vision, identity
         self.object_crop.cfg = vision.object_crop
+        self.follower.cfg = vision.object_track
         if shown is not None:
             self.shown = shown
         self.track_stats.cfg = vision
@@ -626,6 +654,7 @@ class VisionPipeline:
             "objects": objects,
             "entity_embeds": entity_embeds,
             "embed_worker": self._embed_worker_report(),
+            "object_track": self.follower.snapshot(),
             "frame": self._frame_facts(),
             "faces": self._face_report(),
         }
@@ -747,6 +776,8 @@ class VisionPipeline:
         a rebirth (``_new_entity``)."""
         state = self._entities.pop(track_id, None)
         self.matcher.release(track_id)
+        if track_id == self.follower.target:
+            self.follower.stop(TRACK_ENDED)
         if state is not None and state.pending and self.embed_worker is not None:
             self.embed_worker.cancel(track_id)
         if state is not None and state.seen_box is not None:
@@ -843,9 +874,11 @@ class VisionPipeline:
         self._publish("percept.face_frame", frame.stamp, frame.stamp)
 
     def clear_overlay(self) -> None:
-        """Forget the visible tracks the live preview would draw (the robot fell asleep)."""
+        """Forget the visible tracks the live preview would draw (the robot fell asleep); a
+        follow of the shown object ends."""
         self._visible = []
         self._object_visible = []
+        self.follower.stop(ASLEEP)
 
     def face_overlay(self) -> list[tuple[Box, str | None]]:
         """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
@@ -1097,24 +1130,63 @@ class VisionPipeline:
             if episode:
                 role = _Role.SHOWN if track.track_id == shown else _Role.OTHER
             self._evaluate_entity(frame, track, states[track.track_id], key, consumers, role)
+        if episode:
+            seen = {t.track_id: (t.label, self._measured(t)) for t in result.visible}
+            self.follower.detector_run(frame.image, frame.stamp, seen, shown)
         for track in result.visible:
-            state = states[track.track_id]
-            state.seen_box, state.last_seen = track.box, frame.stamp
-            x1, y1, x2, y2 = track.box
-            azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
-            obs = Observation(
-                kind=kinds[track.label],
-                stamp=frame.stamp,
-                source=self.source,
-                azimuth_rad=azimuth,
-                elevation_rad=elevation,
-                category=self.display_name(track.label),
-                identity=state.owner_id,
-                confidence=min(1.0, max(0.0, track.score)),
-                embedding=state.embedding,
-                extent_rad=_extent(camera, track.box),
-            )
-            self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
+            self._publish_entity(frame, camera, track, states[track.track_id])
+
+    def _publish_entity(
+        self, frame: Frame, camera: CameraModel, track: Track, state: _EntityState
+    ) -> None:
+        """Publish an animal or object track's ``percept.entity`` for ``frame`` (its filtered
+        box) and keep that box as its last sighting."""
+        state.seen_box, state.last_seen = track.box, frame.stamp
+        x1, y1, x2, y2 = track.box
+        azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
+        obs = Observation(
+            kind=state.kind,
+            stamp=frame.stamp,
+            source=self.source,
+            azimuth_rad=azimuth,
+            elevation_rad=elevation,
+            category=self.display_name(track.label),
+            identity=state.owner_id,
+            confidence=min(1.0, max(0.0, track.score)),
+            embedding=state.embedding,
+            extent_rad=_extent(camera, track.box),
+        )
+        self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
+
+    def _follow_shown(self, frame: Frame, camera: CameraModel, episode: bool, ran: bool) -> None:
+        """Between object runs of a look, follow the shown track with the single-object tracker
+        (``object_follow``): at most ``rates.object_track_hz`` (the governor's scales apply),
+        never on a frame the object detector took (``ran``). A tracker box is folded into the
+        object track and published like a detector sighting. The follow ends with the look,
+        when the switch goes off or when the track is gone."""
+        follower = self.follower
+        if follower.target is None:
+            return
+        if not episode:
+            follower.stop(EPISODE_END)
+            return
+        if not follower.usable:
+            follower.stop(DISABLED)
+            return
+        if ran or not self.governor.allow(OBJECT_TRACK, frame.stamp):
+            return
+        target = follower.target
+        box = follower.step(frame.image, frame.stamp)
+        if box is None:
+            return
+        track = self.object_tracker.follow(target, box, frame.stamp)
+        state = self._entities.get(target)
+        if track is None or state is None:
+            follower.stop(TRACK_ENDED)
+            return
+        if track not in self._object_visible:
+            self._object_visible = sorted([*self._object_visible, track], key=lambda t: t.track_id)
+        self._publish_entity(frame, camera, track, state)
 
     def _shown_track(self, visible: list[Track], frame: Frame, camera: CameraModel) -> int | None:
         """The track taken as the shown thing during a look at it (SPEC 5, 5A), None while no

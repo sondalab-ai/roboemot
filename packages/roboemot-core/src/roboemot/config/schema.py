@@ -1975,6 +1975,15 @@ class VisionRates(Strict):
         ge=0.1,
         le=30,
     )
+    object_track_hz: float = param(
+        5.0,
+        "Rate of the single-object tracker (VitTrack, vision.object_track) that follows the "
+        "shown object between object detector runs, scaled like every rate; it runs only "
+        "during a look at a shown thing and only on frames the detector does not take",
+        unit="Hz",
+        ge=0.5,
+        le=30,
+    )
     camera_hz: float = param(
         30.0,
         "Upper bound on camera reads handed to vision (read when the camera thread starts)",
@@ -2219,6 +2228,43 @@ class ObjectCropConfig(Strict):
     )
 
 
+class ObjectTrackConfig(Strict):
+    """Detect-then-track of the shown object (SPEC 5, 13): a single-object tracker follows it
+    between object detector runs; the detector stays the source of truth."""
+
+    enabled: bool = param(
+        True,
+        "On: during a look at a shown thing, a single-object tracker (VitTrack) follows the "
+        "shown track between object detector runs (at vision.rates.object_track_hz), so its "
+        "bearing and the world entry stay fresh while the detector misses it. Needs the "
+        "vittrack model file (roboemot models fetch); without it the pipeline runs as before "
+        "and the debug report says why",
+    )
+    score_min: float = param(
+        0.3,
+        "The tracker's own score (0 to 1; about 0.65 on a followed thing, under 0.1 once it is "
+        "gone) below which the track is lost and nothing is published from it",
+        ge=0,
+        le=1,
+    )
+    confirm_max_s: float = param(
+        3.0,
+        "The tracker follows the shown thing at most this long (capture time) after the last "
+        "object detector run that saw it there; then it stops until the detector sees it again",
+        unit="s",
+        ge=0.2,
+        le=30,
+    )
+    reseed_iou: float = param(
+        0.5,
+        "When the object detector sees the followed track, a tracker box that overlaps the "
+        "detector box at least this much (IoU) is confirmed; below it the tracker starts again "
+        "on the detector box (it drifted, or the thing moved elsewhere)",
+        ge=0,
+        le=1,
+    )
+
+
 class SceneMotionConfig(Strict):
     """Motion watch of a day nap (SPEC 5, 7A): the object gate's scene-change test on captured
     frames, while the head is still; its thresholds are vision.object_gate's."""
@@ -2246,6 +2292,9 @@ class VisionConfig(Strict):
     object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
     object_crop: ObjectCropConfig = param(
         {}, "Object detection on a crop around the faces in view (SPEC 5, 13)"
+    )
+    object_track: ObjectTrackConfig = param(
+        {}, "Single-object tracker of the shown thing between object detector runs (SPEC 5, 13)"
     )
     scene_motion: SceneMotionConfig = param({}, "Motion watch of a day nap (SPEC 5, 7A)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)

@@ -132,6 +132,7 @@ BEHAVIOUR_MODULES = [
     "vision/models.py",
     "vision/object_gate.py",
     "vision/object_crop.py",
+    "vision/object_follow.py",
     "vision/scene_change.py",
     "vision/scene_motion.py",
     "vision/embed_worker.py",

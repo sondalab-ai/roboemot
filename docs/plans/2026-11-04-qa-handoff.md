@@ -87,12 +87,17 @@ PRs:
 2. **Still cup.** Use a cup that the robot already knows. Put the cup on the table in view for 2 minutes, then pick it up and show it.
    - Pass: no second long novelty look, neither after about 10 s on the table nor when you pick it up. PR 185 (https://github.com/sondalab-ai/roboemot/pull/185) keeps a recognised object's identity while it sits still, so a repeat look is now a fail.
    - Known limit, not a fail: a known cup that is still from the moment it comes into view may never be recognised while the object gate is on (see the follow-ups).
-3. **Cost.** After about 10 minutes with people and objects in view, save the report. Read `roboemot.vision.stage_timing`: the CPU share of YuNet, SFace, DINOv2 and NanoDet. These numbers decide V-3 (lower face detection rate while nobody is in view) in `docs/plans/2026-11-03-vision-cost-handoff.md`.
+3. **Cost.** After about 10 minutes with people and objects in view, save the report. Read `roboemot.vision.stage_timing`: the CPU share of YuNet, SFace, DINOv2, NanoDet and VitTrack (`object_track`, step 6). These numbers decide V-3 (lower face detection rate while nobody is in view) in `docs/plans/2026-11-03-vision-cost-handoff.md`.
 4. **Fewer DINOv2 embeds** (https://github.com/sondalab-ai/roboemot/pull/188). In the cluttered room, read `entity_embeds.skips.young` and `skips.episode`, `stage_timing.appearance_embed.runs_per_s`, `object_detect.runs_per_s` and `stage_drops.objects`.
    - Baseline on 2026-11-05 (before PR 188): `appearance_embed` 0.23 runs/s at 1174 ms, `object_detect` 0.87 runs/s (3 wanted while a cup was shown), `stage_drops.objects` 1033 in 3.5 min, `entity_embeds.runs.new` 30.
    - Pass: `object_detect.runs_per_s` close to `objects_active_hz` (3) while a cup is shown, and the cup episodes last while the cup is in view.
    - Embed worker (https://github.com/sondalab-ai/roboemot/pull/191): read `roboemot.vision.embed_worker` (queue wait p50/p90, dropped, failed) and `process.wall_ms.max`, which should no longer reach about 1.2 s. Compare `vision.appearance_threads` 1 against 2 on `object_detect.runs_per_s` and the listener `realtime.share`.
 5. Optional: run `scripts/bench/run_cm4.py --only nanodet_plus_m_320,yolox_nano_416` on the robot. This is a SPEC 15 item: object detector p50 and p95 on the CM4.
+6. **Detect-then-track** (VitTrack follows the shown object between NanoDet runs, SPEC 5). The installer fetches the model; on a robot installed before, run `roboemot models fetch vittrack` first. Repeat step 1, then read under `roboemot.vision`:
+   - `object_track.state`: `following` during a look, `idle` between looks. `unavailable` comes with a `reason` (model file missing, or an OpenCV without `TrackerVit`): send it.
+   - `object_track` counts: `seeds`, `reseeds`, `updates`, `confirms`, `bridged` (NanoDet runs that missed the cup while the tracker held it) and `lost` by reason. Many `lost.score` means `vision.object_track.score_min` is too high for the real cup; many `lost.timeout` means NanoDet rarely confirms it (raise `confirm_max_s` only if the gaze stayed on the cup).
+   - `stage_timing.object_track`: `wall_ms` p50 and p90 and `cpu_share` (opencv_zoo: about 49 ms per run on a Pi 4B; at 5 Hz that is about a quarter of a core). It belongs with step 3's CPU shares.
+   - Pass: `roboemot.attention.shown_object` episodes last while the cup is in view, and few end `lost`. To compare with the old behaviour, set `vision.object_track.enabled: false` in the web UI and repeat step 1.
 
 ## C. Wake path with the name "Neve" (PRs 179, 180)
 

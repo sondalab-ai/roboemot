@@ -28,6 +28,12 @@ expire by ``lost_s``. A high-score detection left unmatched may then pick up the
 track of its label within ``pickup_heights`` of its height (a thing lifted into the crop keeps
 its track); the track jumps to the detection.
 
+Between detector runs a single-object tracker may follow one track (the shown object, SPEC 5):
+``follow`` folds its box into that track's filter like a measurement and counts as a sighting
+(``last_stamp``, matched at the last update), so the track neither expires nor drifts away on
+its constant velocity while the detector misses it, and the next detection associates with it.
+It never changes the hits, the score or the detection: only the detector confirms a track.
+
 Track IDs come from an allocator that can be shared between trackers, so IDs are unique across
 faces and objects. No wall clock is read: everything uses the stamps passed in.
 
@@ -185,11 +191,14 @@ class Track:
         self._stamp = stamp
 
     def _correct(self, det: Detection) -> None:
+        self._correct_box(det.box)
+
+    def _correct_box(self, box: Box) -> None:
         h = max(self._mean[HEIGHT], 1.0)
         meas_cov = np.eye(MEASURE_DIM) * (POSITION_STD * h) ** 2
         proj = np.zeros((MEASURE_DIM, STATE_DIM))
         proj[:, :MEASURE_DIM] = np.eye(MEASURE_DIM)
-        innovation = _cxcywh(det.box) - proj @ self._mean
+        innovation = _cxcywh(box) - proj @ self._mean
         s = proj @ self._cov @ proj.T + meas_cov
         gain = self._cov @ proj.T @ np.linalg.inv(s)
         self._mean = self._mean + gain @ innovation
@@ -285,6 +294,18 @@ class Tracker:
         rest_t = [t for i, t in enumerate(tracks) if i not in used_t]
         rest_d = [d for j, d in enumerate(dets) if j not in used_d]
         return matched, rest_t, rest_d
+
+    def follow(self, track_id: int, box: Box, stamp: float) -> Track | None:
+        """Fold a single-object tracker's ``box`` at ``stamp`` into the confirmed track
+        ``track_id`` (see the module docstring); the track, or None when it is not live and
+        confirmed. Hits, score and detection stay the detector's."""
+        track = next((t for t in self._tracks if t.track_id == track_id), None)
+        if track is None or not track.confirmed:
+            return None
+        track._predict(stamp)
+        track._correct_box(box)
+        track.last_stamp, track._matched_last = stamp, True
+        return track
 
     def expire(self, stamp: float) -> list[int]:
         """Remove tracks unmatched for more than ``lost_s`` at ``stamp``; IDs of confirmed ones.

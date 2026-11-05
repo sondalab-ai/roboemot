@@ -2,7 +2,8 @@
 
 ``StageTimer`` keeps, per stage, a fixed ring of (end time, wall seconds, CPU seconds). Keys:
 ``face_detect`` (YuNet), ``face_embed`` (SFace), ``object_detect`` (NanoDet),
-``appearance_embed`` (DINOv2) and ``process``, the whole ``VisionPipeline.process`` call of one
+``appearance_embed`` (DINOv2), ``object_track`` (VitTrack, the shown object between NanoDet
+runs) and ``process``, the whole ``VisionPipeline.process`` call of one
 frame (frames the governor lets through without a stage included). The report never carries the
 word "embedding" (privacy guard of the perception tests), hence ``_embed``.
 
@@ -46,8 +47,9 @@ DETECTION = "face_detect"
 EMBEDDING = "face_embed"
 OBJECTS = "object_detect"
 APPEARANCE = "appearance_embed"
+OBJECT_TRACK = "object_track"
 PROCESS = "process"
-STAGES = (DETECTION, EMBEDDING, OBJECTS, APPEARANCE, PROCESS)
+STAGES = (DETECTION, EMBEDDING, OBJECTS, APPEARANCE, OBJECT_TRACK, PROCESS)
 MS_PER_S = 1000.0
 FIELDS = 3  # end time, wall seconds, CPU seconds
 
