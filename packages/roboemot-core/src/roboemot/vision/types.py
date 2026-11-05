@@ -75,17 +75,30 @@ class PersonRecognized:
 
 
 @dataclass(frozen=True)
+class FaceMarks:
+    """One face's landmarks for the live preview (SPEC 11A): the 5 detector points (eyes,
+    nose, mouth corners) in camera pixels, None without them, and the published head yaw
+    (degrees, None without one). Only for the local preview, never stored or logged (SPEC 12)."""
+
+    points: tuple[tuple[float, float], ...] | None
+    yaw_deg: float | None
+
+
+@dataclass(frozen=True)
 class PreviewOverlay:
     """The live preview's boxes for one frame (SPEC 11A): face tracks as ``(box, owner_id or
     None)``, confirmed animal and object tracks as ``(box, readable category, owner_id or
     None)``. ``faces_current`` is False when face detection did not run on the frame (its face
     boxes are unknown, ``faces`` is empty): ``LatestFrameRunner`` then holds the last frame
     with face boxes for a poll period. Object boxes are the tracker's latest estimate, never
-    an exact match of the picture, so they never hold a frame."""
+    an exact match of the picture, so they never hold a frame. ``marks`` is empty unless
+    ``webui.live.video_landmarks`` is on; then it has one ``FaceMarks`` per face, in ``faces``
+    order."""
 
     faces: tuple[tuple[Box, str | None], ...] = ()
     objects: tuple[tuple[Box, str, str | None], ...] = ()
     faces_current: bool = True
+    marks: tuple[FaceMarks, ...] = ()
 
     def __bool__(self) -> bool:
         """True when it holds a face box: what makes a kept frame worth holding."""

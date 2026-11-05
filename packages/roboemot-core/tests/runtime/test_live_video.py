@@ -16,7 +16,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.runtime import live_video
 from roboemot.runtime.live_video import LiveVideo, ascii_label
 from roboemot.vision.runner import LatestFrameRunner
-from roboemot.vision.types import Frame, PreviewOverlay
+from roboemot.vision.types import FaceMarks, Frame, PreviewOverlay
 from roboemot.world.types import Entry
 
 cv2 = pytest.importorskip("cv2")  # the vision extra: run by the python-vision CI job
@@ -718,6 +718,32 @@ def test_object_boxes_come_from_the_frame_capture_with_the_faces():
     img = drawn(rig)
     assert seen and rig.runner.latest().overlay is kept
     assert green_pixels(img) > 0 and blue_pixels(img) > 0
+
+
+def magenta_pixels(img):
+    return int(((img[:, :, 0] > 120) & (img[:, :, 2] > 120) & (img[:, :, 1] < 100)).sum())
+
+
+@pytest.mark.parametrize("with_marks", [False, True])
+def test_landmark_dots_and_the_yaw_label_are_drawn_only_with_marks(with_marks):
+    box = (200.0, 100.0, 360.0, 260.0)
+    points = ((250.0, 160.0), (310.0, 160.0), (280.0, 190.0), (260.0, 220.0), (300.0, 220.0))
+    marks = (FaceMarks(points, 12.4),) if with_marks else ()
+    kept = PreviewOverlay(faces=((box, None),), marks=marks)
+    img = drawn(Rig(hook=lambda report: kept))
+    if not with_marks:
+        assert magenta_pixels(img) == 0
+        return
+    assert magenta_pixels(img[150:230, 240:320]) > 0  # the dots inside the box
+    assert magenta_pixels(img[262:300, 200:300]) > 0  # "yaw 12" under the box
+
+
+def test_marks_with_bad_values_never_break_the_picture():
+    box = (200.0, 100.0, 360.0, 260.0)
+    bad = FaceMarks(((float("nan"), 1.0), (1e12, -1e12)), float("inf"))
+    kept = PreviewOverlay(faces=((box, None),), marks=(bad, FaceMarks(None, None)))
+    img = drawn(Rig(hook=lambda report: kept))
+    assert img is not None and img.shape == (480, 640, 3)  # still served
 
 
 def test_object_boxes_alone_never_hold_a_frame():
