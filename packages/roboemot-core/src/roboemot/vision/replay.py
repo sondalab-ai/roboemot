@@ -127,8 +127,9 @@ def replay(
 
     Frames go in recorded order with their recorded stamps and joint states, one ``process``
     call each. To be reproducible it resets the pipeline (tracks, track IDs, governor) and the
-    matcher session first and forces online refresh off for the duration (restored
-    afterwards). The subscription is removed afterwards even on error.
+    matcher session first, forces online refresh off and runs the appearance embeddings inline
+    (an embed worker is set aside, SPEC 14) for the duration (both restored afterwards). The
+    subscription is removed afterwards even on error.
     """
     messages: list[Recorded] = []
     current = [0]
@@ -139,6 +140,7 @@ def replay(
     unsubscribe = [bus.subscribe(t, record) for t in topics]
     refresh, pipeline.refresh = pipeline.refresh, False
     pipeline.reset()
+    worker, pipeline.embed_worker = pipeline.embed_worker, None
     pipeline.matcher.new_session()
     try:
         for i in range(len(session.frames)):
@@ -146,6 +148,7 @@ def replay(
             pipeline.process(session.load(i))
     finally:
         pipeline.refresh = refresh
+        pipeline.embed_worker = worker
         for off in unsubscribe:
             off()
     return ReplayResult(session.frames, messages)

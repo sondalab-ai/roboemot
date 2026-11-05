@@ -44,7 +44,7 @@ def run_in_thread(name: str) -> int:
 
 def test_defaults_list_vision_and_not_the_real_time_threads():
     assert DEFAULTS.background_nice == 5
-    assert {"roboemot-vision", "vision-models", "roboemot-camera"} <= set(
+    assert {"roboemot-vision", "roboemot-embed", "vision-models", "roboemot-camera"} <= set(
         DEFAULTS.background_threads
     )
     real_time = {

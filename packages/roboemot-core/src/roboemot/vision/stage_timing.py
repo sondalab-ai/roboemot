@@ -13,10 +13,13 @@ share of one core), and ``span_s``, the wall time these cover. The span starts a
 first recorded run, so model loading and a stage that has not run yet never dilute the rate; it
 is 0 before the first run. A run that raises still counts: its time was spent.
 
-CPU time is ``time.thread_time`` of the vision thread. ONNX Runtime runs each model with
-``intra_op_num_threads = vision.threads`` (2 by default) and OpenCV with ``cv2.setNumThreads``
+CPU time is ``time.thread_time`` of the thread that ran the stage: the vision thread, except
+``appearance_embed``, which the embed worker records on its own thread in the live app
+(``embed_worker``; its ``wall_ms`` is then what an embedding takes there, no longer time the
+frame path waits). ONNX Runtime runs each model with ``intra_op_num_threads = vision.threads``
+(2 by default; DINOv2-S ``vision.appearance_threads``, 2) and OpenCV with ``cv2.setNumThreads``
 of the same value, so work done in their pool threads is not counted: ``cpu_share`` is a lower
-bound, and ``wall_ms`` is the cost the frame path sees.
+bound, and ``wall_ms`` is the cost the calling thread sees.
 
 Timing reads its own clocks (the pipeline only uses capture stamps); the values never feed a
 decision, so replays stay deterministic. Recording a run writes three doubles into a ring sized

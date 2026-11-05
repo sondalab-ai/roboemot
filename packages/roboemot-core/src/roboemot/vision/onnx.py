@@ -2,8 +2,10 @@
 
 YuNet face detector (MIT), SFace face embedder (Apache-2.0), DINOv2-S appearance embedder
 (Apache-2.0) and NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
-in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU with two threads;
-the cm4 budget leaves two cores to vision, audio and core together (SPEC 13). All resizing,
+in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU: the frame-path
+models on ``vision.threads`` (2), DINOv2-S, which runs beside them on the embed worker, on
+``vision.appearance_threads`` (2) at ``vision.appearance_input_px`` (224); the cm4 budget
+leaves two cores to vision, audio and core together (SPEC 13). All resizing,
 alignment and cropping happens here: crops live only inside a call (SPEC 12).
 Weights are never downloaded here, see ``roboemot models fetch``.
 """
@@ -19,7 +21,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from ..config.schema import VisionConfig
+from ..config.schema import DINO_INPUT_PX, DINO_PATCH_PX, VisionConfig
 from . import models
 from .models import ModelError
 from .types import Box, Detection
@@ -64,7 +66,11 @@ NANODET_MAX_DETECTIONS = 100
 IOU_EPS = 1e-9
 
 DINO_MODEL_ID = "dinov2-small"
-DINO_SIZE = 224
+DINO_SIZE = DINO_INPUT_PX
+DINO_PATCH = DINO_PATCH_PX
+HF_POS_OFFSET = 0.1  # added to the patch grid side by interpolate_pos_encoding
+RESIZE_SCALES = 2  # input index of a Resize node's scales
+RESIZE_SPATIAL = 2  # the scales of the two spatial axes follow batch and channels
 DINO_MEAN = (0.485, 0.456, 0.406)
 DINO_STD = (0.229, 0.224, 0.225)
 
@@ -75,12 +81,14 @@ def configure(threads: int) -> None:
     cv2.setNumThreads(threads)
 
 
-def _session(path: Path, threads: int) -> ort.InferenceSession:
+def _session(source: Path | bytes, threads: int) -> ort.InferenceSession:
+    """A CPU session of a model file, or of serialised model bytes, on ``threads`` threads."""
     options = ort.SessionOptions()
     options.log_severity_level = LOG_ERROR
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
-    return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+    model = source if isinstance(source, bytes) else str(source)
+    return ort.InferenceSession(model, options, providers=["CPUExecutionProvider"])
 
 
 def _unit(x: np.ndarray) -> np.ndarray:
@@ -156,19 +164,65 @@ class SFaceEmbedder:
         return _unit(self._rec.feature(align_face(image, face.landmarks))[0])
 
 
-class DinoV2Embedder:
-    """DINOv2-S/14 CLS token of the whole box, squashed to 224x224 (no margin).
+def dino_model_id(input_px: int) -> str:
+    """Registry model ID of DINOv2-S embeddings at ``input_px``: the plain ID at 224 (what the
+    stored records were made at), else one naming the size, so embeddings of two sizes are
+    never matched against each other."""
+    return DINO_MODEL_ID if input_px == DINO_SIZE else f"{DINO_MODEL_ID}-{input_px}px"
 
-    ``embed`` is serialised by a lock: the vision worker and the catalogue import (web UI
-    thread) share one session, which the project keeps single-threaded.
+
+def _dino_at(path: Path, input_px: int) -> bytes:
+    """The DINOv2-S graph for a ``input_px`` input. The export interpolates its 37 x 37
+    position embeddings to the patch grid with a Resize whose scales were fixed at 224 px
+    ((16 + 0.1) / 37, Hugging Face's ``interpolate_pos_encoding``), so any other size fails at
+    the position add; the scales are set for the new grid instead. Raises ``ModelError`` when
+    the graph does not have that shape."""
+    import onnx
+    from onnx import numpy_helper
+
+    model = onnx.load(str(path))
+    resizes = [n for n in model.graph.node if n.op_type == "Resize"]
+    constants = {o: n for n in model.graph.node if n.op_type == "Constant" for o in n.output}
+    if len(resizes) != 1 or len(resizes[0].input) <= RESIZE_SCALES:
+        raise ModelError(f"{path.name}: expected one position-embedding Resize")
+    scales = constants.get(resizes[0].input[RESIZE_SCALES])
+    if scales is None or len(scales.attribute) != 1:
+        raise ModelError(f"{path.name}: the position-embedding Resize has no constant scales")
+    old = numpy_helper.to_array(scales.attribute[0].t)
+    factor = (input_px // DINO_PATCH + HF_POS_OFFSET) / (DINO_SIZE // DINO_PATCH + HF_POS_OFFSET)
+    new = old.astype(np.float32)
+    new[RESIZE_SPATIAL:] *= factor
+    scales.attribute[0].t.CopyFrom(numpy_helper.from_array(new))
+    return model.SerializeToString()
+
+
+class DinoV2Embedder:
+    """DINOv2-S/14 CLS token of the whole box, squashed to ``input_px`` square (224 by
+    default; no margin). ``model_id`` names the size when it is not 224 (``dino_model_id``).
+
+    ``embed`` is serialised by a lock: the embed worker and the catalogue import (web UI
+    thread) share one session.
     """
 
-    model_id = DINO_MODEL_ID
-
-    def __init__(self, path: Path, threads: int):
+    def __init__(self, path: Path, threads: int, input_px: int = DINO_SIZE):
+        if input_px % DINO_PATCH:
+            raise ValueError(f"DINOv2 input must be a multiple of {DINO_PATCH} px")
         self._lock = threading.Lock()
-        self._sess = _session(path, threads)
+        self._px = input_px
+        self.model_id = dino_model_id(input_px)
+        source: Path | bytes = path if input_px == DINO_SIZE else _dino_at(path, input_px)
+        self._sess = _session(source, threads)
         self._input = self._sess.get_inputs()[0].name
+        if input_px != DINO_SIZE:
+            self._check_tokens(path.name)
+
+    def _check_tokens(self, name: str) -> None:
+        """One run on a blank input: the output must hold one token per patch plus CLS."""
+        x = np.zeros((1, CHANNELS, self._px, self._px), np.float32)
+        tokens = self._sess.run(None, {self._input: x})[0]
+        want = (self._px // DINO_PATCH) ** 2 + 1
+        if tokens.shape[1] != want:
+            raise ModelError(f"{name}: {tokens.shape[1]} tokens at {self._px} px, expected {want}")
 
     def embed(self, image: np.ndarray, box: Box) -> np.ndarray:
         """Unit-length appearance embedding of the box; the crop is dropped on return."""
@@ -178,7 +232,7 @@ class DinoV2Embedder:
         if crop.size == 0:
             raise ValueError("empty crop")
         rgb = cv2.cvtColor(
-            cv2.resize(crop, (DINO_SIZE, DINO_SIZE), interpolation=cv2.INTER_CUBIC),
+            cv2.resize(crop, (self._px, self._px), interpolation=cv2.INTER_CUBIC),
             cv2.COLOR_BGR2RGB,
         )
         x = (rgb.astype(np.float32) / PIXEL_MAX - np.array(DINO_MEAN, np.float32)) / np.array(
@@ -381,8 +435,9 @@ def load_stages(
     faces keep working.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
-    otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads (SPEC 13:
-    two cores are shared by vision, audio and core). ``profile`` (the robot manifest's) is
+    otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads, DINOv2-S
+    ``vision.appearance_threads`` (SPEC 13: two cores are shared by vision, audio and core) at
+    ``vision.appearance_input_px``. ``profile`` (the robot manifest's) is
     accepted for callers and not used. Sets the OpenCV and ONNX Runtime globals once.
     """
     configure(cfg.threads)
@@ -392,7 +447,11 @@ def load_stages(
         try:
             detector = load_object_detector(root, cfg) if wanted else None
             embedder = (
-                DinoV2Embedder(_file(root, "dinov2-small"), cfg.threads) if appearance else None
+                DinoV2Embedder(
+                    _file(root, "dinov2-small"), cfg.appearance_threads, cfg.appearance_input_px
+                )
+                if appearance
+                else None
             )
         except Exception as exc:
             detector = embedder = None
