@@ -10,6 +10,9 @@ from __future__ import annotations
 import base64
 import json
 import shlex
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 import roboemot.install as inst
@@ -53,13 +56,40 @@ CPU_KHZ = {False: "1500000", True: "1800000"}
 ARM = {False: "arm_freq=1500", True: "arm_freq=1800"}
 
 
-class BootRobot(FakeRobot):
-    """The fake robot with a boot partition, firmware answers, sudo and a reboot."""
+def local_bins(folder: Path) -> dict[str, str]:
+    """This machine's binaries for the root script's absolute ones (``sha256sum`` through
+    ``shasum`` where only that exists, as on some macOS)."""
+    bins = {name: shutil.which(name) or "" for name in oc_mod.ROOT_BINS}
+    if not bins["sha256sum"]:
+        wrapper = folder / "sha256sum"
+        wrapper.write_text('#!/bin/sh\nexec shasum -a 256 "$@"\n')
+        wrapper.chmod(0o755)
+        bins["sha256sum"] = str(wrapper)
+    assert all(bins.values()), bins
+    return bins
 
-    def __init__(self) -> None:
+
+def run_script(script: str, root: Path, bins: dict[str, str]) -> int:
+    """``script`` through a real ``/bin/sh``, with the boot partition under ``root`` and this
+    machine's binaries in place of the robot's absolute ones."""
+    for name, path in oc_mod.ROOT_BINS.items():
+        script = script.replace(path, bins[name])
+    script = script.replace(reachy_oc.BOOT + "/", f"{root}{reachy_oc.BOOT}/")
+    return subprocess.run(["/bin/sh", "-c", script], capture_output=True).returncode
+
+
+class BootRobot(FakeRobot):
+    """The fake robot with a boot partition (a real folder: the root scripts run through
+    ``/bin/sh``), firmware answers, sudo and a reboot."""
+
+    def __init__(self, root: Path) -> None:
         super().__init__()
-        self.boot = {CONFIG: ORIGINAL}  # /boot/firmware files
-        self.staged: dict[str, str] = {}
+        self.root = root
+        self.bins = local_bins(root)
+        (root / reachy_oc.BOOT.lstrip("/")).mkdir(parents=True)
+        self.boot = {CONFIG: ORIGINAL}  # /boot/firmware files, synced with the folder
+        self.leftovers: list[str] = []  # temporary files a root script left behind
+        self.unreadable: set[str] = set()
         self.model = "Raspberry Pi Compute Module 4 Rev 1.1"
         self.throttled = 0
         self.temp_milli = 52_000
@@ -79,16 +109,15 @@ class BootRobot(FakeRobot):
 
     def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         words = shlex.split(command) if "'" in command or '"' in command else command.split()
-        if command.startswith("test -e /boot/firmware/") and "base64 -w0" in command:
-            path = words[2]
+        if command.startswith("if [ -e /boot/firmware/") and "base64 -w0" in command:
+            path = words[3]
+            if path in self.unreadable:
+                raise WizardError("Command failed on the robot", f"{path}: Permission denied")
             text = self.boot.get(path)
             return "" if text is None else "x" + base64.b64encode(text.encode()).decode()
-        if command.startswith("sudo -n true"):
+        if command.startswith(f"{oc_mod.SUDO} -n true"):
             self.commands.append(command)
             return "yes" if self.passwordless else "no"
-        if command.startswith("umask 077 && cat > "):
-            self.staged[words[-1]] = stdin or ""
-            return ""
         if command == oc_mod.BOOT_ID:
             return self.boot_id
         if command.startswith("tr -d "):
@@ -107,36 +136,30 @@ class BootRobot(FakeRobot):
             return CPU_KHZ[self.overclocked]
         if command.startswith("od -An -tu1 "):
             return f"0 0 0 {self.tryboot}"
-        if command.startswith("rm -rf /tmp/roboemot-install"):
-            folder = words[2]
-            self.staged = {p: t for p, t in self.staged.items() if not p.startswith(folder + "/")}
         return super().run(command, check=check, stdin=stdin)
+
+    @property
+    def folder(self) -> Path:
+        return self.root / reachy_oc.BOOT.lstrip("/")
 
     def run_root(self, script: str, tty: bool) -> int:
         self.roots.append((script, tty))
         if self.sudo_fails:
             return oc_mod.SUDO_DENIED_RC
-        lines = script.splitlines()
-        if lines[0].startswith("reboot"):
-            return self._reboot(lines[0])
-        assert lines[0] == "set -e" and lines[-1] == "sync", script
-        for line in lines[1:-1]:
-            w = shlex.split(line)
-            if w[:2] == ["test", "!"]:
-                if w[3] in self.boot:
-                    return oc_mod.CHANGED_RC
-            elif w[:2] == ["cmp", "-s"]:
-                if self.boot.get(w[3]) != self.staged[w[2]]:
-                    return oc_mod.CHANGED_RC
-            elif w[0] == "rm":
-                self.boot.pop(w[2], None)
-            elif w[0] == "cp":
-                assert w[2] == w[6] == w[7] + oc_mod.NEW_SUFFIX, line
-                assert w[3:6] == ["&&", "mv", "-f"], line
-                self.boot[w[7]] = self.staged[w[1]]
+        if script.startswith(reachy_oc.REBOOT):
+            return self._reboot(script)
+        for f in self.folder.iterdir():
+            f.unlink()
+        for path, text in self.boot.items():
+            (self.root / path.lstrip("/")).write_bytes(text.encode())
+        rc = run_script(script, self.root, self.bins)
+        self.boot, self.leftovers = {}, []
+        for f in sorted(self.folder.iterdir()):
+            if f.name.endswith(oc_mod.NEW_SUFFIX):
+                self.leftovers.append(f.name)
             else:
-                raise AssertionError(f"unexpected root line: {line}")
-        return 0
+                self.boot[f"{reachy_oc.BOOT}/{f.name}"] = f.read_bytes().decode()
+        return rc
 
     def _reboot(self, line: str) -> int:
         self.reboots.append(line)
@@ -165,8 +188,8 @@ class BootRobot(FakeRobot):
 
 
 @pytest.fixture()
-def boot_robot(monkeypatch):
-    return BootRobot()
+def boot_robot(tmp_path):
+    return BootRobot(tmp_path)
 
 
 @pytest.fixture()
@@ -210,13 +233,14 @@ def test_the_block_sets_only_1800_mhz_for_a_cm4_and_resets_the_filter():
 
 
 def test_with_and_without_the_block_keep_every_other_byte():
-    for text in (ORIGINAL, ORIGINAL.rstrip("\n"), ""):
-        new, newline = oc_mod.with_block(text, reachy_oc.BLOCK)
-        assert new.startswith(text) and newline == (bool(text) and not text.endswith("\n"))
-        rec = inst.OverclockRecord(CONFIG, reachy_oc.BLOCK, text, newline)
-        assert oc_mod.without_block(new, rec) == text
+    for text in (ORIGINAL, ORIGINAL.replace("\n", "\r\n"), ""):
+        new = oc_mod.with_block(text, reachy_oc.BLOCK)
+        assert new == text + reachy_oc.BLOCK
+        assert oc_mod.without_block(new, reachy_oc.BLOCK) == text
         edited = new.replace("arm_freq=1800", "arm_freq=2000")
-        assert oc_mod.without_block(edited, rec) is None
+        assert oc_mod.without_block(edited, reachy_oc.BLOCK) is None
+    with pytest.raises(WizardError, match="does not end in a newline"):
+        oc_mod.with_block("x=1", reachy_oc.BLOCK)
 
 
 # ---------------------------------------------------------------- support checks
@@ -232,6 +256,9 @@ def test_with_and_without_the_block_keep_every_other_byte():
         ("temp_milli", 70_000, "Temperature"),
         ("firmware", "Oct  1 2020 10:00:00\nCopyright", "Firmware"),
         ("firmware", "", "Firmware"),
+        ("bootloader", "", "Bootloader"),  # no parseable date: the path cannot be chosen
+        ("bootloader", "version abc (release)", "Bootloader"),
+        ("bootloader", "2020/12/10 10:00:00\ntimestamp 1607594400", "Bootloader"),
     ],
 )
 def test_a_failed_support_check_leaves_the_robot_unchanged_and_names_it(
@@ -254,6 +281,14 @@ def test_a_failed_support_check_leaves_the_robot_unchanged_and_names_it(
         ({CONFIG: ORIGINAL + reachy_oc.BLOCK}, "already has a RoboEmot block"),
         ({CONFIG: ORIGINAL, TRIAL: "foreign\n"}, "tryboot.txt exists and is not the installer's"),
         ({}, "config.txt not found"),
+        ({CONFIG: ORIGINAL.rstrip("\n")}, "does not end in a newline"),
+        ({CONFIG: ORIGINAL + "include extra.txt\n"}, "includes another file (line 12)"),
+        ({CONFIG: ORIGINAL + "  include  cm4.txt # x\n"}, "includes another file"),
+        ({CONFIG: ORIGINAL + "tryboot_a_b=1\n"}, "config.txt sets tryboot_a_b=1"),
+        (
+            {CONFIG: ORIGINAL, reachy_oc.AUTOBOOT: "[all]\ntryboot_a_b = 1\nboot_partition=2\n"},
+            "autoboot.txt sets tryboot_a_b=1",
+        ),
     ],
 )
 def test_a_boot_config_that_cannot_take_the_block_is_refused(
@@ -293,7 +328,7 @@ def test_the_dry_run_prints_the_checks_and_the_diff_and_writes_nothing(
     assert "+arm_freq=1800" in out and f"--- {CONFIG}" in out
     assert "Write the trial config" in flat(out)
     assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
-    assert offline_boot.staged == {} and offline_boot.reboots == []
+    assert offline_boot.reboots == []
     assert RECORD not in offline_boot.files
 
 
@@ -411,7 +446,7 @@ def test_a_refused_trial_reboot_keeps_the_trial_unbooted(offline_boot, daemon, m
     real = offline_boot.run_root
 
     def refuse_reboot(script: str, tty: bool) -> int:
-        return oc_mod.SUDO_DENIED_RC if script.startswith("reboot") else real(script, tty)
+        return oc_mod.SUDO_DENIED_RC if script.startswith(reachy_oc.REBOOT) else real(script, tty)
 
     monkeypatch.setattr(offline_boot, "run_root", refuse_reboot)
     with pytest.raises(WizardError, match="sudo refused the reboot"):
@@ -441,16 +476,14 @@ def test_on_a_terminal_sudo_asks_over_the_terminal(offline_boot, daemon, monkeyp
 # ---------------------------------------------------------------- fallback path
 
 
-def test_an_old_bootloader_writes_the_boot_config_directly_and_never_reboots(
-    offline_boot, daemon, capsys
-):
+def test_a_bootloader_without_tryboot_is_not_supported(offline_boot, daemon, capsys):
+    """Owner decision 2026-11-05: always a trial boot first; no direct write to config.txt."""
     offline_boot.bootloader = "2020/09/03 12:11:43\nversion x (release)\ntimestamp 1599135103"
     install(overclock_reboot=True)
     out = flat(capsys.readouterr().out)
-    assert "no tryboot" in out and "Wrote the overclock block" in out
-    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.reboots == []
-    assert "sudo reboot" in out  # the reboot hint
-    assert offline_boot.record["overclock"]["state"] == "on"
+    assert "! Bootloader built 2020-09-03, no tryboot" in out and "No overclock" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.roots == []
+    assert offline_boot.record["overclock"] is None
 
 
 # ---------------------------------------------------------------- revert
@@ -487,12 +520,19 @@ def test_the_hint_to_boot_the_trial_later_names_the_robot(offline_boot, daemon, 
     )
 
 
-def test_a_boot_config_without_a_final_newline_comes_back_byte_identical(offline_boot, daemon):
-    offline_boot.boot[CONFIG] = ORIGINAL.rstrip("\n")
+def test_a_commented_include_is_no_include():
+    check = reachy_oc.config_check(ORIGINAL + "# include extra.txt\n", None)
+    assert check.ok, check
+
+
+def test_the_installers_own_leftover_trial_config_does_not_lock_the_robot_out(
+    offline_boot, daemon, capsys
+):
+    offline_boot.boot[TRIAL] = overclocked()  # left by a write whose record was lost
     install(overclock_reboot=True)
-    assert offline_boot.boot[CONFIG] == ORIGINAL.rstrip("\n") + "\n" + reachy_oc.BLOCK
-    install(overclock=False)
-    assert offline_boot.boot == {CONFIG: ORIGINAL.rstrip("\n")}
+    out = flat(capsys.readouterr().out)
+    assert "Found the trial config" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
 
 
 def test_the_revert_reboot_has_its_own_question(offline_boot, daemon, capsys):
@@ -692,3 +732,99 @@ def test_a_tampered_backup_is_never_written_as_root_on_revert(offline_boot, daem
     tamper(offline_boot, backup="dtoverlay=evil\n")
     install(overclock=False)  # the trial config no longer matches: left alone, never rewritten
     assert not any("evil" in text for text in offline_boot.boot.values())
+
+
+# ---------------------------------------------------------------- interrupted and partial writes
+
+
+def test_ctrl_c_after_the_trial_write_keeps_the_record_and_the_rerun_finishes(
+    offline_boot, daemon, monkeypatch
+):
+    real = offline_boot.run_root
+
+    def interrupted(script: str, tty: bool) -> int:
+        real(script, tty)
+        raise KeyboardInterrupt  # the owner pressed Ctrl-C while sudo ran
+
+    monkeypatch.setattr(offline_boot, "run_root", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial"
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+    monkeypatch.setattr(offline_boot, "run_root", real)
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_ctrl_c_before_the_trial_write_is_cleaned_up_by_the_rerun(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    real = offline_boot.run_root
+
+    def interrupted(script: str, tty: bool) -> int:
+        raise KeyboardInterrupt  # before sudo ran anything
+
+    monkeypatch.setattr(offline_boot, "run_root", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        install(overclock_reboot=True)
+    assert offline_boot.record["overclock"]["state"] == "trial" and TRIAL not in offline_boot.boot
+    monkeypatch.setattr(offline_boot, "run_root", real)
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Trial config not current" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_a_stale_trial_config_before_a_deferred_trial_is_replaced(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    offline_boot.boot[CONFIG] = ORIGINAL + "dtparam=i2c_arm=on\n"  # the owner's edit since
+    install(overclock_reboot=True)
+    out = flat(capsys.readouterr().out)
+    assert "Trial config not current" in out and "Promoted the overclock" in out
+    assert offline_boot.boot == {CONFIG: ORIGINAL + "dtparam=i2c_arm=on\n" + reachy_oc.BLOCK}
+
+
+def test_a_foreign_trial_config_before_a_deferred_trial_is_left_alone(offline_boot, daemon):
+    install(overclock_reboot=False)
+    offline_boot.boot[TRIAL] = "kernel=evil.img\n"
+    install(overclock_reboot=True)
+    assert offline_boot.boot[TRIAL] == "kernel=evil.img\n" and offline_boot.reboots == []
+    assert offline_boot.boot[CONFIG] == ORIGINAL
+
+
+def test_a_partial_root_write_says_so_and_keeps_the_record(offline_boot, daemon, monkeypatch):
+    monkeypatch.setattr(offline_boot, "run_root", lambda script, tty: oc_mod.PARTIAL_RC)
+    with pytest.raises(WizardError) as e:
+        install(overclock_reboot=True)
+    assert "may be partly changed" in str(e.value.why) and "rerun the installer" in e.value.fix
+    assert offline_boot.record["overclock"]["state"] == "trial"
+
+
+def test_an_unreadable_boot_config_stops_the_run(offline_boot, daemon):
+    offline_boot.unreadable.add(CONFIG)
+    with pytest.raises(WizardError, match="Command failed"):
+        install()
+    assert offline_boot.roots == []
+
+
+def test_a_record_with_an_older_known_block_is_removed_and_only_the_current_is_written(
+    offline_boot, daemon, monkeypatch
+):
+    old = reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1750")
+    monkeypatch.setattr(reachy_oc.ReachyOverclock, "known_blocks", (reachy_oc.BLOCK, old))
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] = ORIGINAL + old
+    tamper(offline_boot, block=old)
+    install(overclock=False)
+    assert offline_boot.boot == {CONFIG: ORIGINAL} and offline_boot.record["overclock"] is None
+    install(overclock_reboot=True)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_no_root_script_reads_a_staged_file(offline_boot, daemon):
+    promoted(offline_boot)
+    install(overclock=False)
+    scripts = [script for script, _ in offline_boot.roots]
+    assert scripts and not any("/tmp/" in script for script in scripts)
+    assert offline_boot.leftovers == []

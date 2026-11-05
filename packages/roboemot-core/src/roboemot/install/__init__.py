@@ -2705,7 +2705,8 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         help="overclock the CPU where the platform's hardware supports it (every support check "
         "passes), writing one marked block into the boot config, through a trial boot when the "
         "board has one; --no-overclock (and a reinstall without it) removes the recorded block "
-        "(default: ask on a terminal, no; -y does not turn it on)",
+        "(default: ask on a terminal, no; -y does not turn it on, and on a reinstall -y removes "
+        "an active overclock unless --overclock is passed)",
     )
     p.add_argument(
         overclocking.REBOOT_FLAG,

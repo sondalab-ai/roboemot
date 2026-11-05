@@ -156,11 +156,14 @@ What goes onto the robot besides the two wheels:
   (the firmware scales the voltage itself) and no `force_turbo` (the clock still scales down when
   idle). It does so only when every check passes: the board is a Compute Module 4,
   `vcgencmd get_throttled` shows no under-voltage, capping or throttling since boot, the SoC is
-  below 70 °C, the firmware is recent enough, and `config.txt` sets no clock or voltage of its
-  own. Otherwise it says which check failed and changes nothing. On a terminal it asks, after a
+  below 70 °C, the firmware and the bootloader are recent enough (the bootloader must have
+  `tryboot`), and `config.txt` ends in a newline, includes no other file, sets no clock or voltage
+  of its own and does not use A/B tryboot (`tryboot_a_b=1`). Otherwise it says which check failed
+  and changes nothing. On a terminal it asks, after a
   warning that recovering a CM4 that does not boot needs `rpiboot` from a computer; the default
   is no, `-y` does not turn it on, and an unattended run needs `--overclock` or
-  `--no-overclock`. With a bootloader that has `tryboot`, the block first goes into
+  `--no-overclock`. On a reinstall, `-y` without `--overclock` removes an active overclock. The
+  block always goes first into
   `/boot/firmware/tryboot.txt` (a copy of `config.txt` plus the block), and the installer asks
   separately, default no, whether to reboot into it once (`--overclock-reboot` answers it
   unattended; without a terminal and without the flag it does not reboot). The reboot stops
@@ -168,9 +171,11 @@ What goes onto the robot besides the two wheels:
   come back within 5 minutes, a power cycle boots the unchanged `config.txt`, and the next run
   cleans up. When it is back, the installer checks that the trial config booted, that
   `arm_freq` is 1800 and no throttling flag is set, and that the SoC is below 70 °C. Then it moves
-  the block into `config.txt` (no second reboot), or removes the trial config. With an older
-  bootloader it writes `config.txt` directly and prints how to reboot. Writing `/boot/firmware`
-  runs `sudo` over SSH, and sudo asks for the password on your terminal. A reinstall without
+  the block into `config.txt` (no second reboot), or removes the trial config; it never writes
+  `config.txt` without a trial boot first. Writing `/boot/firmware` runs `sudo` over SSH, and
+  sudo asks for the password on your terminal; the content travels inside the root command and
+  is checked by hash, never read from a file the robot user can change. The install record
+  keeps a backup of `config.txt` for recovery by hand only: the installer never writes it back. A reinstall without
   `--overclock` and `--uninstall` remove exactly that block. A block you have edited is left
   alone, and the installer prints the difference. The dry run prints the checks and the diff.
 

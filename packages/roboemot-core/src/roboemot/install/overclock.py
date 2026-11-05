@@ -5,22 +5,29 @@ Robot-agnostic: the platform says whether its hardware supports an overclock and
 read-only checks and gives an :class:`OverclockProfile` only when every check passes: the boot
 config file, the block of lines with begin and end markers, and the trial config, a copy of the
 boot config plus the block that the robot boots once (``Overclock.trial_reboot``) before the
-block goes into the boot config itself. A platform without a trial boot (``trial_path`` None)
-writes the boot config directly, and the installer never reboots it.
+block goes into the boot config itself. There is no direct write: a robot that cannot boot a
+trial config is not supported (owner decision 2026-11-05).
 
-Every write is recorded first (``record.OverclockRecord``: the file, the block, a backup of the
-file). The record is writable by the robot user, so it is never trusted for a root write: its
-paths and block must equal the platform's own (``Overclock.config_path``, ``trial_path``,
-``block``) or the run stops before anything changes, and every text written as root is built
-from the live boot config and the platform's block, never from the record. The backup is only
-for the owner's recovery by hand; no root write restores it. Writes need root: the files are
-staged in a temporary folder over the normal SSH channel, then one ``sudo sh -c`` copies them
-into place after checking that each target still holds what was read (``Remote.run_root``:
-sudo asks on the owner's terminal, the password never passes through the installer). Every
-other line of the boot config stays byte-identical. Removing the block takes out exactly the
-platform's block from the live file; a block edited by hand is refused and the difference
-printed. A reboot is only ever run after its own question (default no; ``-y`` does not answer
-it, the ``--overclock-reboot`` flag does) and the wait for the robot to come back is bounded.
+Root and trust. Writes to the boot partition run as root through one ``sudo`` per step
+(``Remote.run_root``, ``/usr/bin/sudo /bin/sh -c``): sudo asks on the owner's terminal and the
+password never passes through the installer. The script root runs (``root_script``) reads no
+file the robot user can write: each new text is a base64 literal in the script, decoded by root
+into a temporary file next to its target, and checked against a sha256 computed on this PC; each
+target's current text is checked against the sha256 of what was read. It then syncs, renames,
+and syncs again. Every text it writes is built from the live, root-owned boot config and the
+platform's own block. The install record (``record.OverclockRecord``) stays writable by the
+robot user, so it is never trusted for a root write: its paths and block must be the platform's
+(``config_path``, ``trial_path``, ``known_blocks``) or the run stops before anything changes, and
+its backup of the boot config is kept only for the owner's recovery by hand. These checks guard
+against a corrupt or stale record and against files swapped while the owner types the
+password; they do not make the installer safe against a fully hostile robot account, which
+controls the login shell that runs sudo and the binaries the support checks call.
+
+Every other byte of the boot config stays the same: the block is appended to a file that ends
+in a newline (the platform refuses one that does not) and removed as that exact text. A block
+edited by hand is refused and the difference printed. A reboot is only ever run after its own
+question (default no; ``-y`` does not answer it, the ``--overclock-reboot`` flag does) and the
+wait for the robot to come back is bounded.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from __future__ import annotations
 import base64
 import binascii
 import difflib
+import hashlib
 import shlex
 import time
 from collections.abc import Callable
@@ -47,9 +55,21 @@ BOOT_POLL_S = 5.0
 BOOT_ID = "cat /proc/sys/kernel/random/boot_id"  # changes on every boot (Linux)
 REMOVED, GONE, EDITED = "removed", "gone", "edited"  # what ``remove`` found and did
 OFF_NEXT_BOOT = "the overclock comes off on the next boot"
-CHANGED_RC = 3  # the root script's exit code when a target no longer holds what was read
-SUDO_DENIED_RC = 1  # sudo's exit code when it could not authenticate
+SUDO = "/usr/bin/sudo"
+CHANGED_RC = 3  # the root script changed nothing: a target was not as read
+PARTIAL_RC = 4  # the root script failed while renaming or deleting: maybe partly changed
+SUDO_DENIED_RC = 1  # sudo's exit code when it could not authenticate (the script never uses it)
 NEW_SUFFIX = ".roboemot-new"
+# Absolute binaries inside the root script (merged /usr, Debian 12 on): no PATH lookup as root.
+ROOT_BINS = {
+    "sha256sum": "/usr/bin/sha256sum",
+    "base64": "/usr/bin/base64",
+    "mv": "/usr/bin/mv",
+    "rm": "/usr/bin/rm",
+    "sync": "/usr/bin/sync",
+}
+
+Change = tuple[str, str | None, str | None]  # path, text it holds now (None: absent), new text
 
 
 @dataclass(frozen=True)
@@ -67,7 +87,7 @@ class OverclockProfile:
 
     label: str  # what it is, as the question names it (for example "1.8 GHz")
     config_path: str  # the boot config the block goes into
-    trial_path: str | None  # the trial config booted once first; None: no trial boot
+    trial_path: str  # the trial config booted once first
     block: str  # the exact lines, begin and end markers included, ending in a newline
     config: str  # the boot config as read during the checks
 
@@ -80,10 +100,12 @@ class Overclock(Protocol):
     trial_reboot: str  # root command that boots the trial config once
     reboot_warning: str  # what any reboot does to the robot, said before asking for one
     reboot_hint: str  # how the owner reboots it by hand
-    # The only files root ever writes, and the only block: a record naming others is refused.
+    # The only files root ever writes, the block it writes, and every block an earlier version
+    # wrote (``block`` first), which it may remove: a record naming others is refused.
     config_path: str
     trial_path: str
     block: str
+    known_blocks: tuple[str, ...]
 
     def support(self, remote: Remote) -> tuple[OverclockProfile | None, list[Check]]: ...
     def trial_booted(self, remote: Remote) -> bool: ...
@@ -102,23 +124,25 @@ class Plan:
     rerun: str = ""  # the installer command line that boots the trial config later
 
 
+Save = Callable[[OverclockRecord | None], None]
+
+
 # ---------------------------------------------------------------- text
 
 
-def with_block(text: str, block: str) -> tuple[str, bool]:
-    """``text`` with ``block`` appended, and whether a newline had to go in before it (the
-    file did not end in one). Nothing else in ``text`` changes."""
-    newline = bool(text) and not text.endswith("\n")
-    return text + "\n" * newline + block, newline
+def with_block(text: str, block: str) -> str:
+    """``text`` with ``block`` appended. ``text`` must be empty or end in a newline (the
+    platform's checks refuse any other), so removing the block gives back every byte."""
+    if text and not text.endswith("\n"):
+        raise WizardError("The boot config does not end in a newline", "nothing was changed")
+    return text + block
 
 
-def without_block(text: str, rec: OverclockRecord) -> str | None:
-    """``text`` with exactly the recorded block (and the newline put before it) taken out, or
-    None when that exact text is not in it once."""
-    piece = "\n" * rec.newline + rec.block
-    if text.count(piece) != 1:
+def without_block(text: str, block: str) -> str | None:
+    """``text`` with exactly ``block`` taken out, or None when it is not in it exactly once."""
+    if text.count(block) != 1:
         return None
-    return text.replace(piece, "", 1)
+    return text.replace(block, "", 1)
 
 
 def has_markers(text: str, block: str) -> bool:
@@ -146,7 +170,7 @@ def root_mode(ui: Ui, remote: Remote, dry_run: bool) -> bool:
     """Whether root runs over the terminal (sudo asks for a password); False when sudo needs
     none. Off a terminal a sudo that needs a password stops the run here, before anything
     changes (the dry run warns instead)."""
-    if remote.run("sudo -n true 2>/dev/null && echo yes || echo no") == "yes":
+    if remote.run(f"{SUDO} -n true 2>/dev/null && echo yes || echo no") == "yes":
         return False
     if ui.interactive:
         return True
@@ -157,54 +181,93 @@ def root_mode(ui: Ui, remote: Remote, dry_run: bool) -> bool:
     raise WizardError("The overclock needs root", why, "run the installer on a terminal")
 
 
-def _stage(remote: Remote, texts: list[str]) -> tuple[str, list[str]]:
-    """Copy ``texts`` into a new private temporary folder over the normal channel (stdin), and
-    return the folder with each file's path."""
-    folder = remote.run("mktemp -d /tmp/roboemot-install.XXXXXX")
-    paths = [f"{folder}/{i}" for i in range(len(texts))]
-    for path, text in zip(paths, texts, strict=True):
-        remote.run(f"umask 077 && cat > {shlex.quote(path)}", stdin=text)
-    return folder, paths
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def root_write(
-    ui: Ui, remote: Remote, tty: bool, changes: list[tuple[str, str | None, str | None]]
-) -> None:
-    """Apply ``changes`` (path, text it must hold now or None for absent, new text or None to
-    delete) as root in one ``sudo``. Each target is compared with what was read first; a
-    mismatch or a failed sudo changes nothing and raises ``WizardError``."""
-    texts = [t for _, before, after in changes for t in (before, after) if t is not None]
-    folder, staged = _stage(remote, texts)
-    files = iter(staged)
-    checks, writes = ["set -e"], []
-    for path, before, after in changes:
+def root_script(changes: list[Change], bins: dict[str, str] = ROOT_BINS) -> str:
+    """The shell script root runs for ``changes`` (path, text it must hold now or None for
+    absent, new text or None to delete). Nothing in it is read from a file the robot user can
+    write: each new text is a base64 literal in the script, decoded by root into a temporary
+    file next to its target (on the boot partition, root-owned), and checked against its
+    sha256. The phases keep the exit code honest:
+
+    1. every target holds what was read (its sha256, or absent), else ``CHANGED_RC``;
+    2. every new text is decoded and verified, else the temporary files go and ``CHANGED_RC``;
+    3. ``sync``, then each rename or delete, then ``sync`` (FAT on the boot partition: the data
+       is on disk before the rename); a failure here exits ``PARTIAL_RC``.
+
+    Every command carries its own exit, so nothing depends on ``set -e``."""
+    b = bins
+    lines = ["set -u"]
+    for path, before, _ in changes:
         q = shlex.quote(path)
         if before is None:
-            checks.append(f"test ! -e {q} || exit {CHANGED_RC}")
+            lines.append(f"if [ -e {q} ]; then exit {CHANGED_RC}; fi")
         else:
-            checks.append(f"cmp -s {shlex.quote(next(files))} {q} || exit {CHANGED_RC}")
+            lines += [
+                f"h=$({b['sha256sum']} < {q}) || exit {CHANGED_RC}",
+                f'[ "${{h%% *}}" = {sha256(before)} ] || exit {CHANGED_RC}',
+            ]
+    temps = [shlex.quote(path + NEW_SUFFIX) for path, _, after in changes if after is not None]
+    drop = f"{b['rm']} -f {' '.join(temps)}" if temps else ":"
+    for path, _, after in changes:
         if after is None:
-            writes.append(f"rm -f {q}")
+            continue
+        t = shlex.quote(path + NEW_SUFFIX)
+        data = base64.b64encode(after.encode("utf-8")).decode("ascii")
+        lines += [
+            f"{b['rm']} -f {t} || exit {CHANGED_RC}",
+            f"printf '%s' {data} | {b['base64']} -d > {t} || {{ {drop}; exit {CHANGED_RC}; }}",
+            f"h=$({b['sha256sum']} < {t}) || {{ {drop}; exit {CHANGED_RC}; }}",
+            f'[ "${{h%% *}}" = {sha256(after)} ] || {{ {drop}; exit {CHANGED_RC}; }}',
+        ]
+    lines.append(f"{b['sync']} || {{ {drop}; exit {CHANGED_RC}; }}")
+    for path, _, after in changes:
+        q = shlex.quote(path)
+        if after is None:
+            lines.append(f"{b['rm']} -f {q} || exit {PARTIAL_RC}")
         else:
-            tmp = shlex.quote(path + NEW_SUFFIX)
-            writes.append(f"cp {shlex.quote(next(files))} {tmp} && mv -f {tmp} {q}")
-    try:
-        rc = remote.run_root("\n".join([*checks, *writes, "sync"]), tty)
-    finally:
-        remote.run(f"rm -rf {shlex.quote(folder)}")
+            lines.append(f"{b['mv']} -f {shlex.quote(path + NEW_SUFFIX)} {q} || exit {PARTIAL_RC}")
+    lines.append(f"{b['sync']} || exit {PARTIAL_RC}")
+    return "\n".join(lines)
+
+
+class RootUnchanged(WizardError):
+    """A root write that changed nothing: sudo refused, or a target was not as read."""
+
+
+class RootPartial(WizardError):
+    """A root write that may have changed part of what it was asked to."""
+
+
+def root_write(ui: Ui, remote: Remote, tty: bool, changes: list[Change]) -> None:
+    """Apply ``changes`` as root in one ``sudo`` (``root_script``). A target that no longer
+    holds what was read, or a refused sudo, changes nothing (``RootUnchanged``); any other
+    failure may have changed part of it (``RootPartial``: rerun the installer)."""
+    names = ", ".join(path for path, _, _ in changes)
+    rc = remote.run_root(root_script(changes), tty)
     if rc == CHANGED_RC:
-        names = ", ".join(path for path, _, _ in changes)
-        raise WizardError("The boot config changed while the installer ran", f"{names}: unchanged")
+        raise RootUnchanged(
+            "The boot config changed while the installer ran", f"{names}: unchanged"
+        )
+    if rc == SUDO_DENIED_RC:
+        raise RootUnchanged("Root command failed", f"sudo exited {rc}; the robot is unchanged")
     if rc != 0:
-        raise WizardError("Root command failed", f"sudo exited {rc}; the robot is unchanged")
+        raise RootPartial(
+            "Root command failed",
+            f"exited {rc}; {names} may be partly changed",
+            "rerun the installer: it checks the files and finishes or removes the change",
+        )
 
 
 def read(remote: Remote, path: str) -> str | None:
     """A file's exact text (world-readable), or None when it does not exist. It travels as
     base64 after a marker byte, so neither ``Remote.run``'s text mode (``\\r\\n``) nor its strip
-    changes a byte; a file that is not UTF-8 text is refused."""
+    changes a byte. A file that exists but cannot be read stops the run (it never reads as
+    empty), and so does one that is not UTF-8 text."""
     q = shlex.quote(path)
-    out = remote.run(f"test -e {q} && {{ printf x; base64 -w0 < {q}; }} || true")
+    out = remote.run(f"if [ -e {q} ]; then printf x; base64 -w0 < {q}; fi")
     if not out.startswith("x"):
         return None
     try:
@@ -235,7 +298,7 @@ def reboot_and_wait(ui: Ui, remote: Remote, tty: bool, command: str) -> bool:
     before = remote.run(BOOT_ID)
     rc = remote.run_root(command, tty)
     if rc == SUDO_DENIED_RC:
-        raise WizardError("Root command failed", "sudo refused the reboot; the robot is unchanged")
+        raise RootUnchanged("Root command failed", "sudo refused the reboot; nothing rebooted")
     ui.ok("Asked the robot to reboot", "the SSH connection drops now")
     remote.disconnect()
     deadline = time.monotonic() + BOOT_TIMEOUT_S
@@ -277,15 +340,15 @@ def offer_reboot(
 
 def untrusted(oc: Overclock | None, rec: OverclockRecord) -> str | None:
     """Why the record's overclock entry cannot drive a root write, or None. The record is
-    writable by the robot user: only the platform's own paths and block are accepted."""
+    writable by the robot user: only the platform's own paths and known blocks are accepted."""
     if oc is None:
         return "this platform offers no overclock to check the recorded one against"
     if rec.path != oc.config_path:
         return f"it names {rec.path!r}, not {oc.config_path}"
     if rec.trial is not None and rec.trial != oc.trial_path:
         return f"its trial config is {rec.trial!r}, not {oc.trial_path}"
-    if rec.block != oc.block:
-        return "its block is not the platform's block"
+    if rec.block not in oc.known_blocks:
+        return "its block is none the platform ever wrote"
     return None
 
 
@@ -299,6 +362,16 @@ def require_trusted(oc: Overclock | None, rec: OverclockRecord) -> Overclock:
             "check the overclock entry of the install record by hand",
         )
     return oc
+
+
+def own_trial(oc: Overclock, rec: OverclockRecord | None, trial: str, config: str | None) -> bool:
+    """Whether ``trial`` is a trial config this installer wrote: the live boot config plus a
+    block it knows, or (an older boot config) the recorded one plus the recorded block. Only
+    used to decide that the file may be deleted; nothing of it is ever written back."""
+    clean = config is not None and (not config or config.endswith("\n"))
+    if clean and any(trial == config + b for b in oc.known_blocks):
+        return True
+    return rec is not None and trial == rec.applied
 
 
 # ---------------------------------------------------------------- phases
@@ -341,8 +414,7 @@ def settle(
     if want is None:
         label = plan.profile.label if plan.profile else "the recorded overclock"
         want = ui.confirm_opt_in(f"Overclock the CPU ({label})?", False, flag=FLAG)
-    keep = rec is not None and rec.state == "on" and want  # only read back, never written
-    plan.root = (rec is not None and not keep) or (want and plan.profile is not None)
+    plan.root = rec is not None or (want and plan.profile is not None)
     if plan.root:
         plan.tty = root_mode(ui, remote, dry_run)
     return want, plan
@@ -357,14 +429,14 @@ def apply(
     want: bool,
     reboot_flag: bool | None,
     dry_run: bool,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> None:
     """The install's last step: write, promote or remove the block as ``want`` and the record
     say. ``save`` writes the record with its new overclock entry (None: none)."""
     if rec is not None and rec.state != "on":
         _settle_trial(ui, remote, oc, plan, rec, want, reboot_flag, dry_run, save)
     elif rec is not None and want:
-        _check_on(ui, remote, rec, dry_run, save)
+        _check_on(ui, remote, oc, plan, rec, reboot_flag, dry_run, save)
     elif rec is not None:
         if remove(ui, remote, oc, plan, rec, dry_run, save) == REMOVED:
             offer_reboot(ui, remote, oc, plan, reboot_flag, OFF_NEXT_BOOT)
@@ -374,32 +446,58 @@ def apply(
         ui.ok("No overclock", "the boot config is not touched")
 
 
+def _fresh(
+    ui: Ui,
+    remote: Remote,
+    oc: Overclock,
+    plan: Plan,
+    reboot_flag: bool | None,
+    dry_run: bool,
+    save: Save,
+) -> None:
+    """Start over after the recorded overclock turned out gone: the support checks again,
+    then a new write when they pass."""
+    plan.profile, plan.checks = oc.support(remote)
+    report_checks(ui, plan.checks)
+    if plan.profile is None:
+        failed = ", ".join(c.name for c in plan.checks if not c.ok)
+        ui.warn("No overclock", f"{failed or 'not supported'}: the robot is unchanged")
+        return
+    _write(ui, remote, oc, plan, reboot_flag, dry_run, save)
+
+
 def _check_on(
     ui: Ui,
     remote: Remote,
+    oc: Overclock | None,
+    plan: Plan,
     rec: OverclockRecord,
+    reboot_flag: bool | None,
     dry_run: bool,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> None:
     """An overclock already on: the block is still there as written, or it was edited (left
-    alone, the difference printed), or it was removed by hand (the record forgets it)."""
-    text = read(remote, rec.path) or ""
-    if without_block(text, rec) is not None:
-        ui.ok("Overclock on", f"the block is in {rec.path}")
+    alone, the difference printed), or it is gone (removed by hand, or a write that never
+    finished): the record forgets it and the checks run again."""
+    oc = require_trusted(oc, rec)
+    text = read(remote, oc.config_path) or ""
+    if without_block(text, rec.block) is not None:
+        ui.ok("Overclock on", f"the block is in {oc.config_path}")
     elif has_markers(text, rec.block):
-        ui.warn("Overclock block edited", f"{rec.path}: left as it is")
-        show_diff(ui, rec.block, _found(text, rec), rec.path)
+        ui.warn("Overclock block edited", f"{oc.config_path}: left as it is")
+        show_diff(ui, rec.block, _found(text, rec.block), oc.config_path)
     else:
-        ui.warn("Overclock block gone", f"removed from {rec.path} by hand; {FLAG} again")
+        ui.warn("Overclock block gone", f"not in {oc.config_path}; checking again")
         if not dry_run:
             save(None)
+        _fresh(ui, remote, oc, plan, reboot_flag, dry_run, save)
 
 
-def _found(text: str, rec: OverclockRecord) -> str:
-    """The lines between (and with) the recorded markers in ``text``, or "" without them."""
+def _found(text: str, block: str) -> str:
+    """The lines between (and with) ``block``'s markers in ``text``, or "" without them."""
     lines = text.splitlines(keepends=True)
-    begin, end = rec.block.splitlines()[0], rec.block.splitlines()[-1]
-    names = [ln.rstrip("\n") for ln in lines]
+    begin, end = block.splitlines()[0], block.splitlines()[-1]
+    names = [ln.rstrip("\r\n") for ln in lines]
     start = names.index(begin) if begin in names else None
     stop = names.index(end) if end in names else None
     if start is None and stop is None:
@@ -414,37 +512,32 @@ def _write(
     plan: Plan,
     reboot_flag: bool | None,
     dry_run: bool,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> None:
-    """A new overclock: the trial config (then the trial boot), or the boot config directly."""
+    """A new overclock: the trial config, then the trial boot. The record is written first.
+    Only a write that changed nothing (``RootUnchanged``) drops it again; anything else (a
+    partial write, Ctrl-C, a lost connection) leaves it, so the next run checks the files and
+    finishes or removes what is there."""
     p = plan.profile
     assert p is not None
-    new, newline = with_block(p.config, p.block)
-    target = p.trial_path or p.config_path
+    new = with_block(p.config, p.block)
     if dry_run:
-        if p.trial_path:
-            ui.would("Write the trial config", f"{p.trial_path}: {p.config_path} plus the block")
-            show_diff(ui, p.config, new, p.config_path)
-            ui.would("Ask for the trial boot", "then check it and promote the block")
-        else:
-            ui.would("Write the overclock block", f"{p.config_path}; no trial boot on this robot")
-            show_diff(ui, p.config, new, p.config_path)
+        ui.would("Write the trial config", f"{p.trial_path}: {p.config_path} plus the block")
+        show_diff(ui, p.config, new, p.config_path)
+        ui.would("Ask for the trial boot", "then check it and promote the block")
         return
-    rec = OverclockRecord(p.config_path, p.block, p.config, newline, p.trial_path)
-    rec.state = "trial" if p.trial_path else "on"
+    rec = OverclockRecord(p.config_path, p.block, p.config, p.trial_path)
     save(rec)  # recorded before the write, so an interrupted run can still be undone
-    try:
-        root_write(ui, remote, plan.tty, [(target, None if p.trial_path else p.config, new)])
-    except WizardError:
-        save(None)  # nothing was written
-        raise
-    if not p.trial_path:
-        ui.ok("Wrote the overclock block", f"{p.config_path}; it applies on the next boot")
-        if oc is not None:
-            ui.hint("Reboot the robot to apply it", oc.reboot_hint)
-        return
-    ui.ok("Wrote the trial config", f"{p.trial_path}; {p.config_path} is unchanged")
-    _trial_boot(ui, remote, oc, plan, rec, reboot_flag, save)
+    if read(remote, p.trial_path) == new:
+        ui.ok("Found the trial config", f"{p.trial_path}, written by an earlier run")
+    else:
+        try:
+            root_write(ui, remote, plan.tty, [(p.trial_path, None, new)])
+        except RootUnchanged:
+            save(None)  # nothing was written
+            raise
+        ui.ok("Wrote the trial config", f"{p.trial_path}; {p.config_path} is unchanged")
+    _trial_boot(ui, remote, oc, plan, rec, reboot_flag, dry_run, save)
 
 
 def _trial_boot(
@@ -454,10 +547,30 @@ def _trial_boot(
     plan: Plan,
     rec: OverclockRecord,
     reboot_flag: bool | None,
-    save: Callable[[OverclockRecord | None], None],
+    dry_run: bool,
+    save: Save,
 ) -> None:
-    """Ask for the trial boot; after it, check and promote, or remove the trial config."""
-    if oc is None or rec.trial is None:
+    """Ask for the trial boot; after it, check and promote, or remove the trial config. The
+    trial config must still be the live boot config plus the block; one that is missing or
+    stale is removed (when it is the installer's) or forgotten, and the checks run again."""
+    oc = require_trusted(oc, rec)
+    config, trial = read(remote, oc.config_path), read(remote, oc.trial_path)
+    if config is None or (config and not config.endswith("\n")) or trial != config + oc.block:
+        if trial is not None and not own_trial(oc, rec, trial, config):
+            ui.warn("Left the overclock alone", f"{oc.trial_path} is not the installer's")
+            return
+        ui.warn("Trial config not current", f"{oc.trial_path} is missing or stale; checking again")
+        if dry_run:
+            if trial is not None:
+                ui.would("Remove the trial config", oc.trial_path)
+            return
+        if trial is not None:
+            root_write(ui, remote, plan.tty, [(oc.trial_path, trial, None)])
+        save(None)
+        _fresh(ui, remote, oc, plan, reboot_flag, dry_run, save)
+        return
+    if dry_run:
+        ui.would("Ask for the trial boot", f"{oc.trial_path} is written")
         return
     question = "Reboot the robot now into the trial config?"
     command = plan.rerun or shlex.join(["python", "scripts/install_on_robot.py", FLAG, REBOOT_FLAG])
@@ -468,15 +581,15 @@ def _trial_boot(
     save(rec)  # before the reboot: the connection ends with it
     try:
         back = reboot_and_wait(ui, remote, plan.tty, oc.trial_reboot)
-    except WizardError:
+    except RootUnchanged:
         rec.state = "trial"  # sudo refused: nothing rebooted
         save(rec)
         raise
     if not back:
         ui.warn("Robot not back", f"not on SSH after {BOOT_TIMEOUT_S:.0f} s")
         ui.info(
-            f"Power-cycle the robot: a power cycle boots the unchanged {rec.path}. The next run "
-            "of the installer removes the trial config and says what happened."
+            f"Power-cycle the robot: a power cycle boots the unchanged {oc.config_path}. The "
+            "next run of the installer removes the trial config and says what happened."
         )
         return
     _promote_or_drop(ui, remote, oc, plan, rec, save)
@@ -488,7 +601,7 @@ def _promote_or_drop(
     oc: Overclock,
     plan: Plan,
     rec: OverclockRecord,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> None:
     """On the trial boot: every check passes, then the block goes into the boot config (no
     second reboot: what runs and what the boot config says are the same); else the trial
@@ -499,29 +612,31 @@ def _promote_or_drop(
     checks += oc.verify(remote) if checks[0].ok else []
     report_checks(ui, checks)
     config, trial = read(remote, oc.config_path), read(remote, oc.trial_path)
-    if config is None or trial != with_block(config, oc.block)[0]:
+    current = (
+        config is not None and (not config or config.endswith("\n")) and trial == config + oc.block
+    )
+    if not current:
         checks.append(Check("Boot config unchanged", False, "changed since the trial"))
         ui.warn("Boot config unchanged", f"{oc.config_path} changed since the trial was written")
     failed = [c for c in checks if not c.ok]
     if failed:
-        if trial is not None:
+        if trial is not None and own_trial(oc, rec, trial, config):
             root_write(ui, remote, plan.tty, [(oc.trial_path, trial, None)])
         save(None)
         ui.warn("Overclock not promoted", ", ".join(c.name for c in failed))
         ui.info(
             f"Removed the trial config. The robot runs it until its next boot, which uses the "
-            f"unchanged {rec.path}."
+            f"unchanged {oc.config_path}."
         )
         return
     assert config is not None and trial is not None
-    new, rec.newline = with_block(config, oc.block)
-    promote = [(oc.config_path, config, new), (oc.trial_path, trial, None)]
+    promote = [(oc.config_path, config, with_block(config, oc.block)), (oc.trial_path, trial, None)]
     root_write(ui, remote, plan.tty, promote)
-    rec.state, rec.trial = "on", None
+    rec.state, rec.trial, rec.block = "on", None, oc.block
     save(rec)
     ui.ok(
         "Promoted the overclock",
-        f"the block is in {rec.path}; no second reboot: the running config is the same",
+        f"the block is in {oc.config_path}; no second reboot: the running config is the same",
     )
 
 
@@ -534,29 +649,26 @@ def _settle_trial(
     want: bool,
     reboot_flag: bool | None,
     dry_run: bool,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> None:
     """A trial config from an earlier run: promote it when the robot runs it now, report a
     trial boot that did not happen (a power cycle, a hang), offer the trial boot again, or
     remove it when the overclock is no longer wanted."""
-    booted = oc is not None and oc.trial_booted(remote)
-    if want and booted and oc is not None:
+    oc = require_trusted(oc, rec)
+    booted = oc.trial_booted(remote)
+    if want and booted:
         if dry_run:
-            ui.would("Check and promote", rec.path)
+            ui.would("Check and promote", oc.config_path)
             return
         _promote_or_drop(ui, remote, oc, plan, rec, save)
         return
-    if want and rec.state == "trial" and oc is not None:
-        if dry_run:
-            ui.would("Ask for the trial boot", f"{rec.trial} is written")
-            return
-        ui.ok("Found the trial config", f"{rec.trial}, not booted yet")
-        _trial_boot(ui, remote, oc, plan, rec, reboot_flag, save)
+    if want and rec.state == "trial":
+        _trial_boot(ui, remote, oc, plan, rec, reboot_flag, dry_run, save)
         return
     if rec.state == "trying" and not booted:
         ui.warn(
             "Trial boot not finished",
-            f"the robot booted the unchanged {rec.path} (a power cycle, or the trial hung)",
+            f"the robot booted the unchanged {oc.config_path} (a power cycle, or the trial hung)",
         )
     if remove(ui, remote, oc, plan, rec, dry_run, save) == REMOVED and booted:
         offer_reboot(ui, remote, oc, plan, reboot_flag, "the robot runs the trial config now")
@@ -569,29 +681,30 @@ def remove(
     plan: Plan,
     rec: OverclockRecord,
     dry_run: bool,
-    save: Callable[[OverclockRecord | None], None],
+    save: Save,
 ) -> str:
     """Take out exactly what the record says: the trial config, or the block in the boot
-    config (every other line unchanged), and drop it from the record. A block or trial config
+    config (every other byte unchanged), and drop it from the record. A block or trial config
     edited by hand is refused and the difference printed; the record then keeps it. Returns
     ``REMOVED``, ``GONE`` (nothing was left) or ``EDITED``; the caller offers the reboot.
-    Only the platform's paths and block are used: the live file minus that exact block, or
-    the trial config deleted; the record's backup is never written."""
+    Only the platform's paths and known blocks are used: the live file minus that exact
+    block, or the installer's own trial config deleted; the record's backup is never written."""
     oc = require_trusted(oc, rec)
     on = rec.state == "on"
     path = oc.config_path if on else oc.trial_path
     text = read(remote, path)
     label = "overclock block" if on else "trial config"
     if on:
-        after = without_block(text or "", rec)
+        after = without_block(text or "", rec.block)
         edited = after is None and has_markers(text or "", rec.block)
         gone = after is None and not edited
-        expected, found = rec.block, _found(text or "", rec)
+        expected, found = rec.block, _found(text or "", rec.block)
     else:
         after = None
-        edited = text is not None and text != rec.applied
+        config = read(remote, oc.config_path)
+        edited = text is not None and not own_trial(oc, rec, text, config)
         gone = text is None
-        expected, found = rec.applied, text or ""
+        expected, found = (config or "") + rec.block, text or ""
     if edited:
         ui.warn("Left the overclock alone", f"{path} was edited since; fix it by hand")
         show_diff(ui, expected, found, path)
@@ -616,15 +729,19 @@ __all__ = [
     "OFF_NEXT_BOOT",
     "REBOOT_FLAG",
     "REMOVED",
+    "ROOT_BINS",
     "Check",
     "Overclock",
     "OverclockProfile",
     "Plan",
+    "RootPartial",
+    "RootUnchanged",
     "apply",
     "diff",
     "offer_reboot",
     "remove",
     "root_mode",
+    "root_script",
     "settle",
     "with_block",
     "without_block",

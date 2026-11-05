@@ -22,6 +22,8 @@ CONTROL_PERSIST_S = 120
 CONNECT_TIMEOUT_S = 10
 LOST_CONNECTION = 255  # ssh's own exit code: it could not connect or authenticate
 SUDO_PROMPT = "[sudo] password for %u on the robot: "  # %u: sudo puts the robot user's name
+SUDO = "/usr/bin/sudo"  # absolute: no PATH lookup for the command that gets the password
+SH = "/bin/sh"
 AUTH_REFUSED = "Permission denied"  # ssh's message for a host that answers but wants a password
 
 
@@ -127,8 +129,8 @@ class Remote:
         which fails instead of asking. The script is the command's only argument; nothing is
         sent on stdin.
         """
-        sudo = ["sudo", "-p", SUDO_PROMPT] if tty else ["sudo", "-n"]
-        command = shlex.join([*sudo, "sh", "-c", script])
+        sudo = [SUDO, "-p", SUDO_PROMPT] if tty else [SUDO, "-n"]
+        command = shlex.join([*sudo, SH, "-c", script])
         if tty:
             return subprocess.run(["ssh", *self._opts(), "-t", self.target, command]).returncode
         return subprocess.run(

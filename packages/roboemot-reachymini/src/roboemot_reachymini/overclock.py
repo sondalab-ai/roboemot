@@ -11,13 +11,13 @@ The installer's ``--overclock`` (``roboemot.install.overclock``) writes ``BLOCK`
 - the firmware (``vcgencmd version``) is at least ``MIN_BOOT_DATE``, and the boot config sets no
   clock or voltage of its own (``CONFLICT_KEYS``) and holds no RoboEmot marker already.
 
-The bootloader (``vcgencmd bootloader_version``) decides the path: from ``MIN_BOOT_DATE`` on it
-has ``tryboot``, so the block goes first into ``tryboot.txt`` (a full copy of ``config.txt`` plus
+The bootloader (``vcgencmd bootloader_version``) must have ``tryboot`` (built ``MIN_BOOT_DATE``
+or later; owner decision 2026-11-05: no tryboot, no overclock), so the block goes first into
+``tryboot.txt`` (a full copy of ``config.txt`` plus
 the block: the firmware loads it *instead of* ``config.txt``) and the robot boots it once with
 ``reboot '0 tryboot'``; the flag is cleared before the firmware starts, so a hang and a power
 cycle boot the unchanged ``config.txt``. After that boot ``verify`` checks the clock, the flags
-and the temperature before the block is promoted. An older bootloader gets ``config.txt``
-written directly.
+and the temperature before the block is promoted.
 
 Values and sources (Raspberry Pi documentation, read 2026-11-05):
 
@@ -51,6 +51,7 @@ from roboemot.install.remote import Remote
 BOOT = "/boot/firmware"
 CONFIG = f"{BOOT}/config.txt"
 TRIAL = f"{BOOT}/tryboot.txt"
+AUTOBOOT = f"{BOOT}/autoboot.txt"  # tryboot_a_b lives here
 MODEL_PATH = "/proc/device-tree/model"
 MODEL = "Compute Module 4"
 TRYBOOT_FLAG = "/proc/device-tree/chosen/bootloader/tryboot"  # 4-byte big-endian, 1: tryboot
@@ -67,9 +68,10 @@ BEGIN = "# >>> RoboEmot overclock: written and removed by the RoboEmot installer
 END = "# <<< RoboEmot overclock"
 OVERCLOCK_LINES = (f"arm_freq={ARM_FREQ_MHZ}",)  # no voltage line: see the module docstring
 BLOCK = "\n".join([BEGIN, "[all]", "[cm4]", *OVERCLOCK_LINES, "[all]", END]) + "\n"
+KNOWN_BLOCKS = (BLOCK,)  # every block a release wrote, the current first: removable
 CONFLICT_KEYS = ("arm_freq", "force_turbo", "over_voltage")  # over_voltage: every over_voltage*
-TRIAL_REBOOT = "reboot '0 tryboot'"
-REBOOT = "reboot"
+TRIAL_REBOOT = "/usr/sbin/reboot '0 tryboot'"  # root runs it: an absolute path
+REBOOT = "/usr/sbin/reboot"
 LABEL = f"{ARM_FREQ_MHZ / MHZ_PER_GHZ:.1f} GHz, from {DEFAULT_ARM_FREQ_MHZ / MHZ_PER_GHZ:.1f}"
 WARNING = (
     "Overclock: if the board ever fails to boot, recovering the CM4's eMMC needs rpiboot "
@@ -147,13 +149,16 @@ def firmware_check(remote: Remote) -> Check:
     return Check("Firmware", built >= MIN_BOOT_DATE, f"built {built}, needs {MIN_BOOT_DATE} on")
 
 
-def tryboot_check(remote: Remote) -> tuple[bool, Check]:
-    """Whether the bootloader has tryboot; either way a passed check that names the path."""
+def tryboot_check(remote: Remote) -> Check:
+    """The bootloader has tryboot (built ``MIN_BOOT_DATE`` or later). Without it, or without a
+    readable build date, the overclock is not supported: it is always a trial boot first
+    (owner decision 2026-11-05)."""
     built = bootloader_date(_run(remote, "vcgencmd bootloader_version"))
-    if built is not None and built >= MIN_BOOT_DATE:
-        return True, Check("Bootloader", True, f"built {built}: trial boot through tryboot")
-    why = f"built {built}" if built else "no build date"
-    return False, Check("Bootloader", True, f"{why}, no tryboot: {CONFIG} written directly")
+    if built is None:
+        return Check("Bootloader", False, "vcgencmd bootloader_version gave no build date")
+    if built < MIN_BOOT_DATE:
+        return Check("Bootloader", False, f"built {built}, no tryboot (needs {MIN_BOOT_DATE} on)")
+    return Check("Bootloader", True, f"built {built}: trial boot through tryboot")
 
 
 def conflicts(text: str) -> list[str]:
@@ -166,18 +171,36 @@ def conflicts(text: str) -> list[str]:
     return found
 
 
-def config_check(text: str | None, tryboot: bool, trial: str | None) -> Check:
-    """The boot config can take the block: it exists, sets no clock or voltage of its own, has
-    no RoboEmot marker yet, and no ``tryboot.txt`` that is not ours is in the way."""
+def _setting(line: str) -> tuple[str, str]:
+    """A config line's key and value, comments and spaces left out ("" for neither)."""
+    key, _, value = line.split("#", 1)[0].partition("=")
+    return key.strip(), value.strip()
+
+
+def config_check(text: str | None, trial: str | None, autoboot: str | None = None) -> Check:
+    """The boot config can take the block and give every byte back: it exists and ends in a
+    newline, includes no other file (whose lines the block could not see), sets no clock or
+    voltage of its own, has no RoboEmot marker yet, no A/B tryboot (``tryboot_a_b=1`` loads
+    ``config.txt`` on a tryboot, never ``tryboot.txt``), and no ``tryboot.txt`` that is not the
+    installer's own (the boot config plus the block, left by a write that did not finish)."""
     if text is None:
         return Check("Boot config", False, f"{CONFIG} not found")
+    if text and not text.endswith("\n"):
+        return Check("Boot config", False, f"{CONFIG} does not end in a newline: add one")
     lines = text.splitlines()
     if BEGIN in lines or END in lines:
         return Check("Boot config", False, f"{CONFIG} already has a RoboEmot block")
+    words = [ln.split("#", 1)[0].split()[:1] for ln in lines]
+    includes = [n for n, first in enumerate(words, 1) if first == ["include"]]
+    if includes:
+        return Check("Boot config", False, f"{CONFIG} includes another file (line {includes[0]})")
     own = conflicts(text)
     if own:
         return Check("Boot config", False, f"{CONFIG} already sets {', '.join(own)}")
-    if tryboot and trial is not None:
+    for path, body in ((CONFIG, text), (AUTOBOOT, autoboot or "")):
+        if any(_setting(ln) == ("tryboot_a_b", "1") for ln in body.splitlines()):
+            return Check("Boot config", False, f"{path} sets tryboot_a_b=1 (A/B tryboot)")
+    if trial is not None and trial not in (text + b for b in KNOWN_BLOCKS):
         return Check("Boot config", False, f"{TRIAL} exists and is not the installer's")
     return Check("Boot config", True, f"{CONFIG}, nothing that conflicts")
 
@@ -189,6 +212,7 @@ class ReachyOverclock:
     config_path = CONFIG
     trial_path = TRIAL
     block = BLOCK
+    known_blocks = KNOWN_BLOCKS
     reboot = REBOOT
     trial_reboot = TRIAL_REBOOT
     reboot_warning = REBOOT_WARNING
@@ -198,7 +222,7 @@ class ReachyOverclock:
 
     def support(self, remote: Remote) -> tuple[OverclockProfile | None, list[Check]]:
         """Every check, read-only; the profile only when all of them pass."""
-        tryboot, boot = tryboot_check(remote)
+        boot = tryboot_check(remote)
         text = read(remote, CONFIG)
         checks = [
             model_check(remote),
@@ -206,11 +230,11 @@ class ReachyOverclock:
             temperature_check(remote),
             firmware_check(remote),
             boot,
-            config_check(text, tryboot, read(remote, TRIAL) if tryboot else None),
+            config_check(text, read(remote, TRIAL), read(remote, AUTOBOOT)),
         ]
         if not all(c.ok for c in checks) or text is None:
             return None, checks
-        return OverclockProfile(LABEL, CONFIG, TRIAL if tryboot else None, BLOCK, text), checks
+        return OverclockProfile(LABEL, CONFIG, TRIAL, BLOCK, text), checks
 
     def trial_booted(self, remote: Remote) -> bool:
         """The bootloader's tryboot flag in the device tree is 1 (this boot used tryboot)."""

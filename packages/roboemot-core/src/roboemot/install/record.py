@@ -69,23 +69,22 @@ OVERCLOCK_STATES = ("trial", "trying", "on")  # trial written, trial boot asked,
 @dataclass
 class OverclockRecord:
     """The overclock block this installer wrote (``roboemot.install.overclock``). ``path`` is
-    the boot config, ``block`` the exact text with its markers, ``newline`` whether a newline
-    went in before it (the file did not end in one), ``backup`` the file as it was before the
-    first write. ``trial`` is the trial config (a copy of ``backup`` plus the block) while
-    ``state`` is ``trial`` (written) or ``trying`` (its one boot asked); ``on``: the block is in
-    ``path``."""
+    the boot config, ``block`` the exact text with its markers, ``backup`` the file as it was
+    before the first write (for the owner's recovery by hand: never written back as root).
+    ``trial`` is the trial config (a copy of ``backup`` plus the block) while ``state`` is
+    ``trial`` (written, or its write did not finish) or ``trying`` (its one boot asked); ``on``:
+    the block is in ``path``."""
 
     path: str
     block: str
     backup: str
-    newline: bool = False
     trial: str | None = None
     state: str = "trial"
 
     @property
     def applied(self) -> str:
         """The boot config's text with the block, as this installer wrote it."""
-        return self.backup + "\n" * self.newline + self.block
+        return self.backup + self.block
 
 
 @dataclass
@@ -164,8 +163,9 @@ class InstallRecord:
 
 
 def _overclock(raw: Any) -> OverclockRecord | None:
-    """The record's ``overclock`` field, checked: the block and the backup are written back to
-    a boot config, so a field of the wrong type or an unknown state is refused, not guessed."""
+    """The record's ``overclock`` field, checked: a field of the wrong type, a NUL byte or an
+    unknown state is refused, not guessed (the paths and the block are checked against the
+    platform's own before any root write, ``overclock.require_trusted``)."""
     if raw is None:
         return None
     names = {f.name for f in fields(OverclockRecord)}
@@ -177,8 +177,8 @@ def _overclock(raw: Any) -> OverclockRecord | None:
         not all(isinstance(t, str) for t in texts)
         or not oc.path
         or not oc.block
-        or not isinstance(oc.newline, bool)
         or not (oc.trial is None or (isinstance(oc.trial, str) and oc.trial))
+        or any("\x00" in t for t in (*texts, oc.trial or ""))
         or oc.state not in OVERCLOCK_STATES
         or (oc.state != "on" and oc.trial is None)
     ):

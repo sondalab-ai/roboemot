@@ -339,7 +339,7 @@ def test_a_version_3_record_loads_without_an_overclock_and_is_written_back_as_4(
 
 
 def oc(**kw) -> OverclockRecord:
-    base = dict(path="/boot/cfg", block="# >>>\nx=1\n# <<<\n", backup="a=1", newline=True)
+    base = dict(path="/boot/cfg", block="# >>>\nx=1\n# <<<\n", backup="a=1\n")
     return OverclockRecord(**{**base, "trial": "/boot/trial", **kw})
 
 
@@ -349,9 +349,7 @@ def oc(**kw) -> OverclockRecord:
 def test_the_overclock_entry_round_trips_with_its_backup(entry):
     r = rec(overclock=entry)
     loaded = InstallRecord.from_json(json.loads(json.dumps(r.to_json())))
-    assert loaded == r and loaded.overclock.applied == entry.backup + "\n" * entry.newline + (
-        entry.block
-    )
+    assert loaded == r and loaded.overclock.applied == entry.backup + entry.block
 
 
 @pytest.mark.parametrize(
@@ -362,7 +360,9 @@ def test_the_overclock_entry_round_trips_with_its_backup(entry):
         {**asdict(oc()), "state": "maybe"},
         {**asdict(oc()), "trial": None},  # a trial state needs its trial file
         {**asdict(oc()), "block": ""},
-        {**asdict(oc()), "newline": "yes"},
+        {**asdict(oc()), "trial": 5},
+        {**asdict(oc()), "backup": "a=1\x00"},  # a NUL byte: a WizardError, not a ValueError
+        {**asdict(oc()), "path": "/boot/\x00cfg"},
         {**asdict(oc()), "extra": 1},
     ],
 )
