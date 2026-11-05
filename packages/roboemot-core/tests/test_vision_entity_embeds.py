@@ -359,7 +359,9 @@ def test_a_known_object_is_still_recognised_after_the_minimum_age(tmp_path):
         stamps = [k / hz for k in range(round(20 * hz))]
         confirm = (CFG.vision.object_confirm_hits - 1) / hz
         for min_age, want in ((MIN_AGE, MIN_AGE + gaps), (0.0, confirm + gaps)):
-            pipe, _ = rig(tmp_path / f"{hz}-{min_age}", entity_embed_min_age_s=min_age)
+            pipe, _ = rig(
+                tmp_path / f"{hz}-{min_age}", entity_embed_min_age_s=min_age, object_crop=NO_CROP
+            )
             mug = enroll_mug(pipe)
             pipe.governor.set_active("objects", hz == active_hz)  # 3 Hz only in an episode
             assert recognition_age(pipe, stamps) == pytest.approx(want), (hz, min_age)
@@ -420,15 +422,31 @@ def test_the_shown_track_runs_only_its_votes_and_keeps_its_owner(tmp_path):
     assert runs(pipe)["recognised"] >= 1  # the steady rate is back
 
 
-def test_the_shown_track_is_kept_while_it_lives(tmp_path):
-    pipe, app = rig(tmp_path, dets=[SIDE_CUP], object_crop=NO_CROP)
+COUCH = Detection((60, 40, 260, 240), 0.8, "couch")  # behind the person, centre (160, 140)
+COUCH_TURNED = Detection((120, 40, 320, 240), 0.8, "couch")  # the head turned to the cup
+HELD_CUP = Detection((120, 90, 160, 130), 0.8, "cup")  # centre (140, 110): farther than the couch
+
+
+def test_a_wrong_first_pick_of_the_shown_track_corrects_itself(tmp_path):
+    """A large couch near the frame centre is picked when the look starts; once the head turns
+    to the held cup, the cup is the shown track and gets its votes, and the couch none."""
+    pipe, app = rig(
+        tmp_path,
+        dets=[COUCH],
+        record="active",  # an object record that never matches: bursts stay open
+        object_categories=["cup", "couch"],
+        object_crop=NO_CROP,
+    )
+    burst = CFG.vision.embedding_burst
+    run(pipe, 0, 10)
+    assert len(app.boxes) == burst  # the couch's new embedding and burst, before the look
     pipe.governor.set_active("objects", True)
-    run(pipe, 0, 2)
-    shown = pipe._shown_id
-    assert shown is not None
-    pipe.object_detector.dets = [SIDE_CUP, CENTRE_CUP]  # a nearer thing comes to the centre
-    run(pipe, 2, 10)
-    assert pipe._shown_id == shown and app.boxes == [SIDE_CUP.box]
-    pipe.governor.set_active("objects", False)
-    run(pipe, 10, 11)
-    assert pipe._shown_id is None
+    pipe.object_detector.dets = [COUCH, HELD_CUP]
+    run(pipe, 10, 12)
+    assert pipe._shown_track(pipe._object_visible, 320, 240) == min(pipe._entities)  # couch
+    pipe.object_detector.dets = [COUCH_TURNED, CENTRE_CUP]
+    run(pipe, 12, 20)
+    during = app.boxes[burst:]
+    assert len(during) == burst  # the cup's new embedding and burst votes
+    assert all(x2 - x1 < 100 for x1, _, x2, _ in during)  # none of them the couch
+    assert len(pipe._entities) == 2  # the cup kept its track when the head turned

@@ -289,7 +289,6 @@ class VisionPipeline:
         self._entity_embeds = 0
         self._object_runs = 0
         self._records: _Records | None = None
-        self._shown_id: int | None = None  # the track taken as the shown thing in an episode
         self._embed_runs = dict.fromkeys(EMBED_RUNS, 0)
         self._embed_skips = dict.fromkeys(EMBED_SKIPS, 0)
         self._report_lock = threading.Lock()
@@ -396,7 +395,6 @@ class VisionPipeline:
         self._faces.clear()
         self._entities.clear()
         self._object_visible = []
-        self._shown_id = None
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
@@ -844,7 +842,7 @@ class VisionPipeline:
         consumers = self._entity_consumers() if self.appearance_embedder is not None else None
         if consumers is not None:
             self._follow_records(consumers.records)
-        shown = self._shown_track(result.visible, width, height, episode)
+        shown = self._shown_track(result.visible, width, height) if episode else None
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
@@ -869,22 +867,16 @@ class VisionPipeline:
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 
-    def _shown_track(
-        self, visible: list[Track], width: int, height: int, episode: bool
-    ) -> int | None:
-        """The track taken as the shown thing during a look at it (SPEC 5, 5A); None outside one
-        or while no confirmed track is in view. Attention names a world entry, not a track, so
-        this is a proxy: the head follows the shown thing, so it is the confirmed track nearest
-        the frame centre (as the look-down crop picks it). The choice is kept while that track
-        lives, so a thing passing the centre does not take its place, and made again only once
-        it is gone."""
-        if not episode:
-            self._shown_id = None
-            return None
-        if self._shown_id not in self._entities:
-            near = min(visible, key=lambda t: off_centre(t.box, width, height), default=None)
-            self._shown_id = None if near is None else near.track_id
-        return self._shown_id
+    @staticmethod
+    def _shown_track(visible: list[Track], width: int, height: int) -> int | None:
+        """The track taken as the shown thing during a look at it (SPEC 5, 5A), None while no
+        confirmed track is in view. Attention names a world entry, not a track, so this is a
+        proxy: the head follows the shown thing, so it is the confirmed track nearest the frame
+        centre on this run (as the look-down crop picks it). Picked again on every run, so a
+        wrong first pick (a large couch behind the person) corrects itself once the head turns
+        to the thing; a thing that passes the centre may run only its own new-track votes."""
+        near = min(visible, key=lambda t: off_centre(t.box, width, height), default=None)
+        return None if near is None else near.track_id
 
     def _follow_aside(self, aside: list[Track]) -> None:
         """A crop run did not look at the tracks left outside the crop: they were not missed,
