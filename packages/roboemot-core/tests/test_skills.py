@@ -367,6 +367,24 @@ def test_the_default_skills_run_inline_on_the_loop():
     assert all(reg_skill.inline for reg_skill in Env().reg._skills.values())
 
 
+def test_gestures_looks_and_mood_nudges_are_fire_and_forget_and_plugins_are_not():
+    """SPEC 11: ``follow_up=False`` on the skills whose result never changes what is said."""
+    reg = Env().reg
+    assert {n: reg.get(n).follow_up for n in reg.names()} == {
+        "play": False,
+        "look_at": False,
+        "express_emotion": False,
+        "remember_preference": True,
+        "stop_talking": True,
+    }
+
+    @skill(llm_visible=True)
+    def plugin() -> str:
+        return "x"
+
+    assert plugin.skill.follow_up is True
+
+
 async def test_inline_skills_run_on_the_calling_thread():
     import threading
 

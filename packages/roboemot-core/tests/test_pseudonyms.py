@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from typing import Annotated
 
 import httpx
 import pytest
@@ -18,7 +19,9 @@ from roboemot.llm.pseudonyms import (
     replace_names,
     route_is_local,
 )
-from test_conversation_tools import C, Env, Scripted
+from roboemot.skills import skill
+from roboemot.skills.schema import Desc
+from test_conversation_tools import DEFAULTS, C, Env, Scripted
 from test_conversation_worker import rigs  # noqa: F401  (fixture)
 from test_llm_router import chunk, sse
 
@@ -607,20 +610,41 @@ def tooled(rigs):  # noqa: F811
     return make
 
 
+def add_greet(env) -> list[str]:
+    """A plugin skill that takes a name in view and keeps ``follow_up`` (unlike ``look_at``), so
+    text spoken before its call is followed by a second request that carries the call back."""
+    greeted: list[str] = []
+
+    @skill(
+        llm_visible=True,
+        inline=True,
+        description="Greet someone in view by name.",
+        choices={"target": lambda: ["Marta"]},
+    )
+    def greet(target: Annotated[str, Desc("Who to greet")]) -> dict:
+        greeted.append(target)
+        return {"ok": True}
+
+    env.registry.add(greet)
+    return greeted
+
+
 def test_a_cloud_turn_hides_every_name_and_speaks_and_acts_with_the_real_ones(tooled):
     rig, srv, env = tooled(
         lambda al: [
             [
                 f"Ciao {al('Marta')}, guardo {al('Luca Bianchi')}. ",
-                C(0, "c1", "look_at", {"target": al("Marta")}),
+                C(0, "c1", "greet", {"target": al("Marta")}),
             ],
             [f"Fatto, {al('Marta')[:-1]}", al("Marta")[-1:] + "."],
         ],
         routes=(CLOUD,),
+        conversation={"llm_skills": [*DEFAULTS, "greet"]},
         **PRIVACY,
     )
+    greeted = add_greet(env)
     rig.turn("hello, I am Marta and this is luca bianchi, with Ömer", language="en")
-    assert env.looked == ["Marta"]  # the executor got the real name from the alias
+    assert greeted == ["Marta"]  # the executor got the real name from the alias
     assert rig.speech.texts() == ["Ciao Marta, guardo Luca Bianchi.", "Fatto, Marta."]
     # the check the router runs: a snapshot with the skills' structural keys
     sent_with = rig.worker._name_source.for_config(
@@ -635,7 +659,7 @@ def test_a_cloud_turn_hides_every_name_and_speaks_and_acts_with_the_real_ones(to
     alias = sent_with.to_alias("Marta")
     assert alias in json.dumps(first["messages"][0])
     assert alias in first["messages"][-1]["content"]
-    enum = next(t for t in first["tools"] if t["function"]["name"] == "look_at")["function"][
+    enum = next(t for t in first["tools"] if t["function"]["name"] == "greet")["function"][
         "parameters"
     ]["properties"]["target"]["enum"]
     assert alias in enum and "Marta" not in enum

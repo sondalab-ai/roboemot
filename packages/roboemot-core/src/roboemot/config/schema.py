@@ -4583,7 +4583,9 @@ class ConversationConfig(Strict):
     max_tool_rounds: int = param(
         3,
         "Requests of one turn that may end in tool calls; after that many the model is asked "
-        "once more without tools, so the turn ends in text (0: no tools)",
+        "once more without tools, so the turn ends in text (0: no tools). A round that spoke "
+        "and called only fire-and-forget skills (play, look_at, express_emotion) ends the turn "
+        "earlier",
         ge=0, le=10,
     )  # fmt: skip
     tool_timeout_s: float = param(
