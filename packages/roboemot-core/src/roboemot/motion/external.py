@@ -40,12 +40,14 @@ confirming run, stay in the debug report.
 loop yielded, resumed after the grace and pushed again, every ~6.8 s all night). A unit that
 diverges again within ``repeat_window_s`` of its resume, on the same joint, toward the same arbiter
 target and stopped at the same place (both within ``same_target_*``), repeats; after
-``unreachable_repeats`` repeats it holds: it writes the measured pose once (the platform's goal
-leaves the obstacle), then nothing, and never resumes on a timer. It takes control back when the
-blocked joint's target moves further than ``same_target_*`` from the blocked one (never while the
-watchdog holds: that target is transient). The blocked record stays: the same target coming back
-is held at its first divergence. A hold is not external control (``yielding``); the other units
-resume as usual. Motors off forgets it all.
+``unreachable_repeats`` repeats it holds: it writes the measured pose once, clamped by the limiter
+(the platform's goal leaves the obstacle; a failed write is retried), then nothing, and never
+resumes on a timer. It takes control back once still for the grace, when the blocked joint's
+target moves further than ``same_target_*`` from the blocked one and not further past the stop
+(never while the watchdog holds: that target is transient). The blocked record stays: the same
+target coming back is held at its first divergence. A settled hold is not external control
+(``yielding``) and the other units resume as usual; a held unit that moves after it settled (a
+hand) becomes a plain yield. Motors off forgets it all.
 """
 
 from __future__ import annotations
@@ -80,6 +82,8 @@ class Unit:
     still_since: float | None = None
     anchor: dict[str, float] | None = None
     holding: bool = False  # yielding because its target cannot be reached (no resume on a timer)
+    hold_pending: bool = False  # the hold pose is still to be written (a failed write retries)
+    settled: bool = False  # still for the grace while yielding (a moving held unit is external)
     resumed_t: float | None = None
     last_stop: Stop | None = None  # its own last divergence
     blocked: Stop | None = None  # the last target found unreachable
@@ -225,9 +229,14 @@ class ExternalControl:
 
     @property
     def yielding(self) -> bool:
-        """External control: a unit yields to something else (a hold on an unreachable target
-        does not count, its dofs are still in ``held``)."""
-        return any(u.yielding and not u.holding for u in self.units)
+        """External control: a unit yields to something else. A hold on an unreachable target
+        counts only until its pose has been still for the grace (a hand may be moving it); its
+        dofs stay in ``held`` throughout."""
+        return any(self._external(u) for u in self.units)
+
+    @staticmethod
+    def _external(unit: Unit) -> bool:
+        return unit.yielding and not (unit.holding and unit.settled)
 
     def reset(self, measured: dict[str, float]) -> None:
         """The loop re-aligned to the measured pose: commands start from there."""
@@ -242,7 +251,7 @@ class ExternalControl:
         for unit in self.units:
             unit.yielding, unit.run, unit.still_since, unit.anchor = False, 0, None, None
             unit.holding, unit.resumed_t, unit.last_stop, unit.blocked = False, None, None, None
-            unit.repeats, unit.progress = 0, 0.0
+            unit.repeats, unit.progress, unit.hold_pending, unit.settled = 0, 0.0, False, False
         for window in self._windows.values():
             window.reset(None)
         self._update_held()
@@ -344,6 +353,7 @@ class ExternalControl:
         if not known and unit.repeats < self.cfg.unreachable_repeats:
             return False
         unit.holding, unit.blocked, unit.repeats = True, stop, 0
+        unit.hold_pending = True
         self.unreachable += 1
         self.unreachable_last = {
             "t": now,
@@ -429,6 +439,7 @@ class ExternalControl:
 
     def _start_yield(self, unit: Unit, now: float, measured: dict[str, float]) -> None:
         unit.yielding, unit.still_since, unit.anchor, unit.yield_t = True, None, None, now
+        unit.settled = False
         for name in unit.dofs:
             self._windows[name].reset(None)
         self._update_held()
@@ -465,8 +476,11 @@ class ExternalControl:
             ):
                 anchor = None
             if anchor is None:
+                if unit.holding and unit.settled:
+                    unit.holding = False  # moved after it settled: external control, a yield
                 unit.anchor = {n: measured[n] for n in unit.dofs if n in measured}
                 unit.still_since = now
+            unit.settled = unit.still_since is not None and now - unit.still_since >= grace_s
         ready: list[Unit] = []
         for unit in yielding:
             if unit.holding:
@@ -478,20 +492,24 @@ class ExternalControl:
         return ready
 
     def release(self, goal: dict[str, float]) -> list[Unit]:
-        """The holding units whose blocked joint's target moved further than ``same_target_*``
-        from the blocked one: they may take control back."""
+        """The holding units that may take control back: still for the grace (as ``watch``
+        requires; a hand may be moving it), and their blocked joint's target moved further than
+        ``same_target_*`` from the blocked one, to the reachable side of the stop (a target
+        further past it stays held)."""
         return [
             u
             for u in self.units
             if u.holding
+            and u.settled
             and (stop := u.blocked) is not None
             and stop.joint in goal
             and abs(goal[stop.joint] - stop.target) > self._same[stop.joint]
+            and stop.past(goal[stop.joint]) <= self._same[stop.joint]
         ]
 
     def resume(self, unit: Unit, measured: dict[str, float], now: float | None = None) -> None:
         unit.yielding, unit.still_since, unit.anchor, unit.run = False, None, None, 0
-        unit.holding, unit.resumed_t = False, now
+        unit.holding, unit.resumed_t, unit.hold_pending, unit.settled = False, now, False, False
         for name in unit.dofs:
             self._windows[name].reset(measured.get(name))
             self._ref[name] = None
@@ -500,7 +518,7 @@ class ExternalControl:
     # ---- report (SPEC 12A)
 
     def snapshot(self, now: float) -> dict[str, object]:
-        yielding = [u for u in self.units if u.yielding and not u.holding]
+        yielding = [u for u in self.units if self._external(u)]
         still = [now - u.still_since for u in yielding if u.still_since is not None]
         return {
             "external": bool(yielding),

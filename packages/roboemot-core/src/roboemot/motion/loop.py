@@ -274,7 +274,9 @@ class MotionLoop:
                     self._follow(measured, ext.held)
                     names = ", ".join(u.name for u in started)
                     log.info("motion: external control of the robot detected (%s), yielding", names)
-                    self._hold_where_stopped(now, measured, [u for u in started if u.holding])
+                pending = [u for u in ext.units if u.holding and u.hold_pending]
+                if pending:
+                    self._hold_where_stopped(now, measured, pending)
             ext.push(out)
             self.ticks += 1
             self._tick_stamp = now
@@ -318,14 +320,17 @@ class MotionLoop:
     def _hold_where_stopped(
         self, now: float, measured: dict[str, float], units: list[Unit]
     ) -> None:
-        """Write the measured pose once for units that hold on an unreachable target: a
+        """Write the measured pose (a fresh sample, through the limiter's position clamp and
+        coupled constraints) once for units that hold on an unreachable target: a
         position-controlled platform keeps its last goal, which would press on the obstacle
-        all night (SPEC 12: more conservative than not writing)."""
+        all night (SPEC 12: more conservative than not writing). A failed write leaves it
+        pending: retried on the next fresh sample, after a link recovery too."""
         pose = {k: measured[k] for u in units for k in u.dofs if k in measured}
         if not pose:
             return
-        self._call(self.driver.write_pose_targets, now, pose)
+        self._call(self.driver.write_pose_targets, now, self.core.limiter.clamp(pose))
         for unit in units:
+            unit.hold_pending = False
             if (stop := unit.blocked) is None:
                 continue
             log.warning(
