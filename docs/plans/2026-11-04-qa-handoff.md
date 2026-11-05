@@ -16,14 +16,24 @@ It replaces these older lists, which stay as background:
 
 **Last full robot run:** 2026-10-30 on #138 (local pipeline numbers, before the cloud-voice epic). On 2026-11-04 the owner checked the cup only, with three debug reports. Everything merged after #138 is untested on the robot unless a check below says otherwise.
 
+**2026-11-05 (owner, informal, before a reinstall, so on code before PRs 188 and 190):** two debug reports, at 09:41 and 13:27.
+- The cup was recognised slowly and not followed (2 episodes, both `lost`, 2.4 s).
+- Music was not detected (`music.confidence` 0.14).
+- The robot answered 6 of 51 utterances. `rejected_not_facing` was 29, and the facing yaw read a median 66.8° while the owner faced the robot.
+- One answer was spoken three times, because of skill rounds.
+- The server transcribed "ciao Neve" as "Ciao, Reachy Mini" and "hey ciao neve" as "si deve".
+- One reply ended with a stray spoken word, "odyssey".
+
+The fixes are listed in the code follow-ups below.
+
 ## 0. Setup
 
 Owner rules: an agent does not move the motors, does not start or restart RoboEmot, and asks before any SSH write to the robot. The SSH password is never stored.
 
-1. On the Mac: `git pull --ff-only` on `main` (at least `bb858c9`, PR 184), then `pip install --no-deps -e packages/roboemot-core -e packages/roboemot-reachymini`.
+1. On the Mac: `git pull --ff-only` on `main` (at least `d93f4df`, PR 190; take the newest `main`), then `pip install --no-deps -e packages/roboemot-core -e packages/roboemot-reachymini`.
 2. Run `python scripts/install_on_robot.py --dry-run --cloud-voice --host 192.168.88.198`, then the same command without `--dry-run`. If the Mac says "No route to host", run `sudo arp -s 192.168.88.198 88:a2:9e:8d:58:b5`.
 3. Start with `python scripts/run_on_robot.py --host 192.168.88.198`. Do not use `--restart` right after an install. Wait about 2 minutes before you talk: the listener lags while the models load.
-4. Check in the web UI Settings: `vision.objects_enabled` is on, and `voice.barge_in.onset_enabled` is on (it was turned off during an earlier QA).
+4. Check in the web UI Settings: `vision.objects_enabled` is on, and `voice.barge_in.onset_enabled` is on (it was turned off during an earlier QA). Until the facing fix lands, turn `voice.facing.enabled` off for every section except C.
 5. Take each debug report from the web UI Diagnostics tab. The SSH report (`robot_ssh.py --debug`) has no runtime sections. Name each file after its check (for example `B-cup.json`).
 
 ## A. Cloud voice baseline (epic PR 160, CV-0 to CV-21)
@@ -47,6 +57,12 @@ PRs: https://github.com/sondalab-ai/roboemot/pull/160, plus CV-20/21 https://git
 5. Interrupt the robot while it uses a tool (for example during a long answer with a tool call).
    - Pass: the next turn answers normally, and the debug report shows no server error after the cut.
    - Why: nobody has verified that the platform server accepts tool results sent right after `response.cancel` (CV-8, https://github.com/sondalab-ai/roboemot/pull/148).
+6. **Name hint** (https://github.com/sondalab-ai/roboemot/pull/190). Say "ciao Neve" 5 times.
+   - Pass: the Live transcript reads "Neve", not "Reachy Mini".
+   - Read `roboemot.realtime_route.transcription_hint` `sent` and `refused`, and the client `update_fallback`. A non-zero `refused` means that the server does not accept the hint.
+   - Watch for a hallucinated "Neve" in the transcript of silence or noise. It could wake the robot falsely.
+7. **One answer per question.** Pass: `realtime_route.responses.completed` is close to `conversation.turns` minus `skipped`, and no sentence is spoken twice. The fire-and-forget slice ends the turn after a spoken reply with `play`, `look_at` or `express_emotion`; read `conversation.follow_ups_skipped`.
+8. **Stray words.** Write down every stray word at the end of a reply ("odyssey" on 2026-11-05), with the time. If it repeats, report it to Pollen: the server model generates it.
 
 ## B. Vision: objects, cup, cost (PRs 162, 163, 167, 174, 176, 177, 178)
 
@@ -72,7 +88,10 @@ PRs:
    - Pass: no second long novelty look, neither after about 10 s on the table nor when you pick it up. PR 185 (https://github.com/sondalab-ai/roboemot/pull/185) keeps a recognised object's identity while it sits still, so a repeat look is now a fail.
    - Known limit, not a fail: a known cup that is still from the moment it comes into view may never be recognised while the object gate is on (see the follow-ups).
 3. **Cost.** After about 10 minutes with people and objects in view, save the report. Read `roboemot.vision.stage_timing`: the CPU share of YuNet, SFace, DINOv2 and NanoDet. These numbers decide V-3 (lower face detection rate while nobody is in view) in `docs/plans/2026-11-03-vision-cost-handoff.md`.
-4. Optional: run `scripts/bench/run_cm4.py --only nanodet_plus_m_320,yolox_nano_416` on the robot. This is a SPEC 15 item: object detector p50 and p95 on the CM4.
+4. **Fewer DINOv2 embeds** (https://github.com/sondalab-ai/roboemot/pull/188). In the cluttered room, read `entity_embeds.skips.young` and `skips.episode`, `stage_timing.appearance_embed.runs_per_s`, `object_detect.runs_per_s` and `stage_drops.objects`.
+   - Baseline on 2026-11-05 (before PR 188): `appearance_embed` 0.23 runs/s at 1174 ms, `object_detect` 0.87 runs/s (3 wanted while a cup was shown), `stage_drops.objects` 1033 in 3.5 min, `entity_embeds.runs.new` 30.
+   - Pass: `object_detect.runs_per_s` close to `objects_active_hz` (3) while a cup is shown, and the cup episodes last while the cup is in view.
+5. Optional: run `scripts/bench/run_cm4.py --only nanodet_plus_m_320,yolox_nano_416` on the robot. This is a SPEC 15 item: object detector p50 and p95 on the CM4.
 
 ## C. Wake path with the name "Neve" (PRs 179, 180)
 
@@ -86,6 +105,8 @@ Do each step 5 times, then save one report for the whole set:
 5. Looking away: "ciao Neve" followed by a long sentence.
 6. As step 1, with a second person 1 m to the side.
 7. Turn away from the other person and speak at once. Then face the robot for 3 s first and speak.
+
+On 2026-11-05 the yaw read a median 66.8° (49 checks, min 14°) while the owner faced the robot. A Mac experiment ruled out the yaw formula and small faces: LFW frontal faces at 4–40 px eye span read 5–10°. The photographs in the room are behind the robot. The facing diagnostics slice adds the data that decides the cause. Before the steps, turn `webui.preview_landmarks` on (when that slice is merged) and check in the Live preview that the 5 dots sit on your eyes, nose and mouth.
 
 Read `roboemot.voice`:
 - the wake `decisions` (`wake_word` and the `rejected_*` outcomes);
@@ -255,8 +276,8 @@ Items marked "after QA X" wait for that QA section.
 | --- | --- | --- |
 | With `voice.enabled` off (the default), the `turn-to-voice` reflex never fires, because it needs the speech detector. Accept, or give it a fallback? https://github.com/sondalab-ai/roboemot/pull/182 | `reflex/engine.py`, SPEC 10 | decision |
 | Startle under load: a bang shorter than one chunk can be missed when the audio hub runs late. Keep this, or pass the loudest chunk of the pass (a SPEC change)? | `TODO.md`, SPEC 10 | decision |
-| CPU headroom: overclock the CM4 to 1.8 GHz (eMMC recovery needs rpiboot), a CM5 swap, an AI accelerator, LAN offload (a SPEC 12 privacy decision), or cooling. | hardware | decision |
-| Let the server start its answer before the robot's transcript round trip, as Pollen's app does. This affects the wake-word check and the skip tool. | SPEC 8, `docs/plans/2026-10-28-cloud-voice-default.md` | decision |
+| CPU headroom: the owner chose an opt-in installer overclock to 1.8 GHz with a tryboot trial (2026-11-05). A Coral or Hailo-8L accelerator was ruled out for this robot. A CM5 swap stays open. https://github.com/sondalab-ai/roboemot/pull/189 | installer, SPEC 4A | approved |
+| Let the server start its answer before the robot's transcript round trip, as Pollen's app does. The owner approved server-driven turns (2026-11-05): a `voice.realtime_route.turns: server` mode with server VAD creating and interrupting responses, speech-gated streaming, the skip tool as the addressing filter, and Pollen-like barge-in (duck to 25 %, stop on the server's `speech_started`). Slices S1–S3. | SPEC 8, 12, 13 | approved |
 | Try `voice.mood_source: llm_tagged`, because the owner found the delivery flat. | SPEC 8 | proposed |
 | Put the shown object into the conversation context. | `docs/plans/2026-11-03-vision-cost-handoff.md` section 4 | proposed |
 | LeRobot: adopt nothing now. Import expression clips in the LeRobot dataset format only if the owner starts recording clips. | `scripts/import_pollen_emotions.py` | proposed |
@@ -266,9 +287,9 @@ Items marked "after QA X" wait for that QA section.
 
 | Item | Where | Status |
 | --- | --- | --- |
-| Facing check: raise `voice.facing.max_yaw_deg`, recalibrate `vision.facing_nose_depth_ratio`, keep the yaw per face track, or judge the yaw after the speech starts. The choice depends on which steps fail. | `voice/facing.py`, SPEC 8 | after QA C |
+| Facing check: the yaw reads about 70° while the owner faces the robot (2026-11-04 and 2026-11-05). The small-face cause is ruled out. Choose the fix from the facing diagnostics (matched entry, eye span, sound bearing, channel order, landmarks in the preview). Do not raise `voice.facing.max_yaw_deg` to hide it. | `voice/facing.py`, `vision/facing.py`, SPEC 8 | after QA C |
 | Set `voice.realtime_route.transcript_timeout_s` to the measured p95 plus about 1 s. The profile writes 10 s, and the code default is 4 s. A 2026-11-03 run measured p95 4273 ms. | `config/schema.py`, installer profile | after QA A |
-| Entity embeds: a detector flicker on an unrecognised track opens a burst of up to 5 embeds (`reacquired`). Add a minimum gap if the counters show many. https://github.com/sondalab-ai/roboemot/pull/177 | `vision/pipeline.py` | after QA B |
+| Entity embeds: PR 188 adds a 3 s minimum age, the episode rule and a rebirth carry (age and last embed). Check `skips.young`, `skips.episode` and `runs.reacquired`. Then try `vision.appearance_input_px` 126 (Slice 2) against 224 for cost and recognition. https://github.com/sondalab-ai/roboemot/pull/188 | `vision/pipeline.py` | after QA B |
 | Reflex motion gate: expressive motion above 60 deg/s (clips, antenna wiggles) suppresses reactions for the motion plus a 500 ms tail. Watch `gate.suppressed.motion`. https://github.com/sondalab-ai/roboemot/pull/182 | `reflex/engine.py` | after QA D |
 | Tone tool: many `tone_retry` against `tones` means extra server rounds. The appraisal rules for the five tone labels are guesses. https://github.com/sondalab-ai/roboemot/pull/165 | installer profile, SPEC 8 | after QA A |
 | Local Vosk decode cap over music: add the cap if `decode` plus `asr_*` is above 15 % of one core with a song playing. | `docs/plans/2026-11-04-music-dance.md` | after QA G |
@@ -283,6 +304,14 @@ Items marked "after QA X" wait for that QA section.
 | --- | --- | --- |
 | Sticky identity for still objects. https://github.com/sondalab-ai/roboemot/pull/185 | `registry/matcher.py` | done (2026-11-04) |
 | Make the flaky tests timing-independent, and fix the Python 3.11 `asyncio.wait_for` race that dropped a barge-in cancel. https://github.com/sondalab-ai/roboemot/pull/186 | tests, `realtime/turn.py` | done (2026-11-04) |
+| Fewer DINOv2 embeds in a cluttered room and during a look (minimum age, shown-track only by bearing, rebirth carry). https://github.com/sondalab-ai/roboemot/pull/188 | `vision/pipeline.py` | done (2026-11-05) |
+| The robot's name as the server's transcription hint, decided at connect. https://github.com/sondalab-ai/roboemot/pull/190 | `realtime/` | done (2026-11-05) |
+| Slice 2: DINOv2 on its own worker thread, with `vision.appearance_threads` and `vision.appearance_input_px`. Watch the peak vision CPU (about 4 cores while an embed runs). | `vision/embed_worker.py`, `vision/pipeline.py` | approved |
+| Opt-in installer overclock (`--overclock`, tryboot trial, verify, promote; revert on reinstall or uninstall). | installer, SPEC 4A | approved |
+| Fire-and-forget skills: a spoken reply with only `play`, `look_at` or `express_emotion` calls ends the turn, with no repeat round. The tone tool is offered in the first response only. | `skills/`, `conversation/worker.py`, SPEC 8 | approved |
+| Facing diagnostics: per-check records, per-face yaw and eye span, frame channel order, landmarks in the Live preview (`webui.preview_landmarks`). | `vision/`, `voice/direction.py`, web UI | approved |
+| Server-driven turns S1–S3 (see the decision above). | `realtime/`, `conversation/worker.py`, `voice/` | approved |
+| Detect-then-track for the shown object: a cheap single-object tracker (OpenCV VitTrack, 48.6 ms on a Pi 4B) between NanoDet runs. | `vision/tracker.py` | approved |
 | A known object that is still from the moment it comes into view is never recognised while the object gate is on: its votes land about 10 s apart, so `votes_required` live votes never exist. Possible fix: hold the gate while a new track's vote burst is open against an active record (the V-4 "denser object runs" note). Found in PR 185. | `vision/object_gate.py`, `vision/pipeline.py` | proposed |
 | An object that moves and then stops can lose its track: the constant-velocity filter carries the old track away across the 10 s gate gap, and a new unknown track is born. Found in PR 185. | `vision/tracker.py` | proposed |
 | `Registry.delete_entity` does not notify the forget listeners. The matcher covers this with a gallery check on each observation. Found in PR 185. | `registry/` | proposed |
