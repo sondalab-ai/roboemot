@@ -373,3 +373,49 @@ def test_a_runtime_change_that_widens_the_stream_needs_the_admin(key, value):
     with pytest.raises(GuardrailError):
         stack.set(key, value, source="test")
     stack.set(key, value, source="test", admin=True)  # the admin's confirmation
+
+
+# ------------------------------------------------------------------ a stream and a burst
+
+
+def test_a_streams_item_never_joins_a_burst_of_the_same_session(ears):  # noqa: F811
+    """A runtime switch back to robot turns can leave a stream's transcript on its way while a
+    burst of the same session waits: the stream keeps its words, the burst gets none."""
+    from roboemot.realtime import protocol
+    from roboemot.realtime.input import InputJob, _Burst
+
+    with TurnServer() as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        inp, gen = ear.input, ear.rt.route.generation
+        caps = {"silence_ms": 600.0, "max_items": 8, "max_chars": 2000}
+        stream = _Burst(InputJob(np.zeros(0), RATE), gen, utt_ms=1000.0, **caps)
+        stream.add("s1")
+        stream.stopped("s1", 1000)
+        burst = _Burst(InputJob(np.zeros(0), RATE), gen, start_ms=0.0, utt_ms=1000.0, **caps)
+        with inp._lock:
+            inp._streams.append(stream)
+            inp._burst = burst
+        done = protocol.InputTranscript(protocol.TRANSCRIPTION_COMPLETED, "s1", "la tv", True)
+        inp.on_event(done, gen)
+        assert stream.job.result is not None and stream.job.result.text == "la tv"
+        assert burst.texts == {} and not burst.job.done
+
+
+def test_a_revoked_opt_in_cancels_the_open_stream_and_sends_nothing_more(ears):  # noqa: F811
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        ear.r.feed(voice(seconds=0.5))
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        assert wait_until(lambda: appended_s(server) >= 0.45)
+        stack = ear.rt.stack
+        stack.set("privacy.realtime_audio_unaddressed", False, source="test")
+        ear.rt.route.apply_config(stack.effective())  # the runtime's hot reload
+        before = len(server.audio())
+        assert ear.rt.route.snapshot()["streams_revoked"] == 1
+        gen = ear.rt.route.generation
+        assert (gen, "in_1_0") in ear.input._dead  # deleted as soon as the server names it
+        ear.r.feed(voice(seconds=0.5))
+        tail(ear)
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert ear.utterances[0].local_only  # its audio left: not answered
+        assert len(server.audio()) == before

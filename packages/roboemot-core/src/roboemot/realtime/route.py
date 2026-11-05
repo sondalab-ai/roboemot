@@ -396,6 +396,8 @@ class RealtimeRoute:
             lost, closes = self.state == "fallback_local", self._closes
         if reason is None and lost:
             self._reconnect_soon(closes)
+        if self.input is not None:  # live streams no longer allowed are cancelled (SPEC 12)
+            self.input.apply_config(cfg)
 
     def _fits(self, cfg: RoboEmotConfig, client: Any) -> bool:
         """Whether ``cfg`` would open ``client``'s session (``_lock`` held): the route is not
@@ -1721,6 +1723,7 @@ COUNTERS = (
     "streams",  # live streams opened (turns: server)
     "streams_refused",  # ... refused at their opening piece (nothing sent)
     "stream_pieces_refused",  # a later piece refused: the stream was cut
+    "streams_revoked",  # open streams cancelled by a reload that no longer allows them
     "streams_cut",  # cut part way (a refused piece, the robot speaking, a gap): items deleted
     "audio_items",
     "audio_items_deleted",

@@ -677,7 +677,8 @@ class RealtimeInput:
         session (None: the current one): it belongs to the burst in flight on that session when
         its position is at or after the burst's start; a transcript of no burst is deleted."""
         gen = self.route.generation if generation is None else generation
-        if self._streams_hold(gen):
+        named = isinstance(event, protocol.SpeechBoundary | protocol.InputTranscript)
+        if self._streams_hold(gen, event.item_id if named else None):
             self._stream_event(event, gen)
             return
         delete: list[tuple[str, int]] = []
@@ -780,15 +781,37 @@ class RealtimeInput:
         if oldest is not None:  # the oldest open item without an id
             burst.stopped(oldest, event.audio_ms)
 
-    def _streams_hold(self, gen: int) -> bool:
-        """Whether session ``gen``'s input events go to the live streams: some of its streams
-        still collect items and no burst of it is set. Decided per event, so a mode that changes
-        at runtime (the unaddressed opt-in turned off) takes the burst path at its next burst."""
+    def _streams_hold(self, gen: int, item: str | None) -> bool:
+        """Whether an input event of session ``gen`` about ``item`` goes to the live streams: a
+        stream of that session holds the item (whatever burst is set: a stream's words never
+        join a burst), or the session has streams and no burst. Decided per event, so a mode
+        that changes at runtime (the unaddressed opt-in turned off) takes the burst path at its
+        next burst."""
         with self._lock:
+            streams = [s for s in self._streams if s.generation == gen]
+            if item is not None and any(item in s.order for s in streams):
+                return True
             burst = self._burst
             if burst is not None and burst.generation == gen:
                 return False
-            return any(s.generation == gen for s in self._streams)
+            return bool(streams)
+
+    def apply_config(self, cfg: RoboEmotConfig) -> None:
+        """Hot reload (the route passes it on): when live streams are no longer allowed (an
+        opt-in turned off, robot turns back, another gate), the open ones are cancelled and
+        their items deleted on the server; nothing more of them is sent (counted
+        ``streams_revoked``)."""
+        rt = cfg.voice.realtime_route
+        allowed = server_turns(cfg) and cfg.privacy.realtime_audio and rt.audio_gate == STREAM_GATE
+        if allowed:
+            return
+        with self._lock:
+            jobs = [s.job for s in self._streams if not s.closed]
+        for job in jobs:
+            job.cancelled = True
+            self._close(job)
+        if jobs:
+            self.route.count("streams_revoked", len(jobs))
 
     def _stream_event(self, event: protocol.ServerEvent, gen: int) -> None:
         """``on_event`` for live streams (module docstring): a start goes to the oldest stream
