@@ -21,6 +21,7 @@ Scripts (``scripts``, used in order; the last one repeats):
 - ``updated_then_refused``: ``session.updated``, then the ``error`` that echoes the request;
 - ``unrelated_error``: ``session.updated``, then an ``error`` about another event;
 - ``empty``: ``response.created`` and ``response.done``, no audio;
+- ``created_close``: ``response.created``, then the socket is closed (no audio);
 - ``silent``: nothing at all;
 - ``pending``: the ``error`` ``function_call_output_pending`` that echoes the request;
 - ``cancel_then_tool``: the ``reply`` audio; at a cancel, the ``tool`` call, then
@@ -447,6 +448,9 @@ class TurnServer(FakeServer):
             await self._send(ws, {"type": "error", "error": error})
             return
         await self._send(ws, {"type": "response.created", "response": {"id": rid}})
+        if script == "created_close":
+            await ws.close()
+            return
         if script == "empty":  # a response with no audio
             await self._done(ws, rid, "completed")
             return

@@ -1184,12 +1184,22 @@ class ConversationWorker:
         toned = [tone_tool(rt_cfg.tone_labels)] if tone else []
         return offered, choices, functions, toned
 
-    def _stream_session(self) -> tuple[str, list[dict[str, Any]]]:
+    def _stream_session(self) -> tuple[str, Any]:
         """What a stream's opening ``session.update`` carries with server turns (the stream
         thread): the instructions and tools a turn would send (parts 1 to 5 with the skip rule
         and the conversation state, the replay after a reconnect, the mood; the skills, the
         skip and tone tools), since the server answers with them on its own. The skills, their
-        choices and the conversation state are kept for the server turn that follows."""
+        choices and the conversation state are kept for the server turn that follows. Whatever
+        fails here, the opening goes with parts 1 to 4 and the session's tools as they are
+        (counted ``stream_session_fallbacks``): a stream never stops on it."""
+        try:
+            return self._stream_session_now()
+        except Exception as exc:
+            log.warning("conversation: stream session: %s", type(exc).__name__)
+            self._counts["stream_session_fallbacks"] += 1
+            return self._base_instructions(), None
+
+    def _stream_session_now(self) -> tuple[str, list[dict[str, Any]]]:
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
@@ -1217,7 +1227,9 @@ class ConversationWorker:
             queued = next((u for u, _ in self._pending if isinstance(u, _ServerTurn)), None)
             active = self._active_turn
             if active is not None or queued is not None:
-                host = active.server if active is not None else queued
+                host = queued if active is None else active.server
+                if host is None and active is not None:  # a robot turn: the words join it
+                    host = _ServerTurn(None, turn=active)
                 words = self._claim(offer.job, host, cap) if host is not None else None
                 taken = False
             else:
@@ -1230,6 +1242,8 @@ class ConversationWorker:
         if taken:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(wake.set)
+        elif offer.job.start_stamp is not None:  # no answer of its own: the cue ends now
+            self.cues.listening_end(offer.job.start_stamp)
         return taken
 
     def _claim(self, job: Any, st: _ServerTurn, cap: int) -> Utterance | None:
@@ -1282,7 +1296,9 @@ class ConversationWorker:
                 turn.messages[0]["content"] = joined
             items = []
             if audio is not None and audio[0] == turn.rt_gen:
-                items = [i for i in audio[1] if i not in turn.rt_items]
+                # the offer's items are the turn's already (a skip deleted them once)
+                known = set(turn.rt_items) | set(turn.server.offer.items if turn.server else ())
+                items = [i for i in audio[1] if i not in known]
         if items:
             self._late_items(turn, items)
         if self.transcript is not None and text:
@@ -1341,8 +1357,11 @@ class ConversationWorker:
             self._attach(turn, u)
         try:
             if not await self._realtime_turn(turn):
-                turn.outcome = "realtime_lost"
+                # nothing played and no skill ran: no words reached the robot, so no chat route
+                # answers; Piper (or the cue) says the fallback, never the server on its own turn
+                turn.outcome, turn.voice = "realtime_lost", "local"
                 self._say_fallback(turn)
+            await self._speak_lines(turn)  # a fixed line a round left (no_text), as _respond
         finally:
             self._inner = None
             self.phase.end_thinking()
@@ -1579,7 +1598,8 @@ class ConversationWorker:
             turn.stamps["token"] = turn.stamps.setdefault("say", reply.first_audio)
             heard = turn.utterance.last_speech_stamp
             route.note_first_audio((reply.first_audio - heard) * MS_PER_S)
-            route.note_turn((reply.first_audio - heard) * MS_PER_S)  # SPEC 13, both modes
+            if turn.utterance.addressed:  # a person's turn, not a fixed line (_cue_line)
+                route.note_turn((reply.first_audio - heard) * MS_PER_S)  # SPEC 13, both modes
         if reply.status is None and reply.closed is None and not reply.cancelled:
             return
         text = reply.text()

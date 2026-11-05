@@ -6,8 +6,9 @@ the end of a conversation session, and reopens on wake and when a turn needs it.
 whether the route may answer at all (``blocked``: a reason code), reports the session to the
 ``realtime`` link of the network monitor (so a connect is retried with the
 ``connectivity.network`` backoff), charges the route's daily token budget, cancels a response
-the robot never asked for, and keeps the numbers of the ``roboemot.realtime_route`` debug
-section.
+the robot never asked for (with server turns: hands the worker the server's own answer to a
+stream that ended whole, and cancels a fragment's or a duplicate's, ``_created``), and keeps the
+numbers of the ``roboemot.realtime_route`` debug section.
 
 Session state is one small state machine guarded by one lock (``_lock``): the client (or
 none), the connect in flight (or none), a revision bumped by every ``apply_config``, a close
@@ -1252,10 +1253,16 @@ class RealtimeRoute:
 
     def _drop(self, req: Request, rid: str | None, client: Any, reason: str) -> None:
         """A response no run follows: its events are dropped (none reaches the speaker), it is
-        cancelled (by its id when the server created it, so a turn's response that may be
-        active alongside it is not the one cancelled) and charged at its ``response.done``."""
+        cancelled and charged at its ``response.done``. The cancel names it (``response_id``)
+        only when the server created it while a response with a run is live on that session:
+        a bare cancel could then stop the turn's answer instead (otherwise the plain subset)."""
         with self._lock:
             req.run = None
+            others = any(
+                r is not req and r.run is not None and r.token is req.token
+                for r in self._live.values()
+            )
+            rid = rid if others else None
         if reason in (FRAGMENT, DUPLICATE):
             self._count("server_fragments" if reason == FRAGMENT else "server_duplicates")
             self.events("turn", "server_response_dropped", why=reason)

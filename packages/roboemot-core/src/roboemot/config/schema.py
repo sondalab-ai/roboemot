@@ -3762,9 +3762,10 @@ class RealtimeRouteConfig(Strict):
         "streams while the local VAD hears speech that passed server_gates (the wake word "
         "policy and the follow-up window do not gate it), and the server's VAD ends the turn: "
         "the robot sends no commit. It needs privacy.realtime_audio_unaddressed and "
-        "audio_gate: server_gates (without the opt-in robot turns run). Until barge-in and "
-        "server-created answers land, the robot still asks for the answer once the transcript "
-        "came. Applies at once; a change needs the admin",
+        "audio_gate: server_gates (without the opt-in robot turns run). The server then answers "
+        "on its own: its answer plays as it comes, never a request of the robot's on top (an "
+        "answer to a cut or revoked stream never plays). Applies at once; a change needs the "
+        "admin",
         admin_only=True,
     )
     server_gates: list[Literal["music", "other_speaker", "at_face", "facing"]] = param(

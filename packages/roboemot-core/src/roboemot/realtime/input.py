@@ -62,6 +62,15 @@ oldest stream the server has not covered yet, and a stream's start is where the 
 ends when it becomes that oldest one. A stream that ended without a result and is still not
 covered ``transcript_timeout_s`` later resets the session, as a burst does; one the server heard
 nothing of is dropped then.
+
+The server answers a stream on its own (``create_response``, S1b): each ``speech_stopped`` of a
+stream is owed one response, and the route asks at each ``response.created`` what it answers
+(``claim``): a stream that ended whole (``ANSWER``: its items then leave with the server turn,
+never deleted here), a fragment (``FRAGMENT``: cut, cancelled, revoked, still streaming, or
+ended by the server before the segment's end) or a second answer (``DUPLICATE``). A cut and a
+close mark the stream before its closing silence goes, so the server's answer to that silence
+is judged on them. While a stream streams or owed speech is fresh (``unsettled``), the robot's
+own requests wait.
 """
 
 from __future__ import annotations
