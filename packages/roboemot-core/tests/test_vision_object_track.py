@@ -471,6 +471,7 @@ def test_a_hot_reload_mid_follow_applies_at_once(tmp_path):
 
 
 def test_a_seed_box_outside_the_image_is_clipped_into_it():
+    pytest.importorskip("cv2")
     from roboemot.vision import onnx
 
     calls = []
