@@ -896,7 +896,7 @@ class RealtimeRoute:
             if any(r.run is None for r in (*self._pending, *self._live.values())):
                 return True
             sink, generation = self.input, self.generation
-        if not hasattr(sink, "unsettled"):
+        if sink is None:
             return False
         first, _ = self.timeouts()
         return bool(sink.unsettled(generation, first))
@@ -1200,7 +1200,7 @@ class RealtimeRoute:
             generation = self.generation + 1 if connecting else self.generation
             sink = self.input
         first, _ = self.timeouts()
-        claim = sink.claim(generation, first) if hasattr(sink, "claim") else None
+        claim = sink.claim(generation, first) if sink is not None else None
         held: HeldResponse | None = None
         with self._lock:
             if not self._current(token):  # detached in between
