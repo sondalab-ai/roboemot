@@ -518,9 +518,61 @@ def test_a_flickering_track_keeps_its_age_across_rebirths(tmp_path):
             first = i
     assert len(created) >= 3  # the track was reborn
     # No track lived past 1 s, but the reborn one at 3 s carries the age from 0 s: embedded
-    # at its first confirmed run. Each later rebirth gets its own first embedding.
-    assert first == 4 and runs(pipe)["new"] >= 1
+    # at its first confirmed run.
+    assert first == 4 and runs(pipe)["new"] == 1
     assert all(s.born == 0.0 for s in pipe._entities.values())
+
+
+def flicker_rig(tmp_path, **kw):
+    """A cup whose track is reborn every 3 runs (seen twice, missed once), at 1 Hz."""
+    return rig(tmp_path, object_lost_s=0.5, object_lost_periods=1.0, **kw)
+
+
+def flicker_run(pipe, start, stop, det=CUP):
+    created = set()
+    for i in range(start, stop):
+        pipe.object_detector.dets = [] if i % 3 == 2 else [det]
+        run(pipe, i, i + 1)
+        created |= set(pipe._entities)
+    return created
+
+
+def test_a_track_reborn_again_and_again_costs_one_embedding(tmp_path):
+    """Owner decision 2026-11-05: a rebirth carries the last embedding too, so an unchanged
+    box is not embedded again at each rebirth; the world gets the carried embedding."""
+    pipe, app = flicker_rig(tmp_path)
+    got = []
+    pipe.bus.subscribe("percept.entity", lambda m: got.append(m.payload))
+    created = flicker_run(pipe, 0, 30)
+    assert len(created) >= 8 and len(app.boxes) == 1
+    embedded = [o for o in got if o.kind == "object" and o.stamp > MIN_AGE + 2]
+    assert embedded and all(o.embedding is not None for o in embedded)
+
+
+def test_a_reborn_track_whose_box_changed_shape_is_embedded_again(tmp_path):
+    pipe, app = flicker_rig(tmp_path)
+    flicker_run(pipe, 0, 9)
+    assert len(app.boxes) == 1
+    wider = Detection((85, 112, 175, 152), 0.8, "cup")  # same centre, aspect x2.25
+    flicker_run(pipe, 9, 12, det=wider)
+    assert runs(pipe)["changed"] == 1 and len(app.boxes) == 2
+
+
+def test_a_rebirth_carries_no_identity_and_no_votes(tmp_path):
+    pipe, app = flicker_rig(tmp_path)
+    mug = enroll_mug(pipe)
+    run(pipe, 0, 10)  # seen on every run: recognised
+    ((old_id, old),) = pipe._entities.items()
+    assert old.owner_id == mug.entity_id and old.votes >= CFG.identity.votes_required
+    pipe.object_detector.dets = []
+    run(pipe, 10, 11)  # missed: the track ends
+    pipe.object_detector.dets = [CUP]
+    run(pipe, 11, 13)  # reborn (tentative), then confirmed with the carried state
+    ((track_id, reborn),) = pipe._entities.items()
+    assert track_id != old_id
+    assert reborn.born == 0.0 and reborn.embedding is not None  # age and embedding carried
+    assert reborn.owner_id is None  # the identity is not: it votes again
+    assert reborn.votes <= 1  # this run's burst vote at most, none carried
 
 
 def test_a_rebirth_far_away_or_too_late_starts_a_new_age(tmp_path):

@@ -32,11 +32,12 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    record holds and auto-enrollment does not collect; once for a new track, but only after it
    has lived ``entity_embed_min_age_s`` since its first detection (a cluttered room churns
    short tracks; a rebirth near a track that ended within ``rebirth_window_s`` keeps that
-   track's age, ``_new_entity``), with a burst of votes only while an active record of its
-   kind could match it (again when such records change); then at ``rates.appearance_hz`` for a
-   recognised track, and for an unknown one only when its detector box changed size or shape,
-   after a missed object run, or after ``entity_reembed_floor_s``. During a shown-object episode
-   (``governor.active("objects")``, SPEC 5A) only the shown track, the confirmed track nearest
+   track's age and last embedding, never its identity or votes, ``_new_entity``), with a
+   burst of votes only while an active record of its kind could match it (again when such
+   records change); then at ``rates.appearance_hz`` for a recognised track, and for an unknown
+   one only when its detector box changed size or shape, after a missed object run, or after
+   ``entity_reembed_floor_s``. During a shown-object episode (``governor.active("objects")``,
+   SPEC 5A) only the shown track, the confirmed track nearest
    the attention target's bearing (``governor.focus``; the frame centre without one,
    ``_shown_track``), may embed, and only the votes that can recognise it: the gaze follows it
    without a freeze per run, and the others wait for the episode's end. The look-down crop
@@ -173,12 +174,16 @@ class _EntityState:
 
 @dataclass(frozen=True)
 class _EndedEntity:
-    """An animal or object track that ended, kept ``rebirth_window_s`` for the age carry."""
+    """An animal or object track that ended, kept ``rebirth_window_s`` for a rebirth: its
+    place, age and last appearance embedding (never its identity or votes)."""
 
     kind: str
     seen_box: Box
     last_seen: float
     born: float
+    last_embed: float | None
+    embedding: np.ndarray | None = field(repr=False)
+    box: Box | None  # detector box at the last embedding
 
 
 class _Role(Enum):
@@ -622,20 +627,34 @@ class VisionPipeline:
         return _FaceState(next(self._generations), first_seen=track.first_stamp)
 
     def _drop_entity(self, track_id: int) -> None:
-        """Forget an ended track's state and votes; keep its place and age for a rebirth."""
+        """Forget an ended track's state and votes; keep its place, age and last embedding for
+        a rebirth (``_new_entity``)."""
         state = self._entities.pop(track_id, None)
         self.matcher.release(track_id)
         if state is not None and state.seen_box is not None:
             self._ended_entities.append(
-                _EndedEntity(state.kind, state.seen_box, state.last_seen, state.born)
+                _EndedEntity(
+                    state.kind,
+                    state.seen_box,
+                    state.last_seen,
+                    state.born,
+                    state.last_embed,
+                    state.embedding,
+                    state.box,
+                )
             )
 
     def _new_entity(self, track: Track, kind: str, live: list[_EntityState]) -> _EntityState:
         """State of a newly confirmed animal or object track. When it is a rebirth of a track of
         its kind (born after that one's last sighting, at most ``rebirth_window_s`` later, its
         first box centre within ``rebirth_distance_heights`` heights of that one's last box), it
-        takes that track's age (``born``) and nothing else: no identity, no votes. Candidates
-        are the tracks that ended in the window and the live ones this run missed."""
+        takes that track's age (``born``), its last embedding, the stamp of it and the detector
+        box at it, so it is embedded again only when the usual rules ask (its box changed size
+        or shape, it misses a run, the floor; a burst while a record could match, since the
+        votes are not carried). It never takes the identity, the owner or the votes. Accepted
+        risk (owner, 2026-11-05): another thing put at the same spot within the window keeps
+        the old embedding until the box rule fires. Candidates are the tracks that ended in the
+        window and the live ones this run missed."""
         cfg = self.cfg
         start = track.first_stamp
         ended = self._ended_entities
@@ -656,9 +675,16 @@ class VisionPipeline:
                 best = (d, old)
         if best is None:
             return _EntityState(kind, born=start)
-        if isinstance(best[1], _EndedEntity):
-            ended.remove(best[1])
-        return _EntityState(kind, born=min(start, best[1].born))
+        old = best[1]
+        if isinstance(old, _EndedEntity):
+            ended.remove(old)
+        return _EntityState(
+            kind,
+            last_embed=old.last_embed,
+            embedding=old.embedding,
+            box=old.box,
+            born=min(start, old.born),
+        )
 
     # ------------------------------------------------------------------ faces
 
