@@ -56,6 +56,11 @@ repeats across sessions. ``tool_names`` (when set) names the call of each respon
 response in turn that would end ``completed`` (the last repeats), for example ``incomplete``
 (a token cap). ``sent`` records every event the server sent.
 
+``stream_vad`` makes the VAD listen to the appended audio itself, as for live streams (turns:
+server): a turn starts at the first loud block and ends after the session's
+``silence_duration_ms`` of quiet, with no commit from the robot (``_vad_feed``); its transcript
+is the turn's ``heard`` list, joined.
+
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
 events) or ``segment`` (every segment after a burst's first, with ``segment_gap_s``). A test
@@ -83,6 +88,8 @@ PENDING = "function_call_output_pending"
 HOLD_MAX_S = 10.0  # default bound of a hold nobody releases (hold_timeouts)
 HOLD_POLL_S = 0.005
 HOLD_POINTS = ("speech", "transcript", "segment")
+VAD_BLOCK_MS = 10  # the stream VAD's block
+VAD_LEVEL = 1000  # a block with a sample this loud (PCM16) is speech
 
 
 def pcm(ms: float, level: float = 0.25) -> bytes:
@@ -125,6 +132,7 @@ class TurnServer(FakeServer):
         hold_at: str = "transcript",
         hold_max_s: float = HOLD_MAX_S,
         statuses: list[str] | None = None,
+        stream_vad: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -154,6 +162,11 @@ class TurnServer(FakeServer):
         self.ids_per_session = ids_per_session
         self.session_bursts = 0  # bursts committed on the current connection
         self.sent: list[dict[str, Any]] = []
+        self.stream_vad = stream_vad
+        self.stream_turns = 0  # turns the stream VAD heard, over all sessions
+        self._vad_item: str | None = None  # the stream VAD's turn in progress
+        self._quiet_ms = 0.0
+        self._speech_end = 0.0
         self.buffer_ms = 0.0  # audio appended in this session so far
         self.bursts = 0
         self._burst_start = 0.0
@@ -181,6 +194,7 @@ class TurnServer(FakeServer):
     async def _handler(self, ws: ServerConnection) -> None:
         self.connections.append(ws)
         self.buffer_ms = self._burst_start = 0.0  # a new session's input buffer
+        self._vad_item, self._quiet_ms = None, 0.0  # nor a turn of the old one
         self.session_bursts = 0
         self.open_calls = {}  # a new session holds no call
         await self._send(ws, {"type": "session.created", "session": {}})
@@ -220,6 +234,8 @@ class TurnServer(FakeServer):
                 task.add_done_callback(self._tasks.discard)
             elif kind == "response.cancel" and self._cancel is not None:
                 self._cancel.set()
+            elif kind == "input_audio_buffer.append" and self.stream_vad:
+                await self._vad_feed(ws, base64.b64decode(event["audio"]))
             elif kind == "input_audio_buffer.append":
                 self.buffer_ms += len(base64.b64decode(event["audio"])) / 2 / RATE * 1000
             elif kind == "input_audio_buffer.commit":
@@ -286,6 +302,68 @@ class TurnServer(FakeServer):
         await self._held("transcript")
         for _, _, done in events:
             await self._send(ws, done)
+
+    async def _vad_feed(self, ws: ServerConnection, data: bytes) -> None:
+        """The stream VAD (``stream_vad``): appended audio in blocks of ``VAD_BLOCK_MS``, by
+        sample count, never wall time. The first loud block starts a turn (``speech_started``
+        at its position); ``silence_duration_ms`` of quiet blocks (the last ``session.update``)
+        ends it (``speech_stopped`` where the quiet began, ``committed``), then its transcript
+        (``heard``, one list per turn, joined) after ``transcript_delay_s`` and the hold."""
+        samples = np.frombuffer(data, "<i2")
+        block = round(RATE * VAD_BLOCK_MS / 1000)
+        silence_ms = self._silence_ms()
+        for i in range(0, samples.size, block):
+            part = samples[i : i + block]
+            loud = part.size and int(np.max(np.abs(part.astype(np.int32)))) >= VAD_LEVEL
+            pos = self.buffer_ms
+            self.buffer_ms += part.size / RATE * 1000
+            if loud:
+                self._quiet_ms = 0.0
+                if self._vad_item is None:
+                    self.stream_turns += 1
+                    self._vad_item = f"in_{self.stream_turns}_0"
+                    started: dict[str, Any] = {"type": "input_audio_buffer.speech_started"}
+                    if self.ids:
+                        started["item_id"] = self._vad_item
+                    started["audio_start_ms"] = int(pos)
+                    await self._send(ws, started)
+                self._speech_end = self.buffer_ms
+                continue
+            if self._vad_item is None:
+                continue
+            self._quiet_ms += part.size / RATE * 1000
+            if self._quiet_ms >= silence_ms:
+                item, self._vad_item = self._vad_item, None
+                stopped: dict[str, Any] = {"type": "input_audio_buffer.speech_stopped"}
+                committed: dict[str, Any] = {"type": "input_audio_buffer.committed"}
+                if self.ids:
+                    stopped["item_id"] = committed["item_id"] = item
+                stopped["audio_end_ms"] = int(self._speech_end)
+                await self._send(ws, stopped)
+                await self._send(ws, committed)
+                texts = self.heard[min(self.stream_turns - 1, len(self.heard) - 1)]
+                task = asyncio.ensure_future(self._vad_transcript(ws, item, " ".join(texts)))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
+    def _silence_ms(self) -> float:
+        updates = self.of("session.update")
+        if not updates:
+            return 600.0
+        detect = updates[-1]["session"]["audio"]["input"]["turn_detection"]
+        return float(detect["silence_duration_ms"])
+
+    async def _vad_transcript(self, ws: ServerConnection, item: str, text: str) -> None:
+        if self.transcript_delay_s:
+            await asyncio.sleep(self.transcript_delay_s)
+        await self._held("transcript")
+        done: dict[str, Any] = {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": text,
+        }
+        if self.ids:
+            done["item_id"] = item
+        await self._send(ws, done)
 
     async def _held(self, point: str) -> None:
         """Wait at ``point`` while ``hold`` is unset (at most ``hold_max_s``)."""

@@ -202,6 +202,13 @@ def session_update(
     )
 
 
+def server_turns(cfg: RoboEmotConfig) -> bool:
+    """Whether the server's VAD ends the turns (``turns: server`` with ``input: audio``): the
+    audio streams live and the robot sends no commit. Text input always has robot turns."""
+    rt = cfg.voice.realtime_route
+    return rt.turns == "server" and rt.input == "audio"
+
+
 def has_hint(update: dict[str, Any]) -> bool:
     """Whether a ``session.update`` carries the transcription hint (``prompt``)."""
     audio = update.get("session", {}).get("audio", {})
@@ -1352,6 +1359,8 @@ class RealtimeRoute:
                 why = "turn"
             elif not cfg.privacy.realtime_audio:
                 why = "no_opt_in"
+            elif server_turns(cfg):
+                why = "turns"  # the server ends the turns: audio only streams (stream_audio)
             elif rt.audio_gate != gate:
                 why = "gate"
             elif self._uploaded() + seconds > rt.daily_upload_budget_s:
@@ -1387,6 +1396,86 @@ class RealtimeRoute:
                 self._close_client(client, "reconfigured")
         if why != "turn":  # a hold is not a refusal: the input counts it once (audio_held)
             self._count("audio_refused" if why is not None else "audio_sent")
+        return why
+
+    def stream_audio(
+        self,
+        pcm: bytes,
+        *,
+        instructions: str | None = None,
+        closing: bool = False,
+        hold: Callable[[], str | None] = lambda: None,
+        track: Callable[[int], None] | None = None,
+    ) -> str | None:
+        """Send one piece of a live stream (``turns: server``, SPEC 8 and 12): PCM16 at
+        ``voice.sample_rate_hz`` in appends of at most half the message cap, never a commit
+        (the server's VAD ends the turn). Every piece passes the gate of ``send_audio`` on the
+        committed configuration, atomically with its send: the session fits, ``input: audio``
+        with server turns, the ``privacy.realtime_audio`` opt-in, what ``hold()`` returns
+        (``speaking``, ``asleep``, ``cancelled``; not asked for the ``closing`` silence, which
+        carries no sound) and today's upload budget, which each piece uses. The opening piece
+        (``instructions`` given) goes first with a ``session.update`` carrying them, is refused
+        while a realtime turn is in flight (``turn``) and keeps ``close_silence_ms`` of the
+        budget in reserve, so the stream's closing silence always fits; ``track(generation)``
+        runs with it. The day's count is saved with the opening and the closing piece. None
+        when it was queued, else the reason it was refused (nothing sent)."""
+
+        def piece(cfg: RoboEmotConfig) -> tuple[str | None, Any]:
+            rt = cfg.voice.realtime_route
+            client = self._client
+            if client is None or client.state != "connected":
+                return "no_session", None
+            if not self._fits(cfg, client):
+                self._counts["sends_refused"] += 1
+                return "refused", self._detach()
+            seconds = len(pcm) / PCM_SAMPLE_BYTES / cfg.voice.sample_rate_hz
+            opening = instructions is not None
+            reserve = rt.close_silence_ms / MS_PER_S if not closing else 0.0
+            if not server_turns(cfg):
+                why: str | None = "turns"
+            elif not cfg.privacy.realtime_audio:
+                why = "no_opt_in"
+            elif not closing and (held := hold()) is not None:
+                why = held
+            elif opening and self._input_holds > 0:
+                why = "turn"
+            elif self._uploaded() + seconds + reserve > rt.daily_upload_budget_s:
+                why = "upload_budget"
+            else:
+                why = None
+            if not closing or why is not None:  # the closing silence keeps why audio stopped
+                self._audio_blocked = why
+            if why is not None:
+                return why, None
+            self._upload_s += seconds
+            if track is not None:
+                track(self.generation)
+            if opening:
+                update = self.session_update(cfg, instructions)
+                if has_hint(update):
+                    self._counts["hint_sent"] += 1
+                client.send(update)  # only queued: never blocks
+            step = (
+                rt.max_message_bytes // APPEND_SHARE_OF_CAP // PCM_SAMPLE_BYTES * PCM_SAMPLE_BYTES
+            )
+            for start in range(0, len(pcm), step):
+                client.send(protocol.audio_append(pcm[start : start + step]))
+            return None, (self._upload_day, self._upload_s) if opening or closing else None
+
+        why, stale = self._with_config(piece)
+        if why is None:
+            if stale is not None:
+                self._save_upload(*stale)
+            stale = None
+        if stale is not None:
+            client, orphans = stale
+            self._settle(orphans, "reconfigured")
+            if client is not None:
+                self._close_client(client, "reconfigured")
+        if instructions is not None:
+            self._count("streams_refused" if why is not None else "streams")
+        elif why is not None:
+            self._count("stream_pieces_refused")
         return why
 
     def _uploaded(self) -> float:
@@ -1560,6 +1649,7 @@ class RealtimeRoute:
                 "mode": rt.mode,
                 "input": rt.input,
                 "gate": rt.audio_gate if audio else None,  # text input: no audio gate
+                "turns": "server" if server_turns(cfg) else "robot",  # who ends a turn
                 "endpoint": snap.get("endpoint"),
                 "audio_egress": self._egress,
                 "audio_blocked": self._audio_blocked,  # why the last burst was refused
@@ -1604,6 +1694,10 @@ COUNTERS = (
     "audio_refused",
     "audio_held",
     "audio_reopen_wait",
+    "streams",  # live streams opened (turns: server)
+    "streams_refused",  # ... refused at their opening piece (nothing sent)
+    "stream_pieces_refused",  # a later piece refused: the stream was cut
+    "streams_cut",  # cut part way (a refused piece, the robot speaking, a gap): items deleted
     "audio_items",
     "audio_items_deleted",
     "audio_items_unnamed",

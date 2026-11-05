@@ -3740,6 +3740,34 @@ class RealtimeRouteConfig(Strict):
         "Which utterances' audio may leave the robot with input: audio. addressed: only an "
         "utterance the local wake gate and voice-at-face check accepted, sent once it ended",
     )
+    turns: Literal["robot", "server"] = param(
+        "robot",
+        "Who ends a turn with input: audio. robot: the local wake gate decides once the "
+        "utterance ended, then its audio goes as one burst with a commit. server: audio "
+        "streams while the local VAD hears speech that passed server_gates (the wake word "
+        "policy and the follow-up window do not gate it), and the server's VAD ends the turn: "
+        "the robot sends no commit. Until barge-in and server-created answers land, the robot "
+        "still asks for the answer once the transcript came",
+        restart=True,
+    )
+    server_gates: list[Literal["asleep", "music", "other_speaker", "at_face", "facing"]] = param(
+        ["asleep", "music"],
+        "With turns: server, the local checks that decide whether a speech segment streams at "
+        "all, before any of its audio leaves; none is checked again later. asleep: not while "
+        "the robot sleeps; music: not while music plays; other_speaker: not another known "
+        "person right after the one heard last (voice.fastpath.addressed_window_s); at_face: "
+        "the voice comes from a visible face; facing: that face looks at the robot "
+        "(voice.facing). An empty list streams every segment the VAD hears",
+    )
+    server_gate_hold_ms: float = param(
+        300.0,
+        "With turns: server and at_face or facing in server_gates: speech held on the robot "
+        "before those checks decide, so the voice direction has samples; the held audio then "
+        "streams at once. The other gates decide at the speech start",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
     transcript_timeout_s: float = param(
         4.0,
         "Longest wait for the server's transcript of an utterance's audio; past it the robot "
@@ -3910,6 +3938,13 @@ class RealtimeRouteConfig(Strict):
                 f"at most {TONE_LABEL_MAX_CHARS} characters: {bad}"
             )
         return labels
+
+    @field_validator("server_gates")
+    @classmethod
+    def _gates_once(cls, gates: list[str]) -> list[str]:
+        if len(set(gates)) != len(gates):
+            raise ValueError("voice.realtime_route.server_gates repeats a gate")
+        return gates
 
     @model_validator(mode="after")
     def _close_after_server_silence(self) -> RealtimeRouteConfig:
