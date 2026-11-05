@@ -7,6 +7,7 @@ robot."""
 
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 
@@ -78,9 +79,10 @@ class BootRobot(FakeRobot):
 
     def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         words = shlex.split(command) if "'" in command or '"' in command else command.split()
-        if command.startswith("test -e /boot/firmware/") and "printf x" in command:
+        if command.startswith("test -e /boot/firmware/") and "base64 -w0" in command:
             path = words[2]
-            return f"x{self.boot[path]}x" if path in self.boot else ""
+            text = self.boot.get(path)
+            return "" if text is None else "x" + base64.b64encode(text.encode()).decode()
         if command.startswith("sudo -n true"):
             self.commands.append(command)
             return "yes" if self.passwordless else "no"
@@ -469,6 +471,22 @@ def test_a_reinstall_without_the_option_removes_exactly_the_block(offline_boot, 
     assert offline_boot.record["overclock"] is None
 
 
+def test_a_crlf_boot_config_comes_back_byte_identical(offline_boot, daemon):
+    crlf = ORIGINAL.replace("\n", "\r\n")
+    offline_boot.boot[CONFIG] = crlf
+    install(overclock_reboot=True)
+    assert offline_boot.boot[CONFIG] == crlf + reachy_oc.BLOCK
+    install(overclock=False)
+    assert offline_boot.boot == {CONFIG: crlf}
+
+
+def test_the_hint_to_boot_the_trial_later_names_the_robot(offline_boot, daemon, capsys):
+    install(overclock_reboot=False)
+    assert "Boot the trial config later: python scripts/install_on_robot.py --host 127.0.0.1" in (
+        capsys.readouterr().out
+    )
+
+
 def test_a_boot_config_without_a_final_newline_comes_back_byte_identical(offline_boot, daemon):
     offline_boot.boot[CONFIG] = ORIGINAL.rstrip("\n")
     install(overclock_reboot=True)
@@ -612,3 +630,65 @@ def test_the_debug_report_says_whether_the_block_is_there(tmp_path):
         "trial_pending": False,
     }
     assert overclock_state(Target("192.168.1.20"), tmp_path)["available"] is False
+
+
+# ---------------------------------------------------------------- an untrusted record
+
+
+def tamper(robot_: BootRobot, **fields) -> None:
+    """Edit the overclock entry the way the robot user (no sudo) could: the record is theirs."""
+    data = robot_.record
+    data["overclock"].update(fields)
+    robot_.files[RECORD] = json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"path": "/etc/sudoers"},
+        {"path": "/boot/firmware/cmdline.txt"},
+        {"block": reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=1800\ndtoverlay=evil")},
+        {"block": "# >>> x\n# <<< x\n"},
+    ],
+)
+@pytest.mark.parametrize("run", ["reinstall", "uninstall", "keep"])
+def test_a_tampered_record_path_or_block_is_refused_and_nothing_changes(
+    offline_boot, daemon, fields, run
+):
+    promoted(offline_boot)
+    tamper(offline_boot, **fields)
+    roots, boot = list(offline_boot.roots), dict(offline_boot.boot)
+    with pytest.raises(WizardError, match="does not match the platform"):
+        if run == "uninstall":
+            uninstall()
+        else:
+            install(overclock=run == "keep", overclock_reboot=True)
+    assert offline_boot.roots == roots and offline_boot.boot == boot
+
+
+def test_a_tampered_trial_path_is_refused(offline_boot, daemon):
+    install(overclock_reboot=False)
+    tamper(offline_boot, trial="/etc/shadow")
+    with pytest.raises(WizardError, match="does not match the platform"):
+        uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL, TRIAL: overclocked()}
+
+
+def test_a_tampered_backup_is_never_written_as_root_on_promote(offline_boot, daemon):
+    install(overclock_reboot=False)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    offline_boot._reboot(reachy_oc.TRIAL_REBOOT)  # the owner boots the trial by hand
+    install()
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert not any("evil" in text for text in offline_boot.boot.values())
+
+
+def test_a_tampered_backup_is_never_written_as_root_on_revert(offline_boot, daemon):
+    promoted(offline_boot)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    uninstall()
+    assert offline_boot.boot == {CONFIG: ORIGINAL}  # the live file minus the block
+    install(overclock_reboot=False)
+    tamper(offline_boot, backup="dtoverlay=evil\n")
+    install(overclock=False)  # the trial config no longer matches: left alone, never rewritten
+    assert not any("evil" in text for text in offline_boot.boot.values())

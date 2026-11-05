@@ -2032,7 +2032,8 @@ def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, d
 def test_the_installer_modules_import_without_the_palette():
     code = (
         "import sys; sys.modules['sondalab_palette'] = None; "
-        "import roboemot.install, roboemot_reachymini.settings, roboemot_reachymini.install"
+        "import roboemot.install, roboemot_reachymini.settings, roboemot_reachymini.install, "
+        "roboemot_reachymini.diagnostics"
     )
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr

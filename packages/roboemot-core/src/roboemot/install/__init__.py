@@ -2220,6 +2220,9 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     opts.overclock,
                     opts.dry_run,
                 )
+                plan.rerun = _rerun(
+                    replace(opts, overclock=True, overclock_reboot=True, dry_run=False)
+                )
                 oc_plan.append(plan)
                 check_shared_packages(ui, platform, remote, dirs, extras, opts.dry_run)
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
@@ -2498,7 +2501,9 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         if record.overclock is not None:
             on = record.overclock.state == "on"
             save = (lambda entry: None) if dry else overclock_saver(remote, platform, record)
-            removed = overclocking.remove(ui, remote, oc_plan, record.overclock, dry, save)
+            removed = overclocking.remove(
+                ui, remote, platform.overclock, oc_plan, record.overclock, dry, save
+            )
             oc_removed = on and removed == overclocking.REMOVED
         platform.cleanup(ui, py, dry)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()

@@ -45,7 +45,7 @@ import shlex
 from datetime import UTC, date, datetime
 
 from roboemot.diagnostics.system import THROTTLE_BITS
-from roboemot.install.overclock import Check, OverclockProfile
+from roboemot.install.overclock import Check, OverclockProfile, read
 from roboemot.install.remote import Remote
 
 BOOT = "/boot/firmware"
@@ -182,17 +182,13 @@ def config_check(text: str | None, tryboot: bool, trial: str | None) -> Check:
     return Check("Boot config", True, f"{CONFIG}, nothing that conflicts")
 
 
-def read_text(remote: Remote, path: str) -> str | None:
-    """A file's exact text (world-readable), or None when it does not exist."""
-    q = shlex.quote(path)
-    out = remote.run(f"test -e {q} && {{ printf x; cat {q}; printf x; }} || true")
-    return out[1:-1] if len(out) >= 2 and out[0] == out[-1] == "x" else None
-
-
 class ReachyOverclock:
     """``Platform.overclock`` of the Reachy Mini Wireless (``roboemot.install.overclock``)."""
 
     warning = WARNING
+    config_path = CONFIG
+    trial_path = TRIAL
+    block = BLOCK
     reboot = REBOOT
     trial_reboot = TRIAL_REBOOT
     reboot_warning = REBOOT_WARNING
@@ -203,14 +199,14 @@ class ReachyOverclock:
     def support(self, remote: Remote) -> tuple[OverclockProfile | None, list[Check]]:
         """Every check, read-only; the profile only when all of them pass."""
         tryboot, boot = tryboot_check(remote)
-        text = read_text(remote, CONFIG)
+        text = read(remote, CONFIG)
         checks = [
             model_check(remote),
             throttle_check(remote),
             temperature_check(remote),
             firmware_check(remote),
             boot,
-            config_check(text, tryboot, read_text(remote, TRIAL) if tryboot else None),
+            config_check(text, tryboot, read(remote, TRIAL) if tryboot else None),
         ]
         if not all(c.ok for c in checks) or text is None:
             return None, checks
