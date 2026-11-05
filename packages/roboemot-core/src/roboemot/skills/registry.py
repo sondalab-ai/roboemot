@@ -62,6 +62,7 @@ class Skill:
     choices: Choices = field(default_factory=dict)
     inline: bool = False
     describe: Callable[[], str] | None = None  # builds the description at run time
+    follow_up: bool = True  # False: its result never changes what the robot says
 
     def text(self) -> str:
         """The description shown to the model: ``describe()`` when set, else the static one."""
@@ -95,6 +96,7 @@ def skill(
     choices: Choices | None = None,
     inline: bool = False,
     describe: Callable[[], str] | None = None,
+    follow_up: bool = True,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
@@ -103,7 +105,10 @@ def skill(
     ``inline`` runs a plain function on the event loop instead of a worker thread: for skills
     that only post a request and return, so nothing of theirs can still be running (and
     touching a finished turn) after a timeout or a cancel. They must not block. ``describe``
-    builds the description at run time (it replaces ``description``)."""
+    builds the description at run time (it replaces ``description``). ``follow_up=False`` marks
+    a fire-and-forget skill (a gesture, a look, a mood nudge): its result never changes what the
+    robot says, so a round that already spoke and called only such skills asks the model no more
+    (SPEC 8, tool rounds). Plugin skills keep the default: their result may be the answer."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
@@ -121,6 +126,7 @@ def skill(
             dict(choices or {}),
             inline,
             describe,
+            follow_up=follow_up,
         )
         return fn
 

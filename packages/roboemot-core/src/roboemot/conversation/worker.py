@@ -62,7 +62,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -851,7 +851,8 @@ class ConversationWorker:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
         out the skip rule and the conversation hint (the server must say it, not judge it), and
-        the tone rule too, as does the round after a tone-only response."""
+        the tone rule too, as do the round after a tone-only response and every tool round
+        after the first."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -862,7 +863,7 @@ class ConversationWorker:
                 robot_name=self._prompt_name(cfg),
                 skip_rule=not line,
                 conversation=None if line else turn.conversation,
-                tone_rule=not (line or turn.tone_retry),
+                tone_rule=not (line or turn.tone_retry or turn.rounds),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -915,9 +916,11 @@ class ConversationWorker:
     async def _realtime_rounds(self, turn: _Turn) -> bool:
         """The transcript as ``input_text``, then one response per round: tool calls run as
         they arrive, their results go back as ``function_call_output`` and one more response
-        is asked, until the reply has no call, a skill ends the turn or
-        ``conversation.max_tool_rounds`` rounds ran (the next request has ``tool_choice:
-        none``; a call after that gets an error result and ends the turn)."""
+        is asked, until the reply has no call, a skill ends the turn, the reply spoke and
+        called only fire-and-forget skills (``follow_up=False``: their results go back, no
+        response follows) or ``conversation.max_tool_rounds`` rounds ran (the next request has
+        ``tool_choice: none``; a call after that gets an error result and ends the turn). The
+        tone tool is offered in the first round only."""
         route = self.realtime
         assert self._rt_lock is not None
         async with self._rt_lock:
@@ -1037,7 +1040,10 @@ class ConversationWorker:
             # more response, once, without the tool (SPEC 8, Tone tool)
             noted = TONE_NOTED in tones.values()  # an invalid-only tone round is not retried
             retry = not (ended or calls or reply.audio or turn.tone_retry) and noted
-            more = not ended and (bool(calls) or retry)
+            # spoke and only gestured: one more response would only say it again (SPEC 8)
+            spoke = reply.audio or len(turn.spoken) > round_from
+            quiet = not ended and spoke and self._fire_and_forget(calls, choices)
+            more = not ended and not quiet and (bool(calls) or retry)
             done = [(c.id, r.content) for c, r in zip(calls, results, strict=True)]
             for call_id, content in [*done, *tones.items()]:
                 out_id = route.new_item_id()
@@ -1049,7 +1055,10 @@ class ConversationWorker:
                 run.answered(call_id)
                 turn.rt_items.append(out_id)
             if not more:
-                if turn.rounds and not (ended or turn.spoken):
+                if quiet:
+                    self._end_after_speech(turn, calls, results)
+                    turn.rt_round = None
+                elif turn.rounds and not (ended or turn.spoken):
                     turn.outcome = "no_text"
                     self._say_fallback(turn)
                 return True
@@ -1070,6 +1079,37 @@ class ConversationWorker:
             turn.exchange += self._exchange(calls, results, turn.rounds, said)
             turn.exchange_spoken = len(turn.queued)
             turn.rt_round = None
+            if toned and not turn.tone_retry and turn.rounds == 1:
+                # note_tone is for the first response only: a later round would invite a second
+                # call for the same utterance (SPEC 8, Tone tool); the next turn offers it again
+                update = route.session_update(
+                    turn.cfg, self._base_instructions(tone_rule=False), functions
+                )
+                if not route.send(update):
+                    return self._realtime_lost(turn)
+
+    def _fire_and_forget(self, calls: list[ToolCall], offered: Collection[str]) -> bool:
+        """Whether a round's calls are all offered skills with ``follow_up=False`` (SPEC 8, 11):
+        what they do never changes what the robot says, so after speech no request follows,
+        whatever their results (an error such as ``nothing_to_look_at`` included: the robot
+        already answered). A name that is no offered skill (the refused skip, a plugin skill,
+        an unknown name) keeps the follow-up."""
+        if not calls or self.skills is None:
+            return False
+        return all(
+            c.name in offered and (s := self.skills.get(c.name)) is not None and not s.follow_up
+            for c in calls
+        )
+
+    def _end_after_speech(
+        self, turn: _Turn, calls: list[ToolCall], results: list[ToolOutcome]
+    ) -> None:
+        """A round that spoke and called only fire-and-forget skills ends the turn: its calls and
+        results join the exchange with ``content: None`` and the speech stays for the closing
+        assistant message (``exchange_spoken`` unchanged), so a barge-in on audio still playing
+        trims it as for any reply. Counted ``follow_ups_skipped``."""
+        turn.exchange += self._exchange(calls, results, turn.rounds + 1, None)
+        self._counts["follow_ups_skipped"] += 1
 
     def _realtime_lost(self, turn: _Turn) -> bool:
         """The session was lost (or refused the response, or the turn failed) during the turn.
@@ -1459,7 +1499,8 @@ class ConversationWorker:
     ) -> None:
         """One request per round: the text is spoken as it streams, each tool call runs as soon
         as it is complete, and a round that called tools is followed by another request with
-        the results, until the model answers in text, a skill ends the turn, or
+        the results, until the model answers in text, a skill ends the turn, the round spoke
+        and called only fire-and-forget skills (``follow_up=False``: no request follows), or
         ``conversation.max_tool_rounds`` rounds ran (the next request then has no tools)."""
         conv = turn.cfg.conversation
         cap = conv.max_tool_calls_per_round
@@ -1505,6 +1546,10 @@ class ConversationWorker:
             if not cut:
                 self._speak_all(turn, splitter.flush())
             ended = any(r.end_turn for r in results)
+            spoke = len(turn.spoken) > round_from
+            if not (cut or ended) and spoke and self._fire_and_forget(calls, choices):
+                self._end_after_speech(turn, calls, results)
+                return
             if cut or ended or not calls:
                 if turn.rounds and not (cut or ended or turn.spoken):
                     turn.outcome = "no_text"

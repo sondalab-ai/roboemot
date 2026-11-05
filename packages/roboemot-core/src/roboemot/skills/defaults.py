@@ -11,6 +11,11 @@ controller and the limiter still decide), ``express_emotion`` a label and a stre
 impulse inside the engine's per-turn budget).
 
 ``remember_preference`` only ever acts after the person's spoken confirmation.
+
+``play``, ``look_at`` and ``express_emotion`` are fire-and-forget (``follow_up=False``): what they
+do never changes what the robot says, so a round that spoke and called only them (also when one
+returned an error, such as ``nothing_to_look_at``) gets its results and no further request.
+``remember_preference`` and ``stop_talking`` end the turn themselves (``end_turn``).
 """
 
 from __future__ import annotations
@@ -67,6 +72,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
     @skill(
         llm_visible=True,
         inline=True,
+        follow_up=False,
         description="Play one of the robot's named motions.",
         describe=play_description,
         choices={"gesture": env.gestures},
@@ -82,6 +88,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
     @skill(
         llm_visible=True,
         inline=True,
+        follow_up=False,
         description=(
             "Turn the head to look at someone or something: 'speaker' or 'person' for the "
             "people, 'animal', 'object', 'away' to look aside, or a name of what is in view."
@@ -94,6 +101,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
     @skill(
         llm_visible=True,
         inline=True,
+        follow_up=False,
         description=(
             "Show a feeling in the robot's own mood: it nudges the mood a little towards the "
             "emotion, never beyond a small amount per turn."

@@ -86,6 +86,16 @@ class Env:
         )
         self.registry = default_skills(env)
 
+        @skill(llm_visible=True, inline=True, description="Recall a fact.")
+        def recall() -> str:
+            return "the fact"
+
+        self.registry.add(recall)  # keeps follow_up: offered only where llm_skills names it
+
+
+DEFAULTS = ["play", "look_at", "express_emotion", "remember_preference", "stop_talking"]
+WITH_RECALL = {"llm_skills": [*DEFAULTS, "recall"]}
+
 
 class Store:
     def __init__(self, allowed=True):
@@ -123,27 +133,27 @@ def names(body):
 
 def test_a_tool_round_trip_runs_the_skill_and_asks_again_with_the_result(tooled):
     rig, srv, env = tooled(
-        ["Guardo. ", C(0, "c1", "play", {"gesture": "joy"})],
+        ["Guardo. ", C(0, "c1", "recall", {})],
         ["Fatto, ecco."],
+        conversation=WITH_RECALL,
     )
-    rig.turn("fai una cosa allegra")
-    assert env.played == ["joy"]
+    rig.turn("ricordi?")
     assert rig.speech.texts() == ["Guardo.", "Fatto, ecco."]
     first, second = srv.bodies
-    assert names(first) == [
-        "play",
-        "look_at",
-        "express_emotion",
-        "remember_preference",
-        "stop_talking",
-    ]
+    assert names(first) == [*DEFAULTS, "recall"]
     assert first["tool_choice"] == "auto" and second["tool_choice"] == "auto"
     last = second["messages"][-2:]
     assert last[0]["role"] == "assistant" and last[0]["tool_calls"][0]["id"] == "c1"
-    assert json.loads(last[0]["tool_calls"][0]["function"]["arguments"]) == {"gesture": "joy"}
-    assert last[1] == {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'}
+    assert json.loads(last[0]["tool_calls"][0]["function"]["arguments"]) == {}
+    assert last[1] == {"role": "tool", "tool_call_id": "c1", "content": "the fact"}
     snap = rig.worker.snapshot()
     assert snap["tool_calls"] == 1 and rig.events[0]["rounds"] == 1
+
+
+def test_the_default_skills_are_offered_by_default(tooled):
+    rig, srv, _ = tooled(["Ciao."])
+    rig.turn("ciao")
+    assert names(srv.bodies[0]) == DEFAULTS
 
 
 def test_several_calls_of_one_round_run_in_order_and_all_results_go_back(tooled):
@@ -553,14 +563,14 @@ def test_calls_beyond_the_per_round_cap_are_answered_with_an_error_unrun(tooled)
 
 def test_the_sentences_of_a_tool_round_are_the_content_of_its_assistant_message(tooled):
     rig, srv, _ = tooled(
-        ["Guardo. ", C(0, "c1", "play", {"gesture": "joy"})], ["Fatto."], ["Certo."]
+        ["Guardo. ", C(0, "c1", "recall", {})], ["Fatto."], ["Certo."], conversation=WITH_RECALL
     )
     rig.turn("uno")
     assert srv.bodies[1]["messages"][-2]["content"] == "Guardo."
     rig.turn("due")
     roles = [(m["role"], m.get("content")) for m in srv.bodies[2]["messages"][1:]]
     assert roles == [
-        ("user", "uno"), ("assistant", "Guardo."), ("tool", '{"ok": true}'),
+        ("user", "uno"), ("assistant", "Guardo."), ("tool", "the fact"),
         ("assistant", "Fatto."), ("user", "due"),
     ]  # fmt: skip
 
@@ -631,3 +641,66 @@ def test_a_stop_phrase_right_after_a_barge_in_is_not_answered(tooled):
 def test_a_stop_phrase_without_a_barge_in_is_an_ordinary_utterance(tooled):
     rig, srv, _ = tooled()
     assert rig.worker.submit(utt("stop")) is True
+
+
+# ------------------------------------------------------------------ fire-and-forget skills
+
+
+def test_text_and_a_gesture_end_the_turn_after_one_request(tooled):
+    """SPEC 8, LLM router; SPEC 11: ``play`` never changes what is said, so a round that spoke
+    and only gestured asks no more (one more request only invited a repeat)."""
+    rig, srv, env = tooled(
+        ["Ciao! Sono curiosa. ", C(0, "c1", "play", {"gesture": "joy"})],
+        ["Ciao! Sono curiosa."],
+        ["Certo."],
+    )
+    rig.turn("uno")
+    assert len(srv.bodies) == 1 and env.played == ["joy"]
+    assert rig.speech.texts() == ["Ciao!", "Sono curiosa."]
+    snap = rig.worker.snapshot()
+    assert snap["follow_ups_skipped"] == 1 and snap["tool_calls"] == 1
+    assert rig.events[0]["outcome"] == "ok" and rig.events[0]["rounds"] == 0
+    rig.turn("due")
+    roles = [(m["role"], m.get("content")) for m in srv.bodies[1]["messages"][1:]]
+    assert roles == [
+        ("user", "uno"), ("assistant", None), ("tool", '{"ok": true}'),
+        ("assistant", "Ciao! Sono curiosa."), ("user", "due"),
+    ]  # fmt: skip
+    assert srv.bodies[1]["messages"][2]["tool_calls"][0]["id"] == "c1"
+
+
+def test_a_gesture_without_text_still_gets_the_follow_up(tooled):
+    rig, srv, env = tooled([C(0, "c1", "play", {"gesture": "joy"})], ["Ecco."])
+    rig.turn("ciao")
+    assert len(srv.bodies) == 2 and rig.speech.texts() == ["Ecco."]
+    assert rig.worker.snapshot().get("follow_ups_skipped", 0) == 0
+
+
+def test_text_and_a_skill_that_needs_its_result_keep_the_extra_round(tooled):
+    rig, srv, _ = tooled(
+        ["Vediamo. ", C(0, "c1", "play", {"gesture": "joy"}), C(1, "c2", "recall", {})],
+        ["Ecco."],
+        conversation=WITH_RECALL,
+    )
+    rig.turn("ciao")
+    assert len(srv.bodies) == 2 and rig.speech.texts() == ["Vediamo.", "Ecco."]
+    assert rig.worker.snapshot().get("follow_ups_skipped", 0) == 0
+
+
+def test_text_a_gesture_and_a_failed_look_end_the_turn(tooled):
+    """An error result of a fire-and-forget skill skips the round too: the robot already
+    answered; the error goes back with the history for the next turn."""
+    rig, srv, env = tooled(
+        [
+            "Eccomi. ",
+            C(0, "c1", "play", {"gesture": "joy"}),
+            C(1, "c2", "look_at", {"target": "nessuno"}),
+        ],
+        ["Eccomi."],
+    )
+    rig.turn("ciao")
+    assert len(srv.bodies) == 1 and rig.speech.texts() == ["Eccomi."]
+    assert rig.worker.snapshot()["follow_ups_skipped"] == 1
+    tools = [m for m in rig.worker._turns[0] if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tools] == ["c1", "c2"]
+    assert json.loads(tools[1]["content"])["error"] == "invalid_arguments"

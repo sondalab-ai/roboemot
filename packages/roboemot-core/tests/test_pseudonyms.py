@@ -610,11 +610,13 @@ def tooled(rigs):  # noqa: F811
 def test_a_cloud_turn_hides_every_name_and_speaks_and_acts_with_the_real_ones(tooled):
     rig, srv, env = tooled(
         lambda al: [
+            # the call alone: with speech beside it, look_at (fire-and-forget) would end the turn
+            [C(0, "c1", "look_at", {"target": al("Marta")})],
             [
                 f"Ciao {al('Marta')}, guardo {al('Luca Bianchi')}. ",
-                C(0, "c1", "look_at", {"target": al("Marta")}),
+                f"Fatto, {al('Marta')[:-1]}",
+                al("Marta")[-1:] + ".",
             ],
-            [f"Fatto, {al('Marta')[:-1]}", al("Marta")[-1:] + "."],
         ],
         routes=(CLOUD,),
         **PRIVACY,
