@@ -308,6 +308,8 @@ def assemble(
     if perception.pipeline is not None:  # light from the frames vision already captures
         perception.pipeline.light_tap = circ.sampler.offer
         perception.pipeline.motion_wanted = circ.wants_scene_motion  # a nap's motion watch
+        # the preview's landmark dots (SPEC 11A), read at each preview frame: a runtime switch
+        perception.pipeline.landmarks_wanted = lambda: stack.effective().webui.live.video_landmarks
     light_reader = host.light_reader = IdleLightReader(circ.sampler, source)
     host.enrollment = perception.enrollment
     pipeline = perception.pipeline
@@ -392,6 +394,7 @@ def assemble(
             on_activity=phase.set_listening,
             doa_available="doa" in manifest.capabilities(),
             motion=loop,
+            gaze=gaze_map,
         )
         if bearing is not None
         else None

@@ -66,3 +66,10 @@ class CameraModel:
         y = -(u - cx) / self.focal_px
         z = -(v - cy) / self.focal_y_px
         return math.atan2(y, 1.0), math.asin(z / math.sqrt(1.0 + y * y + z * z))
+
+
+def letterbox_scale(width: int, height: int, input_w: int, input_h: int) -> float:
+    """The factor that fits a ``width`` x ``height`` frame into a detector input of ``input_w`` x
+    ``input_h`` with its aspect ratio kept (the face detector's letterbox): camera pixels times
+    this are detector pixels. A 1280x720 frame into 320x240 gives 0.25."""
+    return min(input_w / width, input_h / height)

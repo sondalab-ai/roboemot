@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from roboemot.attention import AttentionSelector
+from roboemot.attention.gaze import GazeMap
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.motion.state import MotionProbe
@@ -33,7 +34,7 @@ from roboemot.voice import models as voice_models
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import VoskASR, resolve_language
 from roboemot.voice.bargein import BargeIn, PlaybackReference
-from roboemot.voice.direction import DirectionSample, VoiceDirection, face_offset
+from roboemot.voice.direction import DirectionSample, FaceRef, VoiceDirection, face_offset
 from roboemot.voice.facing import FacingCheck
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.grammar import GrammarSpotter
@@ -59,6 +60,31 @@ def yaw_at(entry: Entry, now: float, max_age_s: float) -> float | None:
     return best[1] if best is not None and abs(best[0] - now) <= max_age_s else None
 
 
+def face_ref(entry: Entry, now: float) -> FaceRef:
+    """The facing check record's view of a world entry: ID, kind, age, eye span (SPEC 12A)."""
+    return FaceRef(entry.entry_id, entry.kind, now - entry.last_seen, entry.facing_eye_px)
+
+
+def measured_yaw(
+    motion: MotionProbe | None, gaze: GazeMap | None
+) -> tuple[float | None, float | None]:
+    """The robot's last measured head and body yaw (radians, base frame) from the motion loop,
+    by the dof names of the platform's gaze map; None for each one unknown (no motion loop, no
+    gaze map, no measured pose yet, a robot without a body turn). For records only: it never
+    raises, so the sample it joins is the same as without it."""
+    if motion is None or gaze is None:
+        return None, None
+    try:
+        sample = motion.motion_sample()
+    except Exception:
+        return None, None
+    if sample is None or sample.measured is None:
+        return None, None
+    *_, pose = sample.measured  # (previous stamp, previous pose, last stamp, last pose)
+    body = pose.get(gaze.body_yaw) if gaze.body_yaw is not None else None
+    return pose.get(gaze.head_yaw), body
+
+
 def build_listener(
     cfg: RoboEmotConfig,
     audio: AudioHub,
@@ -76,12 +102,14 @@ def build_listener(
     on_activity: Callable[[bool], None] | None = None,
     doa_available: bool = False,
     motion: MotionProbe | None = None,
+    gaze: GazeMap | None = None,
 ) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
     """The listener, a ``close`` for the bearing source and the barge-in detector (not yet bound
     to its actions), or None when voice can't run. ``bearing`` is the robot's sound direction in
     the base frame (``RobotSession.bearing_source``); ``doa_available`` is whether the manifest
     declares a sound direction (``doa``), which the voice-at-face check's degraded rule needs.
-    ``motion`` (the motion loop) gives the barge-in trigger records their motion reading."""
+    ``motion`` (the motion loop) gives the barge-in trigger records their motion reading, and
+    with ``gaze`` (the platform's gaze map) the facing check records the head and body yaw."""
     root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
     try:
         vad_path = voice_models.model_file(root, "silero-vad")
@@ -153,7 +181,17 @@ def build_listener(
         age = fcfg.yaw_max_age_ms / MS_PER_S
         mine = yaw_at(attended, now, age) if engaged and attended is not None else None
         yaws = tuple(yaw_at(e, now, age) for e in faces)
-        return replace(sample, faces_yaw_rad=yaws, engaged_yaw_rad=mine)
+        head, body = measured_yaw(motion, gaze)
+        return replace(
+            sample,
+            faces_yaw_rad=yaws,
+            engaged_yaw_rad=mine,
+            faces_ref=tuple(face_ref(e, now) for e in faces),
+            engaged_ref=face_ref(attended, now) if engaged and attended is not None else None,
+            engaged_rad=attended.azimuth_rad if engaged and attended is not None else None,
+            head_yaw_rad=head,
+            body_yaw_rad=body,
+        )
 
     fast = FastPath(
         cfg.voice,

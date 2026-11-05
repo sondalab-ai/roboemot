@@ -10,7 +10,8 @@ encodes only when that frame is newer than the last one encoded and the last enc
 than ``1 / video_fps``; otherwise it returns the cached JPEG, so any number of viewers cost one
 encode. Face boxes and confirmed names are drawn on the picture, and a box with its readable
 category for each confirmed animal or object track; the gaze target, a face or a shown object
-(SPEC 5A), is highlighted.
+(SPEC 5A), is highlighted. With ``webui.live.video_landmarks`` on, each face also shows its
+5 detector landmarks as dots and its head yaw under the box (``PreviewOverlay.marks``).
 
 A viewer is a client IP that was sent a frame within the window. ``viewers`` feeds the banner every
 open page shows. Start and stop of viewing are logged once each per client IP (the address only).
@@ -49,6 +50,8 @@ BGR_FACE = (80, 200, 80)
 BGR_TARGET = (0, 215, 255)
 BGR_OBJECT = (230, 120, 40)
 BGR_TEXT_BG = (0, 0, 0)
+BGR_LANDMARK = (255, 0, 255)  # magenta: apart from every box colour
+LANDMARK_RADIUS_PX = 2
 LINE_PX = 1
 TARGET_LINE_PX = 3
 FONT_SCALE = 0.45
@@ -283,15 +286,20 @@ class LiveVideo:
         if pipeline is None:
             return
         if overlay is None:
-            faces, objects = pipeline.face_overlay(), pipeline.object_overlay()
+            faces, objects, marks = pipeline.face_overlay(), pipeline.object_overlay(), ()
         else:
-            faces, objects = overlay.faces, overlay.objects
+            faces, objects, marks = overlay.faces, overlay.objects, overlay.marks
         target = self._p.selector.target
         entry = None
         if target is not None and target.entry_id:
             entry = self._p.world.get(target.entry_id)
         shown = target is not None and target.priority == SHOWN
         self._draw_faces(cv2, canvas, scale, faces, None if shown else target, entry)
+        for (box, _), mark in zip(faces, marks, strict=False):
+            try:
+                self._marks(cv2, canvas, scale, box, mark)
+            except (ValueError, OverflowError, TypeError, cv2.error):
+                log.warning("live video: face landmarks could not be drawn")
         lone = self._shown_index(objects, entry) if shown else -1
         for i, (box, category, _) in enumerate(objects):
             try:
@@ -326,6 +334,25 @@ class LiveVideo:
                 self._box(cv2, canvas, scale, box, color, line, ascii_label(name) if name else "")
             except (ValueError, OverflowError, TypeError, cv2.error):
                 log.warning("live video: a face could not be drawn")
+
+    def _marks(self, cv2: Any, canvas: np.ndarray, scale: float, box: Any, mark: Any) -> None:
+        """One face's landmark dots and its head yaw as ``yaw N`` under the box (the
+        ``webui.live.video_landmarks`` overlay). Non-finite values are skipped."""
+        height, width = canvas.shape[:2]
+        for x, y in mark.points or ():
+            if math.isfinite(x) and math.isfinite(y):
+                u = min(max(round(x * scale), 0), width - 1)
+                v = min(max(round(y * scale), 0), height - 1)
+                cv2.circle(canvas, (u, v), LANDMARK_RADIUS_PX, BGR_LANDMARK, -1, cv2.LINE_AA)
+        yaw = mark.yaw_deg
+        if yaw is None or not math.isfinite(yaw) or not all(math.isfinite(v) for v in box):
+            return
+        text = f"yaw {round(yaw):d}"
+        (_, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, TEXT_THICKNESS)
+        left, _, _, bottom = box
+        x1 = min(max(round(left * scale), 0), width - 1)
+        below = round(bottom * scale) + h + base + LABEL_PAD_PX * 2
+        self._label(cv2, canvas, text, x1, min(max(below, 0), height), BGR_LANDMARK)
 
     @staticmethod
     def _shown_index(objects: Any, entry: Any) -> int:

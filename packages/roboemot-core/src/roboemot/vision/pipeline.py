@@ -96,6 +96,11 @@ Numbers only; the frame thread writes them and the report thread reads them unde
 dropped at the cap, dropped because the track ended, finished, failed, waiting, busy, the queue
 wait), ``{"state": "inline"}`` without one, ``{"state": "off"}`` without an appearance
 embedder.
+For the facing check (SPEC 8 stage 2) ``frame`` gives the last face frame's size, the detector
+input, the letterbox scale and the declared channel order, and ``faces`` the numbers behind
+each visible face's head yaw (``_face_report``). The eye span in detector pixels also rides
+in each person ``Observation`` (``facing_eye_px``). ``landmarks_wanted`` (default never) adds
+the landmarks to the live preview's overlay (``webui.live.video_landmarks``, SPEC 11A).
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -130,8 +135,8 @@ from ..stats import SUMMARY_LEVELS, summarise
 from ..world import FrameSpec, Observation, angular_distance
 from ..world.frame import to_base_frame
 from .embed_worker import EmbedJob, EmbedWorker, cut
-from .facing import head_yaw, smoothed
-from .geometry import CameraModel
+from .facing import eye_span, head_yaw, smoothed
+from .geometry import CameraModel, letterbox_scale
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .object_crop import CropSchedule, off_centre
 from .object_gate import ObjectGate
@@ -148,6 +153,7 @@ from .tracker import Track, Tracker
 from .types import (
     Box,
     Detection,
+    FaceMarks,
     FacePercept,
     Frame,
     FrameReport,
@@ -159,6 +165,11 @@ log = logging.getLogger(__name__)
 
 PERSON = "person"
 S_PER_MIN = 60.0
+FACE_REPORT_MAX = 8  # live face tracks listed in the debug report's ``faces``
+REPORT_DIGITS = 1  # decimals of the angles and pixel sizes in ``faces``
+# The channel order of every Frame image (the Frame contract, vision.types): YuNet and SFace
+# expect BGR and nothing in core converts. Declared, not measured from the pixels.
+CHANNEL_ORDER = "BGR"
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
 LightTap = Callable[[np.ndarray], object]
@@ -176,6 +187,13 @@ class _FaceState:
     announced: str | None = None
     reported: bool = False
     yaws: deque[tuple[float, float]] = field(default_factory=deque)  # (capture stamp, yaw)
+    # Debug report only (SPEC 12A): the last frame's raw yaw and eye span in detector pixels,
+    # the published (smoothed) yaw and the camera-frame and base-frame bearings.
+    yaw: float | None = None
+    eye_px: float | None = None
+    published_yaw: float | None = None
+    camera_bearing: tuple[float, float] | None = None
+    base_azimuth: float | None = None
 
 
 @dataclass
@@ -269,6 +287,16 @@ class _Consumers:
         return key[0] in self.autoenroll or self.votes(key) or _covers(self.records.keep, key)
 
 
+def _round(value: float | None, digits: int = REPORT_DIGITS) -> float | None:
+    """``value`` rounded for the debug report; None stays None."""
+    return None if value is None else round(float(value), digits)
+
+
+def _deg(rad: float | None) -> float | None:
+    """Radians to degrees rounded for the debug report; None stays None."""
+    return None if rad is None else _round(math.degrees(rad))
+
+
 def _extent(camera: CameraModel, box: Box) -> float:
     """Angular height of a pixel box: the elevation from its top edge to its bottom edge, along
     its centre column (the world model's ``extent_rad``, SPEC 5A)."""
@@ -339,6 +367,8 @@ class VisionPipeline:
         self.object_crop = CropSchedule(cfg.object_crop)
         self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
         self.motion_wanted: Callable[[], bool] = lambda: False
+        self.landmarks_wanted: Callable[[], bool] = lambda: False
+        self._frame_size: tuple[int, int] | None = None
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}
@@ -596,6 +626,8 @@ class VisionPipeline:
             "objects": objects,
             "entity_embeds": entity_embeds,
             "embed_worker": self._embed_worker_report(),
+            "frame": self._frame_facts(),
+            "faces": self._face_report(),
         }
 
     def _embed_worker_report(self) -> dict[str, Any]:
@@ -606,6 +638,49 @@ class VisionPipeline:
         if self.embed_worker is None:
             return {"state": "inline"}
         return self.embed_worker.snapshot(self.cfg.timing_window_s)
+
+    def _frame_facts(self) -> dict[str, Any]:
+        """The last face-detection frame's size, the detector input, the letterbox scale between
+        them and the declared channel order (``CHANNEL_ORDER``); sizes None before a frame."""
+        size = self._frame_size
+        w, h = self.cfg.detector_width_px, self.cfg.detector_height_px
+        return {
+            "width_px": size[0] if size else None,
+            "height_px": size[1] if size else None,
+            "channel_order": CHANNEL_ORDER,
+            "detector_input_px": [w, h],
+            "letterbox_scale": letterbox_scale(*size, w, h) if size else None,
+        }
+
+    def _face_report(self) -> list[dict[str, Any]]:
+        """The visible face tracks of the last face run (at most ``FACE_REPORT_MAX``) with the
+        numbers behind their head yaw: the last frame's yaw and the published smoothed one
+        (deg), the eye span in detector pixels, the box size in camera pixels, the score,
+        whether recognised, and the bearing in the camera frame and in the base frame (deg).
+        Numbers only: no landmark, image or registry id. Read from the report thread over
+        one reference swap, like ``face_overlay``."""
+        out = []
+        for track in self._visible[:FACE_REPORT_MAX]:
+            state = self._faces.get(track.track_id)
+            if state is None:
+                continue
+            x1, y1, x2, y2 = track.box
+            bearing = state.camera_bearing
+            out.append(
+                {
+                    "track_id": track.track_id,
+                    "known": state.owner_id is not None,
+                    "yaw_deg": _deg(state.yaw),
+                    "yaw_smoothed_deg": _deg(state.published_yaw),
+                    "eye_px": _round(state.eye_px),
+                    "box_px": [_round(x2 - x1), _round(y2 - y1)],
+                    "score": _round(track.score, 2),
+                    "camera_azimuth_deg": _deg(bearing[0] if bearing else None),
+                    "camera_elevation_deg": _deg(bearing[1] if bearing else None),
+                    "base_azimuth_deg": _deg(state.base_azimuth),
+                }
+            )
+        return out
 
     def _camera(self, width: int, height: int) -> CameraModel:
         key = (width, height)
@@ -745,6 +820,11 @@ class VisionPipeline:
         result = self.face_tracker.update(dets, frame.stamp)
         self._face_lost_held = self._face_lost_s()
         self._visible = result.visible
+        width, height = frame.image.shape[1], frame.image.shape[0]
+        self._frame_size = (width, height)
+        to_detector = letterbox_scale(
+            width, height, self.cfg.detector_width_px, self.cfg.detector_height_px
+        )
         for track_id in result.removed_ids:
             self._drop_face(track_id)
         for track in result.visible:
@@ -752,7 +832,7 @@ class VisionPipeline:
             if state is None:
                 state = self._faces[track.track_id] = self._new_face(track, frame.stamp)
             state.last_seen = frame.stamp
-            self._track_yaw(track, state, frame.stamp)
+            self._track_yaw(track, state, frame.stamp, to_detector)
             self._evaluate_face(frame, track, state)
             self._publish_face(frame, camera, track, state)
         if self.face_tap is not None:
@@ -771,12 +851,26 @@ class VisionPipeline:
         """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
         None)``, for the web UI's live preview. Read on demand from another thread; no cost per
         frame beyond one reference swap."""
-        visible = self._visible
+        return self._face_rows(self._visible)
+
+    def _face_rows(self, visible: list[Track]) -> list[tuple[Box, str | None]]:
         out: list[tuple[Box, str | None]] = []
         for track in visible:
             state = self._faces.get(track.track_id)
             out.append((track.box, state.owner_id if state is not None else None))
         return out
+
+    def _marks(self, track: Track) -> FaceMarks:
+        """The track's landmarks (camera pixels, from its last matched detection) and its
+        published head yaw, for the preview only (``webui.live.video_landmarks``)."""
+        det = track.detection
+        lm = det.landmarks if det is not None else None
+        points = None
+        if lm is not None and np.all(np.isfinite(lm)):
+            points = tuple((float(x), float(y)) for x, y in np.asarray(lm, dtype=float))
+        state = self._faces.get(track.track_id)
+        yaw = state.published_yaw if state is not None else None
+        return FaceMarks(points, None if yaw is None else math.degrees(yaw))
 
     def object_overlay(self) -> list[tuple[Box, str, str | None]]:
         """The confirmed animal and object tracks of the last object run (on a crop, also those
@@ -805,18 +899,24 @@ class VisionPipeline:
         that one for a poll period, then shows newer frames without face boxes)."""
         objects = tuple(self.object_overlay())
         if report.faces_detected:
-            return PreviewOverlay(tuple(self.face_overlay()), objects)
+            visible = self._visible
+            marks = tuple(self._marks(t) for t in visible) if self.landmarks_wanted() else ()
+            return PreviewOverlay(tuple(self._face_rows(visible)), objects, marks=marks)
         if math.isinf(self.governor.period("detection")):
             return PreviewOverlay(objects=objects)
         return PreviewOverlay(objects=objects, faces_current=False)
 
-    def _track_yaw(self, track: Track, state: _FaceState, stamp: float) -> None:
+    def _track_yaw(self, track: Track, state: _FaceState, stamp: float, to_detector: float) -> None:
         """Add this frame's head yaw (from the matched detection's landmarks) to the track's
-        history; a frame without usable landmarks adds nothing."""
+        history; a frame without usable landmarks adds nothing. Keeps the raw yaw and the eye
+        span in detector pixels (``to_detector``: the letterbox scale) for the debug report,
+        also when the span is too small for a yaw."""
         det = track.detection
         cfg = self.cfg
         lm = det.landmarks if det is not None else None
         yaw = head_yaw(lm, cfg.facing_nose_depth_ratio, cfg.facing_min_eye_px)
+        span = eye_span(lm)
+        state.yaw, state.eye_px = yaw, None if span is None else span * to_detector
         if yaw is not None:
             state.yaws.append((stamp, yaw))
 
@@ -889,6 +989,13 @@ class VisionPipeline:
             if self._publish("person.recognized", recognized, frame.stamp):
                 state.announced = owner
                 self._mark_seen(owner)
+        facing = smoothed(state.yaws, frame.stamp, self.cfg.facing_window_s)
+        state.published_yaw, state.camera_bearing = facing, (azimuth, elevation)
+        state.base_azimuth = (
+            to_base_frame(azimuth, elevation, frame.joint_state, self.frame_spec)[0]
+            if self.frame_spec is not None
+            else None
+        )
         obs = Observation(
             kind=PERSON,
             stamp=frame.stamp,
@@ -898,8 +1005,9 @@ class VisionPipeline:
             category=PERSON,
             identity=owner,
             confidence=min(1.0, max(0.0, track.score)),
-            facing_yaw_rad=smoothed(state.yaws, frame.stamp, self.cfg.facing_window_s),
+            facing_yaw_rad=facing,
             extent_rad=extent,
+            facing_eye_px=state.eye_px,
         )
         self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 

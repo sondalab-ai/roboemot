@@ -288,7 +288,10 @@ class WorldModel:
         """Add a face observation's head yaw to the entry's history, dropping readings older
         than ``world.facing_history_s``; one without a yaw (a sound bearing, no usable
         landmarks) or older than the last reading adds nothing. A new tuple each time, so
-        published copies never change under their readers."""
+        published copies never change under their readers. The observation's eye span, when it
+        has one, replaces the entry's (diagnostics only)."""
+        if obs.facing_eye_px is not None:
+            entry.facing_eye_px = obs.facing_eye_px
         if obs.facing_yaw_rad is None or (entry.facing and obs.stamp <= entry.facing[-1][0]):
             return
         oldest = obs.stamp - self.cfg.facing_history_s

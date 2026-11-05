@@ -25,6 +25,7 @@ import onnxruntime as ort
 
 from ..config.schema import DINO_INPUT_PX, DINO_PATCH_PX, VisionConfig
 from . import models
+from .geometry import letterbox_scale
 from .models import ModelError
 from .types import Box, Detection
 
@@ -121,7 +122,7 @@ class YuNetDetector:
         landmarks are scaled back to the original pixels. The lowest scores feed the tracker.
         """
         w, h = self._size
-        scale = min(w / image.shape[1], h / image.shape[0])
+        scale = letterbox_scale(image.shape[1], image.shape[0], w, h)
         nw, nh = int(image.shape[1] * scale), int(image.shape[0] * scale)
         canvas = np.zeros((h, w, CHANNELS), np.uint8)
         canvas[:nh, :nw] = cv2.resize(image, (nw, nh))

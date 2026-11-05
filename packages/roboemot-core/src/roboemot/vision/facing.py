@@ -10,8 +10,10 @@ into the lens reads about 0. Sign: positive when the face turns toward the
 robot's left (the azimuth convention), i.e. the nose moves toward the left of the image.
 
 The vision pipeline keeps a short history per face track and publishes the median over
-``vision.facing_window_s`` (``smoothed``). Landmarks never leave this module; only the angle
-does (SPEC 12).
+``vision.facing_window_s`` (``smoothed``). Only the angle and the eye span (``eye_span``, a
+number for the debug report) go to the world and the report (SPEC 12); the landmarks
+themselves reach only the local live preview, and only while ``webui.live.video_landmarks``
+is on (SPEC 11A).
 """
 
 from __future__ import annotations
@@ -43,6 +45,17 @@ def head_yaw(
         return None
     offset = float(np.dot(pts[NOSE] - (pts[LEFT_EYE] + pts[RIGHT_EYE]) / 2, axis)) / span**2
     return -math.atan(offset / nose_depth_ratio)
+
+
+def eye_span(landmarks: np.ndarray | None) -> float | None:
+    """Distance between the two eye landmarks in the landmarks' pixels; None without 5 finite
+    landmarks. Multiply by the letterbox scale for detector pixels."""
+    if landmarks is None:
+        return None
+    pts = np.asarray(landmarks, dtype=float)
+    if pts.shape != (LANDMARKS, 2) or not np.all(np.isfinite(pts)):
+        return None
+    return float(np.hypot(*(pts[LEFT_EYE] - pts[RIGHT_EYE])))
 
 
 def smoothed(history: deque[tuple[float, float]], stamp: float, window_s: float) -> float | None:

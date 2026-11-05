@@ -35,6 +35,8 @@ class Observation:
     embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
     facing_yaw_rad: float | None = None  # a face's head yaw, 0 looking at the camera (SPEC 8)
     extent_rad: float | None = None  # angular height of the detection box (SPEC 5A)
+    # eye span of the latest landmarks behind facing_yaw_rad, in face-detector pixels (SPEC 12A)
+    facing_eye_px: float | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in get_args(ObservationKind):
@@ -64,6 +66,8 @@ class Entry:
     facing: tuple[tuple[float, float], ...] = ()
     # angular height of the detection box, blended like the bearing (SPEC 5A, Joint attention)
     extent_rad: float | None = None
+    # the latest face observation's eye span in face-detector pixels (debug report, SPEC 12A)
+    facing_eye_px: float | None = None
 
     def public(self) -> Entry:
         """A copy safe to publish: no embedding, own ``sources`` set."""

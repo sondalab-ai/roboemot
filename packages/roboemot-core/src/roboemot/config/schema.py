@@ -3689,6 +3689,13 @@ class VoiceFacingConfig(Strict):
         "sample covers the whole time since the previous one",
         unit="s", ge=0.1, le=60,
     )  # fmt: skip
+    report_checks: int = param(
+        10,
+        "How many of the latest facing checks the debug report keeps with their numbers (the "
+        "face used, its yaw and eye span, the sound bearing, the head and body yaw); counts "
+        "and the yaw summary are kept regardless",
+        ge=1, le=64,
+    )  # fmt: skip
 
 
 # ------------------------------------------------------------------- realtime route (SPEC 8)
@@ -5203,6 +5210,13 @@ class LiveConfig(Strict):
         "tab for a logged-in page; needs webui.live.enabled. Off by default because it shows the "
         "room. Frames are never saved or logged; the page shows a banner while it is watched",
         opt_in=True,
+    )
+    video_landmarks: bool = param(
+        False,
+        "Draw the face detector's 5 landmarks (eyes, nose tip, mouth corners) as dots on each "
+        "face of the live preview, with the head yaw the facing check uses (voice.facing) as a "
+        "label, to check on the robot what the yaw is measured from. Only on the local preview; "
+        "nothing is stored or logged",
     )
     video_fps: float = param(
         3.0,
