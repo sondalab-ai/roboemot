@@ -420,6 +420,8 @@ def test_open_perception_gives_the_live_pipeline_an_embed_worker(tmp_path, monke
             appearance_embedder=app,
             object_detector=ObjectMock([]),
             objects_unavailable=None,
+            object_tracker=None,
+            object_track_unavailable=None,
         )
 
     class Source:

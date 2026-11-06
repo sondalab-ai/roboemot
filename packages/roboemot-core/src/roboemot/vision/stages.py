@@ -43,6 +43,16 @@ class ObjectDetector(Protocol):
     def detect(self, image: np.ndarray) -> list[Detection]: ...
 
 
+class SingleObjectTracker(Protocol):
+    """Follows one box from frame to frame (the shown object between object detector runs):
+    ``init`` starts on ``box`` in ``image``, again for a new box; ``update`` returns the box in
+    the next image and the tracker's own score (0 to 1, low once the thing is gone)."""
+
+    def init(self, image: np.ndarray, box: Box) -> None: ...
+
+    def update(self, image: np.ndarray) -> tuple[Box, float]: ...
+
+
 @runtime_checkable
 class PerceptionModule(Protocol):
     """A perception plugin: consumes frames, publishes percepts on the bus (SPEC 11)."""

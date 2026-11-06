@@ -59,6 +59,20 @@ models:
         url: https://github.com/RangiLyu/nanodet/releases/download/v1.0.0-alpha-1/nanodet-plus-m_320.onnx
         sha256: 4f12723cce3d48e47ca92cb925ba74d97a965c069208edca660bbb9f7ce2c610
         size_bytes: 4793615
+  - name: vittrack
+    role: object_tracker
+    licence: Apache-2.0
+    source: https://github.com/opencv/opencv_zoo/tree/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/object_tracking_vittrack
+    notes: >-
+      VitTrack (opencv_zoo object_tracking_vittrack_2023sep), the single-object tracker that
+      follows the shown object between NanoDet runs (SPEC 5, 13); loaded by OpenCV's
+      cv2.TrackerVit (OpenCV 4.9 or later). URL pinned to opencv_zoo commit f88e9b2 (tag 4.10.0);
+      the sha256 is the Git LFS object id of the file at that commit.
+    files:
+      - path: opencv_zoo/object_tracking_vittrack_2023sep.onnx
+        url: https://github.com/opencv/opencv_zoo/raw/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/object_tracking_vittrack/object_tracking_vittrack_2023sep.onnx
+        sha256: 2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d
+        size_bytes: 714726
 # Files of models that were replaced or removed (SPEC 5, 13; the yolo11n-face-age age model went
 # with the owner decision 2026-10-23 to estimate no age): `roboemot models prune` deletes them
 # and their markers from a models folder that still has them. Nothing loads them any more.

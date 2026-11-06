@@ -55,6 +55,8 @@ class ExitApp(app_module.RoboEmotApp):
             appearance_embedder=None,
             object_detector=None,
             objects_unavailable=None,
+            object_tracker=None,
+            object_track_unavailable=None,
         )
 
 
