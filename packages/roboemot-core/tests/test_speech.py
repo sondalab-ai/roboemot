@@ -1218,6 +1218,9 @@ class AsideSink(FakeSink):
         self.asides.append((samples.size, rate_hz, float(np.max(np.abs(samples)))))
         return time.monotonic() + samples.size / rate_hz
 
+    def cut_aside(self):
+        return False
+
     def playing_until(self):
         return max(time.monotonic(), self.busy_until) if self.busy_until > 0 else time.monotonic()
 

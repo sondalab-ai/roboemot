@@ -47,6 +47,8 @@ instead of starting a second one. A lead of 0 hands everything over at once, as 
 cues): resampled at once (the speech stream is left alone) and queued like any audio, but it opens
 only the gate's own-sound window (``SpeechActivity.extend_own``), never the speaking window, so
 the listener, barge-in and the realtime input do not take it for the robot's voice.
+``cut_aside`` drops such a sound still pending or playing, flushed like a stop, when the answer's
+first audio comes (SPEC 8, S3: the answer never waits behind it); it never cuts speech.
 
 Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
 never logged or published.
@@ -116,10 +118,14 @@ class ReachySpeaker:
         self._pending_n = 0
         self._aside_s = 0.0  # length of the last aside sound (``push_aside``)
         self._handed = -math.inf  # monotonic stamp at which the audio handed over has played
+        self._speech_handed = -math.inf  # ... the speech among it (``cut_aside`` spares it)
         self._duck: DuckGain | None = None
         self._pacer: threading.Thread | None = None
         self._closing = False
-        self._counts = {"pieces": 0, "underruns": 0, "late": 0, "restamped": 0, "pacer_reused": 0}
+        self._counts = {
+            "pieces": 0, "underruns": 0, "late": 0, "restamped": 0, "pacer_reused": 0,
+            "asides_cut": 0,
+        }  # fmt: skip
         self._gap_ms = {"underrun_ms": 0.0, "late_ms": 0.0, "restamped_ms": 0.0}
         self._at_stop_ms: list[float] = []  # last and max pending audio dropped by a stop
 
@@ -318,6 +324,8 @@ class ReachySpeaker:
         if self._reference is not None:
             self._reference.add(begins, resample(played, self._out_hz, self._reference.rate_hz))
         self._handed = begins + piece.size / self._out_hz
+        if speech:
+            self._speech_handed = self._handed
         self._pushed += piece.size
         self._counts["pieces"] += 1
         self._extend(speech)  # under the lock; a restamp moved the end later
@@ -391,30 +399,49 @@ class ReachySpeaker:
         """Seconds of pushed audio still to play."""
         return max(0.0, self.playing_until() - self._clock())
 
+    def cut_aside(self) -> bool:
+        """The answer's first audio comes while an aside sound (the listening blip) may still be
+        queued or playing (SPEC 8, Non-verbal cues, S3): drop it, flushed as ``stop`` flushes,
+        so the answer starts at once and nothing of the sound plays over it. Only when no
+        speech is held: the robot's voice is never cut here. Whether it cut anything."""
+        with self._lock:
+            now = self._clock()
+            if any(speech for _, _, speech in self._pending) or self._speech_handed > now:
+                return False
+            if not self._pending and self._handed <= now:
+                return False  # it played already
+            self._flush(now)
+            self._counts["asides_cut"] += 1
+            return True
+
     def stop(self) -> None:
         """Barge-in: drop the queued audio now (``clear_player``),
         abandon the pieces of a push in flight and reset the queued duration."""
         with self._lock:  # held throughout: no push lands between the flush and the reset
-            self._generation += 1
-            self._stream, self._stream_hz = None, 0  # the next push starts a fresh stream
             now = self._clock()
             if self._pending_n:
                 dropped = self._pending_s() * MS_PER_S
                 top = self._at_stop_ms[1] if self._at_stop_ms else dropped
                 self._at_stop_ms = [dropped, max(top, dropped)]
-            self._drop_pending()
-            self._handed = now
-            if self._reference is not None:
-                self._reference.truncate(now)
-            if self._playing:
-                audio = self._mini.media.audio
-                try:
-                    if audio is not None:
-                        audio.clear_player()
-                except Exception as exc:
-                    log.warning("speaker: flush: %s", type(exc).__name__)
-            if self._activity is not None:
-                self._activity.reset(now)
+            self._flush(now)
+
+    def _flush(self, now: float) -> None:
+        """Drop everything queued and pending at ``now`` (the lock is held): ``stop``'s cut."""
+        self._generation += 1
+        self._stream, self._stream_hz = None, 0  # the next push starts a fresh stream
+        self._drop_pending()
+        self._handed = self._speech_handed = now
+        if self._reference is not None:
+            self._reference.truncate(now)
+        if self._playing:
+            audio = self._mini.media.audio
+            try:
+                if audio is not None:
+                    audio.clear_player()
+            except Exception as exc:
+                log.warning("speaker: flush: %s", type(exc).__name__)
+        if self._activity is not None:
+            self._activity.reset(now)
 
     def snapshot(self) -> dict[str, Any]:
         """State for the debug report: counts and durations only."""

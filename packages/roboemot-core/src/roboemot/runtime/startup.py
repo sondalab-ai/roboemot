@@ -280,6 +280,7 @@ def bind_barge_in(
     audio_in = listener.realtime_input
     if audio_in is not None:
         audio_in.on_confirm = bargein.confirm
+        bargein.on_stop = audio_in.route.note_barge_in  # both modes side by side (SPEC 13)
 
 
 def start_all(
