@@ -45,7 +45,9 @@ def pipeline():
         perception=SimpleNamespace(registry=SimpleNamespace(get_person=people.__getitem__)),
         world=SimpleNamespace(entries=[face]),
         reflexes=SimpleNamespace(last_fired=lambda now: None),
-        loop=SimpleNamespace(motors_off=False, external=False, clock=lambda: NOW),
+        loop=SimpleNamespace(
+            motors_off=False, external=False, unreachable_held=False, clock=lambda: NOW
+        ),
     )  # fmt: skip
 
 
@@ -190,7 +192,7 @@ def test_the_tab_strings_exist_in_both_languages_for_every_value_the_state_can_h
     live = {k for k in EN if k.startswith(("live_", "err_live_"))}
     assert live and live == {k for k in IT if k.startswith(("live_", "err_live_"))}
     needed = [f"live_phase_{p}" for p in (IDLE, LISTENING, THINKING, SPEAKING)]
-    needed += [f"live_motion_{s}" for s in ("writing", "external", "motors_off")]
+    needed += [f"live_motion_{s}" for s in ("writing", "external", "held", "motors_off")]
     needed += [f"live_circ_{s}" for s in ("awake", "drowsy", "resting")]
     needed += [f"live_part_{p}" for p in ("app_tick", "vision", "light_reader", "listener")]
     needed += ["err_live_disabled", "err_live_unavailable", "tab_live"]

@@ -269,7 +269,12 @@ class LiveState:
     def _motion(self) -> dict[str, Any]:
         loop = self._p.loop  # two flags read without the loop's lock: never waits for a tick
         off = loop.motors_off or self._p.sleep.asleep
-        state = "motors_off" if off else "external" if loop.external else "writing"
+        if off:
+            state = "motors_off"
+        elif loop.external:
+            state = "external"
+        else:  # holding on an unreachable target (SPEC 12A): the loop writes nothing there
+            state = "held" if loop.unreachable_held else "writing"
         return {"state": state}
 
     def _system(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any]:

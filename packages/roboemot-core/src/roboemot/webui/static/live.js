@@ -130,7 +130,7 @@ function liveReflexesCard(d) {
 
 function liveMotionCard(d) {
   const s = d.motion.state;
-  const tone = { writing: "success", external: "warning", motors_off: "info" }[s] || "info";
+  const tone = { writing: "success", external: "warning", held: "warning", motors_off: "info" }[s] || "info";
   return card(t("tab_live"), t("live_motion"), el("p", {}, badge(state.strings["live_motion_" + s] || s, tone)));
 }
 
