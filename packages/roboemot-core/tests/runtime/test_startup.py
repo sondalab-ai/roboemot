@@ -102,6 +102,7 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
         stream_playback=lambda samples, stamp: False,
         end_playback=lambda: None,
         server_turns=lambda: False,
+        playback_job=lambda: None,
         realtime_input=audio_in,
     )
     cut_own = lambda: False  # noqa: E731
@@ -112,6 +113,7 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
         "playback": listener.stream_playback,
         "end_playback": listener.end_playback,
         "server_mode": listener.server_turns,
+        "playback_job": listener.playback_job,
     }
     assert bound == [(actions, {"cut_own": cut_own, **server})]
     # S2: the server's speech_started of a barge-in's stream confirms it

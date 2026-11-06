@@ -167,6 +167,7 @@ class InputJob:
         # a stream opened during the robot's speech by a barge-in (S2): its pieces go while the
         # robot speaks, and the server's speech_started for it confirms the barge-in
         self.playback = False
+        self.confirmed = False  # the server's speech_started for that stream came (S2)
 
     def __repr__(self) -> str:
         return f"InputJob(done={self.done}, refused={self.refused!r})"
@@ -344,7 +345,7 @@ class RealtimeInput:
         self._owed: list[_Owed] = []
         # the barge-in's confirmation (S2): called (client thread, no lock held) when the
         # server's VAD starts speech of a stream opened during the robot's speech
-        self.on_confirm: Callable[[], None] | None = None
+        self.on_confirm: Callable[[InputJob], None] | None = None
         route.input = self
 
     # ----------------------------------------------------------------- listener side
@@ -713,6 +714,7 @@ class RealtimeInput:
             tools=tools,
             hold=self._hold(job),
             track=track,
+            interrupt=job.playback,  # S2: only a barge-in's stream lets the server interrupt
         )
         if why is not None:
             job._end(refused=why)
@@ -1097,7 +1099,7 @@ class RealtimeInput:
                 return  # a reset session's event still in flight: it ended with the session
             streams = [s for s in self._streams if s.generation == gen]
             cut = None
-            confirm = False
+            confirm: InputJob | None = None
             if isinstance(event, protocol.SpeechBoundary):
                 confirm = self._stream_boundary(event, gen, streams)
                 if event.item_id is None:  # learnt after a cut: that turn cannot be deleted
@@ -1121,11 +1123,11 @@ class RealtimeInput:
                 else:
                     self._transcript(owner, item, event.text)
             finished, gone, lost = self._results(streams)
-        if confirm:
+        if confirm is not None:
             self.route.count("playback_confirms")
-        if confirm and self.on_confirm is not None:  # first: the barge-in's stop (S2)
+        if confirm is not None and self.on_confirm is not None:  # first: the barge-in's stop
             try:
-                self.on_confirm()
+                self.on_confirm(confirm)
             except Exception as exc:
                 log.warning("realtime input: barge-in confirm: %s", type(exc).__name__)
         self._conclude(finished, delete + gone, undeletable + lost)
@@ -1134,11 +1136,11 @@ class RealtimeInput:
 
     def _stream_boundary(
         self, event: protocol.SpeechBoundary, gen: int, streams: list[_Burst]
-    ) -> bool:
+    ) -> InputJob | None:
         """A ``speech_started``/``stopped`` of session ``gen`` for the live streams (lock
-        held). True when it is the start of a barge-in's stream (``playback``, S2): the
-        server heard the person over the robot, which confirms the barge-in, also once the
-        stream was cut (its release) or closed. A start of any older stream is not."""
+        held). The job of a barge-in's stream (``playback``, S2) when it is that stream's
+        start: the server heard the person over the robot, which confirms the barge-in, also
+        once the stream was cut (its release) or closed. A start of any older stream is not."""
         item = event.item_id
         if item is None:
             self._idless = gen  # its items cannot be deleted: a cut resets it
@@ -1147,7 +1149,10 @@ class RealtimeInput:
             if head is not None and not head.placed:  # the older ones are covered: it is next
                 session, end_ms = self._end
                 head.start_ms, head.placed = (end_ms if session == gen else 0.0), True
-            confirm = head is not None and head.job.playback and head.holds(event.audio_ms)
+            confirm = None
+            if head is not None and head.job.playback and head.holds(event.audio_ms):
+                confirm = head.job
+                confirm.confirmed = True
             if head is not None and head.holds(event.audio_ms):
                 if head.closed and len(head.order) > head.max_items:
                     head.overflow = True  # bounded: an ended stream's items are not kept
@@ -1182,7 +1187,7 @@ class RealtimeInput:
         self._owed.append(_Owed(gen, owner, event.audio_ms, self._clock()))
         while len(self._owed) > self._dead_limit:  # bounded: one per item at most
             self._owed.pop(0)
-        return False
+        return None
 
     def _results(
         self, streams: list[_Burst]

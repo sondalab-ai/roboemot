@@ -89,8 +89,9 @@ def test_server_turns_let_the_server_answer_and_robot_turns_do_not(ears):  # noq
         assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
         updates = server.of("session.update")
         assert all(detect(u)["create_response"] is True for u in updates)  # connect, opening
-        # S2: the server's VAD cancels its own answer when it hears the person (barge-in)
-        assert all(detect(u)["interrupt_response"] is True for u in updates)
+        # S2: only a barge-in's stream lets the server interrupt its answer; an ordinary
+        # stream's opening (and the connect) keep it off, so a pause never cuts the answer
+        assert all(detect(u)["interrupt_response"] is False for u in updates)
         cfg = ear.rt.stack.effective()
         assert detect(session_update(cfg, "x", create_response=False))["create_response"] is False
     with TurnServer() as server:
@@ -698,7 +699,9 @@ def test_a_server_that_never_answers_gets_the_not_heard_cue(ears):  # noqa: F811
         ear.say()
         assert ear.settle(lambda: "not_heard" in ear.rt.cues.played, 10.0)
         assert not ear.rt.worker._unclaimed and server.of("response.create") == []
-        assert "in_1_0" in {e["item_id"] for e in server.of("conversation.item.delete")}
+        # the delete is queued before the cue plays, and reaches the server after it
+        deleted = lambda: {e["item_id"] for e in server.of("conversation.item.delete")}  # noqa: E731
+        assert wait_until(lambda: "in_1_0" in deleted())
 
 
 def test_a_server_without_end_positions_answers_nothing_and_shows_the_cue(ears):  # noqa: F811

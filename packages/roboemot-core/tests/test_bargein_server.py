@@ -110,16 +110,18 @@ def test_the_duck_is_held_until_the_confirmation_not_released_by_a_pause():
     assert ins(w)["false"] == {"robot": 0, "server": 0}
 
 
-def test_a_late_confirmation_after_the_release_still_stops_the_robot():
-    """With interrupt_response the server has cancelled its answer: the robot stops and
-    truncates rather than play the rest of what it had."""
-    w, server, _ = server_world()
+def test_a_late_confirmation_after_the_release_stops_and_keeps_the_persons_words():
+    """Finding 7: the server has cancelled its answer, so the robot stops and truncates; its
+    stream was cut, so the listener restarts on the audio the barge-in kept, as a local cut
+    does, and the person's words are not lost."""
+    w, server, resumed = server_world()
     barge(w)
     w.feed(w.cfg.voice.barge_in.duck.confirm_ms / 1000 + 0.2)
     assert server.ended == 1
     w.bargein.confirm()
-    w.feed(0.1)
+    w.feed(0.1, user_voice(0.1, 0.21))
     assert len(w.stops) == 1 and ins(w)["server_confirmed_late"] == 1
+    assert resumed
 
 
 def test_a_confirmation_with_nothing_waiting_stops_nothing():
@@ -166,13 +168,16 @@ def test_the_robots_answer_ending_first_leaves_the_stream_to_go_on():
     assert w.stops == [] and ins(w)["confirms_idle"] == 1
 
 
-def test_the_stop_keyword_still_cuts_while_the_server_decides():
+def test_the_stop_keyword_while_the_server_decides_cuts_and_ends_the_stream():
+    """Finding 3: the stop keyword still cuts locally, and the barge-in's stream ends with it
+    (cut: a fragment, never answered)."""
     w, server, _ = server_world()
     barge(w)
     w.bargein._trigger("keyword", w.rig.t, w.rig.t, np.empty(0, np.float32), path="keyword")
     assert len(w.stops) == 1 and w.bargein.snapshot()["keyword_triggers"] == 1
-    w.feed(2.0)  # the release never comes: nothing waits any more
-    assert server.ended == 0 and ins(w)["released_unconfirmed"] == 0
+    assert server.ended == 1
+    w.feed(2.0)  # nothing waits any more: no release follows
+    assert server.ended == 1 and ins(w)["released_unconfirmed"] == 0
 
 
 def test_a_quiet_candidate_released_counts_as_a_false_barge_in_of_its_mode():
@@ -184,10 +189,59 @@ def test_a_quiet_candidate_released_counts_as_a_false_barge_in_of_its_mode():
     assert bi.snapshot()["barge_ins"]["false"] == {"robot": 1, "server": 0}
 
 
-def test_confirm_ms_may_not_outlast_the_ducks_safety_cap():
-    import pytest
+def test_confirm_ms_needs_the_admin():
+    """Finding 5: it bounds the audio that leaves unconfirmed."""
+    from roboemot.config.schema import BargeInDuckConfig
 
-    with pytest.raises(ValueError, match="confirm_ms"):
-        RoboEmotConfig.model_validate(
-            {"voice": {"barge_in": {"duck": {"confirm_ms": 4000, "max_episode_s": 3}}}}
-        )
+    extra = BargeInDuckConfig.model_fields["confirm_ms"].json_schema_extra
+    assert extra["admin_only"] is True
+
+
+def test_a_reload_that_turns_barge_in_off_ends_the_wait_at_the_next_chunk():
+    """Finding 2: the stream's bound never depends on barge-in running."""
+    w, server, _ = server_world()
+    barge(w)
+    off = RoboEmotConfig.model_validate(
+        {"voice": {"barge_in": {"enabled": False, "keyword_enabled": False}}}
+    )
+    w.bargein.apply_config(off)
+    w.feed(0.1)
+    assert server.ended == 1 and w.stops == []
+    assert not w.bargein.duck.ducking(w.rig.t)
+
+
+def test_chunks_it_cannot_read_still_end_the_wait_on_time():
+    """Finding 2: a chunk at another rate is no frame, but its stamp still ends the wait."""
+    from types import SimpleNamespace
+
+    w, server, _ = server_world()
+    barge(w)
+    late = w.rig.t + w.cfg.voice.barge_in.duck.confirm_ms / 1000 + 0.1
+    w.bargein.on_chunk(
+        SimpleNamespace(samples=np.zeros(80, np.float32), rate_hz=8000, stamp=late, gap=False)
+    )
+    assert server.ended == 1
+
+
+def test_a_confirmation_of_another_stream_is_idle():
+    w, server, _ = server_world()
+    mine, other = object(), object()
+    w.bargein._playback_job = lambda: mine
+    barge(w)
+    w.bargein.confirm(other)
+    w.feed(0.1, user_voice(0.1, 0.21))
+    assert w.stops == [] and ins(w)["confirms_idle"] == 1
+    w.bargein.confirm(mine)
+    w.feed(0.1, user_voice(0.1, 0.21))
+    assert len(w.stops) == 1 and ins(w)["server_confirmed"] == 1
+
+
+def test_a_confirmation_from_a_window_that_ended_is_dropped_with_it():
+    w, server, _ = server_world()
+    barge(w)
+    w.bargein.reset()  # the answer ended on its own
+    w.bargein.confirm()
+    w.bargein.reset()  # ... and the window's confirmation goes with the next end
+    w.speak(2.0)
+    w.feed(0.3)
+    assert w.stops == [] and ins(w)["confirms_idle"] == 0

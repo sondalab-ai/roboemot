@@ -235,10 +235,13 @@ def response_create(
     return event
 
 
-def response_cancel(response_id: str | None = None) -> dict[str, Any]:
+def response_cancel(response_id: str | None = None, event_id: str | None = None) -> dict[str, Any]:
     """``response.cancel``; ``response_id`` names the response (a server-created one the robot
-    drops while another may be active), left out otherwise."""
+    drops while another may be active), left out otherwise; ``event_id`` names the event, so an
+    error about it (nothing active to cancel) says it is about this cancel (S2)."""
     event: dict[str, Any] = {"type": RESPONSE_CANCEL}
+    if event_id:
+        event["event_id"] = event_id
     if response_id:
         event["response_id"] = response_id
     return event
@@ -259,9 +262,11 @@ class ServerEvent:
 
 @dataclass(frozen=True)
 class SessionEvent(ServerEvent):
-    """``session.created`` or ``session.updated``; ``output_rate_hz`` when the server says."""
+    """``session.created`` or ``session.updated``; ``output_rate_hz`` when the server says;
+    ``interrupt_response`` as its turn detection says (None: it does not say)."""
 
     output_rate_hz: int | None = None
+    interrupt_response: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -426,7 +431,11 @@ def _session(kind: str, data: dict[str, Any]) -> SessionEvent:
     audio = _obj(session.get("audio", {}))
     output = _obj(audio.get("output", {}))
     fmt = _obj(output.get("format", {}))
-    return SessionEvent(kind, _opt_int(fmt, "rate"))
+    detect = _obj(_obj(audio.get("input", {})).get("turn_detection", {}))
+    interrupts = detect.get("interrupt_response")
+    return SessionEvent(
+        kind, _opt_int(fmt, "rate"), interrupts if isinstance(interrupts, bool) else None
+    )
 
 
 def _error(data: dict[str, Any]) -> ServerError:

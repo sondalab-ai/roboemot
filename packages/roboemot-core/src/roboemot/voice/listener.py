@@ -327,6 +327,7 @@ class VoiceListener:
             # those whose stream was refused (the barge-in then cut the robot locally)
             "streamed_during_playback": 0,
             "playback_refused": 0,
+            "playback_unsent": 0,  # its stream's opening was refused later: dropped
             **{f"stream_gated_{gate}": 0 for gate in SERVER_GATES},
             # a listed gate whose detector is off or missing: it fails closed (kept local)
             **{f"stream_gated_{gate}_off": 0 for gate in OFF_GATES},
@@ -337,6 +338,8 @@ class VoiceListener:
         self._playback = False
         self._playback_segment = False
         self._playback_ended = False  # the barge-in's segment ended: back to dropping
+        self._playback_until = -math.inf  # its stream ends here unless the server confirmed
+        self._playback_job: Any = None  # its stream's job, once it opened
         self._last_streamed: tuple[str | None, float] = (None, -math.inf)  # speaker, last speech
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -633,6 +636,9 @@ class VoiceListener:
         if self._playback and speaking and not self._playback_ended:
             if self.music is not None:  # the robot's own sound is never music
                 self.music.gap(start)
+            if start >= self._playback_until and not self._playback_confirmed():
+                # its own bound, whatever the barge-in does (S2: confirm_ms, then it ends)
+                self.end_playback()
             self._speaking_hook(chunk)  # the duck, the confirm and the release (barge-in)
             if self._playback:  # still: the barge-in's segment is heard over the robot (S2)
                 self._ingest(chunk.samples, start, chunk.stamp)
@@ -736,6 +742,8 @@ class VoiceListener:
         self._muted = False
         self._playback = self._playback_segment = True
         self._playback_ended = False
+        self._playback_job = None
+        self._playback_until = start + self._cfg.voice.barge_in.duck.confirm_ms / MS_PER_S
         self._ingest(audio, start, start + audio.size / self._cfg.voice.sample_rate_hz)
         return True
 
@@ -748,6 +756,15 @@ class VoiceListener:
         self._playback = self._playback_segment = False
         self._muted = True
         self._abort()
+
+    def playback_job(self) -> Any:
+        """The stream job of the last barge-in's segment (S2), None before it opened: the
+        barge-in takes the server's confirmation of that stream only."""
+        return self._playback_job
+
+    def _playback_confirmed(self) -> bool:
+        job = self._playback_job
+        return job is not None and job.confirmed
 
     def server_turns(self) -> bool:
         """Whether a barge-in would be confirmed by the server now (``turns: server`` with its
@@ -925,6 +942,8 @@ class VoiceListener:
         if gate is None:
             rate = self._cfg.voice.sample_rate_hz
             s.job = self._realtime.open_stream(held, rate, clock=self._clock, playback=s.playback)
+            if s.playback:
+                self._playback_job = s.job
             return  # counted once its opening went (_announce)
         s.gate = gate
         self._count_audio(f"stream_gated_{gate}")
@@ -1431,6 +1450,11 @@ class VoiceListener:
             # no words of the person)
             self._count_audio("answered_untranscribed")
             self._audio_event(AUDIO_ANSWERED, p)
+            return None
+        if p.stream and job.playback and not job.sent:
+            # a barge-in's segment whose stream never opened: it was heard over the robot's
+            # (ducked) voice, so it is never decoded or given to the wake gate (S2)
+            self._count_audio("playback_unsent")
             return None
         self._count_audio("local_fallbacks")
         self._announce(p)

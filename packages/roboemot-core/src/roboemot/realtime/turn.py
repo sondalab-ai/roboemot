@@ -262,9 +262,12 @@ class ResponseRun:
         """A call ended the turn: cancel, and keep following the response to its end."""
         if self.reply.status is None and not self.reply.cancelled:
             self.reply.cancelled = True
-            if self._request is not None and self._request.interrupted:
-                return  # the server cancels it itself (interrupt_response, S2): no second
-            self.route.send_control(protocol.response_cancel())
+            self.route.cancel_response()  # its own event id: an error about it is benign (S2)
+
+    @property
+    def interrupted(self) -> bool:
+        """The server's VAD interrupted this response on its own (S2): the route marked it."""
+        return self._request is not None and self._request.interrupted is True
 
     def mute(self) -> None:
         """No more audio of this response plays (a skip): new audio items are only recorded

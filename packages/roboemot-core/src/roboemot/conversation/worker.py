@@ -107,7 +107,6 @@ from ..llm.router import (
 )
 from ..persona import apply_to_register, effects
 from ..realtime import protocol as rt_protocol
-from ..realtime.route import server_turns
 from ..realtime.turn import (
     SKIP_TOOL,
     TONE_TOOL,
@@ -1120,8 +1119,7 @@ class ConversationWorker:
                 self._cut_realtime(turn)
             # the server cancelled it on its own (interrupt_response: it heard the person, S2):
             # nothing more is asked and no fallback line is said over the person
-            cancelled = reply.status == CANCELLED and not reply.cancelled
-            interrupted = cancelled and server_turns(turn.cfg)
+            interrupted = reply.status == CANCELLED and run.interrupted
             ended = turn.cut or interrupted or any(r.end_turn for r in results)
             # note_tone is fire-and-forget: only a response of tone calls and no speech gets one
             # more response, once, without the tool (SPEC 8, Tone tool)
@@ -1254,8 +1252,9 @@ class ConversationWorker:
         with self._lock:
             queued = next((u for u, _ in self._pending if isinstance(u, _ServerTurn)), None)
             active, serving = self._active_turn, self._serving
-            if active is not None and active.interrupted and queued is None:
-                # a turn a barge-in cut is ending: the barge-in's own answer is next (S2)
+            barge_in = offer.job.playback and queued is None
+            if barge_in and active is not None and active.interrupted:
+                # a turn the barge-in cut is ending: the barge-in's own answer is next (S2)
                 active = serving = None
             host: _ServerTurn | None
             if active is not None or queued is not None or serving is not None:

@@ -275,6 +275,7 @@ def bind_barge_in(
         playback=listener.stream_playback,
         end_playback=listener.end_playback,
         server_mode=listener.server_turns,
+        playback_job=listener.playback_job,
     )
     audio_in = listener.realtime_input
     if audio_in is not None:

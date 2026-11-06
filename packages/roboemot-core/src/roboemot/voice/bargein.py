@@ -300,6 +300,8 @@ class BargeIn:
         self._released_here = False  # one was released in this speaking window
         self._confirm_lock = threading.Lock()  # leaf: the client thread sets, this one takes
         self._confirmed_flag = False
+        self._confirmed_job: Any = None
+        self._playback_job: Callable[[], Any] = lambda: None
         self._server = dict.fromkeys(SERVER_COUNTS, 0)
         self._false = {"robot": 0, "server": 0}  # episodes released with no stop, by mode
         self._episode_mode = "robot"
@@ -367,6 +369,9 @@ class BargeIn:
         """Hot reload: thresholds, windows and the keyword lists."""
         b = cfg.voice.barge_in
         self._b = b
+        # barge-in off while a barge-in waits for the server: its stream ends at the next chunk
+        # (on the listener thread, which owns the stream; S2)
+        self._release_pending = not b.enabled
         self._tail_s = cfg.voice.echo_tail_ms / MS_PER_S
         # Only the stop keyword is used here: no name, so no name phrases to build or check.
         self._spotter = KeywordSpotter(cfg.voice.keywords, None)
@@ -401,6 +406,7 @@ class BargeIn:
         playback: Callable[[np.ndarray, float], bool] | None = None,
         end_playback: Callable[[], None] | None = None,
         server_mode: Callable[[], bool] | None = None,
+        playback_job: Callable[[], Any] | None = None,
     ) -> None:
         """Connect the actions: ``stop`` the speech output, ``interrupt`` the conversation,
         ``resume`` the listener on the barge-in audio. ``prepare`` runs before ``stop``: it
@@ -417,13 +423,16 @@ class BargeIn:
         self._playback = playback
         self._end_playback = end_playback or (lambda: None)
         self._server_mode = server_mode or (lambda: False)
+        self._playback_job: Callable[[], Any] = playback_job or (lambda: None)
 
-    def confirm(self) -> None:
+    def confirm(self, job: Any = None) -> None:
         """The server's VAD started speech of the stream a barge-in opened (S2; any thread):
         the listener thread stops the robot at its next chunk, so every cut-off stays on one
-        thread (``_poll_confirm``)."""
+        thread (``_poll_confirm``). ``job``: that stream's, checked against the one the
+        listener opened for this barge-in (``playback_job``)."""
         with self._confirm_lock:
             self._confirmed_flag = True
+            self._confirmed_job = job
 
     @property
     def bound(self) -> bool:
@@ -442,6 +451,8 @@ class BargeIn:
                 self._await = None
                 self._server["ended_by_speech_end"] += 1
             self._released_here = False
+            with self._confirm_lock:  # a confirmation from this window is over with it
+                self._confirmed_flag, self._confirmed_job = False, None
             self._end_duck("released", self._last_end)
             self.duck.clear()
             self._safe(self._close_record, "released", None, self._last_end, "speech_end")
@@ -497,6 +508,11 @@ class BargeIn:
     def on_chunk(self, chunk: VoiceChunkLike) -> None:
         """One microphone chunk heard while the robot speaks (the listener's hook)."""
         b = self._b
+        waiting = self._await
+        if waiting is not None and (
+            self._release_pending or chunk.stamp - waiting.detected >= self._confirm_s
+        ):  # before any early return: the stream's egress bound never depends on frames (S2)
+            self._release_await(chunk.stamp)
         if self._stop is None or not (b.enabled or b.keyword_enabled):
             return
         if chunk.rate_hz != self._rate:
@@ -972,8 +988,9 @@ class BargeIn:
         server = not own and kind == "speech"
         if server and self._hand_to_server(samples, audio_stamp, onset, detected):
             return
-        if self._await is not None:  # the stop keyword while the server had not confirmed
-            self._await = None
+        if self._await is not None:  # the stop keyword while the server had not confirmed:
+            self._await = None  # its stream ends (cut: never answered, its items deleted)
+            self._call_end_playback()
         self._end_duck("cut", detected)
         rec, self._rec = self._rec, None  # recorded after the cut: ``reset`` must not release it
         if not own:
@@ -1041,20 +1058,24 @@ class BargeIn:
         server already cancelled its answer). Any other is idle. True when it cut."""
         with self._confirm_lock:
             flag, self._confirmed_flag = self._confirmed_flag, False
+            job, self._confirmed_job = self._confirmed_job, None
         if not flag:
             return False
-        if self._await is None and not self._released_here:
+        ours = job is None or job is self._playback_job()  # the stream this barge-in opened
+        if not ours or (self._await is None and not self._released_here):
             self._server["confirms_idle"] += 1
             return False
         self._server_cut(late=self._await is None)
         return True
 
     def _server_cut(self, *, late: bool) -> None:
-        """The server confirmed: ``prepare``, ``stop``, ``interrupt`` as for a local cut-off (no
-        ``response.cancel`` follows: the route knows the server cancels its answer itself),
-        and no ``resume``: the listener hears the person already. The onset-to-stop latency
-        of server mode is its own (``onset_to_stop_server``)."""
+        """The server confirmed: ``prepare``, ``stop``, ``interrupt`` as for a local cut-off,
+        and no ``resume`` while the barge-in waited: the listener hears the person already. A
+        late one (after the release, its stream cut) resumes the listener on the audio in the
+        ring, as a local cut-off does, so the person's words are heard. The onset-to-stop
+        latency of server mode is its own (``onset_to_stop_server``)."""
         waiting, self._await = self._await, None
+        heard = [(t, f) for t, f in self._ring] if late else []
         self._end_session()
         stop = self._stop
         if stop is None:
@@ -1078,6 +1099,8 @@ class BargeIn:
         except Exception as exc:
             log.warning("barge-in: interrupt: %s", type(exc).__name__)
         self.reset()
+        if heard and self._resume is not None:
+            self._resume(np.concatenate([f for _, f in heard]), heard[0][0])
         self._safe(self._record_cut, rec, "server", self._last_end)
 
     def _release_await(self, end: float) -> None:
@@ -1090,6 +1113,10 @@ class BargeIn:
         self._end_duck("released", end)
         self.duck.release(end)
         self._safe(self._close_record, "released", None, end, "unconfirmed")
+        self._call_end_playback()
+
+    def _call_end_playback(self) -> None:
+        """End the barge-in's stream (the listener's ``end_playback``), guarded."""
         try:
             self._end_playback()
         except Exception as exc:

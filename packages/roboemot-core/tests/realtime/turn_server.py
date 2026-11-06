@@ -77,6 +77,10 @@ ends ``response.done`` ``cancelled`` at its next delta (``interrupted`` lists th
 ``interrupt_first`` waits for those ``response.done`` before it sends the ``speech_started``
 (the server's cancel before the start); by default the start goes first. ``late_deltas``
 audio deltas still go after a cancel, before its ``response.done`` (a cancel that lands late).
+``ignore_interrupt`` never interrupts and says so in ``session.updated`` (interrupt_response
+false). ``strict_cancel`` answers a ``response.cancel`` with no response running with an
+``error`` ``response_cancel_not_active``, naming the cancel's event id unless
+``cancel_error_ids`` is off.
 
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
@@ -155,6 +159,9 @@ class TurnServer(FakeServer):
         ignore_cancel: bool = False,
         interrupt_first: bool = False,
         late_deltas: int = 0,
+        ignore_interrupt: bool = False,
+        strict_cancel: bool = False,
+        cancel_error_ids: bool = True,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -188,6 +195,9 @@ class TurnServer(FakeServer):
         self.answer_delay_s = answer_delay_s
         self.refuse_cancel_id, self.ignore_cancel = refuse_cancel_id, ignore_cancel
         self.interrupt_first, self.late_deltas = interrupt_first, late_deltas
+        self.ignore_interrupt, self.strict_cancel = ignore_interrupt, strict_cancel
+        self.cancel_error_ids = cancel_error_ids
+        self.cancel_errors = 0  # response_cancel_not_active errors sent (strict_cancel)
         self.interrupted: list[str] = []  # responses its VAD cancelled (interrupt_response)
         self._running: dict[str, asyncio.Event] = {}  # response id -> set at its done
         self.stream_turns = 0  # turns the stream VAD heard, over all sessions
@@ -256,6 +266,12 @@ class TurnServer(FakeServer):
                     return
             elif kind == "response.cancel" and self.ignore_cancel:
                 pass
+            elif kind == "response.cancel" and self.strict_cancel and not self._active():
+                self.cancel_errors += 1
+                error = {"code": "response_cancel_not_active"}
+                if self.cancel_error_ids:
+                    error["event_id"] = event.get("event_id")
+                await self._send(ws, {"type": "error", "error": error})
             elif kind == "response.cancel" and self.refuse_cancel_id and "response_id" in event:
                 refused = {"code": "unknown_or_invalid_event"}
                 await self._send(ws, {"type": "error", "error": refused})
@@ -405,7 +421,13 @@ class TurnServer(FakeServer):
         if self._vad_item is None:  # a later committed burst starts after this audio
             self._burst_start = self.buffer_ms
 
+    def _active(self) -> bool:
+        """Whether a response still runs."""
+        return any(not done.is_set() for done in self._running.values())
+
     def _interrupts(self) -> bool:
+        if self.ignore_interrupt:
+            return False
         updates = self.of("session.update")
         if not updates:
             return False

@@ -189,13 +189,16 @@ class FakeServer:
                 },
             )
             return
-        await self._send(
-            ws,
-            {
-                "type": "session.updated",
-                "session": {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}},
-            },
-        )
+        # the turn detection as it applies (a server that ignores interrupt_response says so)
+        detect = dict(audio_in.get("turn_detection", {}))
+        if detect and getattr(self, "ignore_interrupt", False):
+            detect["interrupt_response"] = False
+        session: dict[str, Any] = {
+            "audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}
+        }
+        if detect:
+            session["audio"]["input"] = {"turn_detection": detect}
+        await self._send(ws, {"type": "session.updated", "session": session})
         if self.mode == "oversize":
             await ws.send(json.dumps({"type": "x.big", "pad": "a" * self.oversize_bytes}))
 
