@@ -26,9 +26,14 @@ from test_realtime_server_turns import OPT_INS, SERVER, tail
 from test_voice_listener import FRAME, RATE, SpyMusic, voice
 from turn_server import TurnServer
 
-# a reply that cannot end before the barge-in, also under load: 400 deltas of 100 ms, 50 ms
-# apart (the server's interrupt ends it); the barge-in's own answer is short
-LONG = {"stream_vad": True, "vad_answers": True, "deltas": [400, 20], "gap_s": 0.05}
+# a reply that cannot end before the barge-in, also under load: 400 deltas of 300 ms, 50 ms
+# apart (the server's interrupt ends it). It arrives six times faster than it plays, so when
+# the robot stops on the confirmation (seconds after the reply began, under CI load too) it is
+# still playing what it holds, and its truncation is at a point inside it; the barge-in's own
+# answer is short
+LONG = {
+    "stream_vad": True, "vad_answers": True, "deltas": [400, 20], "gap_s": 0.05, "delta_ms": 300.0,
+}  # fmt: skip
 HEARD = [["ciao Neve"], ["aspetta un attimo"]]
 NO_KEYWORD = {
     **OPT_INS,
@@ -199,7 +204,7 @@ def test_a_confirmed_barge_in_stops_truncates_and_its_own_answer_plays(ears, int
         assert server.of("response.create") == []
         (truncate,) = server.of("conversation.item.truncate")
         assert truncate["item_id"] == "item_1"
-        assert 0 < truncate["audio_end_ms"] < 400 * 100  # at what played, not the whole reply
+        assert 0 < truncate["audio_end_ms"] < 400 * 300  # at what played, not the whole reply
         for cancel in server.of("response.cancel"):  # the fail-safe: named, never bare
             assert cancel["event_id"].startswith("rc_")
         s = snap(ear)
@@ -326,7 +331,7 @@ def test_a_turn_a_barge_in_cut_never_hosts_its_streams_own_answer(ears):  # noqa
 def test_a_barge_in_after_the_last_response_ended_still_truncates_in_robot_turns(ears):  # noqa: F811
     """M5: robot turns; the reply's response ended while its audio still plays and the turn
     has not finished: a barge-in then still truncates the audio item at what played."""
-    with TurnServer(deltas=20) as server:
+    with TurnServer(deltas=200) as server:  # 20 s of audio: still playing at the barge-in
         ear = ears(server, script=["x"], to_worker=True)
         worker = ear.rt.worker
         lines = worker._speak_lines
@@ -341,7 +346,7 @@ def test_a_barge_in_after_the_last_response_ended_still_truncates_in_robot_turns
         ear.say()
         assert ear.settle(lambda: turns(ear) == 1, 10.0)
         (truncate,) = server.of("conversation.item.truncate")
-        assert truncate["item_id"] == "item_1" and truncate["audio_end_ms"] < 20 * 100
+        assert truncate["item_id"] == "item_1" and truncate["audio_end_ms"] < 200 * 100
 
 
 # ------------------------------------------------------------------ the real barge-in
@@ -665,3 +670,17 @@ def test_any_error_about_the_robots_own_cancel_is_benign_whatever_its_code(ears)
         error = protocol.ServerError(protocol.ERROR, "invalid_request_error", event_id)
         route._on_event(error, route._token)
         assert snap(ear)["cancels_not_active"] == 1 and snap(ear)["errors_unrelated"] == 0
+
+
+def test_a_reply_whose_audio_streams_longer_than_the_stall_timeout_is_no_stall(ears):  # noqa: F811
+    """CI root cause of 174cb45: the run's watchdog counted only queued events, never the audio
+    deltas, so a reply that streamed audio for longer than ``stall_timeout_s`` (the rig's 3 s)
+    with no other event was given up as a stall and cancelled by the robot itself mid-sentence.
+    Audio arriving is the answer going on."""
+    with TurnServer(deltas=80, gap_s=0.05) as server:  # 4 s of deltas, nothing else between
+        ear = ears(server, script=["x"], to_worker=True)
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1, 15.0)
+        assert ear.rt.events[0]["outcome"] == "ok"
+        assert server.of("response.cancel") == []
+        assert snap(ear)["cut_mid_turn"] == 0

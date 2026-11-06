@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -114,8 +115,8 @@ class ResponseRun:
     response's events, starting with its ``response.created``, and a refusal (an ``error``
     echoing its request). Every wait is bounded: an abandoned request still in flight for at
     most the route's ``stall_timeout_s``, the ``response.created`` for ``first_token_timeout_s``
-    and each later event for ``stall_timeout_s``; past them the run abandons the request and
-    ends ``closed: stall``."""
+    and each later event (its audio deltas included) for ``stall_timeout_s``; past them the run
+    abandons the request and ends ``closed: stall``."""
 
     def __init__(
         self,
@@ -163,6 +164,7 @@ class ResponseRun:
         # every call of the response (client thread): call id -> its item id; those answered
         self._calls: dict[str, str | None] = {}
         self._answered: set[str] = set()
+        self._heard_at = time.monotonic()  # the last event of any kind (the stall watchdog)
         self._settled = False  # settle ran: a later call is answered at once
         self.on_late = on_late  # gets the server items of a call answered after settle
 
@@ -219,6 +221,8 @@ class ResponseRun:
                     async with asyncio.timeout(stall if created else first):
                         event = await self._queue.get()
                 except TimeoutError:
+                    if created and time.monotonic() - self._heard_at < stall:
+                        continue  # audio (handled off this queue) kept coming: not a stall
                     self.reply.closed = "stall"  # bounded: never hangs holding the turn
                     self._abandon()
                     break
@@ -285,7 +289,9 @@ class ResponseRun:
     # ----------------------------------------------------------------- client thread
 
     def deliver(self, event: protocol.ServerEvent) -> None:
-        """One event of this run's own response (the route correlated it)."""
+        """One event of this run's own response (the route correlated it). Every one, the
+        audio and transcripts handled here too, moves the stall watchdog (``_follow``)."""
+        self._heard_at = time.monotonic()
         if isinstance(event, protocol.AudioDelta):
             self._audio(event)
             return
