@@ -37,17 +37,19 @@ its own resumes on its own. The recent events, with the largest tick gap and the
 confirming run, stay in the debug report.
 
 **Unreachable target** (robot run 2026-11-05: the rest posture drove the head into the body, the
-loop yielded, resumed after the grace and pushed again, every ~6.8 s all night). A unit that
-diverges again within ``repeat_window_s`` of its resume, on the same joint, toward the same arbiter
-target and stopped at the same place (both within ``same_target_*``), repeats; after
-``unreachable_repeats`` repeats it holds: it writes the measured pose once, clamped by the limiter
-(the platform's goal leaves the obstacle; a failed write is retried), then nothing, and never
-resumes on a timer. It takes control back once still for the grace, when the blocked joint's
-target moves further than ``same_target_*`` from the blocked one and not further past the stop
-(never while the watchdog holds: that target is transient). The blocked record stays: the same
-target coming back is held at its first divergence. A settled hold is not external control
-(``yielding``) and the other units resume as usual; a held unit that moves after it settled (a
-hand) becomes a plain yield. Motors off forgets it all.
+loop yielded, resumed after the grace and pushed again, every ~6.8 s all night). Stops are kept
+per joint, robot-wide: a joint that diverges again within ``repeat_window_s`` of its unit's
+resume, stopped at the same place (``same_target_*``) with its arbiter target beyond on the same
+side, repeats; after ``unreachable_repeats`` repeats the unit holds. The loop ramps it to the
+measured pose backed off by ``hold_back_off_*`` (limiter clamp and rate caps; a failed write is
+retried), then writes nothing, and never resumes on a timer. It takes control back once still
+for the grace, when a held joint's target changes by more than ``same_target_*`` or leaves the
+stop (never while the watchdog holds: that target is transient). The stop stays known: a target
+beyond it again is held at its first divergence, and that sticky hold takes only a target off
+the stop for ``sticky_expiry_s``. A settled hold is not external control (``yielding``) and the
+other units resume as usual; a held unit that moves after it settled (a hand) becomes a plain
+yield. Motors off forgets it all. A steady offset under the tolerance (a still joint away from a
+still command) is only counted, never acted on (owner decision 2026-11-06).
 """
 
 from __future__ import annotations
@@ -84,7 +86,9 @@ class Unit:
     holding: bool = False  # yielding because its target cannot be reached (no resume on a timer)
     holds: dict[str, Stop] = field(default_factory=dict)  # the stops it holds on, by joint
     sticky: bool = False  # held again at a known stop: only a target off that stop releases
+    hold_t: float = 0.0  # when it started holding (a sticky hold expires)
     hold_pending: bool = False  # the hold pose is still to be written (a failed write retries)
+    hold_goal: dict[str, float] | None = None  # the hold pose being ramped to
     settled: bool = False  # still for the grace while yielding (a moving held unit is external)
     resumed_t: float | None = None
     repeats: int = 0
@@ -93,13 +97,12 @@ class Unit:
 @dataclass(frozen=True)
 class Stop:
     """Where a joint stopped short of the target it was driven to: the place, the side the
-    target lay on (+1 or -1), that target and what found it (``repeat``, ``steady_offset``)."""
+    target lay on (+1 or -1) and that target."""
 
     joint: str
     target: float
     measured: float
     side: float
-    cause: str = "repeat"
 
     def past(self, value: float) -> float:
         """How far ``value`` lies beyond the stop, toward the target side (negative: back)."""
@@ -175,7 +178,10 @@ class ExternalControl:
         self._stops: dict[str, Stop] = {}  # each joint's last divergence (robot-wide)
         self._progress: dict[str, float] = {}  # how far past that stop it got since
         self._blocked: dict[str, Stop] = {}  # stops found unreachable, until passed or motors off
-        self._steady: dict[str, tuple[float, float, float]] = {}  # since, command, measured
+        # since, command, measured, counted: a steady offset is measured only (owner 2026-11-06)
+        self._steady: dict[str, tuple[float, float, float, bool]] = {}
+        self.steady_offsets = 0
+        self.steady_offset_last: dict[str, Any] | None = None
         self.recent: deque[dict[str, Any]] = deque(maxlen=cfg.recent_events)
         self.held: frozenset[str] = frozenset()
         self._last_tick: float | None = None
@@ -216,6 +222,10 @@ class ExternalControl:
         }
         self._offset = {
             n: cfg.steady_offset_m if k == "m" else cfg.steady_offset_rad
+            for n, k in self._kind.items()
+        }
+        self._back_off = {
+            n: cfg.hold_back_off_m if k == "m" else cfg.hold_back_off_rad
             for n, k in self._kind.items()
         }
         # a resumed push is caught within lag_window_s + max_state_age_s + confirm_s plus the
@@ -272,7 +282,7 @@ class ExternalControl:
         for unit in self.units:
             unit.yielding, unit.run, unit.still_since, unit.anchor = False, 0, None, None
             unit.holding, unit.holds, unit.resumed_t, unit.repeats = False, {}, None, 0
-            unit.sticky = False
+            unit.sticky, unit.hold_goal = False, None
             unit.hold_pending, unit.settled = False, False
         self._stops.clear()
         self._progress.clear()
@@ -312,8 +322,8 @@ class ExternalControl:
     ) -> list[Unit]:
         """Compare a new sample with the windowed commands; returns the units that yield now.
         ``goal`` is the arbiter's target this tick (before the fade and the limiter): a
-        divergence that repeats at a known stop, or a steady offset from a still command,
-        makes its unit hold (module docstring, Unreachable target)."""
+        divergence that repeats at a known stop makes its unit hold (module docstring,
+        Unreachable target). A steady offset from a still command is only counted."""
         started: list[Unit] = []
         goal = goal or {}
         for unit in self.units:
@@ -323,8 +333,8 @@ class ExternalControl:
             diverging = self._diverging(unit, now, measured)
             if not diverging:
                 unit.run = 0
-                if not self._late and self._steady_offset(unit, now, measured, goal):
-                    started.append(unit)
+                if not self._late:
+                    self._steady_offset(unit, now, measured)
                 continue
             worst = max(diverging, key=lambda d: d[1] / d[2])
             if self._late:
@@ -384,7 +394,7 @@ class ExternalControl:
         for joint in joints:
             if joint not in goal or joint not in measured:
                 continue
-            stop = self._stop(joint, goal[joint], measured[joint], "repeat")
+            stop = self._stop(joint, goal[joint], measured[joint])
             stops[joint] = stop
             known = known or self._same_stop(self._blocked.get(joint), stop)
             last = self._stops.get(joint)
@@ -398,14 +408,14 @@ class ExternalControl:
         return True
 
     @staticmethod
-    def _stop(joint: str, target: float, value: float, cause: str) -> Stop:
-        return Stop(joint, target, value, 1.0 if target >= value else -1.0, cause)
+    def _stop(joint: str, target: float, value: float) -> Stop:
+        return Stop(joint, target, value, 1.0 if target >= value else -1.0)
 
     def _hold(
         self, unit: Unit, now: float, stops: dict[str, Stop], *, sticky: bool = False
     ) -> None:
         unit.holding, unit.holds, unit.repeats, unit.hold_pending = True, dict(stops), 0, True
-        unit.sticky = sticky
+        unit.sticky, unit.hold_t, unit.hold_goal = sticky, now, None
         self._blocked.update(stops)
         self.unreachable += 1
         first = next(iter(stops.values()))
@@ -417,40 +427,41 @@ class ExternalControl:
             "joints": sorted(stops),
             "target": first.target,
             "measured": first.measured,
-            "cause": first.cause,
         }
 
-    def _steady_offset(
-        self, unit: Unit, now: float, measured: dict[str, float], goal: dict[str, float]
-    ) -> bool:
-        """The blind band under the tolerance: a joint whose written command and measured pose
-        have both stayed inside ``still_band_*`` for ``steady_offset_s`` while they sit more
-        than ``steady_offset_*`` apart presses on something. The unit holds (alone: no platform
-        move does this). True when it starts holding."""
-        stops = {}
+    def _steady_offset(self, unit: Unit, now: float, measured: dict[str, float]) -> None:
+        """Measured only, never acted on (owner decision 2026-11-06): a joint whose written
+        command and measured pose have both stayed inside ``still_band_*`` for
+        ``steady_offset_s`` while more than ``steady_offset_*`` apart may press on something
+        under the tolerance. Each such episode is counted once, with the joint, both values
+        and how long it has lasted."""
         for name in unit.dofs:
             window, value = self._windows[name], measured.get(name)
             if value is None or not window.values:
                 self._steady.pop(name, None)
                 continue
             command, band = window.values[-1], self._band[name]
-            since, ref_cmd, ref_val = self._steady.get(name, (now, command, value))
-            if abs(command - ref_cmd) > band or abs(value - ref_val) > band:
-                since, ref_cmd, ref_val = now, command, value
-            self._steady[name] = (since, ref_cmd, ref_val)
+            since, ref_cmd, ref_val, counted = self._steady.get(name, (now, command, value, False))
             if (
-                abs(command - value) > self._offset[name]
-                and now - since >= self.cfg.steady_offset_s
+                abs(command - ref_cmd) > band
+                or abs(value - ref_val) > band
+                or abs(command - value) <= self._offset[name]
             ):
-                stops[name] = self._stop(name, goal.get(name, command), value, "steady_offset")
-        if not stops:
-            return False
-        known = any(self._same_stop(self._blocked.get(n), stop) for n, stop in stops.items())
-        for name, stop in stops.items():
-            self._stops[name], self._progress[name] = stop, 0.0
-        self._start_yield(unit, now, measured)
-        self._hold(unit, now, stops, sticky=known)
-        return True
+                since, ref_cmd, ref_val, counted = now, command, value, False
+            lasted = now - since
+            if lasted >= self.cfg.steady_offset_s:
+                if not counted:
+                    self.steady_offsets += 1
+                    counted = True
+                self.steady_offset_last = {
+                    "t": now,
+                    "group": unit.name,
+                    "joint": name,
+                    "commanded": command,
+                    "measured": value,
+                    "duration_s": lasted,
+                }
+            self._steady[name] = (since, ref_cmd, ref_val, counted)
 
     def _track(self, unit: Unit, measured: dict[str, float]) -> None:
         """While written: how far each joint got past its last stop; a stop found unreachable
@@ -569,6 +580,7 @@ class ExternalControl:
             if anchor is None:
                 if unit.holding and unit.settled:  # moved after it settled (a hand): a yield
                     unit.holding, unit.holds, unit.sticky = False, {}, False
+                    unit.hold_pending, unit.hold_goal = False, None
                 unit.anchor = {n: measured[n] for n in unit.dofs if n in measured}
                 unit.still_since = now
             unit.settled = unit.still_since is not None and now - unit.still_since >= grace_s
@@ -582,14 +594,14 @@ class ExternalControl:
                 ready.append(unit)
         return ready
 
-    def release(self, goal: dict[str, float]) -> list[Unit]:
+    def release(self, now: float, goal: dict[str, float]) -> list[Unit]:
         """The holding units that may take control back: still for the grace (as ``watch``
         requires; a hand may be moving it), and the target of a held joint no longer lies
         beyond its stop or (owner decision 2026-11-06) changed by more than ``same_target_*``,
         in either direction. A target still beyond the same stop is then held again at its
         first divergence (``_blocked``: one push), and that sticky hold takes only a target off
-        the stop: a target that keeps drifting beyond it would otherwise buy a push per
-        drift (review item 5)."""
+        the stop for ``sticky_expiry_s``: a target that keeps drifting beyond it would
+        otherwise buy a push per drift (review item 5); after it, any change releases it."""
         return [
             u
             for u in self.units
@@ -599,25 +611,28 @@ class ExternalControl:
                 name in goal
                 and (
                     stop.past(goal[name]) <= 0.0
-                    or (not u.sticky and abs(goal[name] - stop.target) > self._same[name])
+                    or (
+                        (not u.sticky or now - u.hold_t >= self.cfg.sticky_expiry_s)
+                        and abs(goal[name] - stop.target) > self._same[name]
+                    )
                 )
                 for name, stop in u.holds.items()
             )
         ]
 
     def hold_pose(self, unit: Unit, measured: dict[str, float]) -> dict[str, float]:
-        """The pose to write once for a holding unit: the measured pose, each held joint backed
-        off by ``still_band_*`` away from its target, so no press stays."""
+        """The pose to ramp to once for a holding unit: the measured pose, each held joint backed
+        off by ``hold_back_off_*`` away from its target, so no press stays."""
         pose = {k: measured[k] for k in unit.dofs if k in measured}
         for name, stop in unit.holds.items():
             if name in pose:
-                pose[name] -= stop.side * self._band[name]
+                pose[name] -= stop.side * self._back_off[name]
         return pose
 
     def resume(self, unit: Unit, measured: dict[str, float], now: float) -> None:
         unit.yielding, unit.still_since, unit.anchor, unit.run = False, None, None, 0
         unit.holding, unit.holds, unit.sticky, unit.resumed_t = False, {}, False, now
-        unit.hold_pending, unit.settled = False, False
+        unit.hold_pending, unit.settled, unit.hold_goal = False, False, None
         for name in unit.dofs:
             self._windows[name].reset(measured.get(name))
             self._ref[name] = None
@@ -647,4 +662,8 @@ class ExternalControl:
             "unreachable": self.unreachable,
             "unreachable_held": sorted(u.name for u in self.units if u.holding),
             "unreachable_last": dict(self.unreachable_last) if self.unreachable_last else None,
+            "steady_offsets": self.steady_offsets,
+            "steady_offset_last": (
+                dict(self.steady_offset_last) if self.steady_offset_last else None
+            ),
         }

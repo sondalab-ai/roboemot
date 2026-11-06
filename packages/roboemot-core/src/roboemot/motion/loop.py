@@ -56,11 +56,12 @@ from ..config.schema import RoboEmotConfig
 from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
 from ..manifest import Manifest
-from .core import Command, MotionCore
+from .core import Command, Limiter, MotionCore
 from .external import ExternalControl, Unit
 from .state import MeasuredPair, MotionSample, MotionState
 
 MS_PER_S = 1000.0
+HOLD_REACHED = 1e-9  # the hold ramp has landed (the limiter lands exactly on its goal)
 log = logging.getLogger(__name__)
 
 
@@ -95,6 +96,9 @@ class MotionLoop:
         self.external_ctl = ExternalControl(
             manifest.dofs, manifest.constraints, cfg.motion.external, self.rate_hz
         )
+        # ramps a hold pose under the same caps as every motion (SPEC 12), from the stop
+        self._hold_limiter = Limiter(manifest.dofs, manifest.constraints)
+        self._written: dict[str, float] = {}  # the last target written per dof (diagnostics)
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -129,6 +133,7 @@ class MotionLoop:
         self.core.watchdog_s = watchdog_ms / MS_PER_S
         self.core.watchdog_return_factor = cfg.safety.watchdog_return_factor
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
+        self._hold_limiter.constraint_margin = self.core.limiter.constraint_margin
         self.link.policy = cfg.connectivity.robot
         self.platform_move_grace_s = cfg.motion.platform_move_grace_s
         self.external_ctl.configure(cfg.motion.external)
@@ -211,10 +216,13 @@ class MotionLoop:
                 "motors_off": self.motors_off,
                 "asleep": self.motors_off and self.link.online,
                 **self.external_ctl.snapshot(now),
-                # per dof (manifest names): what the robot reports and what the loop writes,
-                # so a press under the tolerance shows (SPEC 12A; rad, m for translations)
+                # per dof (manifest names): what the robot reports, the last target the loop
+                # wrote (not the limiter, which follows the measured pose of a dof not
+                # written) and the arbiter's target, so a press under the tolerance shows
+                # (SPEC 12A; rad, m for translations)
                 "measured": dict(self._measured[-1]) if self._measured else None,
-                "commanded": dict(self.core.limiter.pos),
+                "commanded": dict(self._written),
+                "target": dict(self.core.arbiter.goal),
                 "holding": self.core.holding,
                 "watchdog_engagements": self.core.watchdog_engagements,
                 "rate_hz": self.rate_hz,
@@ -270,7 +278,7 @@ class MotionLoop:
             held = ext.held
             targets = {k: v for k, v in out.items() if k not in held} if held else out
             if targets:
-                self._call(self.driver.write_pose_targets, now, targets)
+                self._write(now, targets)
             measured = self._read_fresh()
             if measured is not None:
                 last_t, last = self._measured[2:] if self._measured else (None, None)
@@ -315,7 +323,7 @@ class MotionLoop:
         have switched them off since)."""
         ready = self.external_ctl.watch(now, measured, self.platform_move_grace_s)
         if not self.core.holding:
-            ready += self.external_ctl.release(goal)
+            ready += self.external_ctl.release(now, goal)
         if not ready:
             return
         if self._call(self.driver.motors_enabled) is False:
@@ -326,31 +334,46 @@ class MotionLoop:
             self._follow(measured, frozenset(unit.dofs))
             log.info("motion: %s resuming control", unit.name)
 
+    def _write(self, now: float, targets: dict[str, float]) -> None:
+        self._call(self.driver.write_pose_targets, now, targets)
+        self._written.update(targets)
+
     def _hold_where_stopped(
         self, now: float, measured: dict[str, float], units: list[Unit]
     ) -> None:
-        """Write the hold pose once (``ExternalControl.hold_pose``: the measured pose of a fresh
-        sample, held joints backed off from the obstacle, through the limiter's position clamp
-        and coupled constraints) for units that hold on an unreachable target: a
-        position-controlled platform keeps its last goal, which would press on the obstacle
-        all night (SPEC 12: more conservative than not writing). Only with the motors on (the
-        same look as before a resume). A failed write leaves it pending: retried on the next
-        fresh sample, after a link recovery too."""
-        pose: dict[str, float] = {}
+        """Ramp units that hold on an unreachable target to their hold pose
+        (``ExternalControl.hold_pose``: the measured pose of the fresh sample where the hold
+        began, held joints backed off from the obstacle by ``hold_back_off_*``), through the
+        limiter's position clamp, coupled constraints and velocity and acceleration caps, one
+        step per fresh sample: a position-controlled platform keeps its last goal, which would
+        press on the obstacle all night (SPEC 12: more conservative than not writing). Only
+        with the motors on (the same look as before a resume). A failed write leaves it
+        pending: retried on the next fresh sample, after a link recovery too."""
+        goal: dict[str, float] = {}
         for unit in units:
-            pose |= self.external_ctl.hold_pose(unit, measured)
-        if not pose:
+            if unit.hold_goal is None:
+                start = {k: measured[k] for k in unit.dofs if k in measured}
+                self._hold_limiter.reset({**self.core.limiter.pos, **start})
+                unit.hold_goal = self.core.limiter.clamp(
+                    self.external_ctl.hold_pose(unit, measured)
+                )
+            goal |= unit.hold_goal
+        if not goal:
             return
         if self._call(self.driver.motors_enabled) is False:
             self._motors_now(False)
             return
-        self._call(self.driver.write_pose_targets, now, self.core.limiter.clamp(pose))
+        step = self._hold_limiter.step(goal, 1.0 / self.rate_hz)
+        self._write(now, {k: step[k] for k in goal})
         for unit in units:
+            hold = unit.hold_goal or {}
+            if any(abs(step[k] - v) > HOLD_REACHED for k, v in hold.items()):
+                continue
             unit.hold_pending = False
             for stop in unit.holds.values():
                 log.warning(
-                    "motion: %s cannot reach %s = %.3f (stopped at %.3f, %s), holding",
-                    unit.name, stop.joint, stop.target, stop.measured, stop.cause,
+                    "motion: %s cannot reach %s = %.3f (stopped at %.3f), holding",
+                    unit.name, stop.joint, stop.target, stop.measured,
                 )  # fmt: skip
 
     def _motors_now(self, enabled: bool) -> None:

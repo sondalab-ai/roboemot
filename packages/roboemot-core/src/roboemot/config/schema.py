@@ -1139,21 +1139,40 @@ class ExternalControlConfig(Strict):
     )  # fmt: skip
     steady_offset_rad: float = param(
         0.04,
-        "Unreachable target under the tolerance: an angular joint whose written command and "
-        "measured pose both stay still for steady_offset_s while further apart than this "
-        "presses on something, and its unit holds. Above the steady residual of our own "
-        "motion (up to 0.021 rad in the MuJoCo sim; not measured on the robot)",
-        unit="rad", ge=0.005, le=1.0, conservative="lower",
+        "Measured only, never acted on (owner decision 2026-11-06): an angular joint whose "
+        "written command and measured pose both stay still for steady_offset_s while further "
+        "apart than this is counted in the debug report (motion.steady_offsets), a press under "
+        "the tolerance the loop does not stop. Above the steady residual of our own motion (up "
+        "to 0.021 rad in the MuJoCo sim; not measured on the robot)",
+        unit="rad", ge=0.005, le=1.0,
     )  # fmt: skip
     steady_offset_m: float = param(
         0.005,
         "The same for translations",
-        unit="m", ge=0.0005, le=0.1, conservative="lower",
+        unit="m", ge=0.0005, le=0.1,
     )  # fmt: skip
     steady_offset_s: float = param(
         3.0,
-        "How long a steady offset must last before the unit holds",
-        unit="s", ge=0.2, le=60.0, conservative="lower",
+        "How long a steady offset must last before it is counted",
+        unit="s", ge=0.2, le=60.0,
+    )  # fmt: skip
+    hold_back_off_rad: float = param(
+        0.01,
+        "Unreachable target: the hold pose backs each held angular joint off its stop by this, "
+        "away from the target, so no press stays; written through the limiter's rate limits",
+        unit="rad", ge=0.001, le=0.05, conservative="lower",
+    )  # fmt: skip
+    hold_back_off_m: float = param(
+        0.001,
+        "The same for translations",
+        unit="m", ge=0.0001, le=0.005, conservative="lower",
+    )  # fmt: skip
+    sticky_expiry_s: float = param(
+        180.0,
+        "Unreachable target: a hold again at a known stop (sticky) takes only a target off the "
+        "stop for this long; after it, the next target change of more than same_target_* "
+        "releases it too (a hand that held the head through two resumes and let go)",
+        unit="s", ge=10.0, le=3600.0, conservative="higher",
     )  # fmt: skip
 
 
