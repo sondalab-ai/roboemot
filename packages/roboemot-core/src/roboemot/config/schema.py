@@ -3831,9 +3831,10 @@ class RealtimeRouteConfig(Strict):
         "streams while the local VAD hears speech that passed server_gates (the wake word "
         "policy and the follow-up window do not gate it), and the server's VAD ends the turn: "
         "the robot sends no commit. It needs privacy.realtime_audio_unaddressed and "
-        "audio_gate: server_gates (without the opt-in robot turns run). Until barge-in and "
-        "server-created answers land, the robot still asks for the answer once the transcript "
-        "came. Applies at once; a change needs the admin",
+        "audio_gate: server_gates (without the opt-in robot turns run). The server then answers "
+        "on its own: its answer plays as it comes, never a request of the robot's on top (an "
+        "answer to a cut or revoked stream never plays). Applies at once; a change needs the "
+        "admin",
         admin_only=True,
     )
     server_gates: list[Literal["music", "other_speaker", "at_face", "facing"]] = param(
@@ -3882,6 +3883,18 @@ class RealtimeRouteConfig(Strict):
         unit="ms",
         ge=100,
         le=5000,
+    )
+    server_answer_wait_s: float = param(
+        5.0,
+        "With turns: server, how long the server's own answer to a stream is waited for once "
+        "the server ended its turn (or the stream ended or was cut): the robot's own requests "
+        "wait meanwhile, and a streamed utterance whose transcript came but no answer gets the "
+        "did-not-get-it cue this long after its transcript. The robot's requests wait at "
+        "most the route's stall_timeout_s: when that is shorter and the server may still "
+        "answer, the session is reset instead of sending",
+        unit="s",
+        ge=1,
+        le=30,
     )
     local_decode_timeout_s: float = param(
         10.0,

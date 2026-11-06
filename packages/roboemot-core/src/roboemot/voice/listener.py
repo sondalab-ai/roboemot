@@ -114,6 +114,9 @@ JOIN_S = 2.0
 MS_PER_S = 1000.0
 # what became of an utterance's audio (``bind_realtime``'s ``on_audio``, the listening cue)
 AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
+# a streamed segment the server answered on its own and whose transcript never came: the
+# listening cue ends, nothing more (the answer played; server turns, SPEC 8)
+AUDIO_ANSWERED = "answered"
 # the server gates (voice.realtime_route.server_gates) that need the voice direction's samples:
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
@@ -153,6 +156,9 @@ class Utterance:
     # (the did-not-get-it cue showed, SPEC 8, Non-verbal cues).
     realtime: tuple[int, tuple[str, ...]] | None = field(default=None, repr=False)
     local_only: bool = False
+    # with server turns, the live stream that carried it (a ``RealtimeInput`` job): the server
+    # answered it on its own, and the conversation joins these words to that turn's history
+    stream: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -312,6 +318,8 @@ class VoiceListener:
             "streamed": 0,
             "streams_refused": 0,
             "turns_fallbacks": 0,  # turns: server without privacy.realtime_audio_unaddressed
+            # a streamed segment the server answered on its own, its transcript never in
+            "answered_untranscribed": 0,
             **{f"stream_gated_{gate}": 0 for gate in SERVER_GATES},
             # a listed gate whose detector is off or missing: it fails closed (kept local)
             **{f"stream_gated_{gate}_off": 0 for gate in OFF_GATES},
@@ -875,6 +883,8 @@ class VoiceListener:
         p.stream = True
         p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s
         p.rt = s.job
+        # the server may answer before its transcript: the turn starts from these (latency)
+        s.job.start_stamp, s.job.speech_end = ev.start_stamp, ev.last_speech_stamp
         self._realtime.close_stream(s.job, self._last_sample(ev) / rate * MS_PER_S, p.deadline)
         self._queue.append(p)
         self.poll_handoff()
@@ -1309,7 +1319,15 @@ class VoiceListener:
                 (self._clock() - p.ev.last_speech_stamp) * MS_PER_S
             )
             heard = (result.generation, result.items)
-            self._finish(p, result.text, None, frozenset(), heard, server=True)
+            stream = job if p.stream else None
+            self._finish(p, result.text, None, frozenset(), heard, server=True, stream=stream)
+            return None
+        if p.stream and job.answered:
+            # the server answered it on its own, and its transcript never came: the answer
+            # played, so neither a local decode nor the did-not-get-it cue (its history keeps
+            # no words of the person)
+            self._count_audio("answered_untranscribed")
+            self._audio_event(AUDIO_ANSWERED, p)
             return None
         self._count_audio("local_fallbacks")
         self._announce(p)
@@ -1336,6 +1354,7 @@ class VoiceListener:
         *,
         local_only: bool = False,
         server: bool = False,
+        stream: Any = None,
     ) -> None:
         """The utterance with its final ``text`` (its wake decision made): keywords, prosody
         and impulses, then the hand-off to the conversation and the bus."""
@@ -1370,6 +1389,7 @@ class VoiceListener:
             fast.prosody,
             realtime=realtime,
             local_only=local_only,
+            stream=stream,
         )
         self._fast.stats.record("final_vs_last_speech", self._clock() - ev.last_speech_stamp)
         self._count("utterances")

@@ -235,8 +235,13 @@ def response_create(
     return event
 
 
-def response_cancel() -> dict[str, Any]:
-    return {"type": RESPONSE_CANCEL}
+def response_cancel(response_id: str | None = None) -> dict[str, Any]:
+    """``response.cancel``; ``response_id`` names the response (a server-created one the robot
+    drops while another may be active), left out otherwise."""
+    event: dict[str, Any] = {"type": RESPONSE_CANCEL}
+    if response_id:
+        event["response_id"] = response_id
+    return event
 
 
 def encode(event: dict[str, Any]) -> str:
@@ -529,3 +534,11 @@ def parse(frame: str | bytes, max_bytes: int) -> ServerEvent:
         return _event(kind, data)
     except _Bad as bad:
         return Malformed("malformed", bad.reason)
+
+
+def response_item(event: ServerEvent) -> str | None:
+    """The server item a response event is about (its audio, transcript or call item), None
+    for any other event."""
+    if isinstance(event, AudioDelta | AudioDone | ReplyTranscript | FunctionCall):
+        return event.item_id
+    return None
