@@ -557,6 +557,8 @@ class Scene:
                     appearance_embedder=None,
                     object_detector=None,
                     objects_unavailable=None,
+                    object_tracker=None,
+                    object_track_unavailable=None,
                 )
 
         self.mini, self.app = mini, SimApp.__new__(SimApp)

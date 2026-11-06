@@ -727,7 +727,8 @@ def test_a_refused_cancel_id_keeps_the_dropped_answer_silent_and_cleans_it_up(ea
         ear.say()
         assert ear.settle(lambda: turns(ear) == 1 and len(ear.utterances) == 2, 15.0)
         assert snap(ear)["server_duplicates"] == 1 and snap(ear)["errors_unrelated"] >= 1
-        assert ear.rt.speech.snapshot()["spoken"] == 1
+        # the answer streams on after its turn ended: wait for its playback, not just the turn
+        assert wait_until(lambda: ear.rt.speech.snapshot()["spoken"] == 1)
         assert wait_until(lambda: "item_2" in {
             e["item_id"] for e in server.of("conversation.item.delete")
         })  # fmt: skip

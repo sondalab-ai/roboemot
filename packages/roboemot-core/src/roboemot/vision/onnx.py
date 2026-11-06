@@ -1,9 +1,11 @@
 """ONNX backends for the vision stages (SPEC 5, 13): needs the ``vision`` extra.
 
 YuNet face detector (MIT), SFace face embedder (Apache-2.0), DINOv2-S appearance embedder
-(Apache-2.0) and NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
-in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU: the frame-path
-models on ``vision.threads`` (2), DINOv2-S, which runs beside them on the embed worker, on
+(Apache-2.0), NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
+in the M1 spike (docs/spikes/2026-10-m1-models.md), and the VitTrack single-object tracker
+(Apache-2.0, OpenCV's ``cv2.TrackerVit``) that follows the shown object between NanoDet
+runs. Everything runs on CPU: the frame-path models (and VitTrack, on OpenCV's pool) on
+``vision.threads`` (2), DINOv2-S, which runs beside them on the embed worker, on
 ``vision.appearance_threads`` (2) at ``vision.appearance_input_px`` (224); the cm4 budget
 leaves two cores to vision, audio and core together (SPEC 13). All resizing,
 alignment and cropping happens here: crops live only inside a call (SPEC 12).
@@ -12,6 +14,7 @@ Weights are never downloaded here, see ``roboemot models fetch``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -67,6 +70,8 @@ NANODET_REG_BINS = 8
 NANODET_SIDES = 4
 NANODET_MAX_DETECTIONS = 100
 IOU_EPS = 1e-9
+
+VITTRACK_NAME = "vittrack"
 
 DINO_MODEL_ID = "dinov2-small"
 DINO_SIZE = DINO_INPUT_PX
@@ -438,6 +443,45 @@ class NanoDetDetector:
         ]
 
 
+class VitTracker:
+    """VitTrack through ``cv2.TrackerVit`` (OpenCV 4.9 or later), the ``SingleObjectTracker``
+    of the shown object (SPEC 5, 13). One instance follows one box; ``init`` again starts on a
+    new box (the template is a crop of that frame, kept inside OpenCV, never logged).
+
+    OpenCV's own score threshold is set to 0 where it exists: the pipeline applies
+    ``vision.object_track.score_min`` to ``getTrackingScore``, and the ``ok`` flag of
+    ``update`` is ignored (a lost target still returns a drifting box with ``ok`` true).
+    Runs on OpenCV's thread pool (``vision.threads``, set by ``configure``)."""
+
+    def __init__(self, path: Path):
+        try:
+            params, create = cv2.TrackerVit_Params(), cv2.TrackerVit_create
+        except AttributeError:
+            raise ModelError(
+                f"OpenCV {cv2.__version__} has no TrackerVit (needs 4.9 or later)"
+            ) from None
+        params.net = str(path)
+        with contextlib.suppress(AttributeError):  # OpenCV 4.9 has no such parameter
+            params.tracking_score_threshold = 0.0
+        self._tracker = create(params)
+
+    def init(self, image: np.ndarray, box: Box) -> None:
+        """Start following ``box`` (xyxy, original pixels) in ``image``, clipped to it."""
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = (int(round(v)) for v in box)
+        x1, y1 = min(max(x1, 0), width - 1), min(max(y1, 0), height - 1)
+        x2, y2 = min(max(x2, x1 + 1), width), min(max(y2, y1 + 1), height)
+        self._tracker.init(image, (x1, y1, x2 - x1, y2 - y1))
+
+    def update(self, image: np.ndarray) -> tuple[Box, float]:
+        """The followed box in ``image`` (xyxy, original pixels) and the tracker's score.
+        Verified on OpenCV 5.0.0 (``opencv-python-headless`` 5.0.0.93): a lost target keeps
+        ``ok`` true with a drifting box, so only the score is read."""
+        _, (x, y, w, h) = self._tracker.update(image)
+        score = float(self._tracker.getTrackingScore())
+        return (float(x), float(y), float(x + w), float(y + h)), score
+
+
 @dataclass
 class Stages:
     """The ONNX backends built from a models folder; optional ones are None when skipped."""
@@ -447,6 +491,8 @@ class Stages:
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
     objects_unavailable: str | None = None  # why the animal and object stage was dropped
+    object_tracker: VitTracker | None = None
+    object_track_unavailable: str | None = None  # why the shown-object tracker is missing
 
 
 def _file(root: Path, name: str, index: int = 0) -> Path:
@@ -492,7 +538,9 @@ def load_stages(
     ``vision.animal_categories`` and ``vision.object_categories`` classes only) and the DINOv2-S
     embedder (when ``appearance``) are loaded together, and if either fails both are dropped
     (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds the reason and
-    faces keep working.
+    faces keep working. The VitTrack tracker of the shown object loads on its own, only with
+    the object detector: a missing file or an OpenCV without ``TrackerVit`` leaves it None
+    with the reason in ``Stages.object_track_unavailable`` and drops nothing else.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads, DINOv2-S
@@ -520,6 +568,13 @@ def load_stages(
             detector = embedder = None
             unavailable = f"{type(exc).__name__}: {exc}"
             log.warning("animal and object stage unavailable, running without it (%s)", exc)
+    tracker, track_unavailable = None, None
+    if detector is not None:
+        try:
+            tracker = VitTracker(_file(root, VITTRACK_NAME))
+        except Exception as exc:
+            track_unavailable = f"{type(exc).__name__}: {exc}"
+            log.warning("shown-object tracker unavailable, running without it (%s)", exc)
     return Stages(
         YuNetDetector(
             _file(root, "yunet"),
@@ -530,4 +585,6 @@ def load_stages(
         embedder,
         detector,
         unavailable,
+        tracker,
+        track_unavailable,
     )

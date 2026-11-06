@@ -48,6 +48,7 @@ def test_manifest_is_complete_and_pinned():
         "sface",
         "dinov2-small",
         "nanodet-plus-m-320",
+        "vittrack",
     }
     paths = [f.path for s in specs.values() for f in s.files]
     assert len(paths) == len(set(paths))
@@ -429,6 +430,43 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     off = cfg.model_copy(update={"objects_enabled": False})
     stages = onnx.load_stages(tmp_path, off, appearance=False)
     assert stages.object_detector is None and stages.appearance_embedder is None and built == []
+
+
+def test_a_missing_vittrack_keeps_the_object_stage_and_says_why(monkeypatch, tmp_path, caplog):
+    """SPEC 5, 13: the shown-object tracker loads on its own; without it NanoDet and DINOv2
+    stay and the report gets the reason."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "vittrack")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
+    assert (stages.object_detector, stages.appearance_embedder) == ("nanodet", "dino")
+    assert stages.object_tracker is None and "vittrack" in stages.object_track_unavailable
+    assert "shown-object tracker unavailable" in caplog.text
+    monkeypatch.setattr(onnx, "VitTracker", lambda path: f"vit:{path.name}")
+    onnx, _ = _optional_stage_rig(monkeypatch, tmp_path, None)
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
+    assert (stages.object_tracker, stages.object_track_unavailable) == ("vit:vittrack", None)
+    off = RoboEmotConfig().vision.model_copy(update={"objects_enabled": False})
+    assert onnx.load_stages(tmp_path, off, appearance=False).object_tracker is None
+
+
+def test_an_opencv_without_trackervit_keeps_the_object_stage(monkeypatch, tmp_path):
+    """OpenCV before 4.9 has no TrackerVit: the real VitTracker says so, nothing else drops."""
+    cv2 = pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, _ = _optional_stage_rig(monkeypatch, tmp_path, None)
+    monkeypatch.delattr(cv2, "TrackerVit_Params")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
+    assert (stages.object_detector, stages.appearance_embedder) == ("nanodet", "dino")
+    assert stages.object_tracker is None and "TrackerVit" in stages.object_track_unavailable
+
+
+def test_the_vittrack_entry_is_pinned_to_a_commit():
+    spec = load_manifest()["vittrack"]
+    (file,) = spec.files
+    assert spec.role == "object_tracker" and spec.licence == "Apache-2.0"
+    assert re.search(r"/raw/[0-9a-f]{40}/", file.url) and file.size_bytes == 714726
+    assert file.sha256 == "2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d"
 
 
 def test_load_stages_needs_only_the_face_stack_and_uses_the_real_marker_check(

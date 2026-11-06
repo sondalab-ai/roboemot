@@ -323,6 +323,8 @@ def open_perception(
         shown=cfg.attention.shown,
         timer=timer,
         embed_worker=worker,
+        object_tracker=stages.object_tracker,
+        object_track_unavailable=stages.object_track_unavailable,
     )
     enrollment.attach(pipeline)
     return Perception(
