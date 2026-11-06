@@ -90,16 +90,32 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     """SPEC 8 stage 8: the speech output applies barge-in's duck; the cut is bound in order."""
     bound = []
     bargein = SimpleNamespace(
-        duck=object(), bind=lambda *actions, **kw: bound.append((actions, kw))
+        duck=object(),
+        bind=lambda *actions, **kw: bound.append((actions, kw)),
+        confirm=lambda: None,
     )
     output = SimpleNamespace(duck=None, stop=lambda: None)
     conv = SimpleNamespace(interrupt=lambda: None, mark_interrupting=lambda: None)
-    listener = SimpleNamespace(resume=lambda samples, stamp: None)
+    audio_in = SimpleNamespace(on_confirm=None)
+    listener = SimpleNamespace(
+        resume=lambda samples, stamp: None,
+        stream_playback=lambda samples, stamp: False,
+        end_playback=lambda: None,
+        server_turns=lambda: False,
+        realtime_input=audio_in,
+    )
     cut_own = lambda: False  # noqa: E731
     bind_barge_in(bargein, output, conv, listener, cut_own)
     assert output.duck is bargein.duck
     actions = (output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)
-    assert bound == [(actions, {"cut_own": cut_own})]
+    server = {
+        "playback": listener.stream_playback,
+        "end_playback": listener.end_playback,
+        "server_mode": listener.server_turns,
+    }
+    assert bound == [(actions, {"cut_own": cut_own, **server})]
+    # S2: the server's speech_started of a barge-in's stream confirms it
+    assert audio_in.on_confirm is bargein.confirm
 
 
 def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():

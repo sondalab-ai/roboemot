@@ -236,7 +236,9 @@ class _Run:
 
     def go(self, client: Any) -> None:
         instructions, text = _turn(self.cfg, self.route)
-        ok = client.connect(session_update(self.cfg, instructions, create_response=False))
+        ok = client.connect(
+            session_update(self.cfg, instructions, create_response=False, interrupt_response=False)
+        )
         self._hosts(client.snapshot(), client.reason)
         r = self.report
         r.update_seen = ok

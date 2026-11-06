@@ -262,6 +262,8 @@ class ResponseRun:
         """A call ended the turn: cancel, and keep following the response to its end."""
         if self.reply.status is None and not self.reply.cancelled:
             self.reply.cancelled = True
+            if self._request is not None and self._request.interrupted:
+                return  # the server cancels it itself (interrupt_response, S2): no second
             self.route.send_control(protocol.response_cancel())
 
     def mute(self) -> None:

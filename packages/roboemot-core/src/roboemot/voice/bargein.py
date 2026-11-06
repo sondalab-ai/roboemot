@@ -83,6 +83,16 @@ counted ``own_sound_cuts`` (not ``triggers``); its record and decision event hav
 cuts the robot as always. With
 barge-in off (``enabled``) speech over such a sound does not cut it.
 
+Server turns (S2, SPEC 8, Barge-in with server turns): with ``playback`` bound (the listener's
+``stream_playback``) a speech cut-off point (``vad`` or ``onset``, after the echo guard and the
+own-sound check) is handed to the server instead: the speech from its onset streams over the
+robot's voice and the duck stays down, held until the server's VAD confirms it (``confirm``,
+any thread, taken on this one at the next chunk: ``prepare``, ``stop``, ``interrupt``, no
+``resume``) or ``duck.confirm_ms`` passes (released: the voice comes back and ``end_playback``
+ends the stream, a false barge-in). A refused stream is cut off locally as before, and so is a
+person still talking after a release in the same speaking window. The stop keyword cuts
+locally at any time. ``barge_ins`` in the snapshot counts the paths of both modes alike.
+
 Audio and text are never logged or published.
 """
 
@@ -120,7 +130,16 @@ EDGE_S = 1e-9
 # Trigger records: decimals kept per value, and the longest label (a manifest group name).
 DIGITS = 3
 LABEL_MAX = 24
-PATHS = ("vad", "onset", "keyword")
+PATHS = ("vad", "onset", "keyword")  # local paths; the server's confirmations: barge_ins (S2)
+SERVER_COUNTS = (
+    "playback_streams",  # a cut-off point handed to the server: a stream over the robot
+    "playback_refused",  # ... refused (consent, budget, gates, a turn): cut locally instead
+    "server_confirmed",  # the server's speech_started stopped the robot
+    "server_confirmed_late",  # ... after the release: the server had cancelled its answer
+    "released_unconfirmed",  # no confirmation within confirm_ms: voice back, stream ended
+    "ended_by_speech_end",  # the robot's answer ended first: the stream goes on as any
+    "confirms_idle",  # a confirmation with no barge-in waiting (nothing playing)
+)
 # the record's fields the Live tab's decision event carries
 EVENT_FIELDS = (
     "fired",
@@ -236,6 +255,15 @@ class _Session:
         self.last_candidate = started
 
 
+class _Await:
+    """A barge-in handed to the server (S2): the onset of the speech (frame stamps) and the
+    cut-off point it reached, from which ``duck.confirm_ms`` runs."""
+
+    def __init__(self, onset: float, detected: float) -> None:
+        self.onset = onset
+        self.detected = detected
+
+
 class BargeIn:
     """See the module docstring. Built before the speech output and the conversation exist;
     ``bind`` hands it the three actions (and it ignores chunks until then)."""
@@ -264,6 +292,17 @@ class BargeIn:
         self._resume: Callable[[np.ndarray, float], None] | None = None
         self._prepare: Callable[[], Any] = lambda: None
         self._cut_own: Callable[[], bool] = lambda: False
+        # server turns (S2): the stream over the robot's speech, its release, the mode
+        self._playback: Callable[[np.ndarray, float], bool] | None = None
+        self._end_playback: Callable[[], None] = lambda: None
+        self._server_mode: Callable[[], bool] = lambda: False
+        self._await: _Await | None = None  # a barge-in waiting for the server's confirmation
+        self._released_here = False  # one was released in this speaking window
+        self._confirm_lock = threading.Lock()  # leaf: the client thread sets, this one takes
+        self._confirmed_flag = False
+        self._server = dict.fromkeys(SERVER_COUNTS, 0)
+        self._false = {"robot": 0, "server": 0}  # episodes released with no stop, by mode
+        self._episode_mode = "robot"
         self.duck = DuckGain(cfg.voice.barge_in.duck)
         self._duck_start: float | None = None  # frame stamp of the episode's first candidate
         self._duck_quiet = 0
@@ -337,6 +376,7 @@ class BargeIn:
         self._echo_frames = max(1, math.ceil(b.echo_window_ms / frame_ms))
         self._pre_frames = math.ceil(b.pre_roll_ms / frame_ms)
         self._release_frames = max(1, math.ceil(b.duck.release_ms / frame_ms))
+        self._confirm_s = b.duck.confirm_ms / MS_PER_S
         self.duck.apply_config(b.duck)  # built in __init__ before the first apply_config
         ring = (
             max(self._pre_frames + max(self._min_frames, self._onset_frames), self._echo_frames) + 1
@@ -357,15 +397,33 @@ class BargeIn:
         resume: Callable[[np.ndarray, float], None] | None = None,
         prepare: Callable[[], Any] | None = None,
         cut_own: Callable[[], bool] | None = None,
+        *,
+        playback: Callable[[np.ndarray, float], bool] | None = None,
+        end_playback: Callable[[], None] | None = None,
+        server_mode: Callable[[], bool] | None = None,
     ) -> None:
         """Connect the actions: ``stop`` the speech output, ``interrupt`` the conversation,
         ``resume`` the listener on the barge-in audio. ``prepare`` runs before ``stop``: it
         tells the conversation to say nothing more, so a sentence queued between the stop and
         ``interrupt`` cannot play. ``cut_own`` cuts the robot's own sounds when nothing but
-        sounds that are not speech plays, and says whether it did (module docstring)."""
+        sounds that are not speech plays, and says whether it did (module docstring). With
+        server turns (S2): ``playback(audio, start)`` hands a cut-off point to the server
+        instead (the listener streams the speech over the robot; False: refused, cut
+        locally), ``end_playback`` ends that stream at the release, ``server_mode`` says
+        which mode the counters of an episode belong to."""
         self._stop, self._interrupt, self._resume = stop, interrupt, resume
         self._prepare = prepare or (lambda: None)
         self._cut_own = cut_own or (lambda: False)
+        self._playback = playback
+        self._end_playback = end_playback or (lambda: None)
+        self._server_mode = server_mode or (lambda: False)
+
+    def confirm(self) -> None:
+        """The server's VAD started speech of the stream a barge-in opened (S2; any thread):
+        the listener thread stops the robot at its next chunk, so every cut-off stays on one
+        thread (``_poll_confirm``)."""
+        with self._confirm_lock:
+            self._confirmed_flag = True
 
     @property
     def bound(self) -> bool:
@@ -380,6 +438,10 @@ class BargeIn:
         if gap:
             self.duck.release(self._last_end)
         else:
+            if self._await is not None:  # the answer ended first: the stream goes on (S2)
+                self._await = None
+                self._server["ended_by_speech_end"] += 1
+            self._released_here = False
             self._end_duck("released", self._last_end)
             self.duck.clear()
             self._safe(self._close_record, "released", None, self._last_end, "speech_end")
@@ -406,8 +468,17 @@ class BargeIn:
             "latency": self.stats.snapshot(),
             "duck": {**self._duck_counts, "capped": self.duck.capped, **self._duck_ms},
             "cuts_by_path": dict(self._cuts_by_path),
+            "barge_ins": self._barge_ins(),
             "recent": self.recent(),
         }
+
+    def _barge_ins(self) -> dict[str, Any]:
+        """Barge-ins by path, the same in both turn modes so QA can compare them (S2): local
+        cuts (the VAD, onset or stop keyword path), the server's confirmations, releases, and
+        false barge-ins by the mode at the episode's start (an episode that ended with no stop:
+        released after ``duck.release_ms`` of quiet, or unconfirmed in ``duck.confirm_ms``)."""
+        local = self._counts["triggers"] + self._counts["keyword_triggers"]
+        return {"local_cuts": local, **self._server, "false": dict(self._false)}
 
     def recent(self) -> list[dict[str, Any]]:
         """The trigger records, oldest first, with ``ago_s`` (since the episode's last frame)
@@ -437,6 +508,8 @@ class BargeIn:
             self.reset(gap=True)
         if self._ring.maxlen != self._ring_len:  # a hot reload changed the windows
             self._ring = collections.deque(self._ring, maxlen=self._ring_len)
+        if self._poll_confirm():
+            return
         if self._session is not None and b.keyword_enabled and self._poll_keyword():
             return
         if start < self._deaf_until:  # the cut-off just happened: this is its echo tail
@@ -461,6 +534,9 @@ class BargeIn:
     def _frame(self, frame: np.ndarray, stamp: float, rest: np.ndarray) -> bool:
         """Advance by one frame; True when it triggered (the rest of the chunk is dropped)."""
         b = self._b
+        waiting = self._await
+        if waiting is not None and stamp + self._frame_s - waiting.detected >= self._confirm_s:
+            self._release_await(stamp + self._frame_s)
         prob = self._vad.speech_prob(frame)
         self._ring.append((stamp, frame))
         speech = b.enabled and prob >= b.threshold
@@ -482,6 +558,8 @@ class BargeIn:
         candidate = candidate and corr < b.keyword_echo_corr_max
         self._duck_frame(speech or weak, stamp + self._frame_s)
         self._safe(self._record_frame, frame, prob, corr, speech, weak, stamp + self._frame_s)
+        if self._await is not None:  # handed to the server: no second cut-off point (S2)
+            speech = weak = False
         if speech:
             if self._run == 0:
                 self._onset = stamp
@@ -512,6 +590,11 @@ class BargeIn:
             if self._duck_start is not None:
                 self._end_duck("released", end)
                 self.duck.release(end)
+            return
+        if self._await is not None and self._duck_start is not None:
+            # handed to the server (S2): held low until its confirmation or the release
+            self._duck_quiet = 0
+            self.duck.duck(end - self._frame_s)
             return
         if heard:
             if self._duck_start is None:
@@ -571,15 +654,17 @@ class BargeIn:
         rec = self._rec
         if speech or weak:
             if rec is None:
+                self._episode_mode = "server" if self._server_mode() else "robot"
                 rec = self._open_record("vad" if speech else "onset", end, frame, prob, corr)
             with self._recent_lock:
                 rec["candidate_frames"] += 1
                 rec["vad_peak"] = round(max(rec["vad_peak"], prob), DIGITS)
                 rec["_end"] = end
             self._rec_quiet = 0
-        elif rec is not None:
+        elif rec is not None and self._await is None:  # handed to the server: it decides
             self._rec_quiet += 1
             if self._rec_quiet >= self._release_frames:
+                self._false[self._episode_mode] += 1  # a candidate that never stopped the robot
                 self._close_record("released", None, end, "quiet")
 
     def _open_record(
@@ -879,13 +964,18 @@ class BargeIn:
         audio.append(rest)
         samples = np.concatenate(audio)
         self._end_session()  # not blocking: the stop is the budgeted step; ``reset`` waits later
-        self._end_duck("cut", detected)
-        rec, self._rec = self._rec, None  # recorded after the cut: ``reset`` must not release it
-        t0 = time.perf_counter()
         stop = self._stop
         if stop is None:  # unbound: on_chunk never gets here, but a caller may
             return
+        t0 = time.perf_counter()
         own = kind == "speech" and self._own_cut()
+        server = not own and kind == "speech"
+        if server and self._hand_to_server(samples, audio_stamp, onset, detected):
+            return
+        if self._await is not None:  # the stop keyword while the server had not confirmed
+            self._await = None
+        self._end_duck("cut", detected)
+        rec, self._rec = self._rec, None  # recorded after the cut: ``reset`` must not release it
         if not own:
             try:
                 self._prepare()
@@ -919,3 +1009,88 @@ class BargeIn:
         if kind == "speech" and self._resume is not None:
             self._resume(samples, audio_stamp)
         self._safe(self._record_cut, rec, path, detected)
+
+    # ----------------------------------------------------------------- server turns (S2)
+
+    def _hand_to_server(
+        self, samples: np.ndarray, start: float, onset: float, detected: float
+    ) -> bool:
+        """At the cut-off point with server turns: the speech streams over the robot's voice
+        (``playback``, the audio from the onset) and the server's VAD decides; the duck stays
+        down meanwhile. Once per speaking window: after a release the person still talking is
+        cut off locally. False: no server turns, or the stream was refused (cut locally)."""
+        if self._playback is None or self._await is not None or self._released_here:
+            return False
+        try:
+            taken = bool(self._playback(samples, start))
+        except Exception as exc:
+            log.warning("barge-in: playback stream: %s", type(exc).__name__)
+            taken = False
+        if not taken:
+            if self._episode_mode == "server":
+                self._server["playback_refused"] += 1
+            return False
+        self._await = _Await(onset, detected)
+        self._server["playback_streams"] += 1
+        self._run = self._weak_run = 0
+        return True
+
+    def _poll_confirm(self) -> bool:
+        """The server's confirmation, taken on this thread (``confirm``): the robot is cut off
+        when a barge-in waits for it, or was released in this speaking window (late: the
+        server already cancelled its answer). Any other is idle. True when it cut."""
+        with self._confirm_lock:
+            flag, self._confirmed_flag = self._confirmed_flag, False
+        if not flag:
+            return False
+        if self._await is None and not self._released_here:
+            self._server["confirms_idle"] += 1
+            return False
+        self._server_cut(late=self._await is None)
+        return True
+
+    def _server_cut(self, *, late: bool) -> None:
+        """The server confirmed: ``prepare``, ``stop``, ``interrupt`` as for a local cut-off (no
+        ``response.cancel`` follows: the route knows the server cancels its answer itself),
+        and no ``resume``: the listener hears the person already. The onset-to-stop latency
+        of server mode is its own (``onset_to_stop_server``)."""
+        waiting, self._await = self._await, None
+        self._end_session()
+        stop = self._stop
+        if stop is None:
+            return
+        t0 = time.perf_counter()
+        try:
+            self._prepare()
+        except Exception as exc:
+            log.warning("barge-in: prepare: %s", type(exc).__name__)
+        stop()
+        stopped = self._clock()
+        self._deaf_until = stopped + self._tail_s
+        self.stats.record("stop_call", time.perf_counter() - t0)
+        if waiting is not None:
+            self.stats.record("onset_to_stop_server", stopped - waiting.onset)
+        self._end_duck("cut", self._last_end)
+        rec, self._rec = self._rec, None
+        self._server["server_confirmed_late" if late else "server_confirmed"] += 1
+        try:
+            self._interrupt()
+        except Exception as exc:
+            log.warning("barge-in: interrupt: %s", type(exc).__name__)
+        self.reset()
+        self._safe(self._record_cut, rec, "server", self._last_end)
+
+    def _release_await(self, end: float) -> None:
+        """No confirmation within ``duck.confirm_ms``: a false barge-in. The voice comes back
+        and the stream ends at once (with the voice up its echo would reach the server)."""
+        self._await = None
+        self._released_here = True
+        self._server["released_unconfirmed"] += 1
+        self._false["server"] += 1
+        self._end_duck("released", end)
+        self.duck.release(end)
+        self._safe(self._close_record, "released", None, end, "unconfirmed")
+        try:
+            self._end_playback()
+        except Exception as exc:
+            log.warning("barge-in: end playback: %s", type(exc).__name__)

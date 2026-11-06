@@ -4,9 +4,10 @@ responses scripted one per ``response.create``, served on their own task so a
 
 Scripts (``scripts``, used in order; the last one repeats):
 
-- ``reply``: ``response.created``, ``deltas`` audio deltas of ``delta_ms`` each ``gap_s`` apart,
-  the reply transcript (``transcript``), ``response.output_audio.done`` and ``response.done``
-  with usage ``usage`` (None leaves usage out);
+- ``reply``: ``response.created``, ``deltas`` audio deltas (a list: per response, the last
+  repeats) of ``delta_ms`` each ``gap_s`` apart, the reply transcript (``transcript``),
+  ``response.output_audio.done`` and ``response.done`` with usage ``usage`` (None leaves usage
+  out);
 - ``tool``: ``response.created``, one ``response.function_call_arguments.done`` (``tool_name``,
   ``tool_args``) and ``response.done``;
 - ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
@@ -70,6 +71,13 @@ of those answers back that long. ``end_positions`` off leaves its ``audio_end_ms
 ``error`` ``unknown_or_invalid_event`` (no event id) and cancels nothing, as Pollen's server
 answers unexpected values; ``ignore_cancel`` ignores every cancel (the reply streams on).
 
+With the last ``session.update``'s ``interrupt_response`` true (server turns, S2) the stream VAD
+cancels the responses still running when it starts a turn, as a server does on its own: each
+ends ``response.done`` ``cancelled`` at its next delta (``interrupted`` lists their ids).
+``interrupt_first`` waits for those ``response.done`` before it sends the ``speech_started``
+(the server's cancel before the start); by default the start goes first. ``late_deltas``
+audio deltas still go after a cancel, before its ``response.done`` (a cancel that lands late).
+
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
 ``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
 events) or ``segment`` (every segment after a burst's first, with ``segment_gap_s``). A test
@@ -114,7 +122,7 @@ class TurnServer(FakeServer):
         self,
         scripts: list[str] | None = None,
         *,
-        deltas: int = 3,
+        deltas: int | list[int] = 3,
         delta_ms: float = 100.0,
         gap_s: float = 0.0,
         transcript: str = REPLY,
@@ -145,6 +153,8 @@ class TurnServer(FakeServer):
         answer_delay_s: float = 0.0,
         refuse_cancel_id: bool = False,
         ignore_cancel: bool = False,
+        interrupt_first: bool = False,
+        late_deltas: int = 0,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -177,6 +187,9 @@ class TurnServer(FakeServer):
         self.stream_vad = stream_vad
         self.answer_delay_s = answer_delay_s
         self.refuse_cancel_id, self.ignore_cancel = refuse_cancel_id, ignore_cancel
+        self.interrupt_first, self.late_deltas = interrupt_first, late_deltas
+        self.interrupted: list[str] = []  # responses its VAD cancelled (interrupt_response)
+        self._running: dict[str, asyncio.Event] = {}  # response id -> set at its done
         self.stream_turns = 0  # turns the stream VAD heard, over all sessions
         self.commits_at_create: list[int] = []  # the stream VAD's commits at each response.create
         self._vad_item: str | None = None  # the stream VAD's turn in progress
@@ -360,7 +373,12 @@ class TurnServer(FakeServer):
                     if self.ids:
                         started["item_id"] = self._vad_item
                     started["audio_start_ms"] = int(pos)
+                    interrupts = self._interrupts()
+                    if interrupts and self.interrupt_first:
+                        await self._interrupt(wait=True)
                     await self._send(ws, started)
+                    if interrupts and not self.interrupt_first:
+                        await self._interrupt(wait=False)
                 self._speech_end = self.buffer_ms
                 continue
             if self._vad_item is None:
@@ -386,6 +404,24 @@ class TurnServer(FakeServer):
                 task.add_done_callback(self._tasks.discard)
         if self._vad_item is None:  # a later committed burst starts after this audio
             self._burst_start = self.buffer_ms
+
+    def _interrupts(self) -> bool:
+        updates = self.of("session.update")
+        if not updates:
+            return False
+        detect = updates[-1]["session"]["audio"]["input"]["turn_detection"]
+        return bool(detect.get("interrupt_response"))
+
+    async def _interrupt(self, *, wait: bool) -> None:
+        """Cancel every response still running (its done ``cancelled`` at its next delta);
+        ``wait``: until each one sent its ``response.done``."""
+        running = [rid for rid, done in self._running.items() if not done.is_set()]
+        for rid in running:
+            self.interrupted.append(rid)
+            self._cancels[rid].set()
+        if wait:
+            for rid in running:
+                await asyncio.wait_for(self._running[rid].wait(), HOLD_MAX_S)
 
     def _silence_ms(self) -> float:
         updates = self.of("session.update")
@@ -446,6 +482,7 @@ class TurnServer(FakeServer):
             await asyncio.sleep(delay_s)
         rid = f"resp_{number}"
         item = f"item_{number}"
+        self._running[rid] = asyncio.Event()
         if script == "silent":
             return
         if script in ("updated_then_refused", "unrelated_error"):
@@ -488,10 +525,18 @@ class TurnServer(FakeServer):
         if script == "tool_then_audio":
             await self._call(ws, rid)
         delta = base64.b64encode(pcm(self.delta_ms)).decode()
-        for i in range(1 if script == "close_mid" else self.deltas):
+        count = (
+            self.deltas
+            if isinstance(self.deltas, int)
+            else self.deltas[min(number, len(self.deltas)) - 1]
+        )
+        for i in range(1 if script == "close_mid" else count):
             if cancel.is_set():
                 if script == "cancel_then_tool":
                     await self._call(ws, rid)
+                for _ in range(self.late_deltas):
+                    late = {"type": "response.output_audio.delta", "response_id": rid}
+                    await self._send(ws, {**late, "item_id": item, "delta": delta})
                 await self._done(ws, rid, "cancelled")
                 return
             await self._send(
@@ -553,3 +598,5 @@ class TurnServer(FakeServer):
             response["usage"] = {"total_tokens": self.usage}
             response["metadata"] = {"speech_to_speech.turn_latency": {"stt": 0.1, "e2e": 0.9}}
         await self._send(ws, {"type": "response.done", "response": response})
+        if rid in self._running:  # after the send: an interrupt that waits sends after it
+            self._running[rid].set()

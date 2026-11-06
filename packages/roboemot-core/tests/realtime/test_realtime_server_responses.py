@@ -89,12 +89,15 @@ def test_server_turns_let_the_server_answer_and_robot_turns_do_not(ears):  # noq
         assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
         updates = server.of("session.update")
         assert all(detect(u)["create_response"] is True for u in updates)  # connect, opening
-        assert all(detect(u)["interrupt_response"] is False for u in updates)  # S2 changes it
+        # S2: the server's VAD cancels its own answer when it hears the person (barge-in)
+        assert all(detect(u)["interrupt_response"] is True for u in updates)
         cfg = ear.rt.stack.effective()
         assert detect(session_update(cfg, "x", create_response=False))["create_response"] is False
     with TurnServer() as server:
         ear = ears(server, script=["x"])
-        assert all(detect(u)["create_response"] is False for u in server.of("session.update"))
+        for update in server.of("session.update"):
+            assert detect(update)["create_response"] is False
+            assert detect(update)["interrupt_response"] is False  # robot turns: ours alone
 
 
 def test_the_realtime_check_never_lets_the_server_answer_on_its_own():
@@ -114,6 +117,7 @@ def test_the_realtime_check_never_lets_the_server_answer_on_its_own():
         assert run(cfg, make_router(cfg)).ok
     (update,) = [e for e in server.received if e["type"] == "session.update"]
     assert detect(update)["create_response"] is False
+    assert detect(update)["interrupt_response"] is False  # S2: nor interrupts on its own
 
 
 def test_robot_turns_back_at_runtime_turn_the_servers_own_answers_off(ears):  # noqa: F811

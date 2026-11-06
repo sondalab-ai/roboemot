@@ -107,6 +107,7 @@ from ..llm.router import (
 )
 from ..persona import apply_to_register, effects
 from ..realtime import protocol as rt_protocol
+from ..realtime.route import server_turns
 from ..realtime.turn import (
     SKIP_TOOL,
     TONE_TOOL,
@@ -146,6 +147,7 @@ TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realti
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
 TONE_NOTED = '{"ok": true}'  # the result of a note_tone call (SPEC 8, Tone tool)
 TONE_INVALID = '{"error": "unknown_tone"}'  # not one of voice.realtime_route.tone_labels
+CANCELLED = "cancelled"  # the response.done status of a response cancelled (S2: by the server)
 
 
 class Speech(Protocol):
@@ -211,6 +213,7 @@ class _Turn:
     rt_items: list[str] = field(default_factory=list)  # server item ids of this turn
     rt_jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item)
     rt_partial: bool = False  # a realtime reply was cut part way (history: interrupted)
+    rt_cut: bool = False  # its played audio items were truncated (``_cut_realtime``)
     rt_tools: bool = False  # a skill ran in this realtime turn: it is never answered again
     rt_round: tuple[list[ToolCall], list[ToolOutcome], int] | None = None  # round in flight
     rt_run: Any = None  # the ResponseRun of that round
@@ -1115,7 +1118,11 @@ class ConversationWorker:
                 return self._realtime_lost(turn)
             if turn.cut:
                 self._cut_realtime(turn)
-            ended = turn.cut or any(r.end_turn for r in results)
+            # the server cancelled it on its own (interrupt_response: it heard the person, S2):
+            # nothing more is asked and no fallback line is said over the person
+            cancelled = reply.status == CANCELLED and not reply.cancelled
+            interrupted = cancelled and server_turns(turn.cfg)
+            ended = turn.cut or interrupted or any(r.end_turn for r in results)
             # note_tone is fire-and-forget: only a response of tone calls and no speech gets one
             # more response, once, without the tool (SPEC 8, Tone tool)
             noted = TONE_NOTED in tones.values()  # an invalid-only tone round is not retried
@@ -1247,6 +1254,9 @@ class ConversationWorker:
         with self._lock:
             queued = next((u for u, _ in self._pending if isinstance(u, _ServerTurn)), None)
             active, serving = self._active_turn, self._serving
+            if active is not None and active.interrupted and queued is None:
+                # a turn a barge-in cut is ending: the barge-in's own answer is next (S2)
+                active = serving = None
             host: _ServerTurn | None
             if active is not None or queued is not None or serving is not None:
                 if active is not None:  # a robot turn's words join it too
@@ -1681,6 +1691,7 @@ class ConversationWorker:
         """After a stop: truncate the server's audio items at what played and keep, in the
         history and the live transcript, the words heard (an estimate by played time)."""
         route = self.realtime
+        turn.rt_cut = True
         heard = truncate_played(route, self.speech, turn.rt_jobs)
         for i, (job, text) in enumerate(turn.queued):
             fraction = heard.get(job)
@@ -2240,6 +2251,10 @@ class ConversationWorker:
         without its text. After a barge-in or stop_talking only the sentences that began to play
         are kept, and the message says it was cut. Sentences already in the exchange messages
         are not repeated in the closing one."""
+        if turn.stopped and turn.voice == "realtime" and turn.rt_jobs and not turn.rt_cut:
+            # a barge-in after its last response ended (the server cancelled it first, S2):
+            # the audio items still played, so they are truncated at what was heard
+            self._cut_realtime(turn)
         with self._lock:
             turn.done = True
             cut = turn.stopped or turn.cut

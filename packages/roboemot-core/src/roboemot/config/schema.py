@@ -3175,6 +3175,21 @@ class BargeInDuckConfig(Strict):
         "as capped. Longer than any hesitant phrase that never reaches the cut-off",
         unit="s", ge=0.5, le=30,
     )  # fmt: skip
+    confirm_ms: float = param(
+        1500.0,
+        "With voice.realtime_route.turns: server: how long the duck waits for the server's VAD "
+        "to confirm the person's speech (input_audio_buffer.speech_started) once a barge-in "
+        "opened a stream during the robot's speech. No confirmation by then restores the voice "
+        "and ends that stream (a false barge-in). Counted from the local cut-off point; at most "
+        "max_episode_s",
+        unit="ms", ge=300, le=5000,
+    )  # fmt: skip
+
+    @model_validator(mode="after")
+    def _confirm_fits_the_cap(self) -> BargeInDuckConfig:
+        if self.confirm_ms > self.max_episode_s * 1000.0:
+            raise ValueError("barge_in.duck.confirm_ms must not exceed max_episode_s")
+        return self
 
 
 class BargeInConfig(Strict):
