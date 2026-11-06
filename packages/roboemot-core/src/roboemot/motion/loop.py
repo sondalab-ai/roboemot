@@ -142,6 +142,11 @@ class MotionLoop:
     def external_events(self) -> int:
         return self.external_ctl.events
 
+    @property
+    def unreachable_held(self) -> bool:
+        """A unit holds on an unreachable target (read without the lock, like ``external``)."""
+        return self.external_ctl.holding
+
     def motion_sample(self) -> MotionSample | None:
         """Raw movement values (``MotionProbe``), read without the lock from any thread: a copy
         of the limiter's velocities (floats replaced in place, so the copy is consistent enough
@@ -206,6 +211,10 @@ class MotionLoop:
                 "motors_off": self.motors_off,
                 "asleep": self.motors_off and self.link.online,
                 **self.external_ctl.snapshot(now),
+                # per dof (manifest names): what the robot reports and what the loop writes,
+                # so a press under the tolerance shows (SPEC 12A; rad, m for translations)
+                "measured": dict(self._measured[-1]) if self._measured else None,
+                "commanded": dict(self.core.limiter.pos),
                 "holding": self.core.holding,
                 "watchdog_engagements": self.core.watchdog_engagements,
                 "rate_hz": self.rate_hz,
@@ -320,23 +329,29 @@ class MotionLoop:
     def _hold_where_stopped(
         self, now: float, measured: dict[str, float], units: list[Unit]
     ) -> None:
-        """Write the measured pose (a fresh sample, through the limiter's position clamp and
-        coupled constraints) once for units that hold on an unreachable target: a
+        """Write the hold pose once (``ExternalControl.hold_pose``: the measured pose of a fresh
+        sample, held joints backed off from the obstacle, through the limiter's position clamp
+        and coupled constraints) for units that hold on an unreachable target: a
         position-controlled platform keeps its last goal, which would press on the obstacle
-        all night (SPEC 12: more conservative than not writing). A failed write leaves it
-        pending: retried on the next fresh sample, after a link recovery too."""
-        pose = {k: measured[k] for u in units for k in u.dofs if k in measured}
+        all night (SPEC 12: more conservative than not writing). Only with the motors on (the
+        same look as before a resume). A failed write leaves it pending: retried on the next
+        fresh sample, after a link recovery too."""
+        pose: dict[str, float] = {}
+        for unit in units:
+            pose |= self.external_ctl.hold_pose(unit, measured)
         if not pose:
+            return
+        if self._call(self.driver.motors_enabled) is False:
+            self._motors_now(False)
             return
         self._call(self.driver.write_pose_targets, now, self.core.limiter.clamp(pose))
         for unit in units:
             unit.hold_pending = False
-            if (stop := unit.blocked) is None:
-                continue
-            log.warning(
-                "motion: %s cannot reach %s = %.3f (stopped at %.3f), holding until it changes",
-                unit.name, stop.joint, stop.target, stop.measured,
-            )  # fmt: skip
+            for stop in unit.holds.values():
+                log.warning(
+                    "motion: %s cannot reach %s = %.3f (stopped at %.3f, %s), holding",
+                    unit.name, stop.joint, stop.target, stop.measured, stop.cause,
+                )  # fmt: skip
 
     def _motors_now(self, enabled: bool) -> None:
         """Track the motor state the platform reports (caller holds the lock)."""

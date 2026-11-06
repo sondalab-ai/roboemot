@@ -929,12 +929,42 @@ def blocked() -> tuple[MotionLoop, StopServo]:
 
 UNREACHABLE = {"head.pitch": 0.35}  # 0.25 rad past the stop, as the robot's 0.24 to 0.28
 PAST_STOP = 0.1 + EXT.tolerance_rad
+BAND = EXT.still_band_rad
+WINDOW_S = EXT.lag_window_s + EXT.max_state_age_s + EXT.confirm_s + EXT.repeat_margin_s
+
+
+def ext_cfg(**kw):
+    """The config with these ``motion.external`` values."""
+    ext = CFG.motion.external.model_copy(update=kw)
+    return CFG.model_copy(update={"motion": CFG.motion.model_copy(update={"external": ext})})
+
+
+def until(loop, driver, t, targets, cond, limit_s=60.0):
+    """``rest`` tick by tick until ``cond()``; the time then."""
+    end = t + limit_s
+    while not cond():
+        assert t < end, "condition never met"
+        t = rest(loop, driver, t, DT, targets)
+    return t
 
 
 def test_the_unreachable_thresholds_are_schema_fields():
-    assert EXT.repeat_window_s > 0
+    assert EXT.repeat_margin_s > 0 and EXT.steady_offset_s > 0
     assert EXT.same_target_rad > EXT.still_band_rad and EXT.same_target_m > EXT.still_band_m
+    assert EXT.steady_offset_rad < EXT.tolerance_rad and EXT.steady_offset_m < EXT.tolerance_m
     assert EXT.unreachable_repeats >= 1
+
+
+def test_the_repeat_window_grows_with_the_detection_times_so_no_value_switches_it_off():
+    """Review item 2: with a fixed window, max_state_age_s 4.0 (in range) pushed past it."""
+    driver = StopServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.stop = {"head.pitch": 0.1}
+    loop = make_with(driver, cfg=ext_cfg(max_state_age_s=4.0))
+    rest(loop, driver, 0.0, 120.0, UNREACHABLE)
+    assert loop.external_ctl.repeat_window_s == pytest.approx(
+        EXT.lag_window_s + 4.0 + EXT.confirm_s + EXT.repeat_margin_s
+    )
+    assert loop.snapshot()["unreachable_held"] == ["head"]
 
 
 def test_an_unreachable_target_is_pushed_twice_then_held_with_no_third_push():
@@ -946,20 +976,59 @@ def test_an_unreachable_target_is_pushed_twice_then_held_with_no_third_push():
     assert pushes(driver, "head.pitch", PAST_STOP) == 2
     last = snap["unreachable_last"]
     assert last["joint"] == "head.pitch" and last["group"] == "head"
+    assert last["cause"] == "repeat" and last["joints"] == ["head.pitch"]
     assert last["target"] == pytest.approx(0.35) and last["measured"] == pytest.approx(0.1)
     event = snap["external_last_event"]
     assert event["target"] == pytest.approx(0.35) and event["measured"] == pytest.approx(0.1)
     assert event["unreachable"] is True
-    # the platform's goal is moved to where the head is, so it stops pressing on the body
-    assert driver.target["head.pitch"] == pytest.approx(0.1, abs=0.01)
-    # not external control: the reflexes and barge-in do not see a robot moved by someone
-    assert not loop.external and snap["external"] is False
+    # the platform's goal is moved off the body by still_band, so no press stays
+    assert driver.target["head.pitch"] == pytest.approx(0.1 - BAND, abs=1e-6)
+    assert snap["measured"]["head.pitch"] < 0.1 + 1e-9
+    # not external control once still: the reflexes and barge-in are not gated all night
+    assert not loop.external and snap["external"] is False and loop.unreachable_held
     n = len(driver.writes)
     rest(loop, driver, t, 120.0, UNREACHABLE)  # hours of the same rest target: no timer retry
     snap = loop.snapshot()
     assert snap["external_events"] == 2 and snap["unreachable"] == 1
+    assert snap["unreachable_held"] == ["head"]  # still a hold after its own back-off
     assert pushes(driver, "head.pitch", PAST_STOP) == 2
     assert all("head.pitch" not in v for _, v in driver.writes[n:])
+
+
+def test_a_press_under_the_tolerance_is_held_as_a_steady_offset():
+    """Review item 1, the blind band: stop 0.1, target 0.2 never diverged (0 events)."""
+    loop, driver = blocked()
+    t = rest(loop, driver, 0.0, EXT.steady_offset_s + 3.0, {"head.pitch": 0.2})
+    snap = loop.snapshot()
+    assert snap["external_events"] == 0 and snap["unreachable"] == 1
+    assert snap["unreachable_held"] == ["head"]
+    assert snap["unreachable_last"]["cause"] == "steady_offset"
+    assert driver.target["head.pitch"] == pytest.approx(0.1 - BAND, abs=1e-6)
+    n = len(driver.writes)
+    rest(loop, driver, t, 60.0, {"head.pitch": 0.2})
+    assert all("head.pitch" not in v for _, v in driver.writes[n:])
+    assert loop.snapshot()["unreachable"] == 1
+
+
+class SagServo(ServoDriver):
+    """Settles ``sag`` short of its pitch target (gravity, a soft servo): our own residual."""
+
+    sag = 0.0
+
+    def advance(self, dt: float) -> None:
+        super().advance(dt)
+        self.pose["head.pitch"] = min(self.pose["head.pitch"], self.target["head.pitch"] - self.sag)
+
+
+def test_a_steady_residual_under_the_offset_threshold_never_holds():
+    driver = SagServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.sag = 0.75 * EXT.steady_offset_rad
+    loop = make_with(driver)
+    t = 0.0
+    for pitch in (0.3, -0.2, 0.1):
+        t = rest(loop, driver, t, 20.0, {"head.pitch": pitch})
+    snap = loop.snapshot()
+    assert snap["unreachable"] == 0 and snap["external_events"] == 0 and not loop.unreachable_held
 
 
 def test_a_hand_that_moves_the_head_once_yields_and_resumes_as_before():
@@ -997,11 +1066,11 @@ def test_a_hand_that_holds_the_head_somewhere_else_the_second_time_is_not_a_repe
     assert driver.pose["head.pitch"] == pytest.approx(0.05, abs=0.01)
 
 
-def test_a_hand_still_holding_the_head_when_the_grace_ends_is_held_until_it_moves_again():
+def test_a_hand_still_holding_the_head_at_the_resume_is_held_until_the_gaze_moves():
     """The accepted trade-off (SPEC 12A, Unreachable target): a hand that still holds the head
     at the resume is an obstacle for the loop. The head stays where the hand leaves it, never
-    pushed against it again, until it is moved again (then a plain yield) or a target on the
-    hand's side of it."""
+    pushed against it again; the next target change (owner decision 2026-11-06: any change,
+    either way), here a face to look at, takes control back."""
     loop, driver = make()
     target = {"head.pitch": 0.05}
     t = rest(loop, driver, 0.0, 2.0, target)
@@ -1011,15 +1080,11 @@ def test_a_hand_still_holding_the_head_when_the_grace_ends_is_held_until_it_move
     assert snap["unreachable"] == 1 and snap["unreachable_held"] == ["head"]
     driver.external = False  # lets go: the platform's goal is where the hand left the head
     t = rest(loop, driver, t, GRACE_S + 3.0, target)
-    assert driver.pose["head.pitch"] == pytest.approx(-0.4, abs=0.02)
-    t = rest(loop, driver, t, 3.0, {"head.pitch": -0.2})  # past the hand's stop: stays held
-    assert loop.snapshot()["unreachable_held"] == ["head"]
-    driver.external, driver.goal = True, {"head.pitch": -0.3}  # a nudge
-    t = rest(loop, driver, t, 1.0, target)
-    driver.external = False
-    rest(loop, driver, t, GRACE_S + 3.0, target)
+    assert driver.pose["head.pitch"] == pytest.approx(-0.4, abs=BAND + 0.01)
+    face = {"head.pitch": -0.1}
+    rest(loop, driver, t, 3.0, face)
     assert loop.snapshot()["unreachable_held"] == [] and not loop.external
-    assert driver.pose["head.pitch"] == pytest.approx(0.05, abs=0.01)
+    assert driver.pose["head.pitch"] == pytest.approx(-0.1, abs=0.01)
 
 
 @pytest.mark.parametrize("new", [{"head.pitch": 0.0}, {"head.pitch": 0.05}])
@@ -1047,6 +1112,184 @@ def test_a_target_that_comes_back_after_the_hold_is_pushed_once_more_then_held()
     assert snap["external_events"] == 3 and snap["unreachable"] == 2
     assert snap["unreachable_held"] == ["head"]
     assert pushes(driver, "head.pitch", PAST_STOP) == 3
+
+
+def test_a_known_stop_holds_at_once_even_long_after_the_release():
+    """Mutant ``noknown``: the target comes back more than the repeat window after the
+    release, so only the remembered stop can hold it at its first divergence."""
+    loop, driver = blocked()
+    t = rest(loop, driver, 0.0, 30.0, UNREACHABLE)
+    t = rest(loop, driver, t, WINDOW_S + 5.0, {"head.pitch": 0.0})
+    rest(loop, driver, t, 30.0, UNREACHABLE)
+    snap = loop.snapshot()
+    assert snap["external_events"] == 3 and snap["unreachable"] == 2
+    assert snap["unreachable_held"] == ["head"]
+
+
+def test_a_second_divergence_after_the_repeat_window_is_not_a_repeat():
+    """Mutant ``norecent``: still stuck at the same stop, but the resume was long ago."""
+    loop, driver = blocked()
+    t = until(loop, driver, 0.0, UNREACHABLE, lambda: loop.external)  # the first yield
+    t = rest(loop, driver, t, GRACE_S + WINDOW_S + 2.0, {"head.pitch": 0.1})  # at the stop
+    assert not loop.external and loop.snapshot()["external_events"] == 1
+    t = until(loop, driver, t, UNREACHABLE, lambda: loop.external)  # the second divergence
+    snap = loop.snapshot()
+    assert snap["external_events"] == 2 and snap["unreachable"] == 0
+    rest(loop, driver, t, 20.0, UNREACHABLE)  # the next one is recent again: held
+    assert loop.snapshot()["unreachable_held"] == ["head"]
+
+
+def test_a_settled_hold_moved_by_a_hand_is_a_yield_and_meets_the_known_stop_once():
+    """Same target meanwhile: the hold becomes a plain yield (external control), resumes after
+    the grace, and the remembered stop holds it again at its first divergence."""
+    loop, driver = blocked()
+    t = rest(loop, driver, 0.0, 30.0, UNREACHABLE)
+    driver.external, driver.goal = True, {"head.pitch": -0.3}
+    t = rest(loop, driver, t, 1.0, UNREACHABLE)
+    assert loop.external and loop.snapshot()["unreachable_held"] == []
+    driver.external = False
+    rest(loop, driver, t, GRACE_S + 10.0, UNREACHABLE)
+    snap = loop.snapshot()
+    assert snap["unreachable_held"] == ["head"] and snap["unreachable"] == 2
+    assert pushes(driver, "head.pitch", PAST_STOP) == 3
+
+
+def test_a_sticky_hold_is_released_by_a_target_off_the_stop():
+    """Held again at a known stop (sticky): a target on the reachable side releases it."""
+    loop, driver = blocked()
+    t = rest(loop, driver, 0.0, 30.0, UNREACHABLE)
+    t = rest(loop, driver, t, 3.0, {"head.pitch": 0.0})
+    t = rest(loop, driver, t, 30.0, UNREACHABLE)
+    assert loop.snapshot()["unreachable_last"]["sticky"] is True
+    rest(loop, driver, t, 3.0, {"head.pitch": 0.05})
+    assert not loop.unreachable_held
+    assert driver.pose["head.pitch"] == pytest.approx(0.05, abs=0.01)
+
+
+def test_the_same_place_with_the_target_on_the_other_side_is_not_a_repeat():
+    """A stop is a place and a side: stopped at 0.1 short of a target below, then held at
+    0.1 by a hand against a target above, right after the resume, is no repeat."""
+    loop, driver = blocked()
+    t = until(loop, driver, 0.0, UNREACHABLE, lambda: loop.external)
+    t = rest(loop, driver, t, GRACE_S + 1.0, UNREACHABLE)  # resumed, pushing again
+    other = {"head.pitch": -0.3}
+    driver.external, driver.goal = True, {"head.pitch": 0.1}  # a hand keeps it at 0.1
+    t = until(loop, driver, t, other, lambda: loop.external)
+    assert loop.snapshot()["unreachable"] == 0
+    rest(loop, driver, t, 1.0, other)
+    assert not loop.unreachable_held
+
+
+def test_a_stop_the_joint_got_past_is_forgotten():
+    """Mutant ``nodrop``: the obstacle goes, the head passes the stop, the obstacle comes back
+    at the same place: it takes a repeat again before the hold."""
+    loop, driver = blocked()
+    t = rest(loop, driver, 0.0, 30.0, UNREACHABLE)
+    t = rest(loop, driver, t, 3.0, {"head.pitch": 0.0})
+    driver.stop = {"head.pitch": 1.0}  # cleared away
+    t = rest(loop, driver, t, 5.0, UNREACHABLE)
+    assert driver.pose["head.pitch"] == pytest.approx(0.35, abs=0.01)
+    t = rest(loop, driver, t, WINDOW_S + 3.0, {"head.pitch": 0.0})
+    driver.stop = {"head.pitch": 0.1}  # back, same place
+    events = loop.snapshot()["external_events"]
+    t = until(loop, driver, t, UNREACHABLE, lambda: loop.external)
+    snap = loop.snapshot()
+    assert snap["external_events"] == events + 1 and snap["unreachable"] == 1  # no hold yet
+    rest(loop, driver, t, 20.0, UNREACHABLE)
+    assert loop.snapshot()["unreachable"] == 2
+
+
+def test_a_hold_is_not_released_while_the_head_still_moves():
+    """Mutant ``nosettled``: a hand moves the head right as it starts holding and the target
+    changes meanwhile: no write to it until it has been still for the grace."""
+    loop, driver = blocked()
+    t = until(loop, driver, 0.0, UNREACHABLE, lambda: loop.unreachable_held)
+    driver.external, driver.goal, driver.speed = True, {"head.pitch": -0.5}, 0.2  # slow hand
+    new = {"head.pitch": -0.1}
+    n = len(driver.writes)
+    t = rest(loop, driver, t, 2.5, new)
+    assert all("head.pitch" not in v for _, v in driver.writes[n + 1 :])  # the hold write only
+    driver.external = False
+    rest(loop, driver, t, GRACE_S + 3.0, new)
+    assert not loop.unreachable_held and not loop.external
+    assert driver.pose["head.pitch"] == pytest.approx(-0.1, abs=0.01)
+
+
+def test_a_slowly_varying_target_beyond_the_same_stop_is_held():
+    """Review item 5: 0.35 +- 0.08 with a 13 s period gave 19 pushes in 120 s."""
+    loop, driver = blocked()
+    t = 0.0
+    while t < 120.0:
+        pitch = 0.35 + 0.08 * math.sin(2 * math.pi * t / 13.0)
+        t = rest(loop, driver, t, DT, {"head.pitch": pitch})
+    snap = loop.snapshot()
+    assert snap["unreachable_held"] == ["head"]
+    assert pushes(driver, "head.pitch", PAST_STOP) <= 3
+
+
+class TwoStops(StopServo):
+    """Two obstacles; which the robot meets first alternates per push (review item 3)."""
+
+    def advance(self, dt: float) -> None:
+        ServoDriver.advance(self, dt)
+        for k, limit in self.stop.items():
+            self.pose[k] = min(self.pose[k], limit)
+
+
+def test_two_units_whose_first_diverger_alternates_still_hold():
+    """Review item 3: a unit that yielded for another lost its record (18 events, no hold)."""
+    driver = TwoStops(home=dict.fromkeys(GROUPED, 0.0))
+    driver.stop = {"head.yaw": 0.1, "antenna_left": 0.1}
+    loop = make_with(driver, grouped_manifest())
+    targets = {"head.yaw": 0.35, "body_yaw": 0.0, "antenna_left": 0.6, "antenna_right": 0.0}
+    t, seen = 0.0, 0
+    while t < 120.0:
+        t = rest(loop, driver, t, DT, targets)
+        ext = loop.external_ctl
+        if ext.events != seen:
+            seen = ext.events
+            first = ext.recent[-1]["group"]
+            driver.stop["antenna_left"] = 0.5 if first == "antennas" else 0.1
+    snap = loop.snapshot()
+    assert snap["unreachable_held"] and snap["external_events"] <= 6
+
+
+def test_a_repeat_on_any_diverging_joint_holds_when_the_worst_one_flips():
+    """Review item 6: the reported (worst) joint flips between two joints of one unit."""
+    driver = StopServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.stop = {"head.pitch": 0.1, "head.yaw": 0.1}
+    loop = make_with(driver)
+    t, seen, flip = 0.0, 0, False
+    while t < 60.0:
+        pitch, yaw = (0.36, 0.34) if flip else (0.34, 0.36)
+        t = rest(loop, driver, t, DT, {"head.pitch": pitch, "head.yaw": yaw})
+        if loop.external_ctl.events != seen:
+            seen, flip = loop.external_ctl.events, not flip
+    assert loop.snapshot()["unreachable_held"] == ["head"] and seen <= 3
+
+
+def test_a_three_degree_rest_held_on_a_stop_is_released_by_the_wake_with_breathing_on():
+    """Review LOW: the wake release margin of a 3 deg hold. The head cannot pitch down at
+    all; the rest (3 deg) is held as a steady offset; the wake (home plus breathing) releases
+    it within one breathing period, whatever the phase."""
+    from roboemot.runtime.ticks import idle_command
+
+    for phase in (0.0, 1.0, 2.0, 3.0):
+        loop, driver = blocked()
+        driver.stop = {"head.pitch": 0.0}
+        rest3 = {"head.pitch": math.radians(3.0)}
+        t = rest(loop, driver, 0.0, EXT.steady_offset_s + 3.0, rest3)
+        assert loop.snapshot()["unreachable_held"] == ["head"]
+        loop.clear(REST)
+        period = CFG.motion.idle.breathing_period_s
+        end = t + period
+        while loop.unreachable_held and t < end:
+            loop.feed(idle_command(CFG, t, phase_t=t + phase, dof="head.pitch"))
+            NOW[0] = t
+            loop.cycle(t, DT)
+            driver.advance(DT)
+            t += DT
+        assert not loop.unreachable_held, phase
 
 
 def test_the_watchdog_does_not_release_the_hold():
@@ -1094,13 +1337,25 @@ def test_the_hold_pose_goes_through_the_limiter_clamp():
     assert not unit.hold_pending
 
 
+def test_no_hold_write_while_the_motors_are_off():
+    """Review item 7: the same look at the motor status as before a resume."""
+    loop, driver = make()
+    unit = loop.external_ctl.units[0]
+    unit.holding, unit.hold_pending = True, True
+    driver.mode = "limp"
+    n = len(driver.writes)
+    loop._hold_where_stopped(0.0, {"head.pitch": 0.1, "head.yaw": 0.0, "head.z": 0.0}, [unit])
+    assert len(driver.writes) == n and loop.motors_off
+
+
 class FlakyHoldServo(StopServo):
-    """Fails the first write of the hold pose (all of the unit's dofs, pitch at the stop)."""
+    """Fails the first write of the hold pose (pitch backed off from the stop)."""
 
     failed = 0
 
     def write_pose_targets(self, t, values):
-        if not self.failed and values.get("head.pitch") == self.stop["head.pitch"]:
+        hold = self.stop["head.pitch"] - BAND
+        if not self.failed and abs(values.get("head.pitch", 9.0) - hold) < 1e-9:
             self.failed += 1
             raise ConnectionError("lost")
         super().write_pose_targets(t, values)
@@ -1113,7 +1368,7 @@ def test_a_failed_hold_write_is_retried_until_it_lands():
     rest(loop, driver, 0.0, 30.0, UNREACHABLE)
     assert driver.failed == 1 and loop.errors >= 1
     assert loop.snapshot()["unreachable_held"] == ["head"]
-    assert driver.target["head.pitch"] == pytest.approx(0.1, abs=0.01)  # written after all
+    assert driver.target["head.pitch"] == pytest.approx(0.1 - BAND, abs=1e-6)  # written after all
     assert not loop.external_ctl.units[0].hold_pending
 
 
@@ -1134,11 +1389,13 @@ def test_a_held_head_moved_by_a_hand_becomes_a_yield_and_resumes_only_once_still
     assert driver.pose["head.pitch"] == pytest.approx(-0.1, abs=0.01)
 
 
-def test_a_new_target_further_past_the_stop_stays_held():
+def test_a_new_target_further_past_the_same_stop_costs_one_push_then_holds():
+    """Owner decision 2026-11-06: any target change releases; a target still beyond the same
+    stop is then held at its first divergence (one push)."""
     loop, driver = blocked()
     t = rest(loop, driver, 0.0, 30.0, UNREACHABLE)
-    n = len(driver.writes)
-    rest(loop, driver, t, 10.0, {"head.pitch": 0.5})
+    rest(loop, driver, t, 30.0, {"head.pitch": 0.5})
     snap = loop.snapshot()
-    assert snap["unreachable_held"] == ["head"] and snap["external_events"] == 2
-    assert all("head.pitch" not in v for _, v in driver.writes[n:])
+    assert snap["unreachable_held"] == ["head"]
+    assert snap["external_events"] == 3 and snap["unreachable"] == 2
+    assert pushes(driver, "head.pitch", PAST_STOP) == 3
