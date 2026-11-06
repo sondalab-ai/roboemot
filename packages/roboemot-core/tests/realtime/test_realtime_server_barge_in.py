@@ -202,6 +202,7 @@ def test_a_confirmed_barge_in_stops_truncates_and_its_own_answer_plays(ears, int
         assert ear.settle(lambda: snap(ear)["server_responses"] == 2, 10.0)
         assert ear.settle(lambda: turns(ear) == 2, 10.0)
         assert server.of("response.create") == []
+        assert wait_until(lambda: server.of("conversation.item.truncate"))  # off the socket
         (truncate,) = server.of("conversation.item.truncate")
         assert truncate["item_id"] == "item_1"
         assert 0 < truncate["audio_end_ms"] < 400 * 300  # at what played, not the whole reply
@@ -331,12 +332,15 @@ def test_a_turn_a_barge_in_cut_never_hosts_its_streams_own_answer(ears):  # noqa
 def test_a_barge_in_after_the_last_response_ended_still_truncates_in_robot_turns(ears):  # noqa: F811
     """M5: robot turns; the reply's response ended while its audio still plays and the turn
     has not finished: a barge-in then still truncates the audio item at what played."""
-    with TurnServer(deltas=200) as server:  # 20 s of audio: still playing at the barge-in
+    with TurnServer(deltas=20) as server:  # 2 s of audio, stopped tens of ms in
         ear = ears(server, script=["x"], to_worker=True)
         worker = ear.rt.worker
         lines = worker._speak_lines
+        playing: list[bool] = []
 
         async def barge_then_lines(turn):  # after the rounds, before _finish
+            progress = [ear.rt.speech.stream_progress(j) for j, _ in turn.rt_jobs]
+            playing.append(bool(progress) and all(p is not None and p[0] < p[1] for p in progress))
             worker.mark_interrupting()
             ear.rt.speech.stop()
             worker.interrupt()
@@ -345,8 +349,13 @@ def test_a_barge_in_after_the_last_response_ended_still_truncates_in_robot_turns
         worker._speak_lines = barge_then_lines
         ear.say()
         assert ear.settle(lambda: turns(ear) == 1, 10.0)
+        assert playing == [True]  # its item was known to the turn and still playing at the stop
+        # the truncate went with the turn's end (the route's count is synchronous with the send);
+        # the server reads it from its socket a moment later: wait for that event, not a time
+        assert snap(ear)["items_truncated"] == 1
+        assert wait_until(lambda: server.of("conversation.item.truncate"))
         (truncate,) = server.of("conversation.item.truncate")
-        assert truncate["item_id"] == "item_1" and truncate["audio_end_ms"] < 200 * 100
+        assert truncate["item_id"] == "item_1" and truncate["audio_end_ms"] < 20 * 100
 
 
 # ------------------------------------------------------------------ the real barge-in
