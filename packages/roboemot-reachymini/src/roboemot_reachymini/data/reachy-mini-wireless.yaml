@@ -215,8 +215,10 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # home (x, y, z 0, as the rest commands them). If it stopped short, it stopped at about 4 to 6
   # deg down (inferred: the event error has no sign). The MuJoCo sim cannot tell: it reaches 39 deg
   # there (no head-body contact). 3 deg stays below that; still to check on the hardware. If it
-  # is out of reach, the motion loop holds where the head stopped after one repeat
-  # (motion.unreachable in the debug report).
+  # is out of reach, the motion loop holds where the head stopped: after one repeat when more
+  # than motion.external.tolerance_rad short, after steady_offset_s when more than
+  # steady_offset_rad (2.3 deg) short (motion.unreachable in the debug report). A smaller
+  # press is not detected: QA compares the measured head.pitch with the command at rest.
   circadian_motion:
     rest_pose_deg:
       head.pitch: 3

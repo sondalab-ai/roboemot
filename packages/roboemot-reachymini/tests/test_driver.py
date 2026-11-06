@@ -173,7 +173,7 @@ def test_package_data_in_sync_with_configs():
 
 # Robot run 2026-11-05: rest pitch 20 diverged by 0.24-0.28 rad; short of it means a stop at about
 # 4-6 deg (inferred, the event error has no sign)
-INFERRED_HEAD_STOP_DEG = 4.0
+INFERRED_HEAD_STOP_CEILING_DEG = 4.0
 
 
 def test_the_rest_posture_is_inside_the_limits_and_below_the_inferred_head_stop():
@@ -184,7 +184,7 @@ def test_the_rest_posture_is_inside_the_limits_and_below_the_inferred_head_stop(
     for name, deg in rest.items():
         dof = manifest.dofs[name]
         assert dof.min <= math.radians(deg) <= dof.max, name
-    assert 0 <= rest["head.pitch"] < INFERRED_HEAD_STOP_DEG
+    assert 0 <= rest["head.pitch"] < INFERRED_HEAD_STOP_CEILING_DEG
     assert all(manifest.dofs[f"head.{k}"].home == 0.0 for k in "xyz")
 
 
