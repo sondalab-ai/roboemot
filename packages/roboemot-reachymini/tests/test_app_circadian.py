@@ -208,8 +208,9 @@ def test_circadian_settings_reload_without_a_restart(data):  # noqa: F811
         )
         assert wait_for(lambda: app.circadian_runner.cfg.circadian.yawn_interval_s == 45.0)
         runner = app.circadian_runner
+        # the runner applies its parts under its lock: wait for the last one, not the first
+        assert wait_for(lambda: runner.motion.cfg.yawn_interval_s == 45.0)
         assert runner.sampler.cfg.sample_interval_s == 3.0
-        assert runner.motion.cfg.yawn_interval_s == 45.0
     finally:
         stop.set()
         thread.join(15)

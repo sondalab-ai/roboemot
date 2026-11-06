@@ -112,6 +112,12 @@ class TranscriptRing:
             seq = self._add_locked(who, text, language, False)
             return seq, (self._clears if seq is not None else NOT_RECORDED)
 
+    def current(self) -> int:
+        """The generation a reply recorded from now on belongs to (a later clear refuses it):
+        a server turn's reply comes before the user's words it answers (SPEC 8, Server turns)."""
+        with self._lock:
+            return self._clears
+
     def add(
         self,
         who: str,

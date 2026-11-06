@@ -72,6 +72,8 @@ def fake_stages(cfg, profile):
         appearance_embedder=None,
         object_detector=None,
         objects_unavailable=None,
+        object_tracker=None,
+        object_track_unavailable=None,
     )
 
 

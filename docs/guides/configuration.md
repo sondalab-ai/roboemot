@@ -1,8 +1,8 @@
 # Configuration guide for the robot owner
 
 This guide covers the settings an owner is most likely to change: the cloud voice, the local
-voice, the LLM routes, safety, the circadian rhythm and the privacy switches. It ends with a
-troubleshooting list for the Live tab.
+voice, the LLM routes, safety, the circadian rhythm, the privacy switches and the following of a
+shown object. It ends with a troubleshooting list for the Live tab.
 
 Every default, unit and range below comes from the configuration schema,
 `packages/roboemot-core/src/roboemot/config/schema.py`. The schema is the source of truth. If this
@@ -206,7 +206,8 @@ A lost session reconnects in the background. The reconnect waits longer after ea
 | --- | --- | --- | --- |
 | `voice.realtime_route.mode` | `direct` | `direct`, `platform` | `direct` connects to the route's own URL. `platform` asks the route's `base_url` for a session first; Reachy Mini uses it. Needs restart. |
 | `voice.realtime_route.audio_gate` | `addressed` | `addressed`, `server_gates` | `server_gates` is the gate of `turns: server` and must be set for it to stream. A change needs the admin. `addressed`: which audio may leave with `turns: robot`. Only an utterance the wake gate and the voice-at-face check accepted is sent. It is sent once it ended, never live. |
-| `voice.realtime_route.turns` | `robot` | `robot`, `server` | Who ends a turn with audio input. `robot`: the robot decides once the utterance ended, then sends its audio in one go. `server`: the audio streams while the robot hears speech, and the server decides when the turn ends. It is faster. The wake word policy does not apply: only `server_gates` decide what streams. It needs `privacy.realtime_audio_unaddressed` and `audio_gate: server_gates`; without the opt-in it runs as `robot`. It applies at once, and a change needs the admin. In this first part, a person who pauses and goes on can get two answers: the first answer already hears both parts. For now the robot still asks for the answer once the transcript came. |
+| `voice.realtime_route.turns` | `robot` | `robot`, `server` | Who ends a turn with audio input. `robot`: the robot decides once the utterance ended, then sends its audio in one go. `server`: the audio streams while the robot hears speech, and the server decides when the turn ends. It is faster. The wake word policy does not apply: only `server_gates` decide what streams. It needs `privacy.realtime_audio_unaddressed` and `audio_gate: server_gates`; without the opt-in it runs as `robot`. It applies at once, and a change needs the admin. The server answers on its own, so the answer starts before the transcript comes; the robot asks for nothing on top. A person who pauses and goes on gets one answer per answer the server starts: if the first is still playing, the second is dropped and its words join the first turn. An answer to a stream cut part way (the robot speaks, a gap, the budget) is dropped, never played. Turning streams off (an opt-in, robot turns, another gate) while the server's own answer plays resets the session, so that answer stops too. If no answer comes within `server_answer_wait_s`, the robot shows the did-not-get-it cue. |
+| `voice.realtime_route.server_answer_wait_s` | `5.0` | s, 1 to 30 | With `turns: server`, how long the robot waits for the server's own answer to a piece of speech. The robot's own requests wait meanwhile. Past it, a late answer is dropped and the person gets the did-not-get-it cue. |
 | `voice.realtime_route.server_gates` | `[music]` | `music`, `other_speaker`, `at_face`, `facing` | With `turns: server`, the checks that decide whether a piece of speech streams at all. They decide before any audio leaves, and never again later. Nothing streams while the robot sleeps, whatever this list says. A listed gate whose detector is off keeps everything local. A change needs the admin. `music`: not while music plays. `other_speaker`: not another known person right after the last one heard. `at_face`: the voice comes from a visible face. `facing`: that face looks at the robot. An empty list streams everything the robot hears as speech. |
 | `voice.realtime_route.server_gate_hold_ms` | `300.0` | ms, 0 to 2000 | With `at_face` or `facing` in `server_gates`, the speech held on the robot before those checks decide. The held audio then streams at once. |
 | `voice.realtime_route.transcription_language` | `""` | language code | Language the server transcribes in. It is sent with audio input only. Empty uses `conversation.language`. |
@@ -559,6 +560,35 @@ These rules hold whatever the switches say:
 - API keys are never logged, shown or returned. A route whose `${secret:name}` cannot be read is
   not called.
 - The debug report holds codes and numbers, never text, audio or names.
+
+## 7. Following a shown object
+
+SPEC 5 (Detect-then-track of the shown object), SPEC 13.
+
+### What it does
+
+When you show the robot a thing (a cup in your hand), it looks at the thing and follows it. The
+object detector (NanoDet) runs only about 3 times a second during such a look, and it can miss a
+frame. Between two detector runs a small tracker (VitTrack) follows the shown thing, so the gaze
+stays on it while it moves. The detector still decides what the thing is: each detector run
+confirms the tracker or starts it again. The tracker follows only the one shown thing, and only
+during a look.
+
+The tracker needs its model file. `roboemot models fetch --all` (and the installer) downloads it.
+Without the file, or with an OpenCV older than 4.9, the robot runs as before, and the debug report
+says why (`roboemot.vision.object_track`, `state: unavailable` with the `reason`).
+
+| Key | Default | Unit, range | What it does |
+| --- | --- | --- | --- |
+| `vision.object_track.enabled` | `true` | on/off | Runs the tracker during a look at a shown thing, when its model file is there. |
+| `vision.rates.object_track_hz` | `5.0` | Hz, 0.5 to 30 | How often the tracker runs between detector runs. The robot's state (resting, speaking) lowers it like every vision rate. A run takes about 50 ms on a Raspberry Pi 4 (the opencv_zoo benchmark; not measured on the robot yet). |
+| `vision.object_track.score_min` | `0.3` | 0 to 1 | Below this tracker score the thing counts as lost, and the tracker stops. |
+| `vision.object_track.confirm_max_s` | `3.0` | s, 0.2 to 30 | The tracker stops when the detector has not seen the thing for this long. |
+| `vision.object_track.reseed_iou` | `0.5` | 0 to 1 | When the detector's box and the tracker's box overlap less than this, the tracker starts again on the detector's box. |
+| `vision.object_track.box_area_ratio_max` | `4.0` | 1.1 to 100 | A tracker box this many times larger (or smaller) than the detector's box is a drift: the tracker stops. So does a box whose centre leaves the picture. |
+
+**Privacy.** The tracker keeps a small picture of the thing in memory while it follows it. It is
+never stored or logged.
 
 ## Troubleshooting
 
