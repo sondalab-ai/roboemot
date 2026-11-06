@@ -3301,6 +3301,16 @@ class BargeInDuckConfig(Strict):
         "as capped. Longer than any hesitant phrase that never reaches the cut-off",
         unit="s", ge=0.5, le=30,
     )  # fmt: skip
+    confirm_ms: float = param(
+        1500.0,
+        "With voice.realtime_route.turns: server: how long the duck waits for the server's VAD "
+        "to confirm the person's speech (input_audio_buffer.speech_started) once a barge-in "
+        "opened a stream during the robot's speech. No confirmation by then restores the voice "
+        "and ends that stream (a false barge-in). Counted from the local cut-off point. It bounds "
+        "the audio that leaves unconfirmed (the robot's ducked voice included), so a change needs "
+        "the admin",
+        unit="ms", ge=300, le=5000, admin_only=True,
+    )  # fmt: skip
 
 
 class BargeInConfig(Strict):

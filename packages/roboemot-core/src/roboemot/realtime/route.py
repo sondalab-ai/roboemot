@@ -40,9 +40,12 @@ is only counted. ``response.created`` binds the oldest request in flight (the se
 order, and a new request waits until no abandoned one is in flight, ``busy``); every later
 event goes to the run that owns its ``response_id`` and is dropped (counted) otherwise. A run cut
 by a barge-in abandons its request: its response is cancelled and its ``response.done`` charged
-then. A new request waits while an abandoned one is in flight (``turn.wait_in_order``, before
-the turn's first send and before each ``response.create``); past the route's
-``stall_timeout_s`` with no event it calls ``expire``, and one that never got its
+then (with an event id of the robot's own: an error that nothing is active is benign). A
+barge-in's stream opening sets ``interrupt_response`` (S2): while its session says it applies, a
+``speech_started`` marks every live response interrupted, and none of its later audio plays.
+A new request waits while an abandoned one is in flight
+(``turn.wait_in_order``, before the turn's first send and before each ``response.create``);
+past the route's ``stall_timeout_s`` with no event it calls ``expire``, and one that never got its
 ``response.created`` resets the session. A detached session's requests are settled at the
 detach (charged once, their runs ended ``closed``): its close comes later, or never. Nothing
 here logs or reports a key, a URL's path or query, text, audio or an identifier (SPEC 12).
@@ -112,6 +115,11 @@ MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
 ITEM_PREFIX = "re_"  # the client's own item ids (user text, tool results)
 EVENT_PREFIX = "rq_"  # the event ids of the robot's response.create events
+CANCEL_PREFIX = "rc_"  # the event ids of the robot's response.cancel events (S2)
+CANCELS_KEPT = 32  # cancel event ids remembered, to tell an error about one (S2)
+# the server's refusal of a cancel with no response active (benign: it ended or the server's
+# own interrupt cancelled it first, S2)
+CANCEL_NOT_ACTIVE = "response_cancel_not_active"
 PCM_SAMPLE_BYTES = 2  # PCM16 mono
 APPEND_SHARE_OF_CAP = (
     2  # an append carries at most 1/2 of max_message_bytes of PCM (base64 grows it)
@@ -151,6 +159,10 @@ class Request:
     items: list[str] = field(default_factory=list, repr=False)
     generation: int = -1
     server_turn: bool = False  # a server turn's own request (a skill's follow-up)
+    # server turns (S2): the server's VAD heard speech while it was live, and with
+    # interrupt_response it cancels it on its own: its round asks nothing more, and no
+    # audio of it plays from then on
+    interrupted: bool = False
 
 
 # what the audio input says of a response the server created on its own (``RealtimeInput.claim``)
@@ -204,11 +216,13 @@ def session_update(
     hint: str | None = None,
     *,
     create_response: bool | None = None,
+    interrupt_response: bool = False,
 ) -> dict[str, Any]:
     """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate (null at
     the native 16 kHz, which Pollen's server requires) and out at the server's own, the voice,
-    server VAD that never interrupts on its own, answers on its own only with server turns
-    (``create_response``, None: ``server_turns(cfg)``; the realtime check passes False) and ends
+    server VAD that answers on its own only with server turns (``create_response``, None:
+    ``server_turns(cfg)``; the realtime check passes False) and interrupts its own answer only
+    when ``interrupt_response`` (S2: a barge-in's stream over the robot's voice) and ends
     a turn after ``server_silence_ms``, with ``input: audio`` the input transcription's language
     (``transcription_language``, else ``conversation.language``), model (left out when empty)
     and ``hint`` as its ``prompt`` (the robot's name, :meth:`RealtimeRoute.hint`; left out
@@ -226,7 +240,7 @@ def session_update(
         vad_threshold=vad.threshold,
         silence_ms=round(rt.server_silence_ms),
         create_response=server_turns(cfg) if create_response is None else create_response,
-        interrupt_response=False,
+        interrupt_response=interrupt_response and server_turns(cfg),
         tools=tools,
         transcription_language=(rt.transcription_language or cfg.conversation.language)
         if audio
@@ -407,6 +421,14 @@ class RealtimeRoute:
         self.server_turn: Callable[[ServerResponse], bool] | None = None
         # responses held while their stream still streams, by the stream's job (``judged``)
         self._held: dict[Any, Request] = {}
+        # S2: the interrupt_response last sent to a session, and whether its session.updated
+        # said it applies, each as (that session's token, the flag): only then does the server
+        # cancel its own answer when its VAD hears speech
+        self._interrupt_sent: tuple[Any, bool] = (None, False)
+        self._interrupt_honoured: tuple[Any, bool] = (None, False)
+        # the event ids of the robot's own cancels: an error about one is benign (nothing was
+        # active any more, the server's own interrupt came first), never a declined answer
+        self._cancel_ids: collections.deque[str] = collections.deque(maxlen=CANCELS_KEPT)
         # what a stream's opening session.update carries: the instructions and tools a turn
         # would send (the worker's), so the server's own answer reads them
         self.stream_session: Callable[[Any], tuple[str, Any]] = lambda job: (
@@ -829,19 +851,31 @@ class RealtimeRoute:
         box.append(client)
         return client
 
-    def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
+    def session_update(
+        self,
+        cfg: RoboEmotConfig,
+        instructions: str,
+        tools: Any = None,
+        *,
+        interrupt: bool | None = None,
+    ) -> Any:
         """``session.update`` for this route (:func:`session_update`), with the transcription
         hint only when this session's connect update carried it and the server confirmed it
         (and ``transcription_name_hint`` is still on, with ``input: audio``): a name that
         arrives later applies from the next connect. With ``tools`` it records their names
-        (``tools_offered``), None leaves the session's tools as they are."""
+        (``tools_offered``), None leaves the session's tools as they are. ``interrupt``: the
+        ``interrupt_response`` a stream's opening sets (S2: a barge-in's stream only); None
+        keeps what this session was last sent, so no other update changes it."""
         if tools is not None:
             self.tools_offered = frozenset(t["name"] for t in tools)
         rt = cfg.voice.realtime_route
         # read without _lock (this also runs under it, in the audio burst): one reference, set
         # at the store and cleared at the detach of the session it belongs to
         hint = self._session_hint if rt.transcription_name_hint else None
-        return session_update(cfg, instructions, tools, hint)
+        sent_to, sent = self._interrupt_sent  # one reference: read without _lock
+        if interrupt is None:
+            interrupt = sent and sent_to is self._token
+        return session_update(cfg, instructions, tools, hint, interrupt_response=interrupt)
 
     def hint(self, cfg: RoboEmotConfig) -> str | None:
         """The transcription hint a connect offers: the robot's name alone
@@ -1134,7 +1168,9 @@ class RealtimeRoute:
             # its own client only: a gone one took the response with it
             client = self._client if in_flight and req.token is self._token else None
         if client is not None:
-            client.send(protocol.response_cancel())
+            # the plain subset cancel, no response_id: Pollen's server refuses one it does not
+            # expect (an error, nothing cancelled), and this is the only active response
+            self._cancel(client)
 
     def finish(self, req: Request) -> None:
         """``req``'s run is over (its ``response.done`` came, or the session is gone)."""
@@ -1178,12 +1214,16 @@ class RealtimeRoute:
         """Route one server event (client thread) to the run that owns it; an event of a
         client that is no longer current is dropped and counted. Each handler checks the
         token in the same critical section that acts on it (a detach may come in between)."""
-        if isinstance(event, protocol.SessionEvent) and event.output_rate_hz:
+        if isinstance(event, protocol.SessionEvent):
             with self._lock:
                 current = self._current(token)
-                if current:
+                if current and event.output_rate_hz:
                     self.output_rate_hz = event.output_rate_hz
-            if not current:
+                if current and event.type == protocol.SESSION_UPDATED:
+                    # S2: an echo without interrupt_response true is not honoured
+                    honoured = event.interrupt_response is True
+                    self._interrupt_honoured = (token or self._token, honoured)
+            if not current and event.output_rate_hz:
                 self._count("stale_callbacks")
             return
         if isinstance(event, protocol.ResponseCreated):
@@ -1200,9 +1240,12 @@ class RealtimeRoute:
             if not current:
                 self._count("stale_callbacks")
         elif isinstance(event, OF_THE_INPUT):
+            started = event.type == protocol.SPEECH_STARTED
             with self._lock:
                 current = self._current(token)
                 sink = self.input
+                if current and started and self._interrupts(token or self._token):
+                    self._interrupted(token or self._token)
                 # the session the event is of, read with the check (a reset may follow at once)
                 connecting = token is not None and token is self._connecting_token
                 generation = self.generation + 1 if connecting else self.generation
@@ -1217,6 +1260,23 @@ class RealtimeRoute:
                 current = self._current(token)
             if not current:
                 self._count("stale_callbacks")
+
+    def _interrupts(self, token: _Token | None) -> bool:
+        """Whether ``token``'s session interrupts its own answer when its VAD hears speech
+        (``_lock`` held): ``interrupt_response`` true was the last sent to it (a barge-in's
+        stream, S2) and its ``session.updated`` said so."""
+        return self._interrupt_sent == (token, True) and self._interrupt_honoured == (token, True)
+
+    def _interrupted(self, token: _Token | None) -> None:
+        """The server's VAD heard speech on ``token``'s session while it interrupts (``_lock``
+        held, S2, SPEC 8): it cancels the response it is generating on its own. Every response
+        live there is marked: none of its later audio reaches the speaker, and a round it ends
+        asks nothing more. The robot still cancels it when it stops (fail-safe); an error about
+        that cancel is benign (``_error``)."""
+        for req in self._live.values():
+            if req.token is token and not req.interrupted:
+                req.interrupted = True
+                self._counts["server_interrupts"] += 1
 
     def _created(self, event: protocol.ResponseCreated, token: _Token | None) -> None:
         """Bind a ``response.created``. While live streams are allowed the audio input says
@@ -1357,7 +1417,25 @@ class RealtimeRoute:
         elif reason == "unrequested":
             self._count("unrequested")
         if client is not None and in_flight:
-            client.send(protocol.response_cancel(rid))
+            self._cancel(client, rid)
+
+    def _cancel(self, client: Any, response_id: str | None = None) -> None:
+        """Send ``response.cancel`` with an event id of the robot's own (S2): an error about it
+        names it, so it is never taken for the server declining a stream's answer."""
+        event_id = f"{CANCEL_PREFIX}{next(self._ids)}"
+        with self._lock:
+            self._cancel_ids.append(event_id)
+        client.send(protocol.response_cancel(response_id, event_id))
+
+    def cancel_response(self) -> bool:
+        """Cancel the response in flight (a call that ends the turn), as ``send_control``
+        would, with the robot's own event id (``_cancel``)."""
+        with self._lock:
+            client = self._client or self._connecting
+        if client is None:
+            return False
+        self._cancel(client)
+        return True
 
     def _error(self, event: protocol.ServerError, token: _Token | None) -> None:
         """An ``error`` refuses the request whose ``event_id`` it echoes; others are only
@@ -1365,10 +1443,16 @@ class RealtimeRoute:
         (``function_call_output_pending``, also one whose request is no longer tracked) and an
         error about a settling tool result (``send_output``: the call may still be open) reset
         the session (``pending_call_resets``, the reset streak's backoff applies): the server
-        would refuse every later response on it."""
+        would refuse every later response on it. An error about one of the robot's own cancels
+        (its event id, or the server's no-active-response code) is benign: the response ended,
+        or the server's own interrupt cancelled it first (S2); it resolves no owed answer."""
         with self._lock:
             if not self._current(token):
                 self._counts["stale_callbacks"] += 1
+                return
+            mine = event.event_id is not None and event.event_id in self._cancel_ids
+            if mine or event.code == CANCEL_NOT_ACTIVE:
+                self._counts["cancels_not_active"] += 1
                 return
             tok = token or self._token
             req = next(
@@ -1421,6 +1505,10 @@ class RealtimeRoute:
                     del self._live[rid]
                     self._resets_in_row = 0  # the server answers: the reset streak ends
             run = req.run if req is not None else None
+            late = req is not None and req.interrupted and isinstance(event, protocol.AudioDelta)
+            if late:  # the server cancelled it on the person's speech: none of it plays (S2)
+                self._counts["late_audio_dropped"] += 1
+                run = None
             recorder = req.recorder if req is not None and run is None else None
             gone: list[str] = []
             if req is not None and req.dropped:
@@ -1649,6 +1737,7 @@ class RealtimeRoute:
         hold: Callable[[], str | None] = lambda: None,
         track: Callable[[int], None] | None = None,
         generation: int | None = None,
+        interrupt: bool = False,
     ) -> str | None:
         """Send one piece of a live stream (``turns: server``, SPEC 8 and 12): PCM16 at
         ``voice.sample_rate_hz`` in appends of at most half the message cap, never a commit
@@ -1704,7 +1793,9 @@ class RealtimeRoute:
             if track is not None:
                 track(self.generation)
             if opening:
-                update = self.session_update(cfg, instructions, tools)
+                # S2: only a barge-in's stream lets the server interrupt its own answer
+                update = self.session_update(cfg, instructions, tools, interrupt=interrupt)
+                self._interrupt_sent = (self._token, interrupt and server_turns(cfg))
                 if has_hint(update):
                     self._counts["hint_sent"] += 1
                 client.send(update)  # only queued: never blocks
@@ -2001,6 +2092,12 @@ COUNTERS = (
     "unsettled_resets",  # the server could still answer a stream past the robot's wait: reset
     "revoke_resets",  # a revoke while the server's own answer ran: reset, its audio stops
     "outputs_refused",  # the server refused a settling tool result (the session is reset)
+    # S2 (turns: server): live responses the server's VAD interrupted on its own, the robot's
+    # cancels it left out for them, and their audio dropped after the interruption
+    "server_interrupts",
+    "cancels_not_active",  # errors about the robot's own cancels: benign, never poison
+    "late_audio_dropped",
+    "playback_confirms",  # speech_started of a barge-in's stream: the barge-in is confirmed
 )
 
 # the server's confirmations of a delete and a truncate, and the counter each one moves

@@ -262,11 +262,24 @@ def bind_barge_in(
 ) -> None:
     """Connect barge-in (SPEC 8 stage 8): its candidate frames duck the speech output's voice,
     and a cut-off stops the speech first, then the stream, then the listener restarts on the
-    user's audio. Over the robot's own sounds alone, ``cut_own`` cuts them instead."""
+    user's audio. Over the robot's own sounds alone, ``cut_own`` cuts them instead. With server
+    turns (S2) the cut-off point streams the speech over the robot's voice instead, and the
+    server's ``speech_started`` for that stream (the realtime input's ``on_confirm``) stops it."""
     output.duck = bargein.duck
     bargein.bind(
-        output.stop, conv.interrupt, listener.resume, conv.mark_interrupting, cut_own=cut_own
+        output.stop,
+        conv.interrupt,
+        listener.resume,
+        conv.mark_interrupting,
+        cut_own=cut_own,
+        playback=listener.stream_playback,
+        end_playback=listener.end_playback,
+        server_mode=listener.server_turns,
+        playback_job=listener.playback_job,
     )
+    audio_in = listener.realtime_input
+    if audio_in is not None:
+        audio_in.on_confirm = bargein.confirm
 
 
 def start_all(
