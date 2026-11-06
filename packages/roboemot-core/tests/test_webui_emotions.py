@@ -59,7 +59,7 @@ def pipeline(cfg: RoboEmotConfig):
         ),
         expression=Renderer(),
         sleep=SimpleNamespace(asleep=False),
-        loop=SimpleNamespace(motors_off=False, external=False),
+        loop=SimpleNamespace(motors_off=False, external=False, unreachable_held=False),
     )
 
 

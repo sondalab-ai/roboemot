@@ -95,6 +95,11 @@ class Arbiter:
         self._winner: dict[str, str | None] = {d: None for d in dofs}
         self._fade: dict[str, _Fade | None] = {d: None for d in dofs}
         self.last: dict[str, float] = {name: d.home for name, d in dofs.items()}
+        # The winner's target per dof in the last step, before the cross-fade (diagnostics and
+        # the loop's unreachable-target rule: a fade is a path, not a new target). Python only:
+        # the C++ core (roboemot-rt) has no such output and the golden vectors do not cover it;
+        # the motion loop that reads it is this Python one.
+        self.goal: dict[str, float] = dict(self.last)
         self.reflex_active = False  # a reflex command won a dof in the last step (diagnostics)
 
     def submit(self, cmd: Command) -> None:
@@ -117,6 +122,7 @@ class Arbiter:
     def step(self, now: float) -> dict[str, float]:
         cmds = self.active(now)
         out: dict[str, float] = {}
+        goal: dict[str, float] = {}
         reflex = False
         for name, dof in self.dofs.items():
             absolute = [c for c in cmds if not c.additive and name in c.targets]
@@ -130,6 +136,7 @@ class Arbiter:
                 target += sum(c.targets[name] for c in cmds if c.additive and name in c.targets)
             if prio != Priority.SAFETY:
                 target = min(max(target, dof.min), dof.max)
+            goal[name] = target
             if winner != self._winner[name]:
                 self._fade[name] = (
                     None if prio == Priority.SAFETY else _Fade(now, self.last[name], winner or "")
@@ -145,6 +152,7 @@ class Arbiter:
                     target = fade.from_value + (target - fade.from_value) * w
             out[name] = target
         self.last = dict(out)
+        self.goal = goal
         self.reflex_active = reflex
         return out
 

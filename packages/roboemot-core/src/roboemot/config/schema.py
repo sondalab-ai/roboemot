@@ -1044,13 +1044,15 @@ class ExternalControlConfig(Strict):
         0.15,
         "An angular joint further than this outside the range of the poses commanded within "
         "lag_window_s counts as diverging (tracking lag and sag of our own motion stay under it). "
-        "Behind the commands, on the side they came from, is lag however far, until they settle",
-        unit="rad", ge=0.01, le=1.0,
+        "Behind the commands, on the side they came from, is lag however far, until they settle. "
+        "Raising it loosens safety: a press on an obstacle under it, toward a target that keeps "
+        "moving, is caught by nothing",
+        unit="rad", ge=0.01, le=1.0, conservative="lower",
     )  # fmt: skip
     tolerance_m: float = param(
         0.02,
         "The same for translations",
-        unit="m", ge=0.002, le=0.1,
+        unit="m", ge=0.002, le=0.1, conservative="lower",
     )  # fmt: skip
     lag_window_s: float = param(
         0.4,
@@ -1105,6 +1107,72 @@ class ExternalControlConfig(Strict):
         0.003,
         "The same for translations",
         unit="m", ge=0.0005, le=0.05,
+    )  # fmt: skip
+    repeat_margin_s: float = param(
+        3.6,
+        "Unreachable target: a joint that diverges again, after its unit resumed, within "
+        "lag_window_s + max_state_age_s + confirm_s (the time a resumed push takes to be "
+        "caught) plus this margin (the travel), stopped where it stopped before with the target "
+        "beyond on the same side, repeats its divergence: something it cannot pass (the body) "
+        "blocks it",
+        unit="s", ge=0.5, le=60.0, conservative="higher",
+    )  # fmt: skip
+    same_target_rad: float = param(
+        0.05,
+        "Unreachable target: two angular stops closer than this are the same place; a held "
+        "unit takes control back once a held joint's target moves further than this, either "
+        "way, or no longer lies beyond the stop",
+        unit="rad", ge=0.005, le=0.5, conservative="higher",
+    )  # fmt: skip
+    same_target_m: float = param(
+        0.005,
+        "The same for translations",
+        unit="m", ge=0.0005, le=0.05, conservative="higher",
+    )  # fmt: skip
+    unreachable_repeats: int = param(
+        1,
+        "Unreachable target: after this many repeats in a row the unit holds where it stopped "
+        "(it writes that pose once, backed off by still_band_*, then nothing) until a held "
+        "joint's target changes, instead of resuming toward it after the grace. A target "
+        "beyond the same stop later is held at its first divergence",
+        ge=1, le=10, conservative="lower",
+    )  # fmt: skip
+    steady_offset_rad: float = param(
+        0.04,
+        "Measured only, never acted on (owner decision 2026-11-06): an angular joint whose "
+        "written command and measured pose both stay still for steady_offset_s while further "
+        "apart than this is counted in the debug report (motion.steady_offsets), a press under "
+        "the tolerance the loop does not stop. Above the steady residual of our own motion (up "
+        "to 0.021 rad in the MuJoCo sim; not measured on the robot)",
+        unit="rad", ge=0.005, le=1.0,
+    )  # fmt: skip
+    steady_offset_m: float = param(
+        0.005,
+        "The same for translations",
+        unit="m", ge=0.0005, le=0.1,
+    )  # fmt: skip
+    steady_offset_s: float = param(
+        3.0,
+        "How long a steady offset must last before it is counted",
+        unit="s", ge=0.2, le=60.0,
+    )  # fmt: skip
+    hold_back_off_rad: float = param(
+        0.01,
+        "Unreachable target: the hold pose backs each held angular joint off its stop by this, "
+        "away from the target, so no press stays; written through the limiter's rate limits",
+        unit="rad", ge=0.001, le=0.05, conservative="lower",
+    )  # fmt: skip
+    hold_back_off_m: float = param(
+        0.001,
+        "The same for translations",
+        unit="m", ge=0.0001, le=0.005, conservative="lower",
+    )  # fmt: skip
+    sticky_expiry_s: float = param(
+        180.0,
+        "Unreachable target: a hold again at a known stop (sticky) takes only a target off the "
+        "stop for this long; after it, the next target change of more than same_target_* "
+        "releases it too (a hand that held the head through two resumes and let go)",
+        unit="s", ge=10.0, le=3600.0, conservative="higher",
     )  # fmt: skip
 
 
