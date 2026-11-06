@@ -113,6 +113,8 @@ OWN_CLOSES = (
 LATENCY_LEVELS = {"p50": P50, "p95": P95}
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
+TURN_MODES = ("robot", "server")  # latency_ms.by_turns: how a turn ran (SPEC 13)
+MODE_LATENCIES = ("turn", "first_audio", "transcript", "onset_to_stop")
 ITEM_PREFIX = "re_"  # the client's own item ids (user text, tool results)
 EVENT_PREFIX = "rq_"  # the event ids of the robot's response.create events
 CANCEL_PREFIX = "rc_"  # the event ids of the robot's response.cancel events (S2)
@@ -407,6 +409,11 @@ class RealtimeRoute:
             kind: collections.Counter() for kind in STATE_COUNTS
         }
         self._first_audio_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
+        # the same latencies per turn mode, for QA to compare robot and server turns (SPEC 13)
+        self._by_turns: dict[str, dict[str, collections.deque[float]]] = {
+            mode: {key: collections.deque(maxlen=LATENCY_WINDOW) for key in MODE_LATENCIES}
+            for mode in TURN_MODES
+        }
         self._transcript_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._stages: dict[str, collections.deque[float]] = {
             stage: collections.deque(maxlen=LATENCY_WINDOW) for stage in protocol.LATENCY_STAGES
@@ -1931,20 +1938,34 @@ class RealtimeRoute:
                 for stage, value in done.latency_s.items():
                     self._stages[stage].append(value)
 
-    def note_first_audio(self, ms: float) -> None:
+    def note_first_audio(self, ms: float, *, turns: str) -> None:
+        """A turn's first audio delta, from the end of speech it answers (``latency_ms
+        .first_audio``); ``turns``: the mode it ran in (``by_turns``)."""
         with self._lock:
             self._first_audio_ms.append(ms)
+            self._by_turns[turns]["first_audio"].append(ms)
 
-    def note_turn(self, ms: float) -> None:
+    def note_turn(self, ms: float, *, turns: str) -> None:
         """The local VAD end of speech of the utterance a turn answers to the first audio of
-        its answer handed to the speech output, in both turn modes (``latency_ms.turn``)."""
+        its answer handed to the speech output, in both turn modes (``latency_ms.turn``);
+        ``turns``: the mode the turn ran in (``by_turns``)."""
         with self._lock:
             self._turn_ms.append(ms)
+            self._by_turns[turns]["turn"].append(ms)
 
-    def note_transcript(self, ms: float) -> None:
-        """End of the user's speech to the server's transcript of it (SPEC 13, the HIL)."""
+    def note_transcript(self, ms: float, *, turns: str) -> None:
+        """End of the user's speech to the server's transcript of it (SPEC 13, the HIL);
+        ``turns``: ``server`` for a stream's, ``robot`` for a burst's (``by_turns``)."""
         with self._lock:
             self._transcript_ms.append(ms)
+            self._by_turns[turns]["transcript"].append(ms)
+
+    def note_barge_in(self, turns: str, seconds: float) -> None:
+        """A barge-in stopped the robot's voice ``seconds`` after the person's speech onset, in
+        the turn mode its episode started in (``by_turns.<mode>.onset_to_stop``, SPEC 13); the
+        voice section keeps its own figures (``bargein.latency``)."""
+        with self._lock:
+            self._by_turns[turns]["onset_to_stop"].append(seconds * MS_PER_S)
 
     def reset_session(self, generation: int) -> bool:
         """Reset ``generation``'s session (``_reset``, counted ``input_resets``): an audio burst
@@ -2026,6 +2047,10 @@ class RealtimeRoute:
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),
                     "transcript": summarise(list(self._transcript_ms), LATENCY_LEVELS),
                     "turn": summarise(list(self._turn_ms), LATENCY_LEVELS),
+                    "by_turns": {
+                        mode: {key: summarise(list(v), LATENCY_LEVELS) for key, v in keys.items()}
+                        for mode, keys in self._by_turns.items()
+                    },
                     "server": {
                         stage: summarise([v * MS_PER_S for v in values], LATENCY_LEVELS)
                         for stage, values in self._stages.items()

@@ -96,7 +96,8 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     )
     output = SimpleNamespace(duck=None, stop=lambda: None)
     conv = SimpleNamespace(interrupt=lambda: None, mark_interrupting=lambda: None)
-    audio_in = SimpleNamespace(on_confirm=None)
+    route = SimpleNamespace(note_barge_in=lambda mode, seconds: None)
+    audio_in = SimpleNamespace(on_confirm=None, route=route)
     listener = SimpleNamespace(
         resume=lambda samples, stamp: None,
         stream_playback=lambda samples, stamp: False,
@@ -118,6 +119,8 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     assert bound == [(actions, {"cut_own": cut_own, **server})]
     # S2: the server's speech_started of a barge-in's stream confirms it
     assert audio_in.on_confirm is bargein.confirm
+    # S3: each stop of the robot's voice reaches the route's report by turn mode (SPEC 13)
+    assert bargein.on_stop == route.note_barge_in
 
 
 def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():

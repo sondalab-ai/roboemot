@@ -14,7 +14,9 @@ was already on its way fall on the floor, so nothing plays after ``stop`` return
 ``play`` queues raw samples (the self-soothing sounds, SPEC 7B) through the same queue, epoch and
 push path: a sound never interleaves with a sentence, ``stop`` cuts it, and it is not speech (it
 leaves ``ended_at``, ``question_end``, the counters and the speech timeline alone, so speaking
-motion ignores it). ``cancel`` drops one such job only.
+motion ignores it). ``cancel`` drops one such job only. A cue's sound is queued with ``yields``:
+a sentence or a stream queued behind it drops it, or cuts it when it already plays, so it never
+holds an answer's first audio back (SPEC 8, Non-verbal cues; counted ``cue_sounds_cut``).
 
 ``play_aside`` is for a sound that must not count as the robot's voice (the listening blip, SPEC 8,
 Non-verbal cues): it never enters the queue, so it holds no answer back. It plays only when the
@@ -23,10 +25,11 @@ through a sink that can keep it out of the speaking window (:class:`AsideSink`);
 gets no such sound (never a raw job, which would count as speech). It must be shorter than
 ``voice.vad.min_speech_ms``, so the listener cannot start an utterance on its echo (a longer one is
 refused, logged once and counted). Counted under ``aside`` in the report. The decision is taken
-under the output's lock and the push made after it; a sentence queued in between plays after the
-sound, at most its length later, and a ``stop`` in between flushes it with the rest. Whether a
-conversation turn is in progress (the gaps between its sentences included) is the caller's
-check: the output sees jobs, not turns (the cues' ``quiet``).
+under the output's lock and the push made after it; a ``stop`` in between flushes it with the
+rest. The first push of an answer while it may still play cuts it in the sink (``cut_aside``,
+counted ``aside.cut``), so the answer starts where it is pushed, never behind the sound (SPEC 8,
+S3). Whether a conversation turn is in progress (the gaps between its sentences included) is
+the caller's check: the output sees jobs, not turns (the cues' ``quiet``).
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
@@ -144,9 +147,11 @@ class DuckingSink(Protocol):
 @runtime_checkable
 class AsideSink(Protocol):
     """An ``AudioSink`` that can play a sound that is not speech: queued like any audio, but it
-    does not open the speaking window (``SpeechActivity.extend_own``)."""
+    does not open the speaking window (``SpeechActivity.extend_own``). ``cut_aside`` drops such
+    a sound still queued or playing, never speech; whether it cut anything."""
 
     def push_aside(self, samples: np.ndarray, rate_hz: int) -> float: ...
+    def cut_aside(self) -> bool: ...
 
 
 @dataclass
@@ -157,6 +162,7 @@ class _RawJob:
     epoch: int
     samples: np.ndarray
     rate_hz: int
+    yields: bool = False  # a cue's sound: an answer queued behind it cuts it (SPEC 8)
 
 
 @dataclass
@@ -281,10 +287,13 @@ class SpeechOutput:
         self._current: asyncio.Task | None = None
         self._current_epoch = -1
         self._raw_current: int | None = None  # id of the raw job taken off the queue, if any
+        self._raw_yields = False  # ... and whether it is a cue's sound (``play(yields=True)``)
         self._raw_cancelled: set[int] = set()
         self._raw_pushed: int | None = None  # id of the raw job whose samples are in the sink
         self._in_flight = False  # a job is off the queue and not finished (``play_aside``)
         self._aside: collections.Counter[str] = collections.Counter()
+        self._aside_until = -math.inf  # where the last aside sound ends in the sink
+        self._cue_sounds_cut = 0  # cue sounds (``yields``) an answer cut or dropped
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -387,7 +396,7 @@ class SpeechOutput:
                 job = self._jobs.popleft() if self._jobs and not self._stopping else None
                 self._in_flight = job is not None
                 if isinstance(job, _RawJob):
-                    self._raw_current = job.id
+                    self._raw_current, self._raw_yields = job.id, job.yields
             if job is None:
                 await self._wake.wait()
                 self._wake.clear()
@@ -478,6 +487,8 @@ class SpeechOutput:
                 continued,
             )
             self._jobs.append(job)
+            cut = self._yield_cues()
+        self._cancel_raw_soon(cut)
         if self.bus is not None:
             self.bus.publish(
                 "speech.say",
@@ -529,6 +540,8 @@ class SpeechOutput:
             self._streams[job.id] = job
             while len(self._streams) > PLAYED_WINDOW:
                 self._streams.popitem(last=False)
+            cut = self._yield_cues()
+        self._cancel_raw_soon(cut)
         if self.bus is not None:
             self.bus.publish(
                 "speech.say",
@@ -606,21 +619,24 @@ class SpeechOutput:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
 
-    def play(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> int | None:
+    def play(
+        self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0, *, yields: bool = False
+    ) -> int | None:
         """Queue raw mono ``samples`` behind whatever is queued; returns the job id, or ``None``
         when the queue is full or closed. The job holds the queue while it plays, so a sentence
         never interleaves with it, and ``stop`` cuts it. It is not speech: nothing is synthesized
         and ``ended_at``, ``question_end`` and the counters stay as they are. ``volume_db`` is
         the circadian offset of the moment (``StateEffects.volume_db``). A raw job counts against
         ``voice.queue_max_sentences`` like a sentence. It writes no speech-timeline event (no
-        envelope, no accent, no breath), so speaking motion never reacts to it. Safe from any
-        thread."""
+        envelope, no accent, no breath), so speaking motion never reacts to it. ``yields`` (a
+        cue's sound, SPEC 8): a sentence or stream queued later cuts it, queued or playing, so it
+        never holds an answer's first audio back. Safe from any thread."""
         gain = db_to_gain(volume_db)
         louder = np.clip(np.asarray(samples, np.float32) * np.float32(gain), -1.0, 1.0)
         with self._lock:
             if self._closed or len(self._jobs) >= self.config.voice.queue_max_sentences:
                 return None
-            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz)
+            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz, yields)
             self._jobs.append(job)
         self._poke()
         return job.id
@@ -654,6 +670,8 @@ class SpeechOutput:
             pushed = False
         with self._lock:
             self._aside["played" if pushed else "failed"] += 1
+            if pushed:
+                self._aside_until = sink.playing_until()
         return pushed
 
     def _aside_refusal(self, duration_ms: float) -> str | None:
@@ -721,11 +739,33 @@ class SpeechOutput:
                 self._raw_cancelled.add(current)
                 if self._raw_pushed == current:
                     self.sink.stop()
-        loop = self._loop
-        if current is not None and loop is not None:
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(self._cancel_raw, current)
+        self._cancel_raw_soon(current)
         return True
+
+    def _yield_cues(self) -> int | None:
+        """An answer was queued (lock held): the cue sounds ahead of it give way (SPEC 8,
+        Non-verbal cues). The queued ones are dropped; the one playing is cut as ``cancel`` cuts
+        it (the sink flushed once it pushed: a raw job starts only after earlier audio played,
+        so nothing else is flushed). Returns that job's id, to cancel its task after the lock."""
+        cues = [job for job in self._jobs if isinstance(job, _RawJob) and job.yields]
+        for job in cues:
+            self._jobs.remove(job)
+        self._cue_sounds_cut += len(cues)
+        current = self._raw_current
+        if current is None or current in self._raw_cancelled or not self._raw_yields:
+            return None
+        self._raw_cancelled.add(current)
+        self._cue_sounds_cut += 1
+        if self._raw_pushed == current:
+            self.sink.stop()
+        return current
+
+    def _cancel_raw_soon(self, job_id: int | None) -> None:
+        """Cancel raw job ``job_id``'s task on the loop thread (lock not held); None: nothing."""
+        loop = self._loop
+        if job_id is not None and loop is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._cancel_raw, job_id)
 
     def _raw_only(self) -> bool:
         """``raw_only`` with the lock held (the timeline takes its own lock after ours, as
@@ -781,7 +821,7 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
-            aside = dict(self._aside)
+            aside, cue_sounds_cut = dict(self._aside), self._cue_sounds_cut
             rtf, rtf_sentence, push_ms, timeline_ms = (
                 list(self._rtf),
                 list(self._rtf_sentence),
@@ -802,6 +842,7 @@ class SpeechOutput:
             "dropped": self.sentences_dropped,
             "no_voice": self.no_voice,
             "aside": aside,
+            "cue_sounds_cut": cue_sounds_cut,
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
@@ -859,6 +900,8 @@ class SpeechOutput:
             if self._stale(job) or job.id in self._raw_cancelled:
                 return False
             now, until = self.clock(), self.sink.playing_until()
+            if not isinstance(job, _RawJob) and self._aside_until > now:
+                until = self._cut_aside()  # the answer never waits behind the blip (SPEC 8)
             start = max(now, until)
             if speech and job.id in self._audible and math.isfinite(until) and now > until:
                 self._count_underrun(job, now - until)
@@ -920,6 +963,22 @@ class SpeechOutput:
         except Exception as exc:  # a sink bug must not end the output thread
             self.failures += 1
             log.warning("speech %d (raw) crashed: %s", job.id, type(exc).__name__)
+
+    def _cut_aside(self) -> float:
+        """An answer's audio is about to be pushed while the last aside sound may still play:
+        the sink cuts it (only it: an aside plays on an idle output, and a raw job waits behind
+        it), so the answer starts at once and nothing of the sound plays over or before it. The
+        lock is held. Returns the sink's ``playing_until`` after the cut."""
+        self._aside_until = -math.inf
+        sink = self.sink
+        try:
+            cut = isinstance(sink, AsideSink) and sink.cut_aside()
+        except Exception as exc:  # a sink bug costs the cut, never the answer
+            log.warning("speech: aside cut: %s", type(exc).__name__)
+            cut = False
+        if cut:
+            self._aside["cut"] += 1
+        return sink.playing_until()
 
     def _stale(self, job: _Job | _RawJob) -> bool:
         """Whether ``job`` must not reach the sink: a stop since it was queued, or one waiting

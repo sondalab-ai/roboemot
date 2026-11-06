@@ -44,11 +44,13 @@ class Clock:
 class Output:
     def __init__(self) -> None:
         self.played: list[tuple[int, int, float]] = []
+        self.yields: list[bool] = []  # each sound's ``yields``: it gives way to an answer
         self.asides: list[tuple[int, int, float]] = []
         self.aside_ok = True  # False: the output is busy and drops the aside sound
 
-    def play(self, samples, rate_hz, volume_db=0.0):
+    def play(self, samples, rate_hz, volume_db=0.0, *, yields=False):
         self.played.append((samples.size, rate_hz, volume_db))
+        self.yields.append(yields)
         return len(self.played)
 
     def play_aside(self, samples, rate_hz, volume_db=0.0):
@@ -61,9 +63,9 @@ class LockCheckingOutput(Output):
 
     cues = None
 
-    def play(self, samples, rate_hz, volume_db=0.0):
+    def play(self, samples, rate_hz, volume_db=0.0, *, yields=False):
         assert not self.cues._lock.locked()
-        return super().play(samples, rate_hz, volume_db)
+        return super().play(samples, rate_hz, volume_db, yields=yields)
 
     def play_aside(self, samples, rate_hz, volume_db=0.0):
         assert not self.cues._lock.locked()
