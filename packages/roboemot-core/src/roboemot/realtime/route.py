@@ -1168,6 +1168,8 @@ class RealtimeRoute:
             # its own client only: a gone one took the response with it
             client = self._client if in_flight and req.token is self._token else None
         if client is not None:
+            # the plain subset cancel, no response_id: Pollen's server refuses one it does not
+            # expect (an error, nothing cancelled), and this is the only active response
             self._cancel(client)
 
     def finish(self, req: Request) -> None:

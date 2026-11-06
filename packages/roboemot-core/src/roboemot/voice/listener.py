@@ -743,8 +743,12 @@ class VoiceListener:
         self._playback = self._playback_segment = True
         self._playback_ended = False
         self._playback_job = None
-        self._playback_until = start + self._cfg.voice.barge_in.duck.confirm_ms / MS_PER_S
-        self._ingest(audio, start, start + audio.size / self._cfg.voice.sample_rate_hz)
+        end = start + audio.size / self._cfg.voice.sample_rate_hz
+        # counted from the end of the handed audio, at or after the barge-in's cut-off point
+        # (where its own wait starts): the barge-in releases first, so a confirmation it takes
+        # as on time always finds this stream (a late one resumes the listener)
+        self._playback_until = end + self._cfg.voice.barge_in.duck.confirm_ms / MS_PER_S
+        self._ingest(audio, start, end)
         return True
 
     def end_playback(self) -> None:

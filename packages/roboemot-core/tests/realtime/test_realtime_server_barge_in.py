@@ -77,6 +77,16 @@ def cut(ear) -> int:
     return at_stop
 
 
+def settled_appends(server) -> int:
+    """The server's appends once what the robot already sent has arrived (the socket lags
+    the robot's sends): the count stops changing."""
+    count = -1
+    while count != len(appended(server)):
+        count = len(appended(server))
+        time.sleep(0.2)
+    return count
+
+
 def openings(server) -> list[bool]:
     """``interrupt_response`` of each session.update, in order."""
     return [detect(u)["interrupt_response"] for u in server.of("session.update")]
@@ -404,7 +414,7 @@ def test_a_release_ends_the_barge_ins_stream_and_deletes_its_item(ears):  # noqa
         ear.r.listener.end_playback()  # the barge-in's release: no confirmation in time
         assert wait_until(lambda: snap(ear)["streams_cut"] == 1)
         assert wait_until(lambda: server.of("conversation.item.delete"))
-        sent = len(appended(server))
+        sent = settled_appends(server)
         ear.r.feed(voice(seconds=0.5))  # the robot still speaks: nothing more goes
         assert not wait_until(lambda: len(appended(server)) > sent, 0.3)
 
@@ -554,7 +564,7 @@ def test_the_listener_ends_an_unconfirmed_playback_stream_on_its_own(ears):  # n
         assert wait_until(lambda: appended(server))
         ear.r.feed(voice(seconds=confirm_s))
         assert wait_until(lambda: snap(ear)["streams_cut"] == 1)
-        sent = len(appended(server))
+        sent = settled_appends(server)
         ear.r.feed(voice(seconds=0.5))
         assert not wait_until(lambda: len(appended(server)) > sent, 0.3)
         assert not ear.r.listener._playback
@@ -575,3 +585,83 @@ def test_a_playback_stream_uses_the_upload_budget_and_is_cut_when_it_runs_out(ea
         s = snap(ear)
         assert s["stream_pieces_refused"] >= 1
         assert 1.5 < s["upload_s_today"] <= 3.0  # it counted, and never beyond the budget
+
+
+# ------------------------------------------------------------------ approval follow-ups
+
+
+def test_the_listener_never_ends_the_stream_before_the_barge_ins_own_release(ears):  # noqa: F811
+    """Follow-up 1: both deadlines count ``confirm_ms`` from the same point, at the earliest
+    the barge-in's cut-off: a confirmation the barge-in still takes as on time always finds
+    the listener's stream there (else the person's words would be lost: no resume)."""
+    with TurnServer(stream_vad=True, heard=HEARD) as server:
+        ear = ears(server, rt=SERVER, app=NO_KEYWORD, script=["x"])
+        bi = wired(ear)
+        ear.input.on_confirm = lambda job: None
+        speaking(ear)
+        assert talk_until(ear, lambda: bi._await is not None)
+        assert ear.r.listener._playback_until >= bi._await.detected + bi._confirm_s
+
+
+def test_a_barge_ins_segment_whose_opening_is_refused_later_is_never_decoded(ears):  # noqa: F811
+    """Follow-up 2 (N10, privacy): the opening is refused on the stream thread after the
+    hand-off (a turn took the input meanwhile): the segment heard over the robot's voice is
+    dropped, never decoded locally nor given to the wake gate."""
+    with TurnServer(stream_vad=True, heard=HEARD) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], decoded="ciao Neve")
+        gate, inside, sweep = threading.Event(), threading.Event(), ear.input._sweep
+
+        def held_sweep(cfg):
+            inside.set()
+            gate.wait(5.0)
+            sweep(cfg)
+
+        ear.input._sweep = held_sweep
+        speaking(ear)
+        barge_in(ear)
+        ear.r.feed(voice(seconds=0.5))
+        assert inside.wait(5.0)
+        ear.rt.route.hold_input()  # the opening is refused: turn
+        try:
+            gate.set()
+            assert wait_until(lambda: ear.r.listener._playback_job.refused == "turn")
+            tail(ear)
+            assert ear.settle(
+                lambda: ear.r.listener.snapshot()["realtime_audio"]["playback_unsent"] == 1
+            )
+        finally:
+            ear.rt.route.release_input()
+        assert ear.r.asr.decodes == 0 and ear.utterances == [] and appended(server) == []
+
+
+def test_a_round_cancelled_without_the_servers_interrupt_still_asks_its_follow_up(ears):  # noqa: F811
+    """Follow-up 3 (N13): the quiet end is for a response the server interrupted on a
+    barge-in only; one that ends cancelled otherwise keeps its follow-up."""
+    from test_realtime_server_responses import tooled
+
+    with TurnServer(
+        ["tool", "reply"], tool_name="recall", stream_vad=True, vad_answers=True,
+        statuses=["cancelled", "completed"],
+    ) as server:  # fmt: skip
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"], to_worker=True)
+        tooled(ear)
+        ear.say()
+        assert ear.settle(lambda: turns(ear) == 1, 10.0)
+        assert len(server.of("response.create")) == 1  # the follow-up after the output
+        assert snap(ear)["server_interrupts"] == 0
+
+
+def test_any_error_about_the_robots_own_cancel_is_benign_whatever_its_code(ears):  # noqa: F811
+    """Follow-up 4 (N4): an error naming one of the robot's own cancels (its rc_ id) is
+    about that cancel, whatever code the server gives it: benign, never unrelated."""
+    from roboemot.realtime import protocol
+
+    with TurnServer(stream_vad=True) as server:
+        ear = ears(server, rt=SERVER, app=OPT_INS, script=["x"])
+        route = ear.rt.route
+        assert route.cancel_response()
+        event_id = route._cancel_ids[-1]
+        assert event_id.startswith("rc_")
+        error = protocol.ServerError(protocol.ERROR, "invalid_request_error", event_id)
+        route._on_event(error, route._token)
+        assert snap(ear)["cancels_not_active"] == 1 and snap(ear)["errors_unrelated"] == 0
