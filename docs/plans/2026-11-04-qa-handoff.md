@@ -190,6 +190,13 @@ PRs:
    - Pass: the modes card shows "Pisolino", "Riposo" or "Assonnato" to match the state.
    - Pass: the status line agrees with the modes badge.
    - Source: `/api/live` `modes.rest`.
+5. **Rest posture and the head (unreachable-target rule).** During a day nap and at night (quiet hours), watch the head and the `roboemot.motion` section of the debug report. On 2026-11-05 the old rest pitch (20 degrees) drove the head into the body every ~6.8 s all night. The rest pitch is now 3 degrees, not yet checked on the hardware.
+   - Pass: the head lowers a little and stays still. It never knocks on the body.
+   - Pass: in `roboemot.motion`, the measured `head.pitch` (`measured`) is within about 1 degree (0.0175 rad) of the last written one (`commanded`, and the rest `target`) while the robot rests. A larger gap with no hold is a silent press on the body: the loop does not stop it. Fail, and send both values.
+   - Pass: `steady_offsets` does not grow while the robot rests. If it grows, send `steady_offset_last` (joint, commanded, measured, duration): that is the same silent press, counted.
+   - Pass: `external_events` does not grow while the robot rests, and `motion.unreachable` stays 0. The Live tab motion card reads "Scrive le pose", not "Fermo: obiettivo irraggiungibile".
+   - If `unreachable` is above 0, the head met something: send `unreachable_last` (joint, target, measured) and the last `external_recent_events` (they now carry `target` and `measured`). Pass then: at most one more push per rest-target change, then `unreachable_held` names the head and the head stays still. A wake or a face to look at moves the head again.
+6. **Antennas against the body (hypothesis).** The rest posture puts the antennas at -50 and +50 degrees, and their signs are not verified. An antenna tip may meet the body as the head pitches down. Do not go back to 20 degrees. Keep the antennas at -50/+50 and, in Settings, raise `circadian_motion.rest_pose_deg` `head.pitch` from 3 degrees in steps of 1 to 2 degrees while the robot rests. At each step, wait 10 s and read `measured` against `commanded` for `head.pitch` and both antennas in `roboemot.motion`. Stop at the first step where a joint is more than 1 degree off, `steady_offsets` grows or an external event appears, and set the pitch back to 3. Send the last good pitch, the first bad one and the joint that went off.
 
 ## G. Music and the wake word (PR 184: slices 181 and 183)
 

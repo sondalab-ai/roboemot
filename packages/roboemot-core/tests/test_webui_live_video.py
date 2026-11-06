@@ -38,7 +38,9 @@ def pipeline():
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
         selector=SimpleNamespace(target=None),
         world=SimpleNamespace(entries=[], get=lambda _id: None),
-        loop=SimpleNamespace(motors_off=False, external=False, clock=lambda: NOW),
+        loop=SimpleNamespace(
+            motors_off=False, external=False, unreachable_held=False, clock=lambda: NOW
+        ),
     )
 
 

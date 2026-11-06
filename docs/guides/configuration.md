@@ -459,6 +459,38 @@ fallback caps above.
 
 The stop keyword, the soft stop and the hard stop work in every state, asleep or awake.
 
+**A pose the robot cannot reach** (SPEC 12A, External control). When the robot's measured pose
+stops following the commands, the motion loop lets go for a while (a hand on the head, the
+platform's own go-to-sleep) and takes control back once the pose has been still for
+`motion.platform_move_grace_s`. If it then drives the same joint toward the same target and
+stops at the same place again, something blocks it (the head meets the body). The loop then
+holds where the joint stopped and does not try again until that joint's target changes (a wake,
+a face to look at, another rest pose). The debug report counts it in `roboemot.motion`
+`unreachable`, with the joint, the target and where the joint stopped in `unreachable_last`. The
+Live tab shows the motion state "Fermo: obiettivo irraggiungibile" while the loop holds.
+
+A smaller press, less than the divergence tolerance short of its target, is **not** stopped. The
+loop only counts it: when the written command and the pose have both been still for
+`steady_offset_s` while further apart than `steady_offset_rad`, `steady_offsets` goes up and
+`steady_offset_last` names the joint, both values and how long it lasted. The report also shows,
+per joint, the measured value (`measured`), the last value the loop wrote (`commanded`) and the
+target (`target`).
+
+| Key | Default | Unit, range | Safe direction | What it does |
+| --- | --- | --- | --- | --- |
+| `motion.external.repeat_margin_s` | `3.6` | s, 0.5 to 60 | higher | A second stop at the same place within the detection times (`lag_window_s + max_state_age_s + confirm_s`) plus this margin after taking control back is a repeat. |
+| `motion.external.same_target_rad` | `0.05` | rad, 0.005 to 0.5 | higher | Two stops closer than this are the same place; a held joint resumes when its target moves further than this, or off the stop. |
+| `motion.external.same_target_m` | `0.005` | m, 0.0005 to 0.05 | higher | The same for translations. |
+| `motion.external.unreachable_repeats` | `1` | 1 to 10 | lower | Repeats before the loop holds. |
+| `motion.external.hold_back_off_rad` | `0.01` | rad, 0.001 to 0.05 | lower | The hold pose backs a held joint off its stop by this, away from the target. |
+| `motion.external.hold_back_off_m` | `0.001` | m, 0.0001 to 0.005 | lower | The same for translations. |
+| `motion.external.sticky_expiry_s` | `180.0` | s, 10 to 3600 | higher | A second hold at the same stop takes only a target off the stop for this long, then any target change. |
+| `motion.external.steady_offset_rad` | `0.04` | rad, 0.005 to 1 | none | Report only: a still joint this far from a still command is counted in `steady_offsets`. |
+| `motion.external.steady_offset_m` | `0.005` | m, 0.0005 to 0.1 | none | The same for translations. |
+| `motion.external.steady_offset_s` | `3.0` | s, 0.2 to 60 | none | How long that offset must last to be counted. |
+| `motion.external.tolerance_rad` | `0.15` | rad, 0.01 to 1 | lower | Divergence from the commands that counts as external control; raising it loosens safety. |
+| `motion.external.tolerance_m` | `0.02` | m, 0.002 to 0.1 | lower | The same for translations. |
+
 ## 5. Circadian rhythm, quiet hours and presence
 
 SPEC 7A.

@@ -87,11 +87,14 @@ class DayApp(AppWithFakes):
         return DaySource()
 
 
-def rested(pose: dict[str, float], min_pitch: float) -> bool:
-    """The rest posture: head lowered and the antennas drooping outward (right below, left above
-    zero), all three at once."""
+REST_MATCH_RAD = 0.002  # the rest posture is an absolute IDLE command: written as is when still
+
+
+def rested(pose: dict[str, float], rest_pitch: float) -> bool:
+    """The rest posture: head at the rest pitch and the antennas drooping outward (right below,
+    left above zero), all three at once."""
     return (
-        pose.get("head.pitch", 0.0) > min_pitch
+        abs(pose.get("head.pitch", 0.0) - rest_pitch) <= REST_MATCH_RAD
         and pose.get("antenna_right", 0.0) < 0
         and pose.get("antenna_left", 0.0) > 0
     )
@@ -127,9 +130,11 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
         body_yaw=None,
     )
     cfg = stack.effective()
-    # the register scales the rest posture; half of it is well clear of idle
-    min_pitch = 0.5 * math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])
-    min_pitch *= cfg.register.motion_amplitude
+    # the rest pitch is absolute (not scaled by the register); let go means clearly below it,
+    # where only home and idle breathing (motion.idle.breathing_amplitude) reach
+    rest_pitch = math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])
+    let_go = 0.5 * (rest_pitch + cfg.motion.idle.breathing_amplitude)
+    assert rest_pitch - let_go > 2 * REST_MATCH_RAD
     offline = [t[1] for t in replay(DayApp.samples, cfg).transitions]  # hour of each change
     app = new_app(DayApp)
     spans: list[dict] = []  # per state: name, virtual hour of entry, range in the feed log
@@ -170,10 +175,10 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
         app.clock.begin()
         feeder.start()
         assert wait_for(lambda: "resting" in states(), timeout=45), states()
-        assert wait_for(lambda: rested(commanded, min_pitch), timeout=10), commanded
+        assert wait_for(lambda: rested(commanded, rest_pitch), timeout=10), commanded
         rest_pose = dict(commanded)
         assert wait_for(lambda: states()[-1] == "awake" and len(spans) >= 3, timeout=45), states()
-        assert wait_for(lambda: commanded["head.pitch"] < 0.1, timeout=10)  # posture let go of
+        assert wait_for(lambda: commanded["head.pitch"] < let_go, timeout=10)  # let go of
         wall = time.monotonic() - started
         feed_log = list(fed)
     finally:
@@ -196,5 +201,5 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
     window = feed_log[rest["begin"] + EDGE : rest["end"] - EDGE]  # the interior of the span
     assert sum(c.source == REST_SOURCE for c in window) >= 50  # the posture is held, not once
     assert not any(c.source in ("idle", "idle-additive") for c in window)  # idle motion stopped
-    assert rested(rest_pose, min_pitch)  # head down, antennas drooping outward
+    assert rested(rest_pose, rest_pitch)  # head down, antennas drooping outward
     assert any(c.source == FX_SOURCE for c in feed_log[rest["end"] :])  # waking: the stretch

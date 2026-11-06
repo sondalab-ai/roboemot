@@ -61,7 +61,7 @@ def parts(entries=(), target=None, registry=None, **over):
         perception=SimpleNamespace(registry=registry),
         world=SimpleNamespace(entries=list(entries)),
         reflexes=SimpleNamespace(last_fired=lambda now: ("startle", 2.34567)),
-        loop=SimpleNamespace(motors_off=False, external=False),
+        loop=SimpleNamespace(motors_off=False, external=False, unreachable_held=False),
     )  # fmt: skip
     for key, value in over.items():
         setattr(p, key, value)
@@ -221,13 +221,17 @@ def test_motion_state():
         ({"motors_off": False, "external": True}, "external"),
         ({"motors_off": True, "external": False}, "motors_off"),
         ({"motors_off": True, "external": True}, "motors_off"),
+        ({"motors_off": False, "external": False, "unreachable_held": True}, "held"),
+        ({"motors_off": False, "external": True, "unreachable_held": True}, "external"),
+        ({"motors_off": True, "external": False, "unreachable_held": True}, "motors_off"),
     ):
-        assert live(parts(loop=SimpleNamespace(**flags))).state()["motion"] == {"state": expect}
+        loop = SimpleNamespace(**({"unreachable_held": False} | flags))
+        assert live(parts(loop=loop)).state()["motion"] == {"state": expect}
 
 
 def test_an_asleep_robot_never_reports_writing():
     p = parts(
-        loop=SimpleNamespace(motors_off=False, external=False),
+        loop=SimpleNamespace(motors_off=False, external=False, unreachable_held=False),
         sleep=SimpleNamespace(asleep=True, paused_parts=lambda: []),
     )
     assert live(p).state()["motion"] == {"state": "motors_off"}

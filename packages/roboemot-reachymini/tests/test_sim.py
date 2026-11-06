@@ -690,7 +690,12 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
             loop.feed(cmd)
         time.sleep(0.02)
     state = loop.driver.read_state()
-    assert state["head.pitch"] - settled["head.pitch"] > 0.05
+    # reached, with no divergence (the sim has no head-body contact: the hardware stop is a
+    # manifest note, SPEC 7A)
+    pitch = math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])
+    assert state["head.pitch"] == pytest.approx(pitch, abs=0.02)
+    snap = loop.snapshot()
+    assert snap["external_events"] == 0 and snap["unreachable"] == 0
     assert state["antenna_right"] < settled["antenna_right"] - 0.05
     assert state["antenna_left"] > settled["antenna_left"] + 0.05
 
