@@ -86,7 +86,10 @@ GESTURE_PREFIX = "cue_"  # the manifest's gesture_map entry of a cue: cue_<kind>
 SOURCE_PREFIX = "cue:"  # the motion source of a cue's gesture
 CUE_SOUND_MAX_S = 1.0  # a cue is short: a longer sound is refused with the library
 CUE_RATE_RANGE_HZ = (8000, 48000)
-ENDED_KEYS_MAX = 64  # utterance keys whose end is remembered: a later begin of one is ignored
+# Internal memory bound, not a behaviour constant (SPEC 11A does not apply): utterance keys whose
+# end is remembered, so a later begin of one is ignored. Keys are start stamps: a begin at or
+# before the newest key evicted from it is as late (``_ended_floor``), so the bound loses nothing.
+ENDED_KEYS_MAX = 64
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,7 @@ class Cues:
         self._open: dict[Hashable, int] = {}
         self._generation = 0
         self._ended: collections.OrderedDict[Hashable, None] = collections.OrderedDict()
+        self._ended_floor: Any = None  # the newest key evicted from ``_ended``
         self._due = math.inf  # when the listening gesture shows (inf: not asked)
         self._began = math.inf  # when the oldest outstanding utterance began it
         self._hold: _Hold | None = None
@@ -343,7 +347,7 @@ class Cues:
         """The audio of utterance ``key`` left: the listening gesture shows after the onset (a
         gesture already up stays); the blip plays now when this starts the cue."""
         with self._lock:
-            if key in self._ended:
+            if key in self._ended or self._before_floor(key):
                 self._counts[f"{LISTENING}.begin_after_end"] += 1
                 return
             now = self.clock()
@@ -365,13 +369,26 @@ class Cues:
             return
         self._play_blip(sound, volume)
 
+    def _before_floor(self, key: Hashable) -> bool:
+        """Whether ``key`` is at or before the newest evicted ended key (lock held); keys that
+        do not order (not stamps) never are."""
+        floor = self._ended_floor
+        if floor is None:
+            return False
+        try:
+            return bool(key <= floor)  # type: ignore[operator]
+        except TypeError:
+            return False
+
     def listening_end(self, key: Hashable) -> None:
         """Utterance ``key`` is over; the last open one releases the cue. An end of an utterance
         not open (ended already, or of a generation a hold limit or sleep closed) is ignored."""
         with self._lock:
             self._ended[key] = None
             while len(self._ended) > ENDED_KEYS_MAX:
-                self._ended.popitem(last=False)
+                old, _ = self._ended.popitem(last=False)
+                if self._ended_floor is None or not self._before_floor(old):
+                    self._ended_floor = old
             if self._open.pop(key, None) is None:
                 self._counts[f"{LISTENING}.late_end"] += 1
                 return

@@ -83,12 +83,13 @@ false). ``strict_cancel`` answers a ``response.cancel`` with no response running
 ``cancel_error_ids`` is off.
 
 ``hold`` (a ``threading.Event``) holds what the VAD says at ``hold_at`` until the test sets it:
-``speech`` (everything a burst's VAD says), ``transcript`` (the ``transcription.completed``
-events) or ``segment`` (every segment after a burst's first, with ``segment_gap_s``). A test
-that cancels a burst before the server's next word sets it after the cancel, so the order
-does not depend on how fast the test runs. A hold nobody released fails the test when the
-server closes (``__exit__`` raises): one that ran past ``hold_max_s`` (the server went on and
-counted it in ``hold_timeouts``) or one still waiting.
+``speech`` (everything a burst's VAD says), ``stream_start`` (the stream VAD's
+``speech_started``, and the stream's audio behind it), ``transcript`` (the
+``transcription.completed`` events) or ``segment`` (every segment after a burst's first, with
+``segment_gap_s``). A test that cancels a burst before the server's next word sets it after
+the cancel, so the order does not depend on how fast the test runs. A hold nobody released
+fails the test when the server closes (``__exit__`` raises): one that ran past ``hold_max_s``
+(the server went on and counted it in ``hold_timeouts``) or one still waiting.
 """
 
 from __future__ import annotations
@@ -108,7 +109,7 @@ REPLY = "Ecco la mia risposta per te"
 PENDING = "function_call_output_pending"
 HOLD_MAX_S = 10.0  # default bound of a hold nobody releases (hold_timeouts)
 HOLD_POLL_S = 0.005
-HOLD_POINTS = ("speech", "transcript", "segment")
+HOLD_POINTS = ("speech", "transcript", "segment", "stream_start")
 VAD_BLOCK_MS = 10  # the stream VAD's block
 VAD_LEVEL = 1000  # a block with a sample this loud (PCM16) is speech
 
@@ -389,6 +390,7 @@ class TurnServer(FakeServer):
                     if self.ids:
                         started["item_id"] = self._vad_item
                     started["audio_start_ms"] = int(pos)
+                    await self._held("stream_start")
                     interrupts = self._interrupts()
                     if interrupts and self.interrupt_first:
                         await self._interrupt(wait=True)

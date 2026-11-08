@@ -148,7 +148,10 @@ class DuckingSink(Protocol):
 class AsideSink(Protocol):
     """An ``AudioSink`` that can play a sound that is not speech: queued like any audio, but it
     does not open the speaking window (``SpeechActivity.extend_own``). ``cut_aside`` drops such
-    a sound still queued or playing, never speech; whether it cut anything."""
+    a sound still queued or playing, never speech; whether it cut anything. ``push_aside``
+    refuses a sound behind speech the sink already holds (returns 0.0). ``cut_aside`` was added
+    in S3: a sink with ``push_aside`` alone is no ``AsideSink`` any more, so ``play_aside``
+    reports it ``unsupported`` (counted ``aside.unsupported``) and plays nothing."""
 
     def push_aside(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def cut_aside(self) -> bool: ...
@@ -661,6 +664,9 @@ class SpeechOutput:
             if why is not None:
                 self._aside[why] += 1
                 return False
+            # until the push is in, any answer pushed meanwhile asks the sink to cut it (a sink
+            # refuses an aside behind speech it holds), so it never lands behind the answer
+            self._aside_until = math.inf
         sink = self.sink
         assert isinstance(sink, AsideSink)
         try:
@@ -670,8 +676,8 @@ class SpeechOutput:
             pushed = False
         with self._lock:
             self._aside["played" if pushed else "failed"] += 1
-            if pushed:
-                self._aside_until = sink.playing_until()
+            if self._aside_until == math.inf:  # no answer cut it meanwhile: narrow the sentinel
+                self._aside_until = sink.playing_until() if pushed else -math.inf
         return pushed
 
     def _aside_refusal(self, duration_ms: float) -> str | None:

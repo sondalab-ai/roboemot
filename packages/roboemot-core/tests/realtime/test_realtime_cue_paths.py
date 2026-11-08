@@ -64,7 +64,12 @@ def test_a_barge_ins_stream_begins_the_cue_only_once_the_robot_stopped(ears):  #
         hold.set()
 
 
-def test_an_unconfirmed_barge_ins_stream_never_cues_and_is_never_decoded(ears):  # noqa: F811
+def test_an_unconfirmed_barge_ins_stream_is_dropped_and_cued_not_heard_once_the_robot_stops(
+    ears,  # noqa: F811
+):
+    """Owner decision 2026-11-08: the utterance is dropped (never decoded, never answered: it
+    was heard over the robot's voice) and the did-not-get-it cue shows once the robot's speech
+    stopped, so the person knows to repeat."""
     with TurnServer() as server:  # no stream VAD: the server never confirms
         ear = ears(server, rt=SHORT_WAIT, app=OPT_INS, script=["x"], decoded="ciao Neve")
         events = recorded(ear)
@@ -73,9 +78,41 @@ def test_an_unconfirmed_barge_ins_stream_never_cues_and_is_never_decoded(ears): 
         ear.r.feed(voice(seconds=0.5))
         tail(ear)  # its segment ends while the robot still speaks
         assert ear.settle(lambda: audio(ear)["streamed"] == 1)
-        silent(ear)  # the robot's answer ended on its own: still no confirmation
-        ear.r.feed(after_the_echo_tail(ear))
+        ear.r.feed(silence(1.0))  # past the transcript wait, the robot still speaking
         assert ear.settle(lambda: audio(ear)["playback_unconfirmed"] == 1)
-        assert events == []  # no listening cue, no did-not-get-it cue
+        assert not ear.settle(lambda: events, 0.2)  # no cue over the robot's voice
+        silent(ear)  # the robot's answer ended on its own
+        ear.r.feed(after_the_echo_tail(ear))
+        assert ear.settle(lambda: [e for e, _ in events] == ["dropped"])
+        assert not ear.settle(lambda: len(events) > 1, 0.2)  # once
         assert ear.r.asr.decodes == 0 and ear.utterances == []
         assert audio(ear)["local_fallbacks"] == 0
+        assert server.of("response.create") == []  # never answered
+
+
+def test_a_confirmation_after_the_transcript_wait_is_late_and_never_stops_the_robot(
+    ears,  # noqa: F811
+):
+    """The drop and the server's confirmation are decided under the input's lock: one that
+    lands after the drop is counted ``playback_unconfirmed_late`` and is not handed to the
+    barge-in, so the robot is never stopped with nothing to answer."""
+    hold = threading.Event()
+    with TurnServer(stream_vad=True, heard=HEARD, hold=hold, hold_at="stream_start") as server:
+        ear = ears(server, rt=SHORT_WAIT, app=OPT_INS, script=["x"], decoded="ciao Neve")
+        events = recorded(ear)
+        speaking(ear)
+        confirmed = barge_in(ear)
+        ear.r.feed(voice(seconds=0.5))
+        tail(ear)
+        assert ear.settle(lambda: audio(ear)["streamed"] == 1)
+        ear.r.feed(silence(1.0))
+        assert ear.settle(lambda: audio(ear)["playback_unconfirmed"] == 1)
+        job = ear.r.listener._playback_job
+        hold.set()  # the server's speech_started now comes
+        assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
+        assert wait_until(lambda: ear.rt.route.snapshot()["playback_unconfirmed_late"] == 1)
+        assert not confirmed.is_set() and not job.confirmed
+        assert ear.r.asr.decodes == 0 and ear.utterances == []
+        silent(ear)
+        ear.r.feed(after_the_echo_tail(ear))
+        assert ear.settle(lambda: [e for e, _ in events] == ["dropped"])

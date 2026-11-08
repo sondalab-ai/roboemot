@@ -29,7 +29,7 @@ from roboemot.skills.defaults import default_skills
 from roboemot.soothe import SootheRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
-from roboemot.voice.listener import AUDIO_NOT_HEARD, AUDIO_SENT
+from roboemot.voice.listener import AUDIO_DROPPED, AUDIO_NOT_HEARD, AUDIO_SENT
 from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
@@ -240,11 +240,15 @@ def bind_realtime_input(
 def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
     """The listener's audio events as cues, keyed by the utterance's start stamp: audio sent
     begins the listening cue; audio that did not leave ends it; audio without a transcript ends
-    it and shows ``not_heard``."""
+    it and shows ``not_heard``; a barge-in's segment the server never confirmed (dropped, S3)
+    shows ``not_heard`` (no listening cue began for it)."""
 
     def on_audio(event: str, key: float) -> None:
         if event == AUDIO_SENT:
             cues.listening_begin(key)
+            return
+        if event == AUDIO_DROPPED:  # no listening cue began for it (S3)
+            cues.play("not_heard", "playback_unconfirmed")
             return
         cues.listening_end(key)
         if event == AUDIO_NOT_HEARD:
@@ -266,6 +270,8 @@ def bind_barge_in(
     turns (S2) the cut-off point streams the speech over the robot's voice instead, and the
     server's ``speech_started`` for that stream (the realtime input's ``on_confirm``) stops it."""
     output.duck = bargein.duck
+    audio_in = listener.realtime_input
+    route = audio_in.route if audio_in is not None else None  # each stop by mode (SPEC 13)
     bargein.bind(
         output.stop,
         conv.interrupt,
@@ -276,11 +282,10 @@ def bind_barge_in(
         end_playback=listener.end_playback,
         server_mode=listener.server_turns,
         playback_job=listener.playback_job,
+        on_stop=route.note_barge_in if route is not None else None,
     )
-    audio_in = listener.realtime_input
     if audio_in is not None:
         audio_in.on_confirm = bargein.confirm
-        bargein.on_stop = audio_in.route.note_barge_in  # both modes side by side (SPEC 13)
 
 
 def start_all(

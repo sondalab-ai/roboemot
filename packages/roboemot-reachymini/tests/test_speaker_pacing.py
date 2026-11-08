@@ -361,3 +361,33 @@ def test_the_lead_never_delays_a_streamed_answers_first_audio(lead_ms):
     finally:
         out.close()
         sp.close()
+
+
+def test_an_aside_behind_speech_already_held_is_refused():
+    """Review of #200: an answer pushed between the speech output's aside decision and the
+    aside's push wins; the blip then never lands behind (or inside) the answer."""
+    sp, log, clock = paced()
+    sp.push_audio_sample(SECOND, RATE)
+    handed = handed_s(log)
+    assert sp.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE) == 0.0
+    assert handed_s(log) == handed and sp.pacing()["pending_ms"] == pytest.approx(800.0)
+
+
+def test_cut_aside_during_a_speech_push_in_flight_never_abandons_the_speech(monkeypatch):
+    """Review of #200: ``cut_aside`` landing while a speech push is converting its audio
+    (generation taken, no piece queued yet) must not bump the generation under it."""
+    from roboemot_reachymini import speaker as speaker_module
+
+    sp, log, clock = paced(lead_ms=0)
+    sp.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE)
+    cut: list[bool] = []
+    process = speaker_module.StreamResampler.process
+
+    def converting(self, x):
+        cut.append(sp.cut_aside())  # from inside the window, as another thread could
+        return process(self, x)
+
+    monkeypatch.setattr(speaker_module.StreamResampler, "process", converting)
+    sp.push_audio_sample(np.ones(24000, np.float32), 24000)  # resampled: the window opens
+    assert cut == [False]
+    assert sum(len(p) for p in log.pushed) >= RATE * 0.99  # the second of speech is all there

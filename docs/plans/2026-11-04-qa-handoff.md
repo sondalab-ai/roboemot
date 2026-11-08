@@ -73,7 +73,7 @@ PRs: https://github.com/sondalab-ai/roboemot/pull/160, plus CV-20/21 https://git
    - Read `roboemot.realtime_route.latency_ms.by_turns` after the second run: `robot` and `server` side by side, each with `turn`, `first_audio`, `transcript` and `onset_to_stop` (count, p50, p95, max, in ms). Record the p50 and p95 of each in SPEC 13. Both runs may land in one process: each value counts in the mode it ran in.
    - Expected: `by_turns.server.turn` p50 below `by_turns.robot.turn` p50 (the reason for server turns; report it if not). Pass: `server.onset_to_stop` p95 at most 1.0 s (the SPEC 13 proposal) and `robot.onset_to_stop` p95 at most 200 ms.
    - Listen for a cue over the answer: no listening blip, `not_heard` or `fallback` sound may play over or just before the robot's answer, and the listening gesture (antennas up, a small tilt) must drop as the answer starts. Talk over the robot in the `server` run: no blip and no gesture while it still speaks.
-   - Read the counters: voice `aside.cut` and `cue_sounds_cut` (a cue gave way to an answer: expected now and then), `pacing.asides_cut`, cues `listening.begin_after_end`, listener `realtime_audio.playback_unconfirmed`, and `underruns` (target 0).
+   - Read the counters: voice `aside.cut` and `cue_sounds_cut` (a cue gave way to an answer: expected now and then), `pacing.asides_cut`, cues `listening.begin_after_end`, listener `realtime_audio.playback_unconfirmed` (each one shows the did-not-get-it cue after the robot stops) and route `playback_unconfirmed_late`, and `underruns` (target 0).
 
 ## B. Vision: objects, cup, cost (PRs 162, 163, 167, 174, 176, 177, 178)
 

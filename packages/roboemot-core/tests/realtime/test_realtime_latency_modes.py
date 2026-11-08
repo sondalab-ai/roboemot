@@ -102,13 +102,37 @@ def test_the_runtime_hands_the_barge_ins_stops_to_the_realtime_route():
     noted: list[tuple[str, float]] = []
     route = SimpleNamespace(note_barge_in=lambda mode, s: noted.append((mode, s)))
     audio_in = SimpleNamespace(route=route, on_confirm=None)
-    bargein = SimpleNamespace(duck=None, bind=lambda *a, **kw: None, confirm=object())
-    bargein.on_stop = None
+    bound = []
+    bargein = SimpleNamespace(duck=None, bind=lambda *a, **kw: bound.append(kw), confirm=object())
     listener = SimpleNamespace(
         realtime_input=audio_in, resume=None, stream_playback=None, end_playback=None,
         server_turns=None, playback_job=None,
     )  # fmt: skip
     conv = SimpleNamespace(interrupt=None, mark_interrupting=None)
     bind_barge_in(bargein, SimpleNamespace(stop=None), conv, listener)
-    bargein.on_stop("robot", 0.1)
+    bound[0]["on_stop"]("robot", 0.1)
     assert noted == [("robot", 0.1)] and audio_in.on_confirm is bargein.confirm
+
+
+def test_a_local_cut_in_a_server_mode_episode_counts_under_server():
+    """Review of #200: a hand-off the listener refuses is cut locally; its episode started in
+    server mode, so the stop counts there (as ``false`` keys an episode)."""
+    w, server, _ = server_world(take=False)
+    stops: list[tuple[str, float]] = []
+    w.bargein.on_stop = lambda mode, seconds: stops.append((mode, seconds))
+    barge(w)
+    assert len(w.stops) == 1 and [m for m, _ in stops] == ["server"]
+
+
+def test_a_failing_mode_check_is_logged_once_and_counts_as_robot(caplog):
+    w = World(["ciao"])
+
+    def broken() -> bool:
+        raise RuntimeError("boom")
+
+    w.bargein._server_mode = broken
+    with caplog.at_level("WARNING"):
+        assert w.bargein._mode_now() == "robot"
+        assert w.bargein._mode_now() == "robot"
+    logged = [r.getMessage() for r in caplog.records]
+    assert logged.count("barge-in: turn mode: RuntimeError (counted as robot)") == 1

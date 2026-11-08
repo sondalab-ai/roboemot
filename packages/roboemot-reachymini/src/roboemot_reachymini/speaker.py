@@ -47,6 +47,7 @@ instead of starting a second one. A lead of 0 hands everything over at once, as 
 cues): resampled at once (the speech stream is left alone) and queued like any audio, but it opens
 only the gate's own-sound window (``SpeechActivity.extend_own``), never the speaking window, so
 the listener, barge-in and the realtime input do not take it for the robot's voice.
+It is refused (nothing queued) behind speech the speaker already holds.
 ``cut_aside`` drops such a sound still pending or playing, flushed like a stop, when the answer's
 first audio comes (SPEC 8, S3: the answer never waits behind it); it never cuts speech.
 
@@ -119,6 +120,7 @@ class ReachySpeaker:
         self._aside_s = 0.0  # length of the last aside sound (``push_aside``)
         self._handed = -math.inf  # monotonic stamp at which the audio handed over has played
         self._speech_handed = -math.inf  # ... the speech among it (``cut_aside`` spares it)
+        self._speech_incoming = 0  # speech pushes between their generation and their pieces
         self._duck: DuckGain | None = None
         self._pacer: threading.Thread | None = None
         self._closing = False
@@ -191,6 +193,7 @@ class ReachySpeaker:
         x = samples.astype(np.float32, copy=False).reshape(-1)
         with self._lock:
             generation = self._generation
+            self._speech_incoming += 1  # converting outside the lock: ``cut_aside`` waits
             tail = self._take_stream() if self._stream_hz != rate_hz else None
             if self._stream is None and rate_hz != self._out_hz:
                 snapped = max(RATE_GRID_HZ, round(rate_hz / RATE_GRID_HZ) * RATE_GRID_HZ)
@@ -198,10 +201,14 @@ class ReachySpeaker:
             self._stream_hz, stream = rate_hz, self._stream
         # converted outside the lock; a stop meanwhile orphans ``stream`` and the pieces are
         # abandoned below, so old audio never reaches a new stream
-        out = x if stream is None else stream.process(x)
-        if tail is not None and tail.size:
-            out = np.concatenate([tail, out])
-        queued = self._push_pieces(out, generation)
+        try:
+            out = x if stream is None else stream.process(x)
+            if tail is not None and tail.size:
+                out = np.concatenate([tail, out])
+            queued = self._push_pieces(out, generation)
+        finally:
+            with self._lock:
+                self._speech_incoming -= 1
         return self.playing_until() if queued else 0.0
 
     def push_aside(self, samples: np.ndarray, rate_hz: int) -> float:
@@ -214,6 +221,8 @@ class ReachySpeaker:
         x = samples.astype(np.float32, copy=False).reshape(-1)
         out = x if rate_hz == self._out_hz else resample(x, rate_hz, self._out_hz)
         with self._lock:
+            if self._holds_speech(self._clock()):
+                return 0.0  # an answer came first: the sound would play behind or inside it
             generation = self._generation
             self._aside_s = out.size / self._out_hz  # its echo tail is at most this long
         queued = self._push_pieces(out, generation, speech=False)
@@ -406,13 +415,20 @@ class ReachySpeaker:
         speech is held: the robot's voice is never cut here. Whether it cut anything."""
         with self._lock:
             now = self._clock()
-            if any(speech for _, _, speech in self._pending) or self._speech_handed > now:
+            if self._holds_speech(now):
                 return False
             if not self._pending and self._handed <= now:
                 return False  # it played already
             self._flush(now)
             self._counts["asides_cut"] += 1
             return True
+
+    def _holds_speech(self, now: float) -> bool:
+        """Whether speech is on its way in, pending or still playing at ``now`` (the lock is
+        held): ``cut_aside`` never bumps the generation under a speech push."""
+        if self._speech_incoming or self._speech_handed > now:
+            return True
+        return any(speech for _, _, speech in self._pending)
 
     def stop(self) -> None:
         """Barge-in: drop the queued audio now (``clear_player``),

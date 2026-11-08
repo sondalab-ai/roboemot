@@ -2123,6 +2123,7 @@ COUNTERS = (
     "cancels_not_active",  # errors about the robot's own cancels: benign, never poison
     "late_audio_dropped",
     "playback_confirms",  # speech_started of a barge-in's stream: the barge-in is confirmed
+    "playback_unconfirmed_late",  # ... after the listener dropped it unconfirmed: ignored (S3)
 )
 
 # the server's confirmations of a delete and a truncate, and the counter each one moves

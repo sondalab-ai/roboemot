@@ -60,8 +60,10 @@ one segment while the robot speaks: chunks then go to the barge-in and to the pi
 that segment ends, the robot stops, or the barge-in releases it (``end_playback``). Its
 listening cue (``AUDIO_SENT``) begins only once the server confirmed it and the robot's speech
 stopped (S3: no cue over the robot's voice); its counts go when its opening went, as for any
-stream. One the server never confirmed shows no cue and is never decoded locally (it was heard
-over the robot's voice, ``playback_unconfirmed``).
+stream. One the server never confirmed by the end of its transcript wait is dropped: never
+decoded locally nor answered (heard over the robot's voice, ``playback_unconfirmed``), and the
+did-not-get-it cue (``AUDIO_DROPPED``) shows once the robot's speech stopped (owner decision
+2026-11-08). The drop is decided with the input, so a confirmation after it confirms nothing.
 
 Music (``music``, a ``MusicDetector`` while ``music.enabled``): every chunk heard while the robot
 does not speak is fed to the detector after the speaking check (the ``music`` stage); a dropped
@@ -123,6 +125,9 @@ AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 # a streamed segment the server answered on its own and whose transcript never came: the
 # listening cue ends, nothing more (the answer played; server turns, SPEC 8)
 AUDIO_ANSWERED = "answered"
+# a barge-in's stream the server never confirmed (S3, owner decision 2026-11-08): dropped, not
+# answered; the did-not-get-it cue shows once the robot's speech stopped (no listening cue began)
+AUDIO_DROPPED = "dropped"
 # the server gates (voice.realtime_route.server_gates) that need the voice direction's samples:
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
@@ -346,6 +351,8 @@ class VoiceListener:
         self._playback_ended = False  # the barge-in's segment ended: back to dropping
         self._playback_until = -math.inf  # its stream ends here unless the server confirmed
         self._playback_job: Any = None  # its stream's job, once it opened
+        # start stamps of barge-in segments dropped unconfirmed, cued once the robot is silent
+        self._unheard: collections.deque[float] = collections.deque()
         self._last_streamed: tuple[str | None, float] = (None, -math.inf)  # speaker, last speech
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -1032,6 +1039,27 @@ class VoiceListener:
             self._count_audio("sent")
         self._cue(p)
 
+    def _drop_unconfirmed(self, job: Any) -> bool:
+        """Drop a barge-in's stream unless the server confirmed it, decided with the input
+        (``drop_unconfirmed``) so a confirmation racing the drop is one or the other."""
+        try:
+            return bool(self._realtime.drop_unconfirmed(job))
+        except Exception as exc:
+            log.warning("voice listener: realtime input: %s", type(exc).__name__)
+            return not job.confirmed
+
+    def _cue_unheard(self) -> None:
+        """The did-not-get-it cue of the barge-in segments dropped unconfirmed, once the
+        robot's speech (echo tail included) stopped: never over its voice."""
+        if not self._unheard or self._speech.speaking(self._clock()):
+            return
+        while self._unheard:
+            key = self._unheard.popleft()
+            try:
+                self._on_audio(AUDIO_DROPPED, key)
+            except Exception as exc:  # a cue must not stop the listener
+                log.warning("voice listener: audio event consumer raised %s", type(exc).__name__)
+
     def _cue(self, p: _Handoff) -> None:
         """Begin ``p``'s listening cue, once. A barge-in's stream (S2) waits until the server
         confirmed it and the robot's own speech stopped, and never begins once its answer was
@@ -1280,6 +1308,7 @@ class VoiceListener:
         read)."""
         for waiting in self._queue:
             self._announce(waiting)
+        self._cue_unheard()
         while self._queue:
             p = self._queue[0]
             if p.decode is not None:
@@ -1473,7 +1502,8 @@ class VoiceListener:
         if p.stream and job.answered:
             # the server answered it on its own, and its transcript never came: the answer
             # played, so neither a local decode nor the did-not-get-it cue (its history keeps
-            # no words of the person)
+            # no words of the person); its listening cue ends here only if it began (a
+            # barge-in's waits for the robot to stop, S3, and its answer may come first)
             self._count_audio("answered_untranscribed")
             if p.cued:
                 self._audio_event(AUDIO_ANSWERED, p)
@@ -1483,11 +1513,13 @@ class VoiceListener:
             # (ducked) voice, so it is never decoded or given to the wake gate (S2)
             self._count_audio("playback_unsent")
             return None
-        if p.stream and job.playback and not job.confirmed:
-            # a barge-in's segment that went but the server never confirmed (the robot spoke
-            # on): it was heard over the robot's voice, so it is not decoded either, and no cue
-            # shows (S3: never the did-not-get-it cue for the robot's own echo)
+        if p.stream and job.playback and self._drop_unconfirmed(job):
+            # a barge-in's segment that went but the server never confirmed: heard over the
+            # robot's voice, so never decoded nor answered (the echo risk); the did-not-get-it
+            # cue shows once the robot's speech stopped (S3, owner decision 2026-11-08)
             self._count_audio("playback_unconfirmed")
+            self._unheard.append(p.ev.start_stamp)
+            self._cue_unheard()
             return None
         self._count_audio("local_fallbacks")
         self._announce(p)
