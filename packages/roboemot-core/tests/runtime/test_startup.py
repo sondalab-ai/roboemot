@@ -96,7 +96,8 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     )
     output = SimpleNamespace(duck=None, stop=lambda: None)
     conv = SimpleNamespace(interrupt=lambda: None, mark_interrupting=lambda: None)
-    audio_in = SimpleNamespace(on_confirm=None)
+    route = SimpleNamespace(note_barge_in=lambda mode, seconds: None)
+    audio_in = SimpleNamespace(on_confirm=None, route=route)
     listener = SimpleNamespace(
         resume=lambda samples, stamp: None,
         stream_playback=lambda samples, stamp: False,
@@ -114,10 +115,29 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
         "end_playback": listener.end_playback,
         "server_mode": listener.server_turns,
         "playback_job": listener.playback_job,
+        "on_stop": route.note_barge_in,  # S3: each stop by turn mode (SPEC 13)
     }
     assert bound == [(actions, {"cut_own": cut_own, **server})]
     # S2: the server's speech_started of a barge-in's stream confirms it
     assert audio_in.on_confirm is bargein.confirm
+
+
+def test_bind_barge_in_without_a_realtime_input_leaves_the_stops_unreported():
+    """Review of #200: no realtime input (no route): the barge-in is bound and its stops go
+    nowhere (the voice section keeps its own figures). Every ``RealtimeInput`` has a route; a
+    ``getattr`` guard for one without is refused by the hierarchy gate (no duck typing)."""
+    audio_in = None
+    bound = []
+    bargein = SimpleNamespace(
+        duck=None, bind=lambda *a, **kw: bound.append(kw), confirm=lambda: None
+    )
+    listener = SimpleNamespace(
+        resume=None, stream_playback=None, end_playback=None, server_turns=None,
+        playback_job=None, realtime_input=audio_in,
+    )  # fmt: skip
+    conv = SimpleNamespace(interrupt=None, mark_interrupting=None)
+    bind_barge_in(bargein, SimpleNamespace(duck=None, stop=None), conv, listener)
+    assert bound[0]["on_stop"] is None
 
 
 def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():

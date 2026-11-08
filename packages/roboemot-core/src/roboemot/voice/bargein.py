@@ -305,6 +305,10 @@ class BargeIn:
         self._server = dict.fromkeys(SERVER_COUNTS, 0)
         self._false = {"robot": 0, "server": 0}  # episodes released with no stop, by mode
         self._episode_mode = "robot"
+        # each stop of the robot's voice, (turn mode, onset to stop in s), for the realtime
+        # route's report of both modes side by side (SPEC 13; ``bind``)
+        self.on_stop: Callable[[str, float], None] = lambda mode, seconds: None
+        self._mode_error_logged = False
         self.duck = DuckGain(cfg.voice.barge_in.duck)
         self._duck_start: float | None = None  # frame stamp of the episode's first candidate
         self._duck_quiet = 0
@@ -407,6 +411,7 @@ class BargeIn:
         end_playback: Callable[[], None] | None = None,
         server_mode: Callable[[], bool] | None = None,
         playback_job: Callable[[], Any] | None = None,
+        on_stop: Callable[[str, float], None] | None = None,
     ) -> None:
         """Connect the actions: ``stop`` the speech output, ``interrupt`` the conversation,
         ``resume`` the listener on the barge-in audio. ``prepare`` runs before ``stop``: it
@@ -416,7 +421,8 @@ class BargeIn:
         server turns (S2): ``playback(audio, start)`` hands a cut-off point to the server
         instead (the listener streams the speech over the robot; False: refused, cut
         locally), ``end_playback`` ends that stream at the release, ``server_mode`` says
-        which mode the counters of an episode belong to."""
+        which mode the counters of an episode belong to. ``on_stop(mode, seconds)`` hears each
+        stop of the robot's voice (the realtime route's report by turn mode, SPEC 13)."""
         self._stop, self._interrupt, self._resume = stop, interrupt, resume
         self._prepare = prepare or (lambda: None)
         self._cut_own = cut_own or (lambda: False)
@@ -424,6 +430,7 @@ class BargeIn:
         self._end_playback = end_playback or (lambda: None)
         self._server_mode = server_mode or (lambda: False)
         self._playback_job: Callable[[], Any] = playback_job or (lambda: None)
+        self.on_stop = on_stop or (lambda mode, seconds: None)
 
     def confirm(self, job: Any = None) -> None:
         """The server's VAD started speech of the stream a barge-in opened (S2; any thread):
@@ -992,6 +999,7 @@ class BargeIn:
             self._await = None  # its stream ends (cut: never answered, its items deleted)
             self._call_end_playback()
         self._end_duck("cut", detected)
+        mode = self._episode_mode if self._rec is not None else self._mode_now()
         rec, self._rec = self._rec, None  # recorded after the cut: ``reset`` must not release it
         if not own:
             try:
@@ -1004,6 +1012,8 @@ class BargeIn:
         self.stats.record("stop_call", time.perf_counter() - t0)
         self.stats.record("onset_to_stop", stopped - onset)  # until ``stop()`` returned
         self.stats.record("detect_to_stop", stopped - detected)
+        if not own:
+            self._note_stop(mode, stopped - onset)
         if own:  # a sound that is not speech: no answer to cancel or trim
             self._counts["own_sound_cuts"] += 1
             self.reset()
@@ -1068,6 +1078,24 @@ class BargeIn:
         self._server_cut(late=self._await is None)
         return True
 
+    def _mode_now(self) -> str:
+        """The turn mode now, as an episode's start keys it (a stop with no episode open). A
+        failing check counts as robot, logged once (a report must not stop a cut)."""
+        try:
+            return "server" if self._server_mode() else "robot"
+        except Exception as exc:
+            if not self._mode_error_logged:
+                self._mode_error_logged = True
+                log.warning("barge-in: turn mode: %s (counted as robot)", type(exc).__name__)
+            return "robot"
+
+    def _note_stop(self, mode: str, seconds: float) -> None:
+        """Hand one stop of the robot's voice to ``on_stop`` (a report must not stop a cut)."""
+        try:
+            self.on_stop(mode, seconds)
+        except Exception as exc:
+            log.warning("barge-in: on_stop: %s", type(exc).__name__)
+
     def _server_cut(self, *, late: bool) -> None:
         """The server confirmed: ``prepare``, ``stop``, ``interrupt`` as for a local cut-off,
         and no ``resume`` while the barge-in waited: the listener hears the person already. A
@@ -1091,6 +1119,7 @@ class BargeIn:
         self.stats.record("stop_call", time.perf_counter() - t0)
         if waiting is not None:
             self.stats.record("onset_to_stop_server", stopped - waiting.onset)
+            self._note_stop("server", stopped - waiting.onset)
         self._end_duck("cut", self._last_end)
         rec, self._rec = self._rec, None
         self._server["server_confirmed_late" if late else "server_confirmed"] += 1

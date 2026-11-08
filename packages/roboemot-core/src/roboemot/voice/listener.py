@@ -57,7 +57,13 @@ local (it fails closed). A segment whose stream never opened (a turn in flight, 
 revoke) is decided by the wake gate too. A segment cut part way (the robot speaks, a gap, a
 pause) cuts its stream. A barge-in over the robot's voice (S2, ``stream_playback``) may stream
 one segment while the robot speaks: chunks then go to the barge-in and to the pipeline, until
-that segment ends, the robot stops, or the barge-in releases it (``end_playback``).
+that segment ends, the robot stops, or the barge-in releases it (``end_playback``). Its
+listening cue (``AUDIO_SENT``) begins only once the server confirmed it and the robot's speech
+stopped (S3: no cue over the robot's voice); its counts go when its opening went, as for any
+stream. One the server never confirmed by the end of its transcript wait is dropped: never
+decoded locally nor answered (heard over the robot's voice, ``playback_unconfirmed``), and the
+did-not-get-it cue (``AUDIO_DROPPED``) shows once the robot's speech stopped (owner decision
+2026-11-08). The drop is decided with the input, so a confirmation after it confirms nothing.
 
 Music (``music``, a ``MusicDetector`` while ``music.enabled``): every chunk heard while the robot
 does not speak is fed to the detector after the speaking check (the ``music`` stage); a dropped
@@ -119,6 +125,9 @@ AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 # a streamed segment the server answered on its own and whose transcript never came: the
 # listening cue ends, nothing more (the answer played; server turns, SPEC 8)
 AUDIO_ANSWERED = "answered"
+# a barge-in's stream the server never confirmed (S3, owner decision 2026-11-08): dropped, not
+# answered; the did-not-get-it cue shows once the robot's speech stopped (no listening cue began)
+AUDIO_DROPPED = "dropped"
 # the server gates (voice.realtime_route.server_gates) that need the voice direction's samples:
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
@@ -207,7 +216,8 @@ class _Handoff:
     progress: _DecodeProgress | None = field(default=None, repr=False)  # its local decode's
     decoded_end: int | None = None  # index in ``ev.audio`` the local text was decoded up to
     stream: bool = False  # its audio is a live stream's (turns: server)
-    announced: bool = False  # its stream's opening went, and that was counted and cued
+    announced: bool = False  # its stream's opening went, and that was counted
+    cued: bool = False  # ... and its listening cue began (AUDIO_SENT; a barge-in's waits, S3)
 
 
 @dataclass
@@ -328,6 +338,7 @@ class VoiceListener:
             "streamed_during_playback": 0,
             "playback_refused": 0,
             "playback_unsent": 0,  # its stream's opening was refused later: dropped
+            "playback_unconfirmed": 0,  # it went, the server never confirmed it: dropped (S3)
             **{f"stream_gated_{gate}": 0 for gate in SERVER_GATES},
             # a listed gate whose detector is off or missing: it fails closed (kept local)
             **{f"stream_gated_{gate}_off": 0 for gate in OFF_GATES},
@@ -340,6 +351,8 @@ class VoiceListener:
         self._playback_ended = False  # the barge-in's segment ended: back to dropping
         self._playback_until = -math.inf  # its stream ends here unless the server confirmed
         self._playback_job: Any = None  # its stream's job, once it opened
+        # start stamps of barge-in segments dropped unconfirmed, cued once the robot is silent
+        self._unheard: collections.deque[float] = collections.deque()
         self._last_streamed: tuple[str | None, float] = (None, -math.inf)  # speaker, last speech
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -1013,16 +1026,52 @@ class VoiceListener:
 
     def _announce(self, p: _Handoff) -> None:
         """A streamed segment's opening went (the stream thread may send it after the segment
-        ended): only now is it counted (``streamed``, ``sent``), does the listening cue begin and
-        does it count as the last streamed one (``other_speaker``)."""
-        if not p.stream or p.announced or p.rt is None or not p.rt.sent:
+        ended): only now is it counted (``streamed``, ``sent``), does it count as the last
+        streamed one (``other_speaker``) and does the listening cue begin (``_cue``)."""
+        if not p.stream or p.rt is None or not p.rt.sent:
             return
-        p.announced = True
-        self._last_streamed = (self._speaker(), p.ev.last_speech_stamp)
-        self._count_audio("streamed")
-        if p.rt.playback:
-            self._count_audio("streamed_during_playback")
-        self._count_audio("sent")
+        if not p.announced:
+            p.announced = True
+            self._last_streamed = (self._speaker(), p.ev.last_speech_stamp)
+            self._count_audio("streamed")
+            if p.rt.playback:
+                self._count_audio("streamed_during_playback")
+            self._count_audio("sent")
+        self._cue(p)
+
+    def _drop_unconfirmed(self, job: Any) -> bool:
+        """Drop a barge-in's stream unless the server confirmed it, decided with the input
+        (``drop_unconfirmed``) so a confirmation racing the drop is one or the other."""
+        try:
+            return bool(self._realtime.drop_unconfirmed(job))
+        except Exception as exc:
+            log.warning("voice listener: realtime input: %s", type(exc).__name__)
+            return not job.confirmed
+
+    def _cue_unheard(self) -> None:
+        """The did-not-get-it cue of the barge-in segments dropped unconfirmed, once the
+        robot's speech (echo tail included) stopped: never over its voice."""
+        if not self._unheard or self._speech.speaking(self._clock()):
+            return
+        while self._unheard:
+            key = self._unheard.popleft()
+            try:
+                self._on_audio(AUDIO_DROPPED, key)
+            except Exception as exc:  # a cue must not stop the listener
+                log.warning("voice listener: audio event consumer raised %s", type(exc).__name__)
+
+    def _cue(self, p: _Handoff) -> None:
+        """Begin ``p``'s listening cue, once. A barge-in's stream (S2) waits until the server
+        confirmed it and the robot's own speech stopped, and never begins once its answer was
+        taken (S3: the cue never shows over the robot's voice; ``poll_handoff`` asks again)."""
+        job = p.rt
+        if p.cued:
+            return
+        if job.playback and (
+            not job.confirmed or job.answered or self._speech.speaking(self._clock())
+        ):
+            return
+        p.cued = True
         self._audio_event(AUDIO_SENT, p)
 
     def _cut_stream(self) -> None:
@@ -1259,6 +1308,7 @@ class VoiceListener:
         read)."""
         for waiting in self._queue:
             self._announce(waiting)
+        self._cue_unheard()
         while self._queue:
             p = self._queue[0]
             if p.decode is not None:
@@ -1357,7 +1407,7 @@ class VoiceListener:
                     self._realtime.cancel(p.rt)
                 except Exception as exc:
                     log.warning("voice listener: realtime input: %s", type(exc).__name__)
-                if not p.stream or p.announced:
+                if not p.stream or p.cued:
                     self._audio_event(AUDIO_UNSENT, p)
             self._count_handoff("dropped_on_stop")
         self._set_active(False)
@@ -1442,7 +1492,8 @@ class VoiceListener:
         if result is not None:
             self._count_audio("transcribed")
             self._realtime.route.note_transcript(
-                (self._clock() - p.ev.last_speech_stamp) * MS_PER_S
+                (self._clock() - p.ev.last_speech_stamp) * MS_PER_S,
+                turns="server" if p.stream else "robot",  # a stream's, or a burst's
             )
             heard = (result.generation, result.items)
             stream = job if p.stream else None
@@ -1451,14 +1502,24 @@ class VoiceListener:
         if p.stream and job.answered:
             # the server answered it on its own, and its transcript never came: the answer
             # played, so neither a local decode nor the did-not-get-it cue (its history keeps
-            # no words of the person)
+            # no words of the person); its listening cue ends here only if it began (a
+            # barge-in's waits for the robot to stop, S3, and its answer may come first)
             self._count_audio("answered_untranscribed")
-            self._audio_event(AUDIO_ANSWERED, p)
+            if p.cued:
+                self._audio_event(AUDIO_ANSWERED, p)
             return None
         if p.stream and job.playback and not job.sent:
             # a barge-in's segment whose stream never opened: it was heard over the robot's
             # (ducked) voice, so it is never decoded or given to the wake gate (S2)
             self._count_audio("playback_unsent")
+            return None
+        if p.stream and job.playback and self._drop_unconfirmed(job):
+            # a barge-in's segment that went but the server never confirmed: heard over the
+            # robot's voice, so never decoded nor answered (the echo risk); the did-not-get-it
+            # cue shows once the robot's speech stopped (S3, owner decision 2026-11-08)
+            self._count_audio("playback_unconfirmed")
+            self._unheard.append(p.ev.start_stamp)
+            self._cue_unheard()
             return None
         self._count_audio("local_fallbacks")
         self._announce(p)
@@ -1467,7 +1528,7 @@ class VoiceListener:
             # its stream never opened (a turn in flight, no session, a revoke): nothing left,
             # so nothing was decided either; the wake gate decides, as with robot turns
             p.addressed = None
-        if not p.stream or p.announced:
+        if not p.stream or p.cued:
             self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
         if not p.text:  # Vosk never ran: decoded off this thread, then handed off
             self._decode(p)

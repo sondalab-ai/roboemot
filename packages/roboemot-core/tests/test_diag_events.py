@@ -263,7 +263,7 @@ class Out:
     def __init__(self, job=1, aside=True):
         self.job, self.aside = job, aside
 
-    def play(self, samples, rate_hz, volume_db=0.0):
+    def play(self, samples, rate_hz, volume_db=0.0, *, yields=False):
         return self.job
 
     def play_aside(self, samples, rate_hz, volume_db=0.0):

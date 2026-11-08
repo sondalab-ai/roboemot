@@ -268,3 +268,126 @@ def test_a_paced_aside_sound_never_opens_the_speaking_window():
     drain(sp, clock)
     assert handed_s(log) == pytest.approx(0.5)
     assert act.until() == -float("inf") and act.sounding(clock.t - 0.01)
+
+
+# ------------------------------------------------------------------ S3: the blip gives way
+
+
+def test_cut_aside_drops_a_blip_handed_and_pending_and_counts_it():
+    """S3 (SPEC 8): the answer's first audio cuts the listening blip, also its pending part."""
+    act = SpeechActivity(0)
+    sp, log, clock = paced(lead_ms=50, activity=act)
+    sp.push_aside(np.full(RATE // 2, 0.1, np.float32), RATE)
+    assert sp.pacing()["pending_ms"] > 0
+    assert sp.cut_aside()
+    assert log.cleared == 1 and sp.pacing()["pending_ms"] == 0
+    assert sp.playing_until() == pytest.approx(clock.t) and not act.sounding(clock.t + 0.01)
+    assert sp.pacing()["asides_cut"] == 1
+    sp.push_audio_sample(SECOND, RATE)  # the answer starts now, not behind the blip
+    assert sp.playing_until() == pytest.approx(clock.t + 1.0)
+
+
+def test_cut_aside_never_cuts_speech_and_does_nothing_once_the_blip_played():
+    sp, log, clock = paced()
+    sp.push_audio_sample(SECOND, RATE)
+    sp.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE)
+    assert not sp.cut_aside() and log.cleared == 0  # speech is held: nothing is cut
+    sp2, log2, clock2 = paced()
+    sp2.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE)
+    clock2.t += 0.1  # it played
+    assert not sp2.cut_aside() and log2.cleared == 0
+    assert sp.pacing()["asides_cut"] == sp2.pacing()["asides_cut"] == 0
+
+
+def test_the_answers_first_audio_through_the_speech_output_cuts_the_blip():
+    """SpeechOutput on the real speaker: a blip, then a stream answer: the blip is flushed and
+    the answer is not placed behind it."""
+    from roboemot.voice.speech import StreamFeed
+
+    mini, log = fake()
+    sp = ReachySpeaker(mini, 100, SpeechActivity(300), lead_ms=200)
+    sp.start_playing()
+    cfg = RoboEmotConfig(voice={"realtime_route": {"prebuffer_ms": 0}})
+    out = SpeechOutput(cfg, sp, ToneBackend())
+    out.start()
+    try:
+        assert out.play_aside(np.full(RATE * 15 // 100, 0.1, np.float32), RATE)  # 150 ms
+        feed = StreamFeed()
+        out.stream(feed, utterance=out.new_utterance(), mood=None, volume_db=0.0)
+        t0 = time.monotonic()
+        feed.put(np.full(RATE, 0.5, np.float32), RATE)
+        feed.end()
+        end = time.monotonic() + 3.0
+        while out.sentences_spoken == 0 and time.monotonic() < end:
+            time.sleep(0.005)
+        assert out.sentences_spoken == 1
+        assert log.cleared == 1 and sp.pacing()["asides_cut"] == 1
+        assert sp.playing_until() - t0 < 1.0 + 0.1  # one second of answer from about now
+    finally:
+        out.close()
+        sp.close()
+
+
+@pytest.mark.parametrize("lead_ms", [0, 200])
+def test_the_lead_never_delays_a_streamed_answers_first_audio(lead_ms):
+    """S3 (SPEC 8, 13): on an idle player the first piece goes at once whatever the lead; only
+    ``voice.realtime_route.prebuffer_ms`` holds a stream's first audio back."""
+    from roboemot.voice.speech import StreamFeed
+
+    first: list[float] = []
+    mini, log = fake()
+    push = mini.media.push_audio_sample
+
+    def stamped(x):
+        first.append(time.monotonic())
+        push(x)
+
+    mini.media.push_audio_sample = stamped
+    sp = ReachySpeaker(mini, 100, SpeechActivity(300), lead_ms=lead_ms)
+    sp.start_playing()
+    cfg = RoboEmotConfig(voice={"realtime_route": {"prebuffer_ms": 0}})
+    out = SpeechOutput(cfg, sp, ToneBackend())
+    out.start()
+    try:
+        feed = StreamFeed()
+        out.stream(feed, utterance=out.new_utterance(), mood=None, volume_db=0.0)
+        t0 = time.monotonic()
+        feed.put(np.zeros(2400, "<i2").tobytes(), 24000)  # one 100 ms delta at 24 kHz
+        end = time.monotonic() + 3.0
+        while not first and time.monotonic() < end:
+            time.sleep(0.002)
+        assert first and first[0] - t0 < 0.05
+        feed.end()
+    finally:
+        out.close()
+        sp.close()
+
+
+def test_an_aside_behind_speech_already_held_is_refused():
+    """Review of #200: an answer pushed between the speech output's aside decision and the
+    aside's push wins; the blip then never lands behind (or inside) the answer."""
+    sp, log, clock = paced()
+    sp.push_audio_sample(SECOND, RATE)
+    handed = handed_s(log)
+    assert sp.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE) == 0.0
+    assert handed_s(log) == handed and sp.pacing()["pending_ms"] == pytest.approx(800.0)
+
+
+def test_cut_aside_during_a_speech_push_in_flight_never_abandons_the_speech(monkeypatch):
+    """Review of #200: ``cut_aside`` landing while a speech push is converting its audio
+    (generation taken, no piece queued yet) must not bump the generation under it."""
+    from roboemot_reachymini import speaker as speaker_module
+
+    sp, log, clock = paced(lead_ms=0)
+    sp.push_aside(np.full(RATE // 20, 0.1, np.float32), RATE)
+    cut: list[bool] = []
+    process = speaker_module.StreamResampler.process
+
+    def converting(self, x):
+        cut.append(sp.cut_aside())  # from inside the window, as another thread could
+        return process(self, x)
+
+    monkeypatch.setattr(speaker_module.StreamResampler, "process", converting)
+    sp.push_audio_sample(np.ones(24000, np.float32), 24000)  # resampled: the window opens
+    assert cut == [False]
+    assert sum(len(p) for p in log.pushed) >= RATE * 0.99  # the second of speech is all there

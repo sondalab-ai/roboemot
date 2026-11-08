@@ -168,6 +168,9 @@ class InputJob:
         # robot speaks, and the server's speech_started for it confirms the barge-in
         self.playback = False
         self.confirmed = False  # the server's speech_started for that stream came (S2)
+        # dropped unconfirmed by the listener at its transcript wait's end (S3): a later
+        # speech_started is late (``playback_unconfirmed_late``) and confirms nothing
+        self.dropped = False
 
     def __repr__(self) -> str:
         return f"InputJob(done={self.done}, refused={self.refused!r})"
@@ -328,6 +331,7 @@ class RealtimeInput:
         self._reopening = False  # this input reset the session: a burst waits for the new one
         self._stream_reopening = False  # ... the same for a stream's opening
         self._idless = -1  # the last session that reported an input item without an id
+        self._late_confirms = 0  # confirmations of dropped streams, counted after the lock
         # where the server's input buffer ends, as (session, its last audio_end_ms)
         self._end: tuple[int, float] = (-1, 0.0)
         self._reset_gen = -1  # the last session this input reset: its late events are dropped
@@ -478,6 +482,17 @@ class RealtimeInput:
         ):
             self._close(job)
         return job.done
+
+    def drop_unconfirmed(self, job: InputJob) -> bool:
+        """The listener's transcript wait for a barge-in's stream ended (S3): drop it unless
+        the server confirmed it. Decided under the lock the confirmation is set under, so a
+        ``speech_started`` that lands just after is late and confirms nothing (counted
+        ``playback_unconfirmed_late``). True when dropped."""
+        with self._lock:
+            if job.confirmed:
+                return False
+            job.dropped = True
+            return True
 
     def cancel(self, job: InputJob) -> None:
         """The listener stopped waiting for ``job`` (its deadline, a newer utterance, a stop):
@@ -1123,6 +1138,9 @@ class RealtimeInput:
                 else:
                     self._transcript(owner, item, event.text)
             finished, gone, lost = self._results(streams)
+            late, self._late_confirms = self._late_confirms, 0
+        if late:
+            self.route.count("playback_unconfirmed_late", late)
         if confirm is not None:
             self.route.count("playback_confirms")
         if confirm is not None and self.on_confirm is not None:  # first: the barge-in's stop
@@ -1151,8 +1169,11 @@ class RealtimeInput:
                 head.start_ms, head.placed = (end_ms if session == gen else 0.0), True
             confirm = None
             if head is not None and head.job.playback and head.holds(event.audio_ms):
-                confirm = head.job
-                confirm.confirmed = True
+                if head.job.dropped:  # after the listener dropped it: never stops the robot
+                    self._late_confirms += 1  # counted after the lock (never the route's in it)
+                else:
+                    confirm = head.job
+                    confirm.confirmed = True
             if head is not None and head.holds(event.audio_ms):
                 if head.closed and len(head.order) > head.max_items:
                     head.overflow = True  # bounded: an ended stream's items are not kept

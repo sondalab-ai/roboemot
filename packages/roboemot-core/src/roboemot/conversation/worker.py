@@ -1672,9 +1672,10 @@ class ConversationWorker:
         if reply.first_audio is not None and "token" not in turn.stamps:
             turn.stamps["token"] = turn.stamps.setdefault("say", reply.first_audio)
             heard = turn.utterance.last_speech_stamp
-            route.note_first_audio((reply.first_audio - heard) * MS_PER_S)
+            mode = "server" if turn.server is not None else "robot"  # how it ran (SPEC 13)
+            route.note_first_audio((reply.first_audio - heard) * MS_PER_S, turns=mode)
             if turn.utterance.addressed:  # a person's turn, not a fixed line (_cue_line)
-                route.note_turn((reply.first_audio - heard) * MS_PER_S)  # SPEC 13, both modes
+                route.note_turn((reply.first_audio - heard) * MS_PER_S, turns=mode)
         if reply.status is None and reply.closed is None and not reply.cancelled:
             return
         text = reply.text()

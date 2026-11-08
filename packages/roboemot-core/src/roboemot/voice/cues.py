@@ -14,7 +14,9 @@ library, registered in the ``roboemot.cue_sounds`` entry-point group under the m
 ``robot.id`` (a factory taking nothing or the manifest, returning kind -> :class:`CueSound`).
 A cue with neither is a no-op, counted (``unsupported``). The one-shot cues' sounds play as raw
 jobs of the speech output (``SpeechOutput.play``, like the self-soothing sound), so barge-in and
-the echo reference treat them as the robot's own audio. A raw sound opens the speaking window and
+the echo reference treat them as the robot's own audio. They give way to an answer
+(``yields``): a sentence or a stream queued behind one cuts it, queued or playing, so a cue
+never holds an answer's first audio back (S3). A raw sound opens the speaking window and
 the listener drops what it hears then, so a one-shot cue's sound never starts while someone's
 speech is in progress or starting (``hearing()``, the listener's ``voice_active``): the gesture
 shows alone, counted ``<kind>.sound_skipped`` (SPEC 8, owner decision 2026-11-04). The cue
@@ -29,8 +31,8 @@ included), else it is skipped (counted ``sound_skipped``). It goes through
 no answer back, the realtime input does not refuse the utterance's audio while it plays, and
 barge-in never hears it (it only runs while the robot speaks); an output that is busy, or cannot
 keep it out of the speaking window, drops it (counted ``sound_dropped``). It is fire and forget,
-never cut: an answer whose first audio comes while it plays follows it in the speaker, at most
-the blip's length (about 0.1 s) later.
+but never in front of an answer: the answer's first push cuts what is left of it in the speaker
+(``SpeechOutput``, counted ``aside.cut`` in its report), so the answer starts at once (S3).
 
 The listening gesture holds at its peak (the keyframe time of its largest offset) until it is
 released: the answer's first audio (the speech timeline has a sentence playing), every
@@ -38,7 +40,9 @@ utterance that began it ended (``listening_end`` with the key ``listening_begin`
 utterance's start stamp), the robot went to sleep, or ``voice.cues.listening_hold_max_s`` passed,
 whatever else happens. Sleep and the hold limit start a new generation: the utterances still open
 are forgotten, so their late ends cannot release the next turn's cue. It shows only after
-``listening_onset_s``, so a quick answer shows none.
+``listening_onset_s``, so a quick answer shows none. A begin for an utterance whose end came
+first (the server answered a barge-in's stream before its cue could begin) is ignored, counted
+``begin_after_end``: that cue would hold over the answer until the hold limit.
 
 Every one-shot cue asked for, and every listening blip, publishes a ``cue`` decision event
 (``roboemot.diag``, SPEC 12A) after the lock is released: the caller's reason code and what
@@ -82,6 +86,10 @@ GESTURE_PREFIX = "cue_"  # the manifest's gesture_map entry of a cue: cue_<kind>
 SOURCE_PREFIX = "cue:"  # the motion source of a cue's gesture
 CUE_SOUND_MAX_S = 1.0  # a cue is short: a longer sound is refused with the library
 CUE_RATE_RANGE_HZ = (8000, 48000)
+# Internal memory bound, not a behaviour constant (SPEC 11A does not apply): utterance keys whose
+# end is remembered, so a later begin of one is ignored. Keys are start stamps: a begin at or
+# before the newest key evicted from it is as late (``_ended_floor``), so the bound loses nothing.
+ENDED_KEYS_MAX = 64
 
 
 @dataclass(frozen=True)
@@ -121,7 +129,9 @@ class CueSink(Protocol):
 class RawOutput(Protocol):
     """``SpeechOutput``'s raw-sound part."""
 
-    def play(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> int | None: ...
+    def play(
+        self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0, *, yields: bool = False
+    ) -> int | None: ...
     def play_aside(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> bool: ...
 
 
@@ -235,6 +245,8 @@ class Cues:
         # so a late end of one of them is ignored instead of releasing the next turn's cue
         self._open: dict[Hashable, int] = {}
         self._generation = 0
+        self._ended: collections.OrderedDict[Hashable, None] = collections.OrderedDict()
+        self._ended_floor: Any = None  # the newest key evicted from ``_ended``
         self._due = math.inf  # when the listening gesture shows (inf: not asked)
         self._began = math.inf  # when the oldest outstanding utterance began it
         self._hold: _Hold | None = None
@@ -306,7 +318,7 @@ class Cues:
         if sound is None or out is None:
             return None
         try:
-            job = out.play(sound.samples, sound.rate_hz, volume_db + self._volume_db())
+            job = out.play(sound.samples, sound.rate_hz, volume_db + self._volume_db(), yields=True)
         except Exception as exc:  # the gesture still shows
             log.warning("cues: %s sound not played (%s)", kind, type(exc).__name__)
             return None
@@ -335,6 +347,9 @@ class Cues:
         """The audio of utterance ``key`` left: the listening gesture shows after the onset (a
         gesture already up stays); the blip plays now when this starts the cue."""
         with self._lock:
+            if key in self._ended or self._before_floor(key):
+                self._counts[f"{LISTENING}.begin_after_end"] += 1
+                return
             now = self.clock()
             starts = not self._open
             self._open[key] = self._generation
@@ -354,10 +369,26 @@ class Cues:
             return
         self._play_blip(sound, volume)
 
+    def _before_floor(self, key: Hashable) -> bool:
+        """Whether ``key`` is at or before the newest evicted ended key (lock held); keys that
+        do not order (not stamps) never are."""
+        floor = self._ended_floor
+        if floor is None:
+            return False
+        try:
+            return bool(key <= floor)  # type: ignore[operator]
+        except TypeError:
+            return False
+
     def listening_end(self, key: Hashable) -> None:
         """Utterance ``key`` is over; the last open one releases the cue. An end of an utterance
         not open (ended already, or of a generation a hold limit or sleep closed) is ignored."""
         with self._lock:
+            self._ended[key] = None
+            while len(self._ended) > ENDED_KEYS_MAX:
+                old, _ = self._ended.popitem(last=False)
+                if self._ended_floor is None or not self._before_floor(old):
+                    self._ended_floor = old
             if self._open.pop(key, None) is None:
                 self._counts[f"{LISTENING}.late_end"] += 1
                 return
