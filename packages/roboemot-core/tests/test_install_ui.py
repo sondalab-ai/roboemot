@@ -4,11 +4,13 @@ error blocks with raw output only under ``--debug``, the spinner's running line,
 
 from __future__ import annotations
 
+import ast
 import copy
 import io
 import pickle
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 import roboemot.install as inst
@@ -277,3 +279,87 @@ def test_a_failing_command_never_echoes_its_stdin(
     Ui(interactive=False, assume_yes=False, debug=debug).error(e.value)
     err = capsys.readouterr().err
     assert "246810" not in err and ("readable by group" in err) is debug
+
+
+def test_a_running_line_keeps_its_detail_next_to_the_label(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setitem(ui_mod.SPINNER, "delayMs", 0)
+    with quiet().running("Waiting for the robot…", "up to 300 s"):
+        threading.Event().wait(0.2)  # stderr is not a terminal: motion is off
+    line = capsys.readouterr().err
+    assert "Waiting for the robot…" in line and line.rstrip().endswith("up to 300 s")
+
+
+def test_the_spinner_draws_the_detail_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    err = tty_stderr(monkeypatch)
+    monkeypatch.setitem(ui_mod.SPINNER, "delayMs", 0)
+    with quiet().running("Waiting for the robot…", "up to 300 s"):
+        threading.Event().wait(0.1)
+    assert "up to 300 s" in err.getvalue()
+
+
+STEP_CALLS = ("ok", "warn", "fail", "active", "running")
+
+
+def _step_labels() -> list[tuple[str, int, str, bool]]:
+    """Every literal label passed to a step-line call (``ok``/``warn``/``fail``/``active``/
+    ``running`` on a ``ui``) in the installers, with whether the call has a detail; an
+    f-string counts its literal parts only."""
+
+    src = Path(inst.__file__).parents[1]
+    files = [*(src / "install").glob("*.py")]
+    plug = src.parents[1].parent / "roboemot-reachymini" / "src" / "roboemot_reachymini"
+    files += [*plug.glob("install*.py"), *plug.glob("overclock*.py")]
+    found = []
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in STEP_CALLS
+                and ast.unparse(node.func.value).endswith("ui")
+                and node.args
+            ):
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                text = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                text = "".join(v.value for v in arg.values if isinstance(v, ast.Constant))
+            else:
+                continue
+            detail = len(node.args) > 1 or any(k.arg == "detail" for k in node.keywords)
+            found.append((path.name, node.lineno, text, detail))
+    return found
+
+
+def test_every_installer_step_label_fits_the_label_column() -> None:
+    """The step line cuts a label at ``labelWidth`` (one less with a detail) and never wraps
+    it: "Waiting for the robot (up to 300 s)…" showed as "Waiting for the robot (up to"
+    (2026-11-08). Whatever does not fit goes in the detail."""
+    width = ui_mod.LAYOUT["labelWidth"]
+    labels = _step_labels()
+    assert len(labels) > 20  # the scan found the installers' calls
+    too_long = [
+        f"{name}:{line} {text!r}"
+        for name, line, text, detail in labels
+        if len(text.replace("…", "...")) > width - (1 if detail else 0)
+    ]
+    assert too_long == []
+
+
+def test_a_quiet_connect_keeps_ssh_errors_off_the_screen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[dict] = []
+
+    def run(cmd, **kw):
+        seen.append(kw)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    remote = Remote("pollen", "robot", tmp_path)
+    remote.connect(quiet=True)
+    remote.connect()
+    assert seen[0]["stderr"] is subprocess.PIPE and seen[1]["stderr"] is None

@@ -330,12 +330,14 @@ class Ui:
         print(self._step_text("active", label, detail, sys.stderr), file=sys.stderr, flush=True)
 
     @contextmanager
-    def running(self, label: str) -> Iterator[None]:
+    def running(self, label: str, detail: str = "") -> Iterator[None]:
         """A step that waits: after ``SPINNER["delayMs"]`` a spinner on stderr (a static
-        running line when motion is off); cleared on exit. The caller prints the result."""
+        running line when motion is off); cleared on exit. The caller prints the result.
+        ``label`` fits ``LAYOUT["labelWidth"]`` (the step line cuts it, never wraps it);
+        what does not fit, a path or a time limit, goes in ``detail``."""
         stream = sys.stderr
         motion = self.vt and _term.motion_enabled(isatty=_isatty(stream))
-        spinner = _Spinner(self, label, stream, motion)
+        spinner = _Spinner(self, label, stream, motion, detail)
         spinner.start()
         try:
             yield
@@ -555,8 +557,9 @@ class _Spinner:
     """The thread behind :meth:`Ui.running`: nothing for the delay, then either the burst
     spinner redrawn in place every interval or, with motion off, the running line once."""
 
-    def __init__(self, ui: Ui, label: str, stream: TextIO, motion: bool) -> None:
+    def __init__(self, ui: Ui, label: str, stream: TextIO, motion: bool, detail: str = "") -> None:
         self.ui, self.label, self.stream, self.motion = ui, label, stream, motion
+        self.detail = detail
         self.drawn = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -576,14 +579,14 @@ class _Spinner:
             return
         self.drawn = True
         if not self.motion:
-            self.ui.active(self.label)
+            self.ui.active(self.label, self.detail)
             return
         ascii, tick = self.ui.ascii(), 0
         try:
             while True:
                 frame = _term.spinner_frame(tick, ascii=ascii)
                 mode = self.ui.mode(self.stream)
-                line = _term.step_line(frame, self.label, "", ascii, mode=mode)
+                line = _term.step_line(frame, self.label, self.detail, ascii, mode=mode)
                 self.stream.write(f"\x1b[?2026h\r\x1b[K{line}\x1b[?2026l")
                 self.stream.flush()
                 tick += 1

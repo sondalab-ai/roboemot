@@ -63,7 +63,7 @@ def clear_caches(
         path = cache_path(home, spec)
         if remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no").strip() != "yes":
             continue
-        with ui.running(f"Measuring {path}…"):
+        with ui.running("Measuring a cache…", path):
             size = remote.run(f"du -sh {shlex.quote(path)} 2>/dev/null | cut -f1").strip() or "?"
         label = f"{path} ({size}; uninstall cannot restore it, whatever filled it fills it again)"
         if not _clearable(ui, remote, path, label, wanted, dry_run, guard_dirs):

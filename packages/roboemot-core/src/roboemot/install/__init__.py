@@ -1507,7 +1507,7 @@ def apply_app_config(
     adopted = existing is not None and record.app_config != path
     if adopted:
         ui.warn(
-            "App config was already there",
+            "App config already there",
             f"{path} {'would be' if dry_run else 'is'} recorded; uninstall removes it whole, other "
             "settings and those saved from the web UI included",
         )
