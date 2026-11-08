@@ -268,6 +268,37 @@ The realtime HIL suite (`test_realtime_hil.py`, section 2 of `docs/plans/2026-10
 - One line per check: pass, fail, or not done, with a note where the result is a judgement.
 - The values you changed in Settings during the round.
 
+## What the next session does with the results (intake)
+
+This is Job 2 of the 2026-11-05 round. It writes no code until the owner approves a fix.
+
+1. **Per section A to H:** list each check as pass, fail or not done, with the debug key values that decide it.
+2. **Each fail:** find the root cause first, then propose a fix and wait for the owner's OK. An agent is spawned only for a hard root-cause diagnosis or a "check first" sweep, and the session says so first.
+3. **Two verdicts, nothing started on them:**
+   - section B step 3 (`stage_timing`) decides V-3 in `docs/plans/2026-11-03-vision-cost-handoff.md`;
+   - section G Q1 decides whether the music-dance slices 2 to 4 start.
+4. **Facing (section C):** read `direction.facing.recent[]` (`face_source`, `faces[]`, `eye_px`, `yaw_deg`, `bearing_head_deg`), `vision.faces[]`, `vision.frame` and the landmarks in the Live preview.
+   - Ruled out on the Mac: the formula, the units, the letterbox, small faces, and photos.
+   - Left to check: the matched face, a front/back confusion of the sound direction, the lens.
+5. **The 2026-11-05 findings:**
+   - compare the skips (`realtime_route.skipped`, 18 of 22 turns) with what the owner said;
+   - check the loud nap wakes and the `startle-loud` count against the `TODO.md` self-noise item.
+6. **New in this round:**
+   - A step 9: false barge-ins, `server` against `robot`;
+   - A step 10: `latency_ms.by_turns`;
+   - B step 6: the VitTrack cost;
+   - F.5 and F.6: the head at rest, measured against commanded.
+7. **Docs, in one PR:**
+   - record the measured figures in SPEC 13;
+   - tick SPEC 15;
+   - mark each check above with its result and date.
+
+After the intake (Job 3):
+- ask the open "Decisions" rows, one question each, with a recommendation;
+- tune the rows whose QA section has results;
+- sweep the "check first" rows;
+- propose the next slices with an estimate, and wait for the owner's OK.
+
 ## Not robot QA (code work)
 
 - Done 2026-11-04: sticky identity for still objects, https://github.com/sondalab-ai/roboemot/pull/185.
