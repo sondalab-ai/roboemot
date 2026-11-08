@@ -331,13 +331,13 @@ def reboot_and_wait(ui: Ui, remote: Remote, tty: bool, command: str) -> bool:
     remote.disconnect()
     deadline = time.monotonic() + BOOT_TIMEOUT_S
     while time.monotonic() < deadline:
-        with ui.running(f"Waiting for the robot (up to {BOOT_TIMEOUT_S:.0f} s)…"):
+        with ui.running("Waiting for the robot…", f"up to {BOOT_TIMEOUT_S:.0f} s"):
             while not remote.reachable():
                 if time.monotonic() >= deadline:
                     return False
                 time.sleep(BOOT_POLL_S)
         try:
-            remote.connect()
+            remote.connect(quiet=True)  # a refusal while it still goes down is expected
             now = remote.run(BOOT_ID)
         except WizardError:
             now = before  # it answered while still going down

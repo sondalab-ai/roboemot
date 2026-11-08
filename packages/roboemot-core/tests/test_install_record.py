@@ -137,7 +137,7 @@ class BareRobot:
         self.env = {"pip": "26.0", "numpy": "2.0.0"}
         self.files: dict[str, str] = {}
 
-    def connect(self) -> None:
+    def connect(self, quiet: bool = False) -> None:
         pass
 
     def close(self) -> None:

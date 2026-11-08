@@ -111,7 +111,7 @@ class FakeRobot:
     # Remote interface
     target = "pollen@robot"
 
-    def connect(self) -> None:
+    def connect(self, quiet: bool = False) -> None:
         pass
 
     def close(self) -> None:

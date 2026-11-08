@@ -155,10 +155,14 @@ class Remote:
         )  # fmt: skip
         return proc.returncode == 0 or AUTH_REFUSED in proc.stderr
 
-    def connect(self) -> None:
-        """Open the master connection interactively, so a password prompt reaches the user."""
+    def connect(self, quiet: bool = False) -> None:
+        """Open the master connection interactively, so a password prompt reaches the user
+        (ssh asks on the terminal, not on stderr). ``quiet`` keeps ssh's own error lines off
+        the screen: a refusal while the robot reboots is expected, and the caller retries."""
         proc = subprocess.run(
-            ["ssh", *self._opts(), self.target, "true"], stdout=subprocess.DEVNULL
+            ["ssh", *self._opts(), self.target, "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE if quiet else None,
         )
         if proc.returncode != 0:
             raise WizardError(
