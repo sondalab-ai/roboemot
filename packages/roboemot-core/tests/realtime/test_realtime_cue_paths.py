@@ -100,6 +100,17 @@ def test_a_confirmation_after_the_transcript_wait_is_late_and_never_stops_the_ro
     with TurnServer(stream_vad=True, heard=HEARD, hold=hold, hold_at="stream_start") as server:
         ear = ears(server, rt=SHORT_WAIT, app=OPT_INS, script=["x"], decoded="ciao Neve")
         events = recorded(ear)
+        under_lock: list[str] = []  # route counts made with the input's lock held (lock order)
+        count = ear.rt.route.count
+
+        def checked(key, n=1):
+            if not ear.input._lock.acquire(timeout=1.0):  # not reentrant: held by this thread
+                under_lock.append(key)
+            else:
+                ear.input._lock.release()
+            count(key, n)
+
+        ear.rt.route.count = checked
         speaking(ear)
         confirmed = barge_in(ear)
         ear.r.feed(voice(seconds=0.5))
@@ -111,6 +122,7 @@ def test_a_confirmation_after_the_transcript_wait_is_late_and_never_stops_the_ro
         hold.set()  # the server's speech_started now comes
         assert wait_until(lambda: server.sent_of("input_audio_buffer.speech_started"))
         assert wait_until(lambda: ear.rt.route.snapshot()["playback_unconfirmed_late"] == 1)
+        assert under_lock == []  # never the route's lock inside the input's
         assert not confirmed.is_set() and not job.confirmed
         assert ear.r.asr.decodes == 0 and ear.utterances == []
         silent(ear)

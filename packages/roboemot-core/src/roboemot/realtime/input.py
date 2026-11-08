@@ -331,6 +331,7 @@ class RealtimeInput:
         self._reopening = False  # this input reset the session: a burst waits for the new one
         self._stream_reopening = False  # ... the same for a stream's opening
         self._idless = -1  # the last session that reported an input item without an id
+        self._late_confirms = 0  # confirmations of dropped streams, counted after the lock
         # where the server's input buffer ends, as (session, its last audio_end_ms)
         self._end: tuple[int, float] = (-1, 0.0)
         self._reset_gen = -1  # the last session this input reset: its late events are dropped
@@ -1137,6 +1138,9 @@ class RealtimeInput:
                 else:
                     self._transcript(owner, item, event.text)
             finished, gone, lost = self._results(streams)
+            late, self._late_confirms = self._late_confirms, 0
+        if late:
+            self.route.count("playback_unconfirmed_late", late)
         if confirm is not None:
             self.route.count("playback_confirms")
         if confirm is not None and self.on_confirm is not None:  # first: the barge-in's stop
@@ -1166,7 +1170,7 @@ class RealtimeInput:
             confirm = None
             if head is not None and head.job.playback and head.holds(event.audio_ms):
                 if head.job.dropped:  # after the listener dropped it: never stops the robot
-                    self.route.count("playback_unconfirmed_late")
+                    self._late_confirms += 1  # counted after the lock (never the route's in it)
                 else:
                     confirm = head.job
                     confirm.confirmed = True
