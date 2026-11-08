@@ -206,6 +206,13 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] `test_app_llm_traits.py::test_shutdown_does_not_wait_for_a_stuck_route` failed once in a full local run
       (10.7 s against its 10 s wall-time bound, 2026-11-05). On `main` its call phase already takes 8.1-9.1 s,
       so the margin is thin. Make it timing-independent, or review the bound.
+- [ ] `test_traits_worker.py::test_a_failed_rating_is_not_asked_again_within_the_backoff` failed once under
+      full-suite load (2026-11-05, S1b review). It passed 32/32 alone. Check it for wall-clock waits.
+- [ ] `test_realtime_cues.py::test_a_skipped_audio_turn_ends_the_listening_cue_and_shows_no_other_cue` failed
+      once in a full run (2026-11-06, S2). Not reproduced in 20 runs under load on the branch or on `main`.
+      Cause unknown.
+- [ ] Sim `test_sim.py::test_streamed_pose_reaches_target` failed once with 2 loop overruns at load
+      average ~126 (2026-11-06, PR 198). Never checked on `main`.
 - [x] `test_realtime_turns.py::test_a_barge_in_while_a_skill_runs_answers_the_queued_calls`: it barged in once
       the server had sent `response.done`, before the route took it, so the cut cancelled a response still
       live on the route. It now waits for the route's `responses` count.

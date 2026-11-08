@@ -306,6 +306,9 @@ Items marked "after QA X" wait for that QA section.
 | Put the shown object into the conversation context. | `docs/plans/2026-11-03-vision-cost-handoff.md` section 4 | proposed |
 | LeRobot: adopt nothing now. Import expression clips in the LeRobot dataset format only if the owner starts recording clips. | `scripts/import_pollen_emotions.py` | proposed |
 | Research ideas, not started: voice emotion through the realtime model, a small head-pose net in place of the 5-landmark yaw, a neural echo guard for barge-in, motion flow to predict where a locked face went, a test of the mirror neural net. | `voice/facing.py`, `TODO.md` | proposed |
+| The SPEC 13 onset-to-stop target for `turns: server` (≤ 1.0 s p95) is a proposal from S2. Confirm or change it after QA A step 9. https://github.com/sondalab-ai/roboemot/pull/199 | SPEC 13 | decision |
+| When to make `turns: server` the `--cloud-voice` profile default. The installer still writes `robot`; the owner sets `server` in Settings for QA A. | installer, SPEC 8 | decision (after QA A) |
+| When to let a steady offset hold the head again. It only counts today (`motion.steady_offsets`); its 0.04 rad threshold comes from the simulator. Decide from the robot's measured-against-commanded residuals. https://github.com/sondalab-ai/roboemot/pull/198 | `motion/external.py`, SPEC 12A | decision (after QA F) |
 
 ### Tuning that waits for robot numbers
 
@@ -321,6 +324,11 @@ Items marked "after QA X" wait for that QA section.
 | Face tracking: the rebirth distance p50 is 0.66 against the 0.6 gate. | `vision/tracker.py` | after QA B |
 | Barge-in onset-to-stop: 313 ms against the 200 ms budget (2026-10-28). Answers were also cut at the sentence cap (3 of 5 turns, local mode). Recheck both under the realtime route. | SPEC 8, 13 | after QA A |
 | A false barge-in on 2026-10-28 has no known cause. CV-9 added per-trigger records. https://github.com/sondalab-ai/roboemot/pull/149 | `voice/bargein.py` | after QA A |
+| Rest pitch 3°: unverified on the hardware. QA F.6 finds the reachable pitch in small steps. https://github.com/sondalab-ai/roboemot/pull/198 | manifest `circadian_motion.rest_pose_deg` | after QA F |
+| `voice.realtime_route.server_answer_wait_s` (5 s) against `stall_timeout_s`: when the stall is shorter, a robot request resets the session instead. Read `unsettled_resets` and `conversation.server_unanswered`. | `config/schema.py`, SPEC 8 | after QA A |
+| `voice.barge_in.duck.confirm_ms` (1500 ms, admin-only): how long unconfirmed audio streams during playback. Read `bargein.barge_ins` (`released_unconfirmed`, `false.server`) and `playback_unconfirmed`. | `config/schema.py`, SPEC 12 | after QA A |
+| `prebuffer_ms` 200 for streamed audio: measured on fakes only. Read `speech.underruns` and `pacing` in server mode. https://github.com/sondalab-ai/roboemot/pull/200 | `voice/speech.py`, SPEC 13 | after QA A |
+| VitTrack thresholds `vision.object_track.score_min` (0.3), `confirm_max_s` (3 s), `box_area_ratio_max` (4.0) and its cost on the CM4. Read `roboemot.vision.object_track` and `stage_timing.object_track`. https://github.com/sondalab-ai/roboemot/pull/197 | `config/schema.py`, SPEC 5 | after QA B |
 
 ### Code follow-ups
 
@@ -360,6 +368,11 @@ Items marked "after QA X" wait for that QA section.
 | Pin the YuNet and SFace model URLs to commit `f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3` (tag 4.10.0) instead of `raw/main`. The sha256 check still protects the download. | `vision/models.yaml:22,31` | proposed |
 | Simplify the configuration (owner TODO). | `TODO.md` | proposed |
 | Installer: check that the main-flow pip steps no longer print a timed ✓ before the final "installed" line. Update the README status rows. | installer, `README.md` | check first |
+| S1b open risks: the stream-session build waits up to `connect_timeout_s` while the worker loop is busy (L6); a pause with two owed answers can drop the first and give a stray `not_heard` (L7); a stream the server splits whose later part is also a fragment stays claimed and gets no answer (fails closed). https://github.com/sondalab-ai/roboemot/pull/196 | `realtime/input.py`, `realtime/route.py` | review |
+| S2 open risks: the server VAD may confirm a barge-in on the robot's own ducked voice; without a `session.updated` echo of `interrupt_response` about one round trip of late audio plays; an opening refused after the hand-off is never stopped (the duck releases); a second audio item after the interrupt stays untruncated. https://github.com/sondalab-ai/roboemot/pull/199 | `voice/bargein.py`, `realtime/route.py` | review |
+| S3 open risks: a dropped barge-in's `not_heard` waits until the robot stops, so it comes late after a long answer; a queued answer can cut another utterance's `not_heard` sound (the gesture stays). https://github.com/sondalab-ai/roboemot/pull/200 | `voice/cues.py`, `voice/speech.py` | limitation |
+| Detect-then-track: while the tracker feeds a track, its velocity comes from two raw tracker boxes, so jitter can carry the track for up to `lost_s` after the follow ends. Watch `reseeds` and track churn in QA B. https://github.com/sondalab-ai/roboemot/pull/197 | `vision/tracker.py` | review |
+| The stall timer counted only queued events, not audio deltas, so the robot cut long audio-only answers (`realtime_lost`) in both modes. Fixed in S2. Earlier "answers cut" observations may not reproduce. https://github.com/sondalab-ai/roboemot/pull/199 | `realtime/turn.py` | done (2026-11-06) |
 
 ### Robot environment (not code)
 
