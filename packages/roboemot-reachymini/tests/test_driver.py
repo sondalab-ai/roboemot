@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from roboemot.config import ConfigStack
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
@@ -169,6 +170,18 @@ def test_package_data_in_sync_with_configs():
         assert filecmp.cmp(DATA / "presets" / p.name, p, shallow=False), (
             "run scripts/sync-package-data.sh"
         )
+
+
+def test_package_dance_motion_map_matches_configs():
+    """The shipped manifest and the repo one dance the same way (SPEC 4A)."""
+    maps = [
+        yaml.safe_load(p.read_text())["behaviour"]["dance_motion_map"]
+        for p in (
+            DATA / "reachy-mini-wireless.yaml",
+            REPO / "configs/manifests/reachy-mini-wireless.yaml",
+        )
+    ]
+    assert maps[0] and maps[0] == maps[1]
 
 
 # Robot run 2026-11-05: rest pitch 20 diverged by 0.24-0.28 rad; short of it means a stop at about
