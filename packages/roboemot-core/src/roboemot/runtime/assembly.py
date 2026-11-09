@@ -331,6 +331,7 @@ def assemble(
         max_amplitude=cfg.expression.max_amplitude,
         beats_per_bar=cfg.music.beats_per_bar,
         beat=own_sound_beat(host),
+        yield_fade_s=lambda: speaking.cfg.fade_ms / MS_PER_S,
         speaking_channels=lambda: speaking.channels,
         ducked=lambda: ducked_channels(expression, circ),
     )

@@ -13,8 +13,9 @@ from roboemot.affect.dance import SOURCE, DanceRenderer, fold
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import DanceConfig, DanceMotionMap, RoboEmotConfig
+from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
-from roboemot.motion import Priority
+from roboemot.motion import MotionLoop, Priority
 from roboemot.motion.beat import Beat, BeatSource
 
 MANIFEST = Path(__file__).resolve().parent / "data" / "dance-head.yaml"
@@ -23,6 +24,7 @@ BOB, SWAY = "neck_tilt", "neck_pan"
 PERIOD = 1.2  # one bob per beat: 2 x min_half_s (0.5) fits
 BARS = 4
 NO_LEAD = {"lead_ms": 0.0, "fade_in_s": 0.1, "fade_out_s": 0.1}
+YIELD_S = 0.15  # the speaking motion's default fade_ms
 
 
 @pytest.fixture(scope="module")
@@ -67,6 +69,7 @@ def make(manifest, mapping, beats, *, cfg=None, max_amplitude=1.5, beats_per_bar
         max_amplitude=max_amplitude,
         beats_per_bar=beats_per_bar,
         beat=beats.source(),
+        yield_fade_s=lambda: YIELD_S,
         **kw,
     )
     r.set_register(register())
@@ -231,9 +234,11 @@ def test_no_dance_while_resting(manifest, mapping):
     r = make(manifest, mapping, Beats(beat()))
     run(r, 0.0, 1.0)
     r.resting = lambda: True
-    track = run(r, 1.0, 1.0 + r.cfg.fade_out_s + 2 * TICK)
+    end = 1.0 + r.cfg.fade_out_s + 2 * TICK
+    track = run(r, 1.0, end)
     assert [m for _, m in track if m is not None][-1] == {BOB: 0.0, SWAY: 0.0}
-    assert r.commands(5.0) == [] and r.beat.beat_at(5.0) is not None
+    assert all(m is None for _, m in run(r, end, end + 1.0))  # tick by tick: no gap reset
+    assert r.beat.beat_at(end) is not None
 
 
 def test_circadian_factor_zero_stops_it(manifest, mapping):
@@ -265,11 +270,12 @@ def test_disabled_freezes(manifest, mapping):
     run(r, 0.0, 1.0)
     frozen = dict(r._s.raw)
     r.apply_config(DanceConfig(enabled=False, **NO_LEAD), mapping, 1.5, BARS)
-    track = run(r, 1.0, 1.0 + r.cfg.fade_out_s + 2 * TICK)
+    end = 1.0 + r.cfg.fade_out_s + 2 * TICK
+    track = run(r, 1.0, end)
     moved = [m for _, m in track if m is not None]
     assert moved[-1] == {BOB: 0.0, SWAY: 0.0}
     assert frozen  # the raw offsets were frozen, not recomputed: they only ramp down
-    assert r.commands(9.0) == []
+    assert all(m is None for _, m in run(r, end, end + 1.0))  # tick by tick: no gap reset
 
 
 def test_amplitude_product_capped(manifest, mapping):
@@ -305,6 +311,132 @@ def test_snapshot_is_counts_and_a_label_only(manifest, mapping):
     assert snap == {"started": 1, "accent": 0, "skipped": 0, "source": "own"}
 
 
+def test_a_yielded_channel_leaves_within_the_speaking_fade(manifest, mapping):
+    speaking: set[str] = set()
+    cfg = DanceConfig(lead_ms=0.0, fade_in_s=0.1, fade_out_s=5.0)
+    r = make(
+        manifest, mapping, Beats(beat()), cfg=cfg, speaking_channels=lambda: frozenset(speaking)
+    )
+    run(r, 0.0, 1.0)
+    speaking.add(BOB)
+    track = run(r, 1.0, 1.0 + YIELD_S + 2 * TICK)
+    assert track[-1][1][BOB] == 0.0  # not the 5 s of the fade-out
+    assert abs(track[-1][1][SWAY]) > 0
+
+
+def test_a_beat_that_returns_during_a_fade_out_rearms_without_a_step(manifest, mapping):
+    beats = Beats(beat())
+    cfg = DanceConfig(lead_ms=0.0, fade_in_s=1.0, fade_out_s=1.0)
+    r = make(manifest, mapping, beats, cfg=cfg)
+    before = run(r, 0.0, 2.0)
+    beats.beat = None
+    gone = run(r, 2.0, 2.3)
+    assert r._s.frozen is not None
+    beats.beat = beat()
+    back = run(r, 2.3, 4.0)
+    assert r._s.frozen is None and r._s.gain == pytest.approx(1.0)  # no wait for the fade's end
+    track = channel(before + gone + back, BOB)
+    peak = max(abs(v) for _, v in track)
+    assert max(abs(b[1] - a[1]) for a, b in zip(track, track[1:], strict=False)) < 0.3 * peak
+    assert r.counts["started"] == 1
+
+
+def test_a_failed_apply_config_keeps_the_old_settings(manifest, mapping):
+    cfg = DanceConfig(**NO_LEAD)
+    r = make(manifest, mapping, Beats(beat()), cfg=cfg)
+    r.body_yaw = "neck_pan"
+    settings = r._b
+    with pytest.raises(ValueError, match="dance_motion_map"):
+        r.apply_config(DanceConfig(enabled=False), DanceMotionMap(sway={"neck_pan": 1}), 1.5, BARS)
+    assert r._b is settings and r.cfg is cfg
+
+
+def test_an_accent_on_a_yielded_channel_stays_at_zero(manifest, mapping):
+    beats = Beats()
+    beats.stamps = [0.5]
+    r = make(manifest, mapping, beats, ducked=lambda: frozenset({BOB}))
+    moved = channel(run(r, 0.0, 1.0), BOB)
+    assert r.counts["accent"] == 1 and moved and all(v == 0.0 for _, v in moved)
+
+
+def test_an_accent_while_resting_finishes_and_no_new_one_starts(manifest, mapping):
+    beats = Beats()
+    beats.stamps = [1.0, 3.0]
+    r = make(manifest, mapping, beats)
+    before = channel(run(r, 0.0, 0.95), BOB)
+    r.resting = lambda: True
+    track = before + channel(run(r, 0.95, 1.6), BOB)
+    peak = max(abs(v) for _, v in track)
+    assert peak > 0 and track[-1][1] == 0.0
+    assert max(abs(b[1] - a[1]) for a, b in zip(track, track[1:], strict=False)) < 0.6 * peak
+    assert all(m is None for _, m in run(r, 1.6, 4.0)) and r.counts["accent"] == 1
+
+
+def test_a_late_stamp_starts_the_flick_from_its_zero(manifest, mapping):
+    """A stalled tick (shorter than the TTL, so no reset) must not enter the shape mid-way."""
+    beats = Beats()
+    beats.stamps = [1.0]
+    r = make(manifest, mapping, beats)
+    run(r, 0.0, 0.7)
+    late = r.commands(0.9)  # horizon jumps past the stamp, 0.1 s before it
+    assert r.counts["accent"] == 1
+    assert late[0].targets[BOB] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_strength_below_one_scales_the_commands(manifest, mapping):
+    def peak(strength):
+        r = make(manifest, mapping, Beats(beat(strength=strength)))
+        run(r, 0.0, 1.0)
+        return max(abs(v) for _, v in channel(run(r, 1.0, 1.0 + 2 * PERIOD), BOB))
+
+    assert peak(0.5) == pytest.approx(0.5 * peak(1.0), rel=0.02)
+
+
+def test_roles_on_one_channel_are_capped_together(manifest, mapping):
+    """``bob`` and the accent share a channel: the sum stays under the cap of the larger."""
+    beats = Beats(beat())
+    beats.stamps = [2.4]  # on a beat: the dip's deepest point
+    cfg = DanceConfig(
+        lead_ms=0.0, fade_in_s=0.1, arousal_gain=2.0, bob_deg=5.0, accent_deg=5.0, sway_deg=0.0
+    )
+    r = make(manifest, mapping, beats, cfg=cfg, max_amplitude=1.0)
+    r.set_affect(AffectState(0.0, 1.0, "joy", 1.0))
+    assert r.scale(1.0) == 1.0
+    assert r.counts["accent"] == 0
+    moved = channel(run(r, 0.0, 3.0), BOB)
+    assert r.counts["accent"] == 1
+    assert max(abs(v) for _, v in moved) == pytest.approx(math.radians(5.0), rel=1e-6)
+
+
+def test_sleep_entry_moves_nothing_and_the_wake_fades_in(manifest, mapping):
+    """The app tick pauses only while the motors are held off: the loop writes nothing as the
+    last command expires, and the dance comes back from zero."""
+    cfg = ConfigStack().effective()
+    driver = MockPoseDriver(home={n: d.home for n, d in manifest.dofs.items()})
+    loop = MotionLoop(manifest, driver, cfg, rate_hz=50, clock=lambda: 0.0)
+    loop.set_mode("active")
+    r = make(manifest, mapping, Beats(beat()))
+    t = 0.0
+    while t < 1.0:
+        for cmd in r.commands(t):
+            loop.feed(cmd)
+        loop.cycle(t, TICK)
+        t = round(t + TICK, 6)
+    assert driver.writes
+    driver.mode = "limp"  # the platform puts the robot to sleep
+    while not loop.motors_off and t < 2.0:  # the loop sees it at its next status probe
+        loop.cycle(t, TICK)
+        t = round(t + TICK, 6)
+    assert loop.motors_off
+    n = len(driver.writes)
+    while t < 3.0:  # asleep: no app tick, so the last command expires
+        t = round(t + TICK, 6)
+        loop.cycle(t, TICK)
+    assert len(driver.writes) == n
+    assert all(abs(v) < 1e-6 for c in r.commands(t) for v in c.targets.values())
+    assert r._s.gain == 0.0
+
+
 # ------------------------------------------------------------------ map and config
 
 
@@ -333,6 +465,7 @@ def test_map_with_body_yaw_refused(manifest):
         max_amplitude=1.5,
         beats_per_bar=BARS,
         beat=BeatSource(lambda n: None, lambda n: None),
+        yield_fade_s=lambda: YIELD_S,
     )
     with pytest.raises(ValueError, match="dance_motion_map.sway"):
         r.apply_config(DanceConfig(), DanceMotionMap(sway={"neck_pan": 1}), 1.5, BARS)

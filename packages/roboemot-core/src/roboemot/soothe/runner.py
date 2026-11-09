@@ -96,10 +96,11 @@ class SootheRunner:
     def beat_at(self, now: float) -> Beat | None:
         """The planned beat grid of the hum playing at ``now`` (SPEC 7B, 7 Dance motion): its
         ``beat_s`` from the moment the output really started it, not the queue time. None for
-        a blirp (irregular), before the hum reached the output and once it is over."""
+        a blirp (irregular), before the hum reached the output, once it is over and at once
+        after a barge-in cut it (the next ``tick`` is not waited for)."""
         with self._lock:
             plan, job = self._plan, self._job
-            if job is None or not isinstance(plan, HumPlan):
+            if job is None or not isinstance(plan, HumPlan) or not self.output.live(job):
                 return None
             start = self.output.started_at(job)
         if start is None or not start <= now < start + plan.length_s:
@@ -111,7 +112,7 @@ class SootheRunner:
         moment the output really started it. Empty for a hum or with nothing playing."""
         with self._lock:
             plan, job = self._plan, self._job
-            if job is None or not isinstance(plan, BlirpPlan):
+            if job is None or not isinstance(plan, BlirpPlan) or not self.output.live(job):
                 return []
             start = self.output.started_at(job)
         if start is None:

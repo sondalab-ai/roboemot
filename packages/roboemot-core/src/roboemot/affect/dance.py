@@ -16,12 +16,15 @@ Amplitude, re-read every tick::
     role degrees x register.motion_amplitude x circadian factor x (1 + arousal_gain x arousal)
                  x beat strength
 
-The product of the factors is capped by ``expression.max_amplitude`` and each offset is clamped to
-the manifest range about home. ``bob`` and ``sway`` ramp in over ``fade_in_s`` once the beat is
-there and out over ``fade_out_s`` when it goes (an accent has its own envelope, which starts and
-ends at zero). A disabled layer, a circadian factor of 0 or the resting state ramp the offsets to
-zero with no beat read. A channel that the playing expression or the speaking motion drives fades
-out of the dance. Never moves the body yaw or a translation: a map naming one is refused at load
+The product of the factors is capped by ``expression.max_amplitude``. Roles that share a channel
+add up, so a channel's sum is capped too, at that factor times its largest role's degrees. Each
+offset is then clamped to the manifest range about home. ``bob`` and ``sway`` ramp in over
+``fade_in_s`` once the beat is there and out over ``fade_out_s`` when it goes; a beat that returns
+during the fade-out fades in again while the old offsets finish fading (an accent has its own
+envelope, which starts and ends at zero). A disabled layer, a circadian factor of 0 or the resting
+state ramp the offsets to zero with no beat read. A channel that the playing expression or the
+speaking motion drives leaves the dance over the speaking motion's ``fade_ms``, so the two never
+add up for long. Never moves the body yaw or a translation: a map naming one is refused at load
 and by :meth:`DanceRenderer.apply_config`.
 
 Threads: the app tick calls everything except :meth:`DanceRenderer.apply_config`, which the config
@@ -69,6 +72,7 @@ class _Settings:
     bob: dict[str, int]
     sway: dict[str, int]
     accent: _Shape | None
+    ceilings: dict[str, float]  # per channel: the cap of the summed offset, radians
 
 
 @dataclass
@@ -95,6 +99,8 @@ class _State:
     gain: float = 0.0
     frozen: dict[str, float] | None = None
     raw: dict[str, float] = field(default_factory=dict)
+    tail: dict[str, float] = field(default_factory=dict)  # still fading after a re-arm
+    tail_gain: float = 0.0
     duck: dict[str, float] = field(default_factory=dict)
     started: bool = False
 
@@ -113,8 +119,9 @@ class DanceRenderer:
     :meth:`set_affect` with each new affect state and :meth:`commands` every app tick.
 
     ``beat`` is read every tick; ``speaking_channels`` returns the channels the speaking motion
-    emitted on its last tick and ``ducked`` those of the playing expression. ``circadian_factor``
-    and ``resting`` are hooks the assembly sets.
+    emitted on its last tick and ``ducked`` those of the playing expression. ``yield_fade_s`` is
+    how fast such a channel leaves the dance (the speaking motion's fade, read live).
+    ``circadian_factor`` and ``resting`` are hooks the assembly sets.
     """
 
     def __init__(
@@ -127,11 +134,13 @@ class DanceRenderer:
         max_amplitude: float,
         beats_per_bar: int,
         beat: BeatSource,
+        yield_fade_s: Callable[[], float],
         speaking_channels: Callable[[], frozenset[str]] = frozenset,
         ducked: Callable[[], frozenset[str]] = frozenset,
     ) -> None:
         self.dofs, self.body_yaw = dofs, body_yaw
         self.beat, self.speaking_channels, self.ducked = beat, speaking_channels, ducked
+        self.yield_fade_s = yield_fade_s
         self.circadian_factor: Callable[[], float] = lambda: 1.0
         self.resting: Callable[[], bool] = lambda: False
         self._motion_amplitude = 0.0  # no motion before the first register
@@ -162,15 +171,19 @@ class DanceRenderer:
                 dof = self.dofs.get(name)
                 if name == self.body_yaw or (dof is not None and dof.kind != "angle"):
                     raise ValueError(f"dance_motion_map.{role}: {name!r} may not move")
-        accent = dance_map.accent
-        self._b = _Settings(
-            cfg,
-            max_amplitude,
-            beats_per_bar,
-            self._signs(dance_map.bob),
-            self._signs(dance_map.sway),
-            self._shape(accent) if accent is not None else None,
-        )
+        bob, sway = self._signs(dance_map.bob), self._signs(dance_map.sway)
+        accent = self._shape(dance_map.accent) if dance_map.accent is not None else None
+        accent_names = accent.prim.keyframes[0].values if accent is not None else {}
+        degrees: dict[str, float] = {}
+        for deg, names in (
+            (cfg.bob_deg, bob),
+            (cfg.sway_deg, sway),
+            (cfg.accent_deg, accent_names),
+        ):
+            for name in names:
+                degrees[name] = max(degrees.get(name, 0.0), deg)
+        ceilings = {name: math.radians(deg) * max_amplitude for name, deg in degrees.items()}
+        self._b = _Settings(cfg, max_amplitude, beats_per_bar, bob, sway, accent, ceilings)
 
     @property
     def cfg(self) -> DanceConfig:
@@ -220,19 +233,22 @@ class DanceRenderer:
         self._source = beat.source if beat is not None else None
         if beat is None and s.frozen is None:
             s.frozen = dict(s.raw)
+        elif beat is not None and s.frozen is not None:
+            self._rearm(s)
         raw = s.frozen if s.frozen is not None else self._render(t, beat, b)
         s.raw = raw
         target = 0.0 if s.frozen is not None else 1.0
         up, down = dt / cfg.fade_in_s, dt / cfg.fade_out_s
         s.gain = min(target, s.gain + up) if target > s.gain else max(target, s.gain - down)
+        s.tail_gain = max(0.0, s.tail_gain - down)
         if s.gain > GAIN_EPSILON and not s.started:
             s.started = True
             self.counts["started"] += 1
         accent = self._accent_offsets(t, b, moving)
-        if s.gain <= GAIN_EPSILON and not accent:
+        if s.gain <= GAIN_EPSILON and s.tail_gain <= GAIN_EPSILON and not accent:
             self._s = _State()
             return self._emit(now, cfg, {})  # a last zero for every channel still held
-        return self._emit(now, cfg, self._mix(raw, accent, s, up, down))
+        return self._emit(now, cfg, self._mix(raw, accent, s, b, dt))
 
     def _step_clock(self, now: float, cfg: DanceConfig) -> float:
         """Seconds since the last tick. A gap longer than the command's lifetime (the app tick
@@ -247,24 +263,41 @@ class DanceRenderer:
             return 0.0
         return max(0.0, now - last)
 
+    @staticmethod
+    def _rearm(s: _State) -> None:
+        """The beat came back during the fade-out: what is on the channels now keeps fading as
+        the tail, and the beat fades in from zero, so the swap has no step."""
+        frozen = s.frozen or {}
+        w, tail_w = min_jerk(s.gain), min_jerk(s.tail_gain)
+        s.tail = {
+            n: frozen.get(n, 0.0) * w + s.tail.get(n, 0.0) * tail_w
+            for n in frozen.keys() | s.tail.keys()
+        }
+        s.tail_gain, s.gain, s.frozen = 1.0, 0.0, None
+
     def _mix(
         self,
         raw: dict[str, float],
         accent: dict[str, float],
         s: _State,
-        up: float,
-        down: float,
+        b: _Settings,
+        dt: float,
     ) -> dict[str, float]:
-        """The beat offsets through the fade plus the accent, each channel through its duck
-        (a channel another layer drives fades out, and back when it is free)."""
+        """The beat offsets through the fade, the tail and the accent: each channel's sum under
+        its ceiling, then through its duck. A channel another layer drives leaves over
+        ``yield_fade_s`` and comes back the same way; one already yielded starts at zero."""
         ducked = self.ducked() | self.speaking_channels()
-        w = min_jerk(s.gain)
+        fade_s = self.yield_fade_s()
+        step = dt / fade_s if fade_s > 0 else 1.0
+        w, tail_w = min_jerk(s.gain), min_jerk(s.tail_gain)
         out: dict[str, float] = {}
-        for n in raw.keys() | accent.keys():
-            d = s.duck.get(n, 1.0)
-            d = max(0.0, d - down) if n in ducked else min(1.0, d + up)
+        for n in raw.keys() | accent.keys() | s.tail.keys():
+            d = s.duck.get(n, 0.0 if n in ducked else 1.0)
+            d = max(0.0, d - step) if n in ducked else min(1.0, d + step)
             s.duck[n] = d
-            out[n] = self._clamp(n, (raw.get(n, 0.0) * w + accent.get(n, 0.0)) * d)
+            total = raw.get(n, 0.0) * w + s.tail.get(n, 0.0) * tail_w + accent.get(n, 0.0)
+            ceiling = b.ceilings.get(n, math.inf)  # a reload may have dropped the channel
+            out[n] = self._clamp(n, max(-ceiling, min(ceiling, total)) * d)
         return out
 
     def _emit(self, now: float, cfg: DanceConfig, out: dict[str, float]) -> list[Command]:
@@ -330,7 +363,7 @@ class DanceRenderer:
             since = self._accent_since if self._accent_since is not None else horizon
             self._accent_since = horizon
             for stamp in self.beat.accents(since, horizon):
-                self._start_accent(stamp, b.accent, b)
+                self._start_accent(stamp, t, b.accent, b)
         else:
             self._accent_since = None
         play = self._play
@@ -341,9 +374,10 @@ class DanceRenderer:
             return {}
         return play.offsets(t)
 
-    def _start_accent(self, stamp: float, shape: _Shape, b: _Settings) -> None:
-        """Start the flick for ``stamp`` unless the rate limit or a flick in progress says no;
-        it peaks on the stamp."""
+    def _start_accent(self, stamp: float, t: float, shape: _Shape, b: _Settings) -> None:
+        """Start the flick for ``stamp`` unless the rate limit or a flick in progress says no.
+        It starts at ``t``, from the shape's zero, never mid-shape: it peaks within one tick
+        after the stamp, or later when a stalled tick found the stamp late."""
         cfg = b.cfg
         if stamp - self._last_accent < cfg.accent_min_interval_s or cfg.accent_deg <= 0:
             return
@@ -352,7 +386,7 @@ class DanceRenderer:
             return
         self._last_accent = stamp
         gain = math.radians(cfg.accent_deg) / shape.peak * self.scale(1.0, b)
-        self._play = _Play(shape, stamp - shape.peak_t, gain)
+        self._play = _Play(shape, t, gain)
         self.counts["accent"] += 1
 
     # ------------------------------------------------------------------ output

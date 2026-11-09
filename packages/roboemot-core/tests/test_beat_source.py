@@ -12,6 +12,7 @@ from roboemot.motion.beat import Beat, BeatSource
 from roboemot.soothe import SootheRunner
 from roboemot.soothe.synth import plan_hum, plan_sound, render_plan, synthesize
 from roboemot.voice.speech import SpeechOutput
+from test_soothe_runner import RealRig
 from test_speech import FakeBackend, TimelineSink, wait_for
 
 RATE = 8000
@@ -141,3 +142,18 @@ def test_real_output_stamps_the_sink_start_not_the_queue_time():
         assert out.started_at(job) >= busy_until  # behind that audio, not at the queue time
     finally:
         out.close()
+
+
+def test_no_beat_right_after_a_barge_in_stop():
+    """``stop`` drops the sound; the beat goes at once, before the runner's next tick."""
+    rig = RealRig()
+    try:
+        job = rig.start_sound()
+        assert wait_for(lambda: rig.out.started_at(job) is not None)
+        at = rig.out.started_at(job) + 0.01
+        assert rig.runner.beat_at(at) is not None
+        rig.out.stop()
+        assert wait_for(lambda: not rig.out.live(job))
+        assert rig.runner.beat_at(at) is None and rig.runner.job == job
+    finally:
+        rig.out.close()
