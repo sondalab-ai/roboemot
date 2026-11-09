@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from ..config.schema import SECONDS_PER_MINUTE
+
+if TYPE_CHECKING:
+    from ..voice.music import MusicState
 
 
 @dataclass(frozen=True)
@@ -49,4 +54,35 @@ class BeatSource:
         return self._accents(since, now)
 
 
-__all__ = ["Beat", "BeatSource"]
+class RoomBeat:
+    """The room-music provider of a :class:`BeatSource`, from the detector's state (``state``
+    returns None without a detector). None while no music plays.
+
+    The detector gives the time since the last beat and re-estimates its grid as it goes;
+    ``Beat.phase_s`` must be a stamp that stays on one beat, or a pattern longer than one beat
+    (a fold, a bar) would restart on every beat. So beats are counted from tick to tick and
+    ``phase_s`` is the last beat minus that count: only whole beats, so a tempo change moves
+    no pattern. The count lives on the app tick: no lock."""
+
+    def __init__(self, state: Callable[[float], MusicState | None]) -> None:
+        self._state = state
+        self._last: float | None = None
+        self._beats = 0
+
+    def __call__(self, now: float) -> Beat | None:
+        """The room beat at ``now``, its strength the detector's confidence, or None."""
+        state = self._state(now)
+        tempo = state.tempo_bpm if state is not None and state.playing else None
+        since = state.beat_phase_s if state is not None else None
+        if state is None or tempo is None or since is None:
+            self._last, self._beats = None, 0
+            return None
+        period_s = SECONDS_PER_MINUTE / tempo
+        last = state.stamp - since
+        if self._last is not None:
+            self._beats += round((last - self._last) / period_s)
+        self._last = last
+        return Beat(period_s, last - self._beats * period_s, state.confidence, "room")
+
+
+__all__ = ["Beat", "BeatSource", "RoomBeat"]

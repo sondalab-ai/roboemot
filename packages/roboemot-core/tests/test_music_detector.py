@@ -19,6 +19,7 @@ from audio_signals import (
 )
 from pydantic import ValidationError
 from roboemot.config.schema import MusicConfig, RoboEmotConfig
+from roboemot.motion.beat import RoomBeat
 from roboemot.voice.music import MusicDetector, _Estimate
 
 RATE = 16000
@@ -144,6 +145,26 @@ def test_hole_does_not_count_toward_the_release():
     assert events == []
     assert det.state(resume + 6.0).playing
     assert det.snapshot()["resets"] == 1
+
+
+def test_music_holds_through_the_robots_speech():
+    """Regression for the owner's rule (keep moving while it answers): the listener feeds nothing
+    while the robot speaks, so ``music.release_s`` of speech must not end the music; the hold
+    ends only on fresh audio with no music in it, within ``music.release_s`` after the speech."""
+    det = detector()
+    cfg = MusicConfig()
+    run(det, drum_loop(120, 8.0, RATE))
+    assert det.state(8.0).playing
+    det.gap(8.0)
+    speech_end = 8.0 + cfg.release_s + 2.0
+    assert speech_end - 8.0 < cfg.blind_hold_s
+    held = det.state(speech_end)
+    assert held.playing and held.tempo_bpm is not None
+    assert (beat := RoomBeat(det.state)(speech_end)) is not None and beat.source == "room"
+    events, _ = run(det, silence(cfg.release_s * 2, RATE), t0=speech_end)
+    stops = [at for at, event in events if event == "stopped"]
+    assert len(stops) == 1
+    assert speech_end < stops[0] <= speech_end + cfg.release_s + cfg.estimate_interval_s
 
 
 def test_short_hole_keeps_the_envelope():

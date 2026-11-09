@@ -27,7 +27,7 @@
  "Audio collected before its hops are analysed together. Longer costs less CPU (most of the cost is per analysis call) and delays the music state by at most this. 0 analyses every chunk": "Audio raccolto prima di analizzarne insieme i passi. Un valore più lungo costa meno CPU (la maggior parte del costo è per chiamata di analisi) e ritarda lo stato della musica al massimo di questo tempo. 0 analizza ogni blocco",
  "Channel to sign of the dip on the beat (the sign that dips the head)": "Canale e segno del movimento in giù sul battito (il segno che abbassa la testa)",
  "Channel to sign of the side-to-side sway per bar": "Canale e segno dell'oscillazione laterale per battuta",
- "Dance to the beat of the robot's own sounds": "Balla al ritmo dei suoni del robot",
+ "Dance to the beat of the robot's own sounds and of room music": "Balla al ritmo dei suoni del robot e della musica nella stanza",
  "How far the moves run ahead of the beat, to cover the command to motion delay (negative: behind it); tuned on the robot": "Di quanto i movimenti anticipano il battito, per coprire il ritardo tra comando e movimento (negativo: lo seguono); si regola sul robot",
  "How much arousal raises the amplitude: 1 + gain x arousal": "Quanto l'attivazione aumenta l'ampiezza: 1 + guadagno x attivazione",
  "Least time between two accent flicks": "Tempo minimo tra due guizzi d'accento",

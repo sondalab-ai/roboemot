@@ -35,7 +35,7 @@ from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import Manifest
 from roboemot.motion import MotionLoop
-from roboemot.motion.beat import Beat, BeatSource
+from roboemot.motion.beat import Beat, BeatSource, RoomBeat
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.realtime.route import select_provider
 from roboemot.reflex import ReflexEngine
@@ -46,6 +46,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.cues import CueSound, load_cue_sounds
 from roboemot.voice.listener import VoiceListener
+from roboemot.voice.music import MusicState
 from roboemot.voice.pipeline import build_listener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.yes_no import YesNoGestures
@@ -144,9 +145,10 @@ def ducked_channels(expression: ExpressionRenderer, circ: CircadianRunner) -> fr
 RESTING = "resting"  # the circadian state name (circadian.model.State)
 
 
-def own_sound_beat(host: RuntimeHost) -> BeatSource:
+def dance_beat(host: RuntimeHost) -> BeatSource:
     """The dance's beat source (SPEC 7, Dance motion): the runner's planned hum grid and blirp
-    accents, read lazily because the runner is built after assembly (startup); no room music yet."""
+    accents, then room music from the listener's detector. Both read lazily: the runner and the
+    listener are built after the dance."""
 
     def own(now: float) -> Beat | None:
         runner = host.soothe_runner
@@ -156,7 +158,23 @@ def own_sound_beat(host: RuntimeHost) -> BeatSource:
         runner = host.soothe_runner
         return runner.accents(since, now) if runner is not None else []
 
-    return BeatSource(own, lambda now: None, accents=accents)
+    def room(now: float) -> MusicState | None:
+        listener = host.voice_listener
+        return listener.music_state(now) if listener is not None else None
+
+    return BeatSource(own, RoomBeat(room), accents=accents)
+
+
+def speech_playing(host: RuntimeHost) -> Callable[[float], bool]:
+    """Whether a spoken sentence plays at a stamp, from the speech timeline: a raw sound writes
+    nothing on it, so a hum does not count (SPEC 7, Dance motion)."""
+
+    def playing(now: float) -> bool:
+        out = host.speech_output
+        timeline = out.timeline if out is not None else None
+        return timeline is not None and timeline.sentence_at(now) is not None
+
+    return playing
 
 
 def preview_landmarks(stack: ConfigStack) -> Callable[[], bool]:
@@ -330,7 +348,8 @@ def assemble(
         body_yaw=gaze_map.body_yaw,
         max_amplitude=cfg.expression.max_amplitude,
         beats_per_bar=cfg.music.beats_per_bar,
-        beat=own_sound_beat(host),
+        beat=dance_beat(host),
+        speaking=speech_playing(host),
         yield_fade_s=lambda: speaking.cfg.fade_ms / MS_PER_S,
         speaking_channels=lambda: speaking.channels,
         ducked=lambda: ducked_channels(expression, circ),

@@ -8,9 +8,10 @@ import time
 
 import pytest
 from roboemot.config.schema import RoboEmotConfig, SootheConfig
-from roboemot.motion.beat import Beat, BeatSource
+from roboemot.motion.beat import Beat, BeatSource, RoomBeat
 from roboemot.soothe import SootheRunner
 from roboemot.soothe.synth import plan_hum, plan_sound, render_plan, synthesize
+from roboemot.voice.music import MusicState
 from roboemot.voice.speech import SpeechOutput
 from test_soothe_runner import RealRig
 from test_speech import FakeBackend, TimelineSink, wait_for
@@ -157,3 +158,84 @@ def test_no_beat_right_after_a_barge_in_stop():
         assert rig.runner.beat_at(at) is None and rig.runner.job == job
     finally:
         rig.out.close()
+
+
+# ------------------------------------------------------------------ room music (SPEC 7, 8)
+
+
+class Music:
+    """A detector stand-in: a settable state with the time since the last beat."""
+
+    def __init__(self, bpm=120.0, anchor=0.0, confidence=0.8, playing=True) -> None:
+        self.bpm, self.anchor, self.confidence, self.playing = bpm, anchor, confidence, playing
+
+    def state(self, now):
+        if not self.playing:
+            return MusicState(False, None, None, self.confidence, now)
+        since = (now - self.anchor) % (60.0 / self.bpm)
+        return MusicState(True, self.bpm, since, self.confidence, now)
+
+
+def test_own_beat_wins_over_room():
+    own = Beat(0.5, 0.0, 1.0, "own")
+    music = Music()
+    source = BeatSource(lambda now: own, RoomBeat(music.state))
+    assert source.beat_at(1.0) is own
+    room_only = BeatSource(lambda now: None, RoomBeat(music.state))
+    assert room_only.beat_at(1.0).source == "room"
+
+
+def test_room_beat_maps_the_detector_state():
+    got = RoomBeat(Music(bpm=120.0, confidence=0.7).state)(10.1)
+    assert got is not None
+    assert got.period_s == pytest.approx(0.5)
+    assert got.strength == pytest.approx(0.7)
+    assert got.source == "room"
+    assert (10.1 - got.phase_s) % got.period_s == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        MusicState(False, None, None, 0.9, 1.0),
+        MusicState(True, None, 0.1, 0.9, 1.0),
+        MusicState(True, 120.0, None, 0.9, 1.0),
+    ],
+)
+def test_room_beat_is_none_without_music(state):
+    assert RoomBeat(lambda now: state)(1.0) is None
+
+
+def test_room_beat_phase_keeps_one_beat():
+    """The stamp stays on one beat of the grid, however far the detector's last beat moved."""
+    music = Music(bpm=100.0, anchor=2.0)
+    room = RoomBeat(music.state)
+    first = room(5.0).phase_s
+    for i in range(1, 50):
+        assert room(5.0 + i * 0.05).phase_s == pytest.approx(first)
+    music.anchor += 12 * 0.6  # a new estimate on the same grid
+    assert room(5.0 + 50 * 0.05).phase_s == pytest.approx(first)
+
+
+def test_room_beat_counts_whole_beats_across_a_tempo_change():
+    """A new tempo moves the fraction of the current beat, not the place in a longer pattern."""
+    music = Music(bpm=120.0)
+    room = RoomBeat(music.state)
+    t = 10.0
+    before = room(t)
+    beats = (t - before.phase_s) / before.period_s
+    music.bpm = 121.0
+    after = room(t)
+    assert (t - after.phase_s) / after.period_s == pytest.approx(beats, abs=0.2)
+
+
+def test_room_beat_forgets_the_count_when_music_stops():
+    music = Music(bpm=120.0)
+    room = RoomBeat(music.state)
+    room(5.0)
+    room(6.0)
+    music.playing = False
+    assert room(6.1) is None
+    music.playing = True
+    assert room(7.05).phase_s == pytest.approx(7.0)

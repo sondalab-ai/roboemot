@@ -4647,10 +4647,9 @@ class DanceMotionMap(Strict):
 
 
 class DanceConfig(Strict):
-    """Dance motion: small moves locked to a beat (SPEC 7, Dance motion). ``speaking_gain`` is
-    read once the dance follows room music; the robot's own sounds never overlap its speech."""
+    """Dance motion: small moves locked to a beat (SPEC 7, Dance motion)."""
 
-    enabled: bool = param(True, "Dance to the beat of the robot's own sounds")
+    enabled: bool = param(True, "Dance to the beat of the robot's own sounds and of room music")
     bob_deg: float = param(
         3.0, "Size of the dip on the beat before the scaling factors", unit="deg", ge=0, le=15
     )

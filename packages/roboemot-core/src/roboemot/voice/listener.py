@@ -110,7 +110,7 @@ from .direction import VoiceDirection
 from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
-from .music import STARTED, MusicDetector
+from .music import STARTED, MusicDetector, MusicState
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
 from .wake import AT_FACE, NO_FACE_AT_VOICE, NO_FACING_DATA, NOT_FACING, AtFace, WakeGate
@@ -712,6 +712,12 @@ class VoiceListener:
         ``music.enabled`` is off."""
         music = self.music
         return music is not None and self._cfg.music.enabled and music.during(start, end)
+
+    def music_state(self, now: float) -> MusicState | None:
+        """The detector's state at ``now`` for the dance's room beat (lock-free, no blocking);
+        None without a detector or while ``music.enabled`` is off."""
+        music = self.music
+        return music.state(now) if music is not None and self._cfg.music.enabled else None
 
     def _own_sound_cut(self) -> bool:
         """Someone's speech is in progress or starting as the speaking window opens: cut the

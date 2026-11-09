@@ -14,7 +14,10 @@ second, then every fourth beat. The whole layer reads the beat ``lead_ms`` ahead
 Amplitude, re-read every tick::
 
     role degrees x register.motion_amplitude x circadian factor x (1 + arousal_gain x arousal)
-                 x beat strength
+                 x beat strength x speaking_gain (while the robot speaks over room music)
+
+Room music's strength (the detector's confidence, new every estimate) and the speaking gain ramp
+with ``fade_in_s`` and ``fade_out_s``, so neither is a step.
 
 The product of the factors is capped by ``expression.max_amplitude``. Roles that share a channel
 add up, so a channel's sum is capped too, at that factor times its largest role's degrees. Each
@@ -102,6 +105,7 @@ class _State:
     tail: dict[str, float] = field(default_factory=dict)  # still fading after a re-arm
     tail_gain: float = 0.0
     duck: dict[str, float] = field(default_factory=dict)
+    level: float | None = None  # beat strength x speaking gain, ramped; None: not read yet
     started: bool = False
 
 
@@ -118,7 +122,8 @@ class DanceRenderer:
     """Dance motion (see the module docstring). Call :meth:`set_register` every app tick,
     :meth:`set_affect` with each new affect state and :meth:`commands` every app tick.
 
-    ``beat`` is read every tick; ``speaking_channels`` returns the channels the speaking motion
+    ``beat`` is read every tick; ``speaking`` says whether the robot's speech plays at a stamp;
+    ``speaking_channels`` returns the channels the speaking motion
     emitted on its last tick and ``ducked`` those of the playing expression. ``yield_fade_s`` is
     how fast such a channel leaves the dance (the speaking motion's fade, read live).
     ``circadian_factor`` and ``resting`` are hooks the assembly sets.
@@ -137,8 +142,10 @@ class DanceRenderer:
         yield_fade_s: Callable[[], float],
         speaking_channels: Callable[[], frozenset[str]] = frozenset,
         ducked: Callable[[], frozenset[str]] = frozenset,
+        speaking: Callable[[float], bool] = lambda _now: False,
     ) -> None:
         self.dofs, self.body_yaw = dofs, body_yaw
+        self.speaking = speaking
         self.beat, self.speaking_channels, self.ducked = beat, speaking_channels, ducked
         self.yield_fade_s = yield_fade_s
         self.circadian_factor: Callable[[], float] = lambda: 1.0
@@ -235,10 +242,10 @@ class DanceRenderer:
             s.frozen = dict(s.raw)
         elif beat is not None and s.frozen is not None:
             self._rearm(s)
-        raw = s.frozen if s.frozen is not None else self._render(t, beat, b)
+        up, down = dt / cfg.fade_in_s, dt / cfg.fade_out_s
+        raw = s.frozen if s.frozen is not None else self._render(t, beat, b, up, down)
         s.raw = raw
         target = 0.0 if s.frozen is not None else 1.0
-        up, down = dt / cfg.fade_in_s, dt / cfg.fade_out_s
         s.gain = min(target, s.gain + up) if target > s.gain else max(target, s.gain - down)
         s.tail_gain = max(0.0, s.tail_gain - down)
         if s.gain > GAIN_EPSILON and not s.started:
@@ -273,7 +280,7 @@ class DanceRenderer:
             n: frozen.get(n, 0.0) * w + s.tail.get(n, 0.0) * tail_w
             for n in frozen.keys() | s.tail.keys()
         }
-        s.tail_gain, s.gain, s.frozen = 1.0, 0.0, None
+        s.tail_gain, s.gain, s.frozen, s.level = 1.0, 0.0, None, None
 
     def _mix(
         self,
@@ -318,11 +325,29 @@ class DanceRenderer:
             )
         ]
 
-    def _render(self, t: float, beat: Beat | None, b: _Settings) -> dict[str, float]:
+    def _level(self, t: float, beat: Beat, b: _Settings, up: float, down: float) -> float:
+        """The beat's share of the amplitude at ``t``: its strength, times ``speaking_gain``
+        while the robot speaks over room music, moving by at most ``up`` or ``down`` per tick.
+        The first read after a (re)start takes the value at once: the fade starts from zero."""
+        s = self._s
+        target = beat.strength
+        if beat.source == "room" and self.speaking(t):
+            target *= b.cfg.speaking_gain
+        if s.level is None:
+            s.level = target
+        elif target > s.level:
+            s.level = min(target, s.level + up)
+        else:
+            s.level = max(target, s.level - down)
+        return s.level
+
+    def _render(
+        self, t: float, beat: Beat | None, b: _Settings, up: float, down: float
+    ) -> dict[str, float]:
         """The ``bob`` and ``sway`` offsets at lead time ``t`` before the fade."""
         if beat is None:
             return {}
-        k, cfg = self.scale(beat.strength, b), b.cfg
+        k, cfg = self.scale(self._level(t, beat, b, up, down), b), b.cfg
         raw: dict[str, float] = {}
         bob = math.radians(cfg.bob_deg) * self._bob(t, beat, cfg) * k
         for n, sign in b.bob.items():
