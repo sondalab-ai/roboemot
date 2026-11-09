@@ -35,7 +35,7 @@ from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import Manifest
 from roboemot.motion import MotionLoop
-from roboemot.motion.beat import Beat, BeatSource, RoomBeat
+from roboemot.motion.beat import Beat, BeatSource, room_beat
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.realtime.route import select_provider
 from roboemot.reflex import ReflexEngine
@@ -46,7 +46,6 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.cues import CueSound, load_cue_sounds
 from roboemot.voice.listener import VoiceListener
-from roboemot.voice.music import MusicState
 from roboemot.voice.pipeline import build_listener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.yes_no import YesNoGestures
@@ -158,21 +157,20 @@ def dance_beat(host: RuntimeHost) -> BeatSource:
         runner = host.soothe_runner
         return runner.accents(since, now) if runner is not None else []
 
-    def room(now: float) -> MusicState | None:
+    def room(now: float) -> Beat | None:
         listener = host.voice_listener
-        return listener.music_state(now) if listener is not None else None
+        return room_beat(listener.music_state(now)) if listener is not None else None
 
-    return BeatSource(own, RoomBeat(room), accents=accents)
+    return BeatSource(own, room, accents=accents)
 
 
 def speech_playing(host: RuntimeHost) -> Callable[[float], bool]:
-    """Whether a spoken sentence plays at a stamp, from the speech timeline: a raw sound writes
-    nothing on it, so a hum does not count (SPEC 7, Dance motion)."""
+    """Whether the robot's speech is under way at a stamp (``SpeechOutput.speaking_at``): the
+    gaps between the sentences of an answer count, a hum does not (SPEC 7, Dance motion)."""
 
     def playing(now: float) -> bool:
         out = host.speech_output
-        timeline = out.timeline if out is not None else None
-        return timeline is not None and timeline.sentence_at(now) is not None
+        return out is not None and out.speaking_at(now)
 
     return playing
 

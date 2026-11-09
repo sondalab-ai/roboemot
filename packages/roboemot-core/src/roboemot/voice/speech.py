@@ -737,6 +737,17 @@ class SpeechOutput:
         with self._lock:
             return self._raw_only()
 
+    def speaking_at(self, now: float) -> bool:
+        """Whether speech is under way at ``now``: a sentence or stream job queued or running, or
+        a sentence on the timeline. So the gap between two sentences of an answer counts and a
+        raw sound does not. Two short leaf locks, no copy: the app tick asks on every tick."""
+        with self._lock:
+            if any(not isinstance(job, _RawJob) for job in self._jobs):
+                return True
+            if self._in_flight and self._raw_current is None:
+                return True
+        return self.timeline.playing(now)
+
     def cut_raw(self) -> bool:
         """Cut the raw sounds if nothing but raw sounds is queued or playing (``raw_only``),
         and say whether it did: the queued raw jobs are dropped and the one playing is cut as

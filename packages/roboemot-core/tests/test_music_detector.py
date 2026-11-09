@@ -19,7 +19,7 @@ from audio_signals import (
 )
 from pydantic import ValidationError
 from roboemot.config.schema import MusicConfig, RoboEmotConfig
-from roboemot.motion.beat import RoomBeat
+from roboemot.motion.beat import room_beat
 from roboemot.voice.music import MusicDetector, _Estimate
 
 RATE = 16000
@@ -160,7 +160,7 @@ def test_music_holds_through_the_robots_speech():
     assert speech_end - 8.0 < cfg.blind_hold_s
     held = det.state(speech_end)
     assert held.playing and held.tempo_bpm is not None
-    assert (beat := RoomBeat(det.state)(speech_end)) is not None and beat.source == "room"
+    assert (beat := room_beat(det.state(speech_end))) is not None and beat.source == "room"
     events, _ = run(det, silence(cfg.release_s * 2, RATE), t0=speech_end)
     stops = [at for at, event in events if event == "stopped"]
     assert len(stops) == 1

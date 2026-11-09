@@ -20,8 +20,9 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Beat:
-    """A beat grid. ``phase_s`` is the stamp of one beat on the monotonic clock, ``strength`` a
-    share in [0, 1] that scales the amplitude, ``source`` which provider it came from."""
+    """A beat grid. ``phase_s`` is the stamp of one beat on the monotonic clock (any beat of the
+    grid: it may differ from read to read), ``strength`` a share in [0, 1] that scales the
+    amplitude, ``source`` which provider it came from."""
 
     period_s: float
     phase_s: float
@@ -54,35 +55,19 @@ class BeatSource:
         return self._accents(since, now)
 
 
-class RoomBeat:
-    """The room-music provider of a :class:`BeatSource`, from the detector's state (``state``
-    returns None without a detector). None while no music plays.
+def room_beat(state: MusicState | None) -> Beat | None:
+    """The beat of room music from the detector's state; None without a state, while no music
+    plays or without a tempo. Its strength is the detector's confidence.
 
-    The detector gives the time since the last beat and re-estimates its grid as it goes;
-    ``Beat.phase_s`` must be a stamp that stays on one beat, or a pattern longer than one beat
-    (a fold, a bar) would restart on every beat. So beats are counted from tick to tick and
-    ``phase_s`` is the last beat minus that count: only whole beats, so a tempo change moves
-    no pattern. The count lives on the app tick: no lock."""
-
-    def __init__(self, state: Callable[[float], MusicState | None]) -> None:
-        self._state = state
-        self._last: float | None = None
-        self._beats = 0
-
-    def __call__(self, now: float) -> Beat | None:
-        """The room beat at ``now``, its strength the detector's confidence, or None."""
-        state = self._state(now)
-        tempo = state.tempo_bpm if state is not None and state.playing else None
-        since = state.beat_phase_s if state is not None else None
-        if state is None or tempo is None or since is None:
-            self._last, self._beats = None, 0
-            return None
-        period_s = SECONDS_PER_MINUTE / tempo
-        last = state.stamp - since
-        if self._last is not None:
-            self._beats += round((last - self._last) / period_s)
-        self._last = last
-        return Beat(period_s, last - self._beats * period_s, state.confidence, "room")
+    The detector gives the time since the last beat, so ``phase_s`` is that last beat: it moves
+    forward one period per beat and jumps when the grid is re-estimated. It tells where a beat
+    falls and nothing about which beat it is; the dance layer keeps its own place in a move."""
+    if state is None or not state.playing or state.tempo_bpm is None:
+        return None
+    if state.beat_phase_s is None:
+        return None
+    period_s = SECONDS_PER_MINUTE / state.tempo_bpm
+    return Beat(period_s, state.stamp - state.beat_phase_s, state.confidence, "room")
 
 
-__all__ = ["Beat", "BeatSource", "RoomBeat"]
+__all__ = ["Beat", "BeatSource", "room_beat"]

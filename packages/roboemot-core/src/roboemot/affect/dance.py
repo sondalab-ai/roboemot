@@ -11,6 +11,14 @@ Roles, bound to channels by the manifest's ``dance_motion_map`` (core names no j
 A move half never lasts less than ``min_half_s``: a tempo too fast for a full bob moves on every
 second, then every fourth beat. The whole layer reads the beat ``lead_ms`` ahead.
 
+Each role keeps its own place in its move and advances it every tick by its share of a move at the
+current tempo, so a new tempo or a new fold changes the speed of a move and never its position. The
+beat grid only corrects that place toward the nearest beat, at ``phase_correction_beats_per_s``,
+and never faster than ``min_half_s`` allows. So a re-estimated grid, a new source or a beat that
+carries no count (room music's stamp moves on every beat) never steps. A fold is kept while it still
+fits; a shorter one is taken only when it clears ``min_half_s`` by ``fold_margin``, so a tempo that
+jitters around a threshold does not flip it.
+
 Amplitude, re-read every tick::
 
     role degrees x register.motion_amplitude x circadian factor x (1 + arousal_gain x arousal)
@@ -31,7 +39,8 @@ add up for long. Never moves the body yaw or a translation: a map naming one is 
 and by :meth:`DanceRenderer.apply_config`.
 
 Threads: the app tick calls everything except :meth:`DanceRenderer.apply_config`, which the config
-reload calls. It swaps one immutable bundle; each tick reads the bundle once.
+reload calls. It swaps one immutable bundle; each tick reads the bundle once. The moves' places
+and the ramped level belong to the tick alone, so they need no lock.
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ SOURCE = "dance"
 MS_PER_S = 1000.0
 GAIN_EPSILON = 1e-9  # a fade gain below this is zero (float rounding of the per-tick steps)
 FOLD_FACTORS = (1, 2, 4)  # one move per this many beats: full, half and quarter time
+MOVE_CYCLE = 2  # a place is kept modulo two moves: the sway's two sides (the bob's repeat in it)
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,14 @@ class _Play:
 
 
 @dataclass
+class _Move:
+    """One role's place: ``position`` in moves (modulo ``MOVE_CYCLE``), ``factor`` its fold."""
+
+    position: float
+    factor: int
+
+
+@dataclass
 class _State:
     """Everything that is reset once the offsets are back at zero."""
 
@@ -106,14 +124,20 @@ class _State:
     tail_gain: float = 0.0
     duck: dict[str, float] = field(default_factory=dict)
     level: float | None = None  # beat strength x speaking gain, ramped; None: not read yet
+    moves: dict[str, _Move] = field(default_factory=dict)  # by role
     started: bool = False
 
 
-def fold(period_s: float, min_half_s: float) -> int | None:
+def fold(
+    period_s: float, min_half_s: float, current: int | None = None, margin: float = 0.0
+) -> int | None:
     """How many beats one move spans so that each of its two halves lasts ``min_half_s``; None
-    when even the longest fold is too short (the role then rests)."""
+    when even the longest fold is too short (the role then rests). With the ``current`` fold, a
+    shorter one must clear ``min_half_s`` by the share ``margin``, so the fold has hysteresis."""
+    floor = 2 * min_half_s
     for factor in FOLD_FACTORS:
-        if factor * period_s >= 2 * min_half_s:
+        shorter = current is not None and factor < current
+        if factor * period_s >= (floor * (1 + margin) if shorter else floor):
             return factor
     return None
 
@@ -242,10 +266,10 @@ class DanceRenderer:
             s.frozen = dict(s.raw)
         elif beat is not None and s.frozen is not None:
             self._rearm(s)
-        up, down = dt / cfg.fade_in_s, dt / cfg.fade_out_s
-        raw = s.frozen if s.frozen is not None else self._render(t, beat, b, up, down)
+        raw = s.frozen if s.frozen is not None else self._render(t, beat, b, dt)
         s.raw = raw
         target = 0.0 if s.frozen is not None else 1.0
+        up, down = dt / cfg.fade_in_s, dt / cfg.fade_out_s
         s.gain = min(target, s.gain + up) if target > s.gain else max(target, s.gain - down)
         s.tail_gain = max(0.0, s.tail_gain - down)
         if s.gain > GAIN_EPSILON and not s.started:
@@ -281,6 +305,7 @@ class DanceRenderer:
             for n in frozen.keys() | s.tail.keys()
         }
         s.tail_gain, s.gain, s.frozen, s.level = 1.0, 0.0, None, None
+        s.moves.clear()
 
     def _mix(
         self,
@@ -325,11 +350,12 @@ class DanceRenderer:
             )
         ]
 
-    def _level(self, t: float, beat: Beat, b: _Settings, up: float, down: float) -> float:
+    def _level(self, t: float, beat: Beat, b: _Settings, dt: float) -> float:
         """The beat's share of the amplitude at ``t``: its strength, times ``speaking_gain``
-        while the robot speaks over room music, moving by at most ``up`` or ``down`` per tick.
-        The first read after a (re)start takes the value at once: the fade starts from zero."""
+        while the robot speaks over room music, at the rates of the fades. The first read after
+        a (re)start takes the value at once: the fade starts from zero."""
         s = self._s
+        up, down = dt / b.cfg.fade_in_s, dt / b.cfg.fade_out_s
         target = beat.strength
         if beat.source == "room" and self.speaking(t):
             target *= b.cfg.speaking_gain
@@ -341,39 +367,59 @@ class DanceRenderer:
             s.level = max(target, s.level - down)
         return s.level
 
-    def _render(
-        self, t: float, beat: Beat | None, b: _Settings, up: float, down: float
-    ) -> dict[str, float]:
+    def _render(self, t: float, beat: Beat | None, b: _Settings, dt: float) -> dict[str, float]:
         """The ``bob`` and ``sway`` offsets at lead time ``t`` before the fade."""
         if beat is None:
             return {}
-        k, cfg = self.scale(self._level(t, beat, b, up, down), b), b.cfg
+        k, cfg = self.scale(self._level(t, beat, b, dt), b), b.cfg
         raw: dict[str, float] = {}
-        bob = math.radians(cfg.bob_deg) * self._bob(t, beat, cfg) * k
+        bob = math.radians(cfg.bob_deg) * self._bob(t, beat, cfg, dt) * k
         for n, sign in b.bob.items():
             raw[n] = raw.get(n, 0.0) + sign * bob
-        sway = math.radians(cfg.sway_deg) * self._sway(t, beat, b) * k
+        sway = math.radians(cfg.sway_deg) * self._sway(t, beat, b, dt) * k
         for n, sign in b.sway.items():
             raw[n] = raw.get(n, 0.0) + sign * sway
         return raw
 
-    @staticmethod
-    def _bob(t: float, beat: Beat, cfg: DanceConfig) -> float:
-        """Depth of the dip in [0, 1]: 1 on the beat, 0 halfway between two moves."""
-        factor = fold(beat.period_s, cfg.min_half_s)
+    def _place(
+        self, role: str, span: int, t: float, dt: float, beat: Beat, cfg: DanceConfig
+    ) -> float | None:
+        """The role's place at lead time ``t``, in moves of ``span`` beats times its fold, or
+        None while it rests. It starts on the grid and then advances by ``dt``; the error to the
+        nearest beat is taken back at a limited rate, in a move whose halves stay ``min_half_s``."""
+        s = self._s
+        move = s.moves.get(role)
+        factor = fold(
+            span * beat.period_s, cfg.min_half_s, move.factor if move else None, cfg.fold_margin
+        )
         if factor is None:
-            return 0.0
-        p = ((t - beat.phase_s) / (factor * beat.period_s)) % 1.0
-        return min_jerk(abs(2 * p - 1))
+            s.moves.pop(role, None)
+            return None
+        beats = factor * span
+        grid = (t - beat.phase_s) / beat.period_s
+        if move is None:
+            s.moves[role] = move = _Move(grid / beats % MOVE_CYCLE, factor)
+            return move.position
+        limit = cfg.phase_correction_beats_per_s * dt
+        error = max(-limit, min(limit, math.remainder(grid - move.position * beats, 1.0)))
+        advance = dt / (beats * beat.period_s) + error / beats
+        fastest = dt / (2 * cfg.min_half_s)
+        move.position = (move.position + max(0.0, min(fastest, advance))) % MOVE_CYCLE
+        move.factor = factor
+        return move.position
 
-    @staticmethod
-    def _sway(t: float, beat: Beat, b: _Settings) -> float:
-        """Sway in [-1, 1]: out and back on one side during a bar, the other side the next."""
-        bar = beat.period_s * b.beats_per_bar
-        factor = fold(bar, b.cfg.min_half_s)
-        if factor is None:
+    def _bob(self, t: float, beat: Beat, cfg: DanceConfig, dt: float) -> float:
+        """Depth of the dip in [0, 1]: 1 on the beat, 0 halfway between two moves."""
+        place = self._place("bob", 1, t, dt, beat, cfg)
+        if place is None:
             return 0.0
-        q = ((t - beat.phase_s) / (factor * bar)) % 2.0
+        return min_jerk(abs(2 * (place % 1.0) - 1))
+
+    def _sway(self, t: float, beat: Beat, b: _Settings, dt: float) -> float:
+        """Sway in [-1, 1]: out and back on one side during a bar, the other side the next."""
+        q = self._place("sway", b.beats_per_bar, t, dt, beat, b.cfg)
+        if q is None:
+            return 0.0
         side = 1.0 if q < 1.0 else -1.0
         return side * min_jerk(1 - abs(2 * (q % 1.0) - 1))
 

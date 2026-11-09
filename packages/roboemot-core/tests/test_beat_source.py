@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 from roboemot.config.schema import RoboEmotConfig, SootheConfig
-from roboemot.motion.beat import Beat, BeatSource, RoomBeat
+from roboemot.motion.beat import Beat, BeatSource, room_beat
+from roboemot.runtime.assembly import dance_beat, speech_playing
 from roboemot.soothe import SootheRunner
 from roboemot.soothe.synth import plan_hum, plan_sound, render_plan, synthesize
 from roboemot.voice.music import MusicState
-from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.speech import SpeechOutput, _Job, _RawJob
 from test_soothe_runner import RealRig
 from test_speech import FakeBackend, TimelineSink, wait_for
 
@@ -179,19 +181,19 @@ class Music:
 def test_own_beat_wins_over_room():
     own = Beat(0.5, 0.0, 1.0, "own")
     music = Music()
-    source = BeatSource(lambda now: own, RoomBeat(music.state))
+    source = BeatSource(lambda now: own, lambda now: room_beat(music.state(now)))
     assert source.beat_at(1.0) is own
-    room_only = BeatSource(lambda now: None, RoomBeat(music.state))
+    room_only = BeatSource(lambda now: None, lambda now: room_beat(music.state(now)))
     assert room_only.beat_at(1.0).source == "room"
 
 
 def test_room_beat_maps_the_detector_state():
-    got = RoomBeat(Music(bpm=120.0, confidence=0.7).state)(10.1)
+    got = room_beat(Music(bpm=120.0, confidence=0.7).state(10.1))
     assert got is not None
     assert got.period_s == pytest.approx(0.5)
     assert got.strength == pytest.approx(0.7)
     assert got.source == "room"
-    assert (10.1 - got.phase_s) % got.period_s == pytest.approx(0.1)
+    assert got.phase_s == pytest.approx(10.0)
 
 
 @pytest.mark.parametrize(
@@ -204,38 +206,47 @@ def test_room_beat_maps_the_detector_state():
     ],
 )
 def test_room_beat_is_none_without_music(state):
-    assert RoomBeat(lambda now: state)(1.0) is None
+    assert room_beat(state) is None
 
 
-def test_room_beat_phase_keeps_one_beat():
-    """The stamp stays on one beat of the grid, however far the detector's last beat moved."""
-    music = Music(bpm=100.0, anchor=2.0)
-    room = RoomBeat(music.state)
-    first = room(5.0).phase_s
-    for i in range(1, 50):
-        assert room(5.0 + i * 0.05).phase_s == pytest.approx(first)
-    music.anchor += 12 * 0.6  # a new estimate on the same grid
-    assert room(5.0 + 50 * 0.05).phase_s == pytest.approx(first)
+# ------------------------------------------------------------------ wiring (SPEC 7)
 
 
-def test_room_beat_counts_whole_beats_across_a_tempo_change():
-    """A new tempo moves the fraction of the current beat, not the place in a longer pattern."""
+def test_assembly_without_a_listener_gives_no_room_beat():
+    host = SimpleNamespace(voice_listener=None, soothe_runner=None)
+    assert dance_beat(host).beat_at(1.0) is None
+
+
+def test_assembly_reads_the_listener_late():
+    host = SimpleNamespace(voice_listener=None, soothe_runner=None)
+    source = dance_beat(host)
     music = Music(bpm=120.0)
-    room = RoomBeat(music.state)
-    t = 10.0
-    before = room(t)
-    beats = (t - before.phase_s) / before.period_s
-    music.bpm = 121.0
-    after = room(t)
-    assert (t - after.phase_s) / after.period_s == pytest.approx(beats, abs=0.2)
+    host.voice_listener = SimpleNamespace(music_state=music.state)
+    assert source.beat_at(1.0).source == "room"
+    host.voice_listener = SimpleNamespace(music_state=lambda now: None)  # no detector
+    assert source.beat_at(1.0) is None
 
 
-def test_room_beat_forgets_the_count_when_music_stops():
-    music = Music(bpm=120.0)
-    room = RoomBeat(music.state)
-    room(5.0)
-    room(6.0)
-    music.playing = False
-    assert room(6.1) is None
-    music.playing = True
-    assert room(7.05).phase_s == pytest.approx(7.0)
+def test_assembly_without_speech_output_is_not_speaking():
+    host = SimpleNamespace(speech_output=None)
+    assert speech_playing(host)(1.0) is False
+    host.speech_output = SimpleNamespace(speaking_at=lambda now: True)
+    assert speech_playing(host)(1.0) is True
+
+
+def test_speaking_at_covers_the_gap_between_sentences_and_not_a_raw_sound():
+    out = SpeechOutput(RoboEmotConfig(), TimelineSink(), FakeBackend())
+    assert not out.speaking_at(1.0)
+    out._jobs.append(object.__new__(_RawJob))
+    assert not out.speaking_at(1.0)  # a queued hum is not speech
+    out._jobs.clear()
+    out._jobs.append(object.__new__(_Job))
+    assert out.speaking_at(1.0)  # the next sentence waits: the gap counts
+    out._jobs.clear()
+    out._in_flight = True
+    assert out.speaking_at(1.0)  # a sentence being synthesized
+    out._raw_current = 7
+    assert not out.speaking_at(1.0)  # the job in flight is the hum
+    out._in_flight, out._raw_current = False, None
+    out.timeline._sentence_at = lambda t: object()
+    assert out.speaking_at(1.0)  # the last sentence still plays out of the sink

@@ -4667,6 +4667,20 @@ class DanceConfig(Strict):
         ge=0.1,
         le=3,
     )
+    fold_margin: float = param(
+        0.1,
+        "How far a shorter fold must clear the least half time before the moves switch to it "
+        "(share); a tempo that jitters around a threshold keeps its fold",
+        ge=0,
+        le=0.5,
+    )
+    phase_correction_beats_per_s: float = param(
+        0.5,
+        "Fastest correction of a move toward the beat grid when the grid or the source changes",
+        unit="beats/s",
+        ge=0.05,
+        le=4,
+    )
     lead_ms: float = param(
         100.0,
         "How far the moves run ahead of the beat, to cover the command to motion delay "
