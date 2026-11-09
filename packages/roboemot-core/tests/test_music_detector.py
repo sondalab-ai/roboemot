@@ -208,7 +208,7 @@ def test_band_rule_is_what_rejects_the_clock():
 
 
 def test_blind_hold():
-    det = detector()
+    det = detector(batch_ms=0.0)  # the stop is read at the very chunk after the hole
     cfg = MusicConfig()
     end = 8.0
     run(det, drum_loop(120, end, RATE))
@@ -326,3 +326,39 @@ def test_music_is_a_root_section_with_defaults_on():
     assert cfg.music.enabled is True
     assert cfg.music.tempo_bpm == (60.0, 180.0)
     assert cfg.music.blind_hold_s == 30.0
+
+
+def test_a_batch_runs_one_analysis_for_many_chunks(monkeypatch):
+    """QA 2026-11-09: the cost is per NumPy call, so chunks are analysed together."""
+    det = detector(batch_ms=256.0)
+    calls = []
+    energy = det._bands.energy
+    monkeypatch.setattr(det._bands, "energy", lambda frames: calls.append(1) or energy(frames))
+    run(det, silence(2.56, RATE))
+    assert len(calls) == 9  # 128 chunks of 20 ms, 13 chunks (260 ms) to a batch
+
+
+def test_batching_keeps_the_start_within_one_batch():
+    signal = click_track(120, 12.0, RATE)
+    batched = run(detector(batch_ms=256.0), signal)[1]
+    each_chunk = run(detector(batch_ms=0.0), signal)[1]
+    assert each_chunk is not None and batched is not None
+    assert 0.0 <= batched - each_chunk <= 0.256 + CHUNK / RATE
+
+
+def test_a_hole_analyses_the_waiting_batch_and_is_not_lost():
+    """The audio before a hole is analysed first, and the hole still clears the envelope."""
+    det = detector(batch_ms=256.0)
+    run(det, click_track(120, 8.0, RATE))
+    resets = det.snapshot()["resets"]
+    det.gap(8.0)
+    late = 8.0 + MusicConfig().max_gap_s + 1.0
+    run(det, silence(0.5, RATE), t0=late)
+    assert det.snapshot()["resets"] == resets + 1
+
+
+def test_a_jump_in_the_stamps_does_not_join_the_batch():
+    det = detector(batch_ms=256.0)
+    det.feed(np.zeros(CHUNK, dtype=np.float32), 0.0)
+    det.feed(np.zeros(CHUNK, dtype=np.float32), 5.0)
+    assert det._batch_start == 5.0 and det._batch_n == CHUNK
