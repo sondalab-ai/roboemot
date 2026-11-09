@@ -38,7 +38,12 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
-from ..config.schema import DanceConfig, DanceMotionMap, ExpressionEntry
+from ..config.schema import (
+    SECONDS_PER_MINUTE,
+    DanceConfig,
+    DanceMotionMap,
+    ExpressionEntry,
+)
 from ..manifest import Dof
 from ..motion.beat import Beat, BeatSource
 from ..motion.core import Command, Priority
@@ -79,17 +84,38 @@ class _Settings:
 @dataclass(frozen=True)
 class DanceLive:
     """The Live tab's view of one tick (SPEC 7, 12), swapped whole. ``active``: the offsets are
-    not back at zero yet. ``source``: the beat followed now (None: no beat, also during the
+    not back at zero yet. ``beat``: the beat followed now (None: no beat, also during the
     fade-out). ``bob`` and ``sway``: each role's envelope as a share of its degrees in [0, 1],
-    0 for a role that rests; not the waveform, which a poll would only alias. The two stamps are
-    on the monotonic clock and stay in the process."""
+    after the fade and the yield to other layers, 0 for a role that rests; not the waveform,
+    which a poll would only alias. The beat's phase and the two stamps are on the monotonic
+    clock and stay in the process."""
 
     active: bool = False
-    source: str | None = None
+    beat: Beat | None = None
     bob: float = 0.0
     sway: float = 0.0
     last_accent_s: float = -math.inf
     stamp: float = -math.inf
+
+    @property
+    def source(self) -> str | None:
+        """Which provider the beat comes from, None with no beat."""
+        return self.beat.source if self.beat is not None else None
+
+    def tempo_bpm(self) -> float | None:
+        """The tempo of the beat followed, None with no beat or no period."""
+        beat = self.beat
+        if beat is None or beat.period_s <= 0:
+            return None
+        return SECONDS_PER_MINUTE / beat.period_s
+
+    def beat_age_s(self, now: float) -> float | None:
+        """Seconds since the last beat of the grid at ``now``, in [0, period); None with no
+        beat or no period."""
+        beat = self.beat
+        if beat is None or beat.period_s <= 0:
+            return None
+        return (now - beat.phase_s) % beat.period_s
 
     def last_accent_age_s(self, now: float) -> float | None:
         """Seconds since the last accent played, None before the first. At least 0: an accent
@@ -272,17 +298,22 @@ class DanceRenderer:
         accent = self._accent_offsets(t, b, moving)
         if s.gain <= GAIN_EPSILON and s.tail_gain <= GAIN_EPSILON and not accent:
             s = self._s = _State()
-            self._publish(now, beat, s, False)
+            self._publish(now, beat, s, b, False)
             return self._emit(now, cfg, {})  # a last zero for every channel still held
-        self._publish(now, beat, s, True)
-        return self._emit(now, cfg, self._mix(raw, accent, s, b, dt))
+        out = self._mix(raw, accent, s, b, dt)  # first: it moves the ducks the levels read
+        self._publish(now, beat, s, b, True)
+        return self._emit(now, cfg, out)
 
-    def _publish(self, now: float, beat: Beat | None, s: _State, active: bool) -> None:
-        """Swap in the Live tab's view of this tick: the only work the tab adds to the tick."""
-        source = beat.source if beat is not None else None
-        self._live = DanceLive(
-            active, source, s.bob * s.gain, s.sway * s.gain, self._last_accent, now
-        )
+    def _publish(
+        self, now: float, beat: Beat | None, s: _State, b: _Settings, active: bool
+    ) -> None:
+        """Swap in the Live tab's view of this tick: the only work the tab adds to the tick.
+        Each level goes through the same fade curve as the offsets, and the role's most ducked
+        channel, so a bar shows what the robot does."""
+        w = min_jerk(s.gain)
+        bob = s.bob * w * min((s.duck.get(n, 1.0) for n in b.bob), default=0.0)
+        sway = s.sway * w * min((s.duck.get(n, 1.0) for n in b.sway), default=0.0)
+        self._live = DanceLive(active, beat, bob, sway, self._last_accent, now)
 
     def _step_clock(self, now: float, cfg: DanceConfig) -> float:
         """Seconds since the last tick. A gap longer than the command's lifetime (the app tick
@@ -447,7 +478,7 @@ class DanceRenderer:
         live = self._live
         if now - live.stamp <= self._b.cfg.command_ttl_s:
             return live
-        return replace(live, active=False, source=None, bob=0.0, sway=0.0)
+        return replace(live, active=False, beat=None, bob=0.0, sway=0.0)
 
 
 __all__ = ["SOURCE", "DanceLive", "DanceRenderer", "fold"]

@@ -17,6 +17,7 @@ from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
 from roboemot.motion.beat import Beat, BeatSource
+from roboemot.motion.curves import min_jerk
 
 MANIFEST = Path(__file__).resolve().parent / "data" / "dance-head.yaml"
 TICK = 0.05  # the 20 Hz app tick
@@ -313,13 +314,46 @@ def test_snapshot_is_counts_and_a_label_only(manifest, mapping):
 
 def test_live_snapshot_shows_the_source_and_each_roles_share(manifest, mapping):
     beats = Beats(beat(strength=0.5))
-    r = make(manifest, mapping, beats)
+    r = make(manifest, mapping, beats, speaking_channels=lambda: frozenset({SWAY}))
     assert r.live_snapshot(0.0).active is False  # nothing ticked yet
     run(r, 0.0, 1.0)
     snap = r.live_snapshot(0.95)
     assert snap.active and snap.source == "own"
     assert snap.bob == pytest.approx(min(1.0, r.scale(0.5)))
-    assert snap.sway == snap.bob
+    assert snap.sway == 0.0  # yields from the start: the roles are not swapped
+
+
+def test_live_snapshot_level_follows_the_duck(manifest, mapping):
+    speaking: set[str] = set()
+    r = make(manifest, mapping, Beats(beat()), speaking_channels=lambda: frozenset(speaking))
+    run(r, 0.0, 1.0)
+    share = min(1.0, r.scale(1.0))
+    assert r.live_snapshot(0.95).bob == pytest.approx(share)
+    speaking.add(BOB)
+    run(r, 1.0, 1.05)  # one tick of the yield fade
+    snap = r.live_snapshot(1.0)
+    assert snap.bob == pytest.approx(share * (1 - TICK / YIELD_S))
+    assert snap.sway == pytest.approx(share)
+
+
+def test_live_snapshot_level_uses_the_fade_curve(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat()), cfg=DanceConfig(lead_ms=0.0, fade_in_s=1.0))
+    run(r, 0.0, 0.3)
+    gain = r._s.gain
+    assert 0.1 < gain < 0.5
+    expected = min_jerk(gain) * min(1.0, r.scale(1.0))
+    assert expected != pytest.approx(gain * min(1.0, r.scale(1.0)))  # the curve is not linear here
+    assert r.live_snapshot(0.25).bob == pytest.approx(expected)
+
+
+def test_live_snapshot_carries_the_beat_it_follows(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat(phase=0.1)))
+    assert r.live_snapshot(0.0).tempo_bpm() is None
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.tempo_bpm() == pytest.approx(60.0 / PERIOD)
+    assert snap.beat_age_s(0.95) == pytest.approx(0.85)
+    assert snap.beat_age_s(0.1 + PERIOD + 0.25) == pytest.approx(0.25)  # wraps per period
 
 
 def test_live_snapshot_passes_a_room_beat_through(manifest, mapping):

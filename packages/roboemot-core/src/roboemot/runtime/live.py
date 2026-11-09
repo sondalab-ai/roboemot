@@ -300,15 +300,19 @@ class LiveState:
 
     def _dance(self, now: float) -> dict[str, Any] | None:
         """The dance layer's last tick, or None without a renderer: ``state`` is ``active`` or
-        ``idle``, ``bob`` and ``sway`` each role's share of its amplitude."""
+        ``idle``, ``bob`` and ``sway`` each role's share of its amplitude, ``tempo_bpm`` and
+        ``beat_age_s`` those of the beat the dance follows (None with no beat)."""
         renderer = self._host.dance
         if renderer is None:
             return None
         d = renderer.live_snapshot(now)
         age = d.last_accent_age_s(now)
+        tempo, beat_age = d.tempo_bpm(), d.beat_age_s(now)
         return {
             "state": "active" if d.active else "idle",
             "source": d.source,
+            "tempo_bpm": None if tempo is None else round(tempo, ROUND_DIGITS),
+            "beat_age_s": None if beat_age is None else round(beat_age, ROUND_DIGITS),
             "bob": round(d.bob, ROUND_DIGITS),
             "sway": round(d.sway, ROUND_DIGITS),
             "last_accent_age_s": None if age is None else round(age, ROUND_DIGITS),

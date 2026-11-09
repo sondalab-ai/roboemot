@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
-from roboemot.affect.dance import DanceLive
+from roboemot.affect.dance import DanceLive, DanceRenderer
 from roboemot.config import ConfigStack
+from roboemot.config.schema import DanceConfig, DanceMotionMap
 from roboemot.conversation import ConversationPhase
+from roboemot.manifest import load_manifest
+from roboemot.motion.beat import Beat, BeatSource
 from roboemot.runtime.live import LiveState
 from roboemot.voice.music import MusicState
 from roboemot.world.types import Entry
@@ -348,7 +352,9 @@ def test_the_state_names_the_video_flag_and_its_poll_interval():
 # ---------------------------------------------------------------- the beat card (SPEC 7, 12)
 
 MUSIC_KEYS = {"playing", "tempo_bpm", "confidence", "beat_age_s"}
-DANCE_KEYS = {"state", "source", "bob", "sway", "last_accent_age_s"}
+DANCE_KEYS = {
+    "state", "source", "tempo_bpm", "beat_age_s", "bob", "sway", "last_accent_age_s",
+}  # fmt: skip
 
 
 def music_host(detector, frame=None):
@@ -368,19 +374,20 @@ def detector(state):
 
 def test_the_beat_blocks_for_a_detector_and_a_dance():
     playing = MusicState(True, 120.04, 0.12345, 0.87654, NOW)
-    frame = DanceLive(True, "room", 0.61234, 0.4, NOW - 3.25, NOW)
+    frame = DanceLive(True, Beat(0.5, NOW - 0.625, 1.0, "room"), 0.61234, 0.4, NOW - 3.25, NOW)
     s = live(host=music_host(detector(playing), frame)).state()
     assert s["music"] == {
         "playing": True, "tempo_bpm": 120.04, "confidence": 0.877, "beat_age_s": 0.123,
     }  # fmt: skip
     assert s["dance"] == {
-        "state": "active", "source": "room", "bob": 0.612, "sway": 0.4, "last_accent_age_s": 3.25,
+        "state": "active", "source": "room", "tempo_bpm": 120.0, "beat_age_s": 0.125,
+        "bob": 0.612, "sway": 0.4, "last_accent_age_s": 3.25,
     }  # fmt: skip
 
 
 def test_the_beat_blocks_carry_only_the_listed_keys_and_no_monotonic_stamp():
     playing = MusicState(True, 120.0, 0.1, 0.8, NOW)
-    frame = DanceLive(True, "own", 0.5, 0.5, NOW - 1.0, NOW)
+    frame = DanceLive(True, Beat(0.5, NOW - 0.1, 1.0, "own"), 0.5, 0.5, NOW - 1.0, NOW)
     s = live(host=music_host(detector(playing), frame)).state()
     assert set(s["music"]) == MUSIC_KEYS
     assert set(s["dance"]) == DANCE_KEYS
@@ -410,5 +417,33 @@ def test_no_music_and_an_idle_dance_have_no_beat():
         "beat_age_s": None,
     }
     assert s["dance"] == {
-        "state": "idle", "source": None, "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
+        "state": "idle", "source": None, "tempo_bpm": None, "beat_age_s": None,
+        "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
+    }  # fmt: skip
+
+
+def test_a_stopped_tick_reads_as_an_idle_dance_block():
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "data" / "dance-head.yaml", allow_unmeasured_dynamics=True
+    )
+    beat = Beat(0.5, 0.0, 1.0, "own")
+    renderer = DanceRenderer(
+        DanceConfig(),
+        DanceMotionMap.model_validate(manifest.model.behaviour["dance_motion_map"]),
+        manifest.dofs,
+        body_yaw=None,
+        max_amplitude=1.0,
+        beats_per_bar=4,
+        beat=BeatSource(lambda now: beat, lambda now: None),
+        yield_fade_s=lambda: 0.15,
+    )
+    renderer.set_register(SimpleNamespace(params=SimpleNamespace(motion_amplitude=1.0)))
+    renderer.commands(NOW - 100.0)
+    renderer.commands(NOW - 99.95)
+    assert renderer.live_snapshot(NOW - 99.95).active
+    host = music_host(None)
+    host.dance = renderer
+    assert live(host=host).state()["dance"] == {
+        "state": "idle", "source": None, "tempo_bpm": None, "beat_age_s": None,
+        "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
     }  # fmt: skip
