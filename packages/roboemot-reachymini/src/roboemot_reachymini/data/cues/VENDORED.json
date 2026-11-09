@@ -9,13 +9,13 @@
       "event": "chirp_up",
       "f0_hz": 660.0,
       "f1_hz": 990.0,
-      "length_s": 0.1,
+      "length_s": 0.08,
       "gain_db": -30.0,
       "events": [
         "chirp_up"
       ],
       "file": "listening.wav",
-      "sha256": "c1b798b5dde82a7be6aac4dfe6f5ac00fba918e677e5a7df2140f3923c21f50c"
+      "sha256": "030bbfb029cd2a7e243bf8bbcfd02f2ee2ab8753404d936d3edfa435984e7123"
     },
     "not_heard": {
       "seed": 167,
