@@ -32,7 +32,9 @@ RATE = 16000
 CHUNK = 512
 CHUNK_20MS = 320
 LEAD_S = 0.5
-CFG = reachy_config()
+_BASE = reachy_config()
+_IMMEDIATE = _BASE.voice.barge_in.model_copy(update={"sustain_ms": 0.0})  # the cut-off point
+CFG = _BASE.model_copy(update={"voice": _BASE.voice.model_copy(update={"barge_in": _IMMEDIATE})})
 
 
 def load(name: str) -> np.ndarray:
