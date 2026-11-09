@@ -99,7 +99,7 @@ test("the panel sits above the cards with the status line, the conditions and th
   const page = await livePage(t);
   const panel = page.document.querySelector("#live-activity");
   assert.ok(panel.nextElementSibling.id === "live-cards", "above the cards");
-  assert.equal(page.document.querySelector("#live-cards").children.length, 8, "the cards are unchanged");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "the cards are unchanged");
   assert.ok(panel.textContent.includes("What's happening"));
   assert.equal(page.document.querySelector("#live-status").textContent, "Cloud voice down");
   assert.ok(panel.textContent.includes("The cloud voice is down (network)."));
@@ -141,5 +141,5 @@ test("an empty feed says so, and no activity block shows no panel", async (t) =>
   assert.equal(page.document.querySelector("#live-events-empty").textContent, "Nothing to explain yet.");
   const off = await livePage(t, { activity: null });
   assert.equal(off.document.querySelector("#live-activity").children.length, 0);
-  assert.equal(off.document.querySelector("#live-cards").children.length, 8);
+  assert.equal(off.document.querySelector("#live-cards").children.length, 9);
 });

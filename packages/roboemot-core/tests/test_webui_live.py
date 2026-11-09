@@ -65,6 +65,7 @@ def served(tmp_path, stack):
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)
     stack.subscribe(live.apply_config)
@@ -122,7 +123,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
-        "video", "audio_egress", "activity",
+        "video", "audio_egress", "activity", "music", "dance",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
@@ -234,6 +235,7 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
         webui=None,
         bus=None,
     )
@@ -269,7 +271,7 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
         perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
         name_source=None, route_check_router=lambda: None, circadian=None,
         phase=ConversationPhase(), activity=None, realtime_route=None, voice_listener=None,
-        webui=None, bus=None,  # gets as far as make_server, which fails
+        webui=None, bus=None, dance=None,  # gets as far as make_server, which fails
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
     p = pipeline()
@@ -354,6 +356,7 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
         webui=None,
         bus=bus,
         live_video=None,

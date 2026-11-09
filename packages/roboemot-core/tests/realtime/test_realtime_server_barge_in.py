@@ -195,7 +195,7 @@ def test_a_confirmed_barge_in_stops_truncates_and_its_own_answer_plays(ears, int
         confirmed = barge_in(ear)
         ear.r.feed(voice(seconds=0.5))
         assert confirmed.wait(10.0)
-        assert server.interrupted == ["resp_1"]  # the server cancelled its answer itself
+        assert wait_until(lambda: server.interrupted == ["resp_1"], 10.0)  # cancelled by itself
         cut(ear)
         ear.r.feed(voice(seconds=0.3))
         tail(ear)  # the person stops: the stream closes whole

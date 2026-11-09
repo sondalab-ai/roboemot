@@ -18,6 +18,7 @@ from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
 from roboemot.motion.beat import Beat, BeatSource, room_beat
+from roboemot.motion.curves import min_jerk
 from roboemot.voice.music import MusicDetector, MusicState
 from roboemot.voice.speech import SpeechOutput, _Job
 from test_speech import FakeBackend, TimelineSink
@@ -343,6 +344,115 @@ def test_snapshot_is_counts_and_a_label_only(manifest, mapping):
     run(r, 0.0, 1.0)
     snap = r.snapshot()
     assert snap == {"started": 1, "accent": 0, "skipped": 0, "source": "own"}
+
+
+def test_live_snapshot_shows_the_source_and_each_roles_share(manifest, mapping):
+    beats = Beats(beat(strength=0.5))
+    r = make(manifest, mapping, beats, speaking_channels=lambda: frozenset({SWAY}))
+    assert r.live_snapshot(0.0).active is False  # nothing ticked yet
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.active and snap.source == "own"
+    assert snap.bob == pytest.approx(min(1.0, r.scale(0.5)))
+    assert snap.sway == 0.0  # yields from the start: the roles are not swapped
+
+
+def test_live_snapshot_level_follows_the_duck(manifest, mapping):
+    speaking: set[str] = set()
+    r = make(manifest, mapping, Beats(beat()), speaking_channels=lambda: frozenset(speaking))
+    run(r, 0.0, 1.0)
+    share = min(1.0, r.scale(1.0))
+    assert r.live_snapshot(0.95).bob == pytest.approx(share)
+    speaking.add(BOB)
+    run(r, 1.0, 1.05)  # one tick of the yield fade
+    snap = r.live_snapshot(1.0)
+    assert snap.bob == pytest.approx(share * (1 - TICK / YIELD_S))
+    assert snap.sway == pytest.approx(share)
+
+
+def test_live_snapshot_level_uses_the_fade_curve(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat()), cfg=DanceConfig(lead_ms=0.0, fade_in_s=1.0))
+    run(r, 0.0, 0.3)
+    gain = r._s.gain
+    assert 0.1 < gain < 0.5
+    expected = min_jerk(gain) * min(1.0, r.scale(1.0))
+    assert expected != pytest.approx(gain * min(1.0, r.scale(1.0)))  # the curve is not linear here
+    assert r.live_snapshot(0.25).bob == pytest.approx(expected)
+
+
+def test_live_snapshot_level_is_the_ramped_level_the_renderer_uses(manifest, mapping):
+    cfg = DanceConfig(lead_ms=0.0, fade_in_s=0.1, fade_out_s=0.1, speaking_gain=0.5)
+    room = Beat(PERIOD, 0.0, 1.0, "room")
+    r = make(manifest, mapping, Beats(room), cfg=cfg, speaking=lambda _t: True)
+    run(r, 0.0, 1.0)
+    assert r.live_snapshot(0.95).bob == pytest.approx(min(1.0, r.scale(0.5)))
+
+
+def test_live_snapshot_pulse_follows_the_beat_at_a_folded_move(manifest, mapping):
+    period = 0.6  # the bob moves every second beat: 0.6 x 2 clears 2 x min_half_s
+    r = make(manifest, mapping, Beats(beat(period=period)))
+    run(r, 0.0, 1.0)
+    assert r._s.moves["bob"].factor == 2
+    snap = r.live_snapshot(0.95)
+    assert snap.tempo_bpm() == pytest.approx(60.0 / period)
+    assert snap.beat_age_s(0.95) == pytest.approx(0.95 % period)
+
+
+def test_live_snapshot_carries_the_beat_it_follows(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat(phase=0.1)))
+    assert r.live_snapshot(0.0).tempo_bpm() is None
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.tempo_bpm() == pytest.approx(60.0 / PERIOD)
+    assert snap.beat_age_s(0.95) == pytest.approx(0.85)
+    assert snap.beat_age_s(0.1 + PERIOD + 0.25) == pytest.approx(0.25)  # wraps per period
+
+
+def test_live_snapshot_passes_a_room_beat_through(manifest, mapping):
+    room = Beat(PERIOD, 0.0, 1.0, "room")
+    r = make(manifest, mapping, Beats(room))
+    run(r, 0.0, 1.0)
+    assert r.live_snapshot(0.95).source == "room"
+
+
+def test_live_snapshot_fades_with_the_beat(manifest, mapping):
+    beats = Beats(beat())
+    r = make(manifest, mapping, beats, cfg=DanceConfig(lead_ms=0.0, fade_in_s=0.1, fade_out_s=1.0))
+    run(r, 0.0, 1.0)
+    full = r.live_snapshot(0.95).bob
+    beats.beat = None
+    run(r, 1.0, 1.5)
+    fading = r.live_snapshot(1.45)
+    assert fading.active and fading.source is None and 0.0 < fading.bob < full
+    run(r, 1.5, 3.0)
+    done = r.live_snapshot(2.95)
+    assert not done.active and done.bob == 0.0
+
+
+def test_live_snapshot_is_idle_once_the_tick_stops(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat()))
+    run(r, 0.0, 1.0)
+    stale = r.live_snapshot(0.95 + r.cfg.command_ttl_s + 0.1)
+    assert not stale.active and stale.source is None and stale.bob == 0.0 and stale.sway == 0.0
+
+
+def test_live_snapshot_of_a_rested_role_is_zero(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat(period=0.1)), cfg=DanceConfig(**NO_LEAD))  # no fold fits
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.source == "own" and snap.bob == 0.0
+
+
+def test_live_snapshot_accent_age(manifest, mapping):
+    beats = Beats()
+    r = make(manifest, mapping, beats)
+    run(r, 0.0, 0.5)
+    assert r.live_snapshot(0.45).last_accent_age_s(0.45) is None
+    beats.stamps = [1.0]
+    run(r, 0.5, 1.5)
+    snap = r.live_snapshot(1.45)
+    assert snap.last_accent_age_s(1.25) == pytest.approx(0.25)
+    assert snap.last_accent_age_s(0.8) == 0.0  # found ahead of the clock: never negative
 
 
 def test_a_yielded_channel_leaves_within_the_speaking_fade(manifest, mapping):
