@@ -4695,6 +4695,13 @@ class DanceConfig(Strict):
     speaking_gain: float = param(
         0.3, "Share of the amplitude kept while the robot speaks", ge=0, le=1
     )
+    min_strength: float = param(
+        0.7,
+        "Least beat strength for confirmed room music: a lower detector confidence moves as "
+        "much as this; 0 lets the confidence scale the moves all the way down",
+        ge=0,
+        le=1,
+    )
     accent_min_interval_s: float = param(
         1.0, "Least time between two accent flicks", unit="s", ge=0.1, le=30
     )

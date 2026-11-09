@@ -765,12 +765,35 @@ def test_speaking_channel_handover(manifest, mapping):
     assert amplitude(back, BOB) > 0.0
 
 
-def test_room_beat_strength_scales_amplitude(manifest, mapping):
-    def size(confidence):
-        r = make(manifest, mapping, Room(100.0, confidence=confidence))
-        return amplitude(steady(r, 8 * Room(100.0).period), SWAY)
+def room_size(manifest, mapping, confidence, min_strength):
+    """The steady sway amplitude at a room confidence with ``dance.min_strength``."""
+    cfg = DanceConfig(**NO_LEAD, min_strength=min_strength)
+    r = make(manifest, mapping, Room(100.0, confidence=confidence), cfg=cfg)
+    return amplitude(steady(r, 8 * Room(100.0).period), SWAY)
 
-    assert size(0.5) == pytest.approx(0.5 * size(1.0), rel=0.05)
+
+def test_room_beat_strength_scales_amplitude(manifest, mapping):
+    full = room_size(manifest, mapping, 1.0, 0.0)
+    assert room_size(manifest, mapping, 0.5, 0.0) == pytest.approx(0.5 * full, rel=0.05)
+
+
+def test_min_strength_raises_a_weak_room_beat(manifest, mapping):
+    full = room_size(manifest, mapping, 1.0, 0.7)
+    assert room_size(manifest, mapping, 0.3, 0.7) == pytest.approx(0.7 * full, rel=0.05)
+
+
+def test_min_strength_leaves_a_strong_room_beat_alone(manifest, mapping):
+    full = room_size(manifest, mapping, 1.0, 0.7)
+    assert room_size(manifest, mapping, 0.9, 0.7) == pytest.approx(0.9 * full, rel=0.05)
+
+
+def test_min_strength_leaves_an_own_beat_alone(manifest, mapping):
+    def size(min_strength):
+        cfg = DanceConfig(**NO_LEAD, min_strength=min_strength)
+        r = make(manifest, mapping, Beats(beat(strength=0.5)), cfg=cfg)
+        return amplitude(steady(r, 8 * PERIOD), SWAY)
+
+    assert size(0.9) == pytest.approx(size(0.0), rel=0.01)
 
 
 def test_a_new_confidence_is_no_step(manifest, mapping):
@@ -920,7 +943,7 @@ def test_own_to_room_and_back_never_steps(manifest, mapping):
 
 def test_a_rising_confidence_ramps_up(manifest, mapping):
     room = Room(100.0, confidence=0.2)
-    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 2.0})
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 2.0, "min_strength": 0.0})
     r = make(manifest, mapping, room, cfg=cfg)
     run(r, 0.0, SETTLE_S)
     assert r._s.level == pytest.approx(0.2)

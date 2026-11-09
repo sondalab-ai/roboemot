@@ -169,7 +169,8 @@ Two providers, picked in this order:
    (my call). The start stamp is the time the speech output really starts the job, not the
    queue time. The builder checks that `SpeechOutput` can report it and adds that if needed.
    `strength` is 1.
-2. **Room music.** The detector's `MusicState`, with `strength` = confidence.
+2. **Room music.** The detector's `MusicState`, with `strength` = confidence. The dance layer reads
+   at least `dance.min_strength` for this source (SPEC 7, Dance motion).
 
 None: no dance.
 
