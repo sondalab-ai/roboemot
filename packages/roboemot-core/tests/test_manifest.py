@@ -8,8 +8,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from roboemot.affect.clips import load_clip_library
+from roboemot.affect.dance import DanceRenderer
 from roboemot.cli import main as cli
+from roboemot.config import ConfigStack
 from roboemot.manifest import ManifestError, load_manifest, negotiate
+from roboemot.motion.beat import BeatSource
 
 MANIFESTS = Path(__file__).resolve().parents[3] / "configs" / "manifests"
 REACHY = MANIFESTS / "reachy-mini-wireless.yaml"
@@ -121,3 +125,36 @@ def test_home_outside_limits_rejected():
     raw["joints"][0]["home_deg"] = 500
     with pytest.raises(ManifestError, match="home_deg"):
         load_manifest(raw)
+
+
+def test_reachy_dance_motion_map_loads_with_its_three_roles():
+    """SPEC 4A: bob dips the head, sway rolls and turns, accent mirrors the antennas; the map
+    loads through the same refusal path as the app and moves no body yaw and no translation."""
+    manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
+    cfg = stack.effective()
+    dance_map = cfg.dance_motion_map
+    assert dance_map.bob == {"head.pitch": 1}
+    assert dance_map.sway == {"head.roll": 1, "head.yaw": -1}
+    peaks = {n: max(f, key=lambda k: abs(k[1])) for n, f in dance_map.accent.channels.items()}
+    assert set(peaks) == {"antenna_right", "antenna_left"}
+    assert peaks["antenna_right"][1] < 0 < peaks["antenna_left"][1]
+    named = {n for names in dance_map.channels().values() for n in names}
+    assert "body_yaw" not in named
+    assert all(manifest.dofs[n].kind == "angle" for n in named)
+    DanceRenderer(
+        cfg.dance,
+        dance_map,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        max_amplitude=cfg.expression.max_amplitude,
+        beats_per_bar=cfg.music.beats_per_bar,
+        beat=BeatSource(lambda _: None, lambda _: None),
+        yield_fade_s=lambda: 0.2,
+    )
