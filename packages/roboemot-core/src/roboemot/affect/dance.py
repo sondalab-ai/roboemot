@@ -24,8 +24,9 @@ Amplitude, re-read every tick::
     role degrees x register.motion_amplitude x circadian factor x (1 + arousal_gain x arousal)
                  x beat strength x speaking_gain (while the robot speaks over room music)
 
-Room music's strength (the detector's confidence, new every estimate) and the speaking gain ramp
-with ``fade_in_s`` and ``fade_out_s``, so neither is a step.
+Room music's strength (the detector's confidence, new every estimate, at least ``min_strength``:
+the real room reads low even while the beat is confirmed) and the speaking gain ramp with
+``fade_in_s`` and ``fade_out_s``, so neither is a step.
 
 The product of the factors is capped by ``expression.max_amplitude``. Roles that share a channel
 add up, so a channel's sum is capped too, at that factor times its largest role's degrees. Each
@@ -416,14 +417,17 @@ class DanceRenderer:
         ]
 
     def _level(self, t: float, beat: Beat, b: _Settings, dt: float) -> float:
-        """The beat's share of the amplitude at ``t``: its strength, times ``speaking_gain``
-        while the robot speaks over room music, at the rates of the fades. The first read after
-        a (re)start takes the value at once: the fade starts from zero."""
+        """The beat's share of the amplitude at ``t``: its strength (room music: at least
+        ``min_strength``), times ``speaking_gain`` while the robot speaks over room music, at the
+        rates of the fades. The first read after a (re)start takes the value at once: the fade
+        starts from zero."""
         s = self._s
         up, down = dt / b.cfg.fade_in_s, dt / b.cfg.fade_out_s
         target = beat.strength
-        if beat.source == "room" and self.speaking(t):
-            target *= b.cfg.speaking_gain
+        if beat.source == "room":
+            target = max(target, b.cfg.min_strength)
+            if self.speaking(t):
+                target *= b.cfg.speaking_gain
         if s.level is None:
             s.level = target
         elif target > s.level:

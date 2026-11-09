@@ -39,6 +39,7 @@
  "SPEC 7: dance motion, small moves locked to a beat": "SPEC 7: movimento di ballo, piccoli movimenti legati a un battito",
  "Shape of the accent flick on a sound's onset": "Forma del guizzo d'accento all'attacco di un suono",
  "Share of the amplitude kept while the robot speaks": "Quota dell'ampiezza mantenuta mentre il robot parla",
+ "Least beat strength for confirmed room music: a lower detector confidence moves as much as this; 0 lets the confidence scale the moves all the way down": "Intensità minima del battito per la musica confermata nella stanza: con una confidenza più bassa i movimenti restano di questa misura; 0 lascia che la confidenza riduca i movimenti senza limite",
  "Size of the accent flick before the scaling factors": "Ampiezza del guizzo d'accento prima dei fattori di scala",
  "Size of the dip on the beat before the scaling factors": "Ampiezza del movimento in giù sul battito prima dei fattori di scala",
  "Size of the sway to each side before the scaling factors": "Ampiezza dell'oscillazione per lato prima dei fattori di scala",
