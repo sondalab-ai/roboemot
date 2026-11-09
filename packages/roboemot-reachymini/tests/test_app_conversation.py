@@ -285,10 +285,12 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         app.speech.extend(time.monotonic() + 5.0)
         now = time.monotonic()
         loud = (0.3 * np.sin(np.arange(1024) * 0.2)).astype(np.float32)
-        for i in range(4):
+        for i in range(20):  # voice.barge_in.sustain_ms: the speech must go on for a second
             app.bargein.on_chunk(
                 SimpleNamespace(samples=loud, rate_hz=16000, stamp=now + (i + 1) * 0.064, gap=False)
             )
+            if stops:
+                break
         assert stops == [1]
         report = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
         assert (
