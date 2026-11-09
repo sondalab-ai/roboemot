@@ -430,22 +430,30 @@ def find_unrecorded(remote: Remote, oc: Overclock) -> OverclockRecord | None:
     return OverclockRecord(oc.config_path, block, config.replace(block, "", 1), state="on")
 
 
+def _keep(ui: Ui, question: str) -> bool:
+    """The keep-or-revert question: default keep, and ``-y`` keeps and says how to remove it."""
+    if ui.assume_yes:
+        ui.ok("Kept the overclock", f"-y keeps it, --no-{FLAG[2:]} removes it")
+    return ui.confirm(question, True, flag=FLAG)
+
+
 def _ask_active(
     ui: Ui, remote: Remote, oc: Overclock, rec: OverclockRecord
 ) -> tuple[bool | None, bool]:
     """What the live boot config says for a run with no overclock flag: the choice (None: the
     normal opt-in decides) and whether the record entry still counts. A block in place gets
-    only the keep-or-revert question (default keep; ``-y`` keeps). A block edited by hand is
-    kept, and ``apply`` prints the difference. A recorded block that is gone counts as no
-    overclock."""
+    only the keep-or-revert question (default keep; ``-y`` keeps), and so does a trial config
+    the robot runs now, which is not saved yet (keep: ``apply`` checks and promotes it). A block
+    edited by hand is kept, and ``apply`` prints the difference. A recorded block that is gone
+    counts as no overclock."""
     config = read(remote, oc.config_path) or ""
     if applied_block(oc, config) is not None:
-        if ui.assume_yes:
-            ui.ok("Kept the overclock", f"-y keeps it, --no-{FLAG[2:]} removes it")
-        question = f"Overclock is on ({oc.label}). Keep it (no reverts it)?"
-        return ui.confirm(question, True, flag=FLAG), True
+        return _keep(ui, f"Overclock is on ({oc.label}). Keep it (no reverts it)?"), True
     if rec.state != "on":
-        return None, True
+        if not oc.trial_booted(remote):
+            return None, True
+        question = f"Overclock is running from a trial boot ({oc.label}) and is not saved."
+        return _keep(ui, f"{question} Keep it (no reverts it)?"), True
     return (True, True) if has_markers(config, rec.block) else (None, False)
 
 
