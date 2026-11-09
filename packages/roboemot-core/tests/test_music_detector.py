@@ -20,9 +20,18 @@ from audio_signals import (
 from pydantic import ValidationError
 from roboemot.config.schema import MusicConfig, RoboEmotConfig
 from roboemot.motion.beat import room_beat
-from roboemot.voice.music import MusicDetector, _Estimate
+from roboemot.voice.music import (
+    MusicDetector,
+    _at,
+    _autocorr,
+    _autocorr_at,
+    _detrend,
+    _Estimate,
+)
 
 RATE = 16000
+HOP_SAMPLES = 512  # the default music.hop_ms at RATE
+HOLDS_NEEDED = 20  # of the 29 estimates of a 30 s signal
 CHUNK = 320  # 20 ms: not a multiple of the hop, so hops span chunks
 TOLERANCE = 0.04
 
@@ -321,7 +330,59 @@ def test_apply_config_takes_effect_on_the_next_feed():
 
 def test_band_above_nyquist_is_rejected():
     with pytest.raises(ValueError, match="Nyquist"):
-        MusicDetector(MusicConfig(bands_hz=[(30.0, 150.0), (150.0, 9000.0)]), RATE)
+        cfg = MusicConfig(bands_hz=[(30.0, 150.0), (150.0, 9000.0)], min_bands_active=2)
+        MusicDetector(cfg, RATE)
+
+
+def _clicks_between_hops(hops, seconds, seed=2):
+    """2.5 ms noise clicks centred on a hop boundary every ``hops`` hops, over a quiet floor."""
+    rng = np.random.default_rng(seed)
+    size = int(seconds * RATE)
+    signal = 0.003 * rng.standard_normal(size)
+    width = 40
+    click = 0.5 * rng.standard_normal(width) * np.exp(-np.arange(width) / (width / 3))
+    for at in range(4 * HOP_SAMPLES, size - width, hops * HOP_SAMPLES):
+        signal[at - width // 2 : at + width // 2] += click
+    return signal.astype(np.float32)
+
+
+def test_a_beat_between_two_hops_holds():
+    """QA 2026-11-09: without overlapping windows a click on a hop boundary fell under the
+    Hann edges of both hops and the beat was not seen (0 holds of 29 before the fix)."""
+    det = detector()
+    run(det, _clicks_between_hops(16, 30.0))
+    assert det.snapshot()["holds"] >= HOLDS_NEEDED
+
+
+@pytest.mark.parametrize("seed", [7, 8])
+def test_a_beat_with_strong_jitter_holds(seed):
+    """QA 2026-11-09: 40 ms of timing jitter spreads a beat over two hops; the smoothing lines
+    it up (at most 4 holds of 29 before the fix at this tempo)."""
+    det = detector()
+    run(det, drum_loop(120, 30.0, RATE, seed=seed, jitter_s=0.04))
+    assert det.snapshot()["holds"] >= HOLDS_NEEDED
+
+
+def test_autocorr_at_matches_the_full_autocorrelation():
+    x = np.random.default_rng(5).standard_normal(180)
+    full = _autocorr(x, 40)
+    for lag in (7.0, 12.25, 31.5):
+        assert _autocorr_at(x, lag) == pytest.approx(_at(full, lag))
+
+
+def test_detrend_keeps_only_the_rises_above_the_local_level():
+    steady = np.full(50, 2.0)
+    assert _detrend(steady, 9) == pytest.approx(np.zeros(50))
+    peak = steady.copy()
+    peak[25] = 5.0
+    out = _detrend(peak, 9)
+    assert out[25] == pytest.approx(3.0 * 8 / 9)
+    assert out[10] == pytest.approx(0.0)
+
+
+def test_detrend_off_returns_the_input():
+    values = np.arange(5.0)
+    assert _detrend(values, 0) is values
 
 
 @pytest.mark.parametrize(
@@ -330,6 +391,7 @@ def test_band_above_nyquist_is_rejected():
         {"bands_hz": []},
         {"bands_hz": [(200.0, 100.0), (300.0, 400.0)]},
         {"bands_hz": [(30.0, 150.0)], "min_bands_active": 2},
+        {"hop_ms": 32.0, "fft_ms": 16.0},
         {"tempo_bpm": (180.0, 60.0)},
         {"prior_bpm": (130.0, 100.0)},
         {"window_s": 2.0, "tempo_bpm": (40.0, 180.0)},
