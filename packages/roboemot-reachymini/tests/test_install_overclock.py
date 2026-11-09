@@ -763,6 +763,54 @@ def test_an_edited_block_is_left_alone_without_the_question(
     assert offline_boot.boot == {CONFIG: edited}
 
 
+def running_trial(robot_: BootRobot, state: str) -> None:
+    """The robot runs the trial config now; the record says ``state``, the block is not saved."""
+    install(overclock_reboot=False)
+    robot_.tryboot, robot_.overclocked = 1, True
+    data = robot_.record
+    data["overclock"]["state"] = state
+    robot_.files[RECORD] = json.dumps(data)
+
+
+@pytest.mark.parametrize("state", ["trial", "trying", "promoting"])
+def test_enter_saves_a_running_trial(offline_boot, daemon, monkeypatch, capsys, state):
+    running_trial(offline_boot, state)
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    captured = capsys.readouterr()
+    prompt = "Overclock is running from a trial boot (1.8 GHz, from 1.5) and is not saved."
+    assert prompt in flat(captured.err) and "Overclock the CPU" not in captured.err
+    assert "Promoted the overclock" in flat(captured.out)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_yes_saves_a_running_trial(offline_boot, daemon, monkeypatch, capsys):
+    running_trial(offline_boot, "promoting")
+    reinstall_on_terminal(Ui(interactive=True, assume_yes=True, read=answers()), monkeypatch)
+    assert "-y keeps it, --no-overclock removes it" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_no_removes_a_running_trial(offline_boot, daemon, monkeypatch):
+    running_trial(offline_boot, "promoting")
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["n\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+    assert offline_boot.record["overclock"] is None
+
+
+def test_a_trial_not_booted_gets_the_opt_in_question(offline_boot, daemon, monkeypatch, capsys):
+    install(overclock_reboot=False)
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    captured = capsys.readouterr()
+    assert "Overclock the CPU" in captured.err and "trial boot" not in captured.err
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+
+
 # ---------------------------------------------------------------- opt-in
 
 
