@@ -254,6 +254,7 @@ def real_piper():
 def yaml_for(language: str, piper: Path | None) -> str:
     lines = [
         "voice:",
+        "  barge_in: {sustain_ms: 0}",  # the budget below measures the cut-off point
         "  enabled: true",
         f"  models_dir: {MODELS_DIR}",
         *([f"  piper:\n    python: {piper}"] if piper else []),
