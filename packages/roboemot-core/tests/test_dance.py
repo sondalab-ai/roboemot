@@ -7,16 +7,20 @@ import math
 from pathlib import Path
 
 import pytest
+from audio_signals import drum_loop
 from pydantic import ValidationError
 from roboemot.affect import AffectState
 from roboemot.affect.dance import SOURCE, DanceRenderer, fold
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigError, ConfigStack
-from roboemot.config.schema import DanceConfig, DanceMotionMap, RoboEmotConfig
+from roboemot.config.schema import DanceConfig, DanceMotionMap, MusicConfig, RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
-from roboemot.motion.beat import Beat, BeatSource
+from roboemot.motion.beat import Beat, BeatSource, room_beat
+from roboemot.voice.music import MusicDetector, MusicState
+from roboemot.voice.speech import SpeechOutput, _Job
+from test_speech import FakeBackend, TimelineSink
 
 MANIFEST = Path(__file__).resolve().parent / "data" / "dance-head.yaml"
 TICK = 0.05  # the 20 Hz app tick
@@ -25,6 +29,14 @@ PERIOD = 1.2  # one bob per beat: 2 x min_half_s (0.5) fits
 BARS = 4
 NO_LEAD = {"lead_ms": 0.0, "fade_in_s": 0.1, "fade_out_s": 0.1}
 YIELD_S = 0.15  # the speaking motion's default fade_ms
+RATE = 16000
+CHUNK = 320
+
+
+def feed(det, signal, t0):
+    """Feed ``signal`` from ``t0`` in chunks, as the listener does."""
+    for i in range(0, signal.size, CHUNK):
+        det.feed(signal[i : i + CHUNK], t0 + i / RATE)
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +61,28 @@ class Beats:
             lambda now: None,
             accents=lambda since, now: [s for s in self.stamps if since < s <= now],
         )
+
+
+class Room:
+    """A music detector's state as the room provider reads it: the time since the last beat of
+    a grid anchored at ``anchor``."""
+
+    def __init__(self, bpm: float, *, confidence: float = 1.0, anchor: float = 0.0) -> None:
+        self.bpm, self.confidence, self.anchor = bpm, confidence, anchor
+        self.playing = True
+
+    @property
+    def period(self) -> float:
+        return 60.0 / self.bpm
+
+    def state(self, now: float) -> MusicState:
+        if not self.playing:
+            return MusicState(False, None, None, self.confidence, now)
+        since = (now - self.anchor) % self.period
+        return MusicState(True, self.bpm, since, self.confidence, now)
+
+    def source(self) -> BeatSource:
+        return BeatSource(lambda now: None, lambda now: room_beat(self.state(now)))
 
 
 def beat(period=PERIOD, phase=0.0, strength=1.0) -> Beat:
@@ -503,3 +537,329 @@ def test_command_ttl_must_outlast_one_app_tick():
         RoboEmotConfig.model_validate(
             {"dance": {"command_ttl_s": 0.05}, "motion": {"app_tick_hz": 20}}
         )
+
+
+# ------------------------------------------------------------------ room music (SPEC 7, 8)
+
+SETTLE_S = 3.0  # past every fade of NO_LEAD
+MIN_JERK_SLOPE = 1.875  # the steepest rate of min_jerk over its unit interval
+SLOPE_MARGIN = 1.15  # sampling and float room over the analytic bound
+
+
+def peaks(track):
+    """Stamps of the local maxima of ``|value|`` that reach most of the track's largest."""
+    values = [abs(v) for _, v in track]
+    top = max(values)
+    return [
+        track[i][0]
+        for i in range(1, len(values) - 1)
+        if values[i] >= 0.9 * top and values[i - 1] < values[i] >= values[i + 1]
+    ]
+
+
+def steady(r, seconds):
+    """The track of ``r`` after it has settled, for ``seconds``."""
+    run(r, 0.0, SETTLE_S)
+    return run(r, SETTLE_S, SETTLE_S + seconds)
+
+
+def amplitude(track, name):
+    return max(abs(v) for _, v in channel(track, name))
+
+
+@pytest.mark.parametrize(
+    ("bpm", "factor"),
+    [(170.0, 4), (100.0, 2), (50.0, 1)],
+)
+def test_tempo_folding(manifest, mapping, bpm, factor):
+    cfg = DanceConfig(**NO_LEAD)
+    room = Room(bpm)
+    assert fold(room.period, cfg.min_half_s) == factor
+    assert (factor * room.period) / 2 >= cfg.min_half_s
+    track = channel(steady(make(manifest, mapping, room, cfg=cfg), 8 * factor * room.period), BOB)
+    gaps = [b - a for a, b in zip(peaks(track), peaks(track)[1:], strict=False)]
+    assert gaps
+    assert all(abs(g - factor * room.period) <= 2 * TICK for g in gaps), gaps
+    assert all(g / 2 >= cfg.min_half_s - TICK for g in gaps)
+
+
+@pytest.mark.parametrize("bpm", [100.0, 170.0])
+def test_room_grid_is_smooth_across_beats_and_re_estimates(manifest, mapping, bpm):
+    """A grid that re-anchors on every beat (what the detector gives) must not restart a move."""
+    room = Room(bpm)
+    r = make(manifest, mapping, room)
+    run(r, 0.0, SETTLE_S)
+    room.anchor += 3 * room.period  # an estimate: another beat of the same grid
+    track = run(r, SETTLE_S, SETTLE_S + 16 * room.period)
+    min_half_s = DanceConfig().min_half_s
+    bob_span = fold(room.period, min_half_s) * room.period
+    sway_span = fold(room.period * BARS, min_half_s) * room.period * BARS
+    for name, span in ((BOB, bob_span), (SWAY, sway_span)):
+        values = [v for _, v in channel(track, name)]
+        amp = max(abs(v) for v in values)
+        bound = amp * MIN_JERK_SLOPE * 2 * TICK / span * SLOPE_MARGIN
+        assert max(abs(b - a) for a, b in zip(values, values[1:], strict=False)) <= bound
+
+
+def test_lead_ms_shifts_peak(manifest, mapping):
+    def peak_time(lead_ms):
+        cfg = DanceConfig(**{**NO_LEAD, "lead_ms": lead_ms})
+        track = channel(steady(make(manifest, mapping, Beats(beat()), cfg=cfg), 2 * PERIOD), BOB)
+        return peaks(track)[0]
+
+    assert peak_time(0.0) - peak_time(200.0) == pytest.approx(0.2, abs=TICK)
+
+
+def test_speaking_gain_scales_amplitude(manifest, mapping):
+    speaking = [False]
+    cfg = DanceConfig(**NO_LEAD, speaking_gain=0.3)
+    r = make(manifest, mapping, Room(100.0), cfg=cfg, speaking=lambda t: speaking[0])
+    window = 2 * Room(100.0).period * 2
+    run(r, 0.0, SETTLE_S)
+    full = amplitude(run(r, SETTLE_S, SETTLE_S + window), SWAY)
+    speaking[0] = True
+    run(r, SETTLE_S + window, 2 * SETTLE_S + window)
+    start = 2 * SETTLE_S + window
+    spoken = amplitude(run(r, start, start + window), SWAY)
+    assert spoken == pytest.approx(0.3 * full, rel=0.1)
+
+
+def test_speaking_gain_leaves_an_own_beat_alone(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat()), speaking=lambda t: True)
+    quiet = make(manifest, mapping, Beats(beat()))
+    assert amplitude(steady(r, 2 * PERIOD), BOB) == pytest.approx(
+        amplitude(steady(quiet, 2 * PERIOD), BOB)
+    )
+
+
+def test_speaking_channel_handover(manifest, mapping):
+    drives = {BOB}
+    cfg = DanceConfig(**NO_LEAD, speaking_gain=0.3)
+    silent = make(manifest, mapping, Room(100.0), cfg=cfg)
+    r = make(
+        manifest,
+        mapping,
+        Room(100.0),
+        cfg=cfg,
+        speaking=lambda t: True,
+        speaking_channels=lambda: frozenset(drives),
+    )
+    window = 4 * Room(100.0).period
+    track = steady(r, window)
+    assert amplitude(track, BOB) == 0.0  # the speaking motion owns it
+    assert amplitude(track, SWAY) == pytest.approx(
+        0.3 * amplitude(steady(silent, window), SWAY), rel=0.1
+    )
+    drives.clear()
+    back = run(r, SETTLE_S + window, SETTLE_S + 2 * window)
+    assert amplitude(back, BOB) > 0.0
+
+
+def test_room_beat_strength_scales_amplitude(manifest, mapping):
+    def size(confidence):
+        r = make(manifest, mapping, Room(100.0, confidence=confidence))
+        return amplitude(steady(r, 8 * Room(100.0).period), SWAY)
+
+    assert size(0.5) == pytest.approx(0.5 * size(1.0), rel=0.05)
+
+
+def test_a_new_confidence_is_no_step(manifest, mapping):
+    room = Room(100.0)
+    cfg = DanceConfig(**{**NO_LEAD, "fade_out_s": 1.0})
+    r = make(manifest, mapping, room, cfg=cfg)
+    run(r, 0.0, SETTLE_S)
+    room.confidence = 0.2
+    r.commands(SETTLE_S)
+    assert r._s.level == pytest.approx(1.0 - TICK / cfg.fade_out_s)
+
+
+def test_no_beat_when_the_room_goes_quiet(manifest, mapping):
+    room = Room(100.0)
+    r = make(manifest, mapping, room)
+    run(r, 0.0, SETTLE_S)
+    room.playing = False
+    track = run(r, SETTLE_S, SETTLE_S + 1.0)
+    assert r.snapshot()["source"] is None
+    assert track[-1][1] is None  # nothing left to send
+    sent = [m for _, m in track if m is not None]
+    assert all(v == 0.0 for v in sent[-1].values())  # the last command returned to zero
+
+
+# ------------------------------------------------------------------ continuity (SPEC 7)
+
+MIN_HALF_S = DanceConfig().min_half_s
+
+
+def steps(track, name):
+    values = [v for _, v in channel(track, name)]
+    return [abs(b - a) for a, b in zip(values, values[1:], strict=False)]
+
+
+def slope_bound(amp):
+    """Largest per-tick change of a move whose halves last at least ``min_half_s``."""
+    return amp * MIN_JERK_SLOPE * 2 * TICK / (2 * MIN_HALF_S) * SLOPE_MARGIN
+
+
+def assert_smooth(track, amp_bob, amp_sway):
+    assert max(steps(track, BOB)) <= slope_bound(amp_bob)
+    assert max(steps(track, SWAY)) <= slope_bound(amp_sway)
+
+
+def settled_amplitudes(r, seconds):
+    run(r, 0.0, SETTLE_S)
+    track = run(r, SETTLE_S, SETTLE_S + seconds)
+    return track, amplitude(track, BOB), amplitude(track, SWAY)
+
+
+def test_fold_keeps_its_factor_inside_the_margin():
+    margin = DanceConfig().fold_margin
+    assert fold(0.4996, 0.5, 2, margin) == 4  # no longer fits
+    assert fold(0.5004, 0.5, 4, margin) == 4  # fits at 2, not by the margin
+    assert fold(0.5004, 0.5, 2, margin) == 2  # kept while it fits
+    assert fold(0.56, 0.5, 4, margin) == 2  # clears the margin
+    assert fold(0.5004, 0.5) == 2  # no current fold: the shortest that fits
+
+
+def test_tempo_crossing_a_fold_threshold_never_steps(manifest, mapping):
+    room = Room(119.9)
+    r = make(manifest, mapping, room)
+    _, amp_bob, amp_sway = settled_amplitudes(r, 4.0)
+    start = SETTLE_S + 4.0
+    track = []
+    for i in range(16):  # an estimate a second, around 120 BPM
+        room.bpm = 120.1 if i % 2 == 0 else 119.9
+        track += run(r, start + i, start + i + 1.0)
+    assert r._s.moves["bob"].factor == 4  # flipped once, then held
+    assert_smooth(track, amp_bob, amp_sway)
+    dips = peaks(channel(track, BOB))
+    assert all(b - a >= 2 * MIN_HALF_S - TICK for a, b in zip(dips, dips[1:], strict=False))
+
+
+def test_a_fractional_grid_shift_never_steps_and_converges(manifest, mapping):
+    room = Room(100.0)
+    r = make(manifest, mapping, room)
+    _, amp_bob, amp_sway = settled_amplitudes(r, 6 * room.period)
+    start = SETTLE_S + 6 * room.period
+    room.anchor += 0.3 * room.period
+    track = run(r, start, start + 3.0)
+    assert_smooth(track, amp_bob, amp_sway)
+    later = run(r, start + 3.0, start + 3.0 + 6 * room.period)
+    for dip in peaks(channel(later, BOB)):
+        off = math.remainder(dip - room.anchor, room.period)
+        assert abs(off) <= 2 * TICK, dip
+
+
+@pytest.mark.parametrize("new_bpm", [100.0, 150.0])
+def test_a_tick_stall_restarts_from_zero(manifest, mapping, new_bpm):
+    room = Room(100.0)
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 1.0})
+    r = make(manifest, mapping, room, cfg=cfg)
+    run(r, 0.0, SETTLE_S)
+    room.bpm = new_bpm
+    resume = SETTLE_S + 5 * room.period  # far beyond command_ttl_s
+    assert r.commands(resume) == []  # the layer restarted: nothing held, the gain is zero
+    second = r.commands(resume + TICK)[0].targets
+    assert max(abs(v) for v in second.values()) <= math.radians(cfg.bob_deg) * 1.5 * TICK
+
+
+def test_a_short_stall_only_advances_the_move(manifest, mapping):
+    """A hiccup below ``command_ttl_s``: the place moves by the elapsed time, no restart."""
+    room = Room(100.0)
+    r = make(manifest, mapping, room)
+    _, amp_bob, _ = settled_amplitudes(r, 4 * room.period)
+    now = SETTLE_S + 4 * room.period
+    before = r.commands(now)[0].targets[BOB]
+    stall = 0.2
+    after = r.commands(now + stall)[0].targets[BOB]
+    assert abs(after - before) <= slope_bound(amp_bob) * stall / TICK
+
+
+def test_resting_then_resuming_fades_in_without_a_step(manifest, mapping):
+    room = Room(100.0)
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 1.0})
+    resting = [False]
+    r = make(manifest, mapping, room, cfg=cfg)
+    r.resting = lambda: resting[0]
+    run(r, 0.0, SETTLE_S)
+    resting[0] = True
+    run(r, SETTLE_S, SETTLE_S + 4.0)
+    assert r.snapshot()["source"] is None
+    resting[0] = False
+    first = run(r, SETTLE_S + 4.0, SETTLE_S + 4.2)
+    moved = [abs(v) for _, m in first if m for v in m.values()]
+    assert max(moved) <= math.radians(cfg.bob_deg) * 1.5 * 0.2
+
+
+def test_own_to_room_and_back_never_steps(manifest, mapping):
+    room = Room(100.0)
+    own = [beat(period=PERIOD)]
+    source = BeatSource(lambda now: own[0], lambda now: room_beat(room.state(now)))
+    holder = type("Holder", (), {"source": lambda self: source})()
+    r = make(manifest, mapping, holder)
+    _, amp_bob, amp_sway = settled_amplitudes(r, 4 * PERIOD)
+    start = SETTLE_S + 4 * PERIOD
+    own[0] = None
+    to_room = run(r, start, start + 4.0)
+    assert r.snapshot()["source"] == "room"
+    own[0] = beat(period=PERIOD, phase=start + 4.0 + 0.37)
+    back = run(r, start + 4.0, start + 8.0)
+    assert r.snapshot()["source"] == "own"
+    assert_smooth(to_room, amp_bob, amp_sway)
+    assert_smooth(back, amp_bob, amp_sway)
+
+
+def test_a_rising_confidence_ramps_up(manifest, mapping):
+    room = Room(100.0, confidence=0.2)
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 2.0})
+    r = make(manifest, mapping, room, cfg=cfg)
+    run(r, 0.0, SETTLE_S)
+    assert r._s.level == pytest.approx(0.2)
+    room.confidence = 1.0
+    r.commands(SETTLE_S)
+    assert r._s.level == pytest.approx(0.2 + TICK / cfg.fade_in_s)
+
+
+def test_blind_hold_expiry_fades_out_then_restarts_cleanly(manifest, mapping):
+    """A real detector: nothing heard past ``music.blind_hold_s`` ends the beat; music heard
+    again confirms anew and the dance fades in from zero."""
+    music = MusicConfig(blind_hold_s=2.0)
+    det = MusicDetector(music, RATE)
+    feed(det, drum_loop(120, 8.0, RATE), 0.0)
+    holder = type(
+        "Holder",
+        (),
+        {"source": lambda self: BeatSource(lambda n: None, lambda n: room_beat(det.state(n)))},
+    )()
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 1.0, "fade_out_s": 0.5})
+    r = make(manifest, mapping, holder, cfg=cfg)
+    run(r, 6.0, 9.5)  # heard until about 8.0 (a batch may wait), held for 2 s more
+    assert r.snapshot()["source"] == "room"
+    ended = run(r, 9.5, 11.0)
+    assert r.snapshot()["source"] is None
+    assert ended[-1][1] is None
+    again = 12.0
+    feed(det, drum_loop(120, 8.0, RATE, seed=5), again)
+    assert det.state(again + 8.0).playing
+    first = run(r, again + 8.0, again + 8.2)
+    assert r.snapshot()["source"] == "room"
+    moved = [abs(v) for _, m in first if m for v in m.values()]
+    assert max(moved) <= math.radians(cfg.bob_deg) * 1.5 * 0.2 / cfg.fade_in_s + 1e-9
+
+
+def test_speaking_gain_holds_across_a_gap_between_sentences(manifest, mapping):
+    """The real busy signal: no sentence on the timeline, the next one queued. Then the answer
+    is over and the gain comes back."""
+    out = SpeechOutput(RoboEmotConfig(), TimelineSink(), FakeBackend())
+    playing = [True]
+    out.timeline._sentence_at = lambda t: object() if playing[0] else None
+    cfg = DanceConfig(**NO_LEAD, speaking_gain=0.3)
+    r = make(manifest, mapping, Room(100.0), cfg=cfg, speaking=out.speaking_at)
+    run(r, 0.0, SETTLE_S)
+    assert r._s.level == pytest.approx(0.3)
+    playing[0] = False
+    out._jobs.append(object.__new__(_Job))
+    run(r, SETTLE_S, SETTLE_S + 1.0)
+    assert r._s.level == pytest.approx(0.3)  # the gap does not pump
+    out._jobs.clear()
+    run(r, SETTLE_S + 1.0, SETTLE_S + 2.0)
+    assert r._s.level == pytest.approx(1.0)

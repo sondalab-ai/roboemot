@@ -387,6 +387,11 @@ class SpeechTimeline:
             s = self._sentence_at(t)
             return replace(s) if s is not None else None
 
+    def playing(self, t: float) -> bool:
+        """Whether a sentence plays at ``t``: :meth:`sentence_at` without the copy."""
+        with self._lock:
+            return self._sentence_at(t) is not None
+
     def sentence(self, sentence_id: int) -> SpeechSentence | None:
         """The sentence ``sentence_id`` while it is in the history; a copy."""
         with self._lock:

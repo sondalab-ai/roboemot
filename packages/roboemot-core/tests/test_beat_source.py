@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 from roboemot.config.schema import RoboEmotConfig, SootheConfig
-from roboemot.motion.beat import Beat, BeatSource
+from roboemot.motion.beat import Beat, BeatSource, room_beat
+from roboemot.runtime.assembly import dance_beat, speech_playing
 from roboemot.soothe import SootheRunner
 from roboemot.soothe.synth import plan_hum, plan_sound, render_plan, synthesize
-from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.music import MusicState
+from roboemot.voice.speech import SpeechOutput, _Job, _RawJob
 from test_soothe_runner import RealRig
 from test_speech import FakeBackend, TimelineSink, wait_for
 
@@ -157,3 +160,93 @@ def test_no_beat_right_after_a_barge_in_stop():
         assert rig.runner.beat_at(at) is None and rig.runner.job == job
     finally:
         rig.out.close()
+
+
+# ------------------------------------------------------------------ room music (SPEC 7, 8)
+
+
+class Music:
+    """A detector stand-in: a settable state with the time since the last beat."""
+
+    def __init__(self, bpm=120.0, anchor=0.0, confidence=0.8, playing=True) -> None:
+        self.bpm, self.anchor, self.confidence, self.playing = bpm, anchor, confidence, playing
+
+    def state(self, now):
+        if not self.playing:
+            return MusicState(False, None, None, self.confidence, now)
+        since = (now - self.anchor) % (60.0 / self.bpm)
+        return MusicState(True, self.bpm, since, self.confidence, now)
+
+
+def test_own_beat_wins_over_room():
+    own = Beat(0.5, 0.0, 1.0, "own")
+    music = Music()
+    source = BeatSource(lambda now: own, lambda now: room_beat(music.state(now)))
+    assert source.beat_at(1.0) is own
+    room_only = BeatSource(lambda now: None, lambda now: room_beat(music.state(now)))
+    assert room_only.beat_at(1.0).source == "room"
+
+
+def test_room_beat_maps_the_detector_state():
+    got = room_beat(Music(bpm=120.0, confidence=0.7).state(10.1))
+    assert got is not None
+    assert got.period_s == pytest.approx(0.5)
+    assert got.strength == pytest.approx(0.7)
+    assert got.source == "room"
+    assert got.phase_s == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        MusicState(False, None, None, 0.9, 1.0),
+        MusicState(True, None, 0.1, 0.9, 1.0),
+        MusicState(True, 120.0, None, 0.9, 1.0),
+    ],
+)
+def test_room_beat_is_none_without_music(state):
+    assert room_beat(state) is None
+
+
+# ------------------------------------------------------------------ wiring (SPEC 7)
+
+
+def test_assembly_without_a_listener_gives_no_room_beat():
+    host = SimpleNamespace(voice_listener=None, soothe_runner=None)
+    assert dance_beat(host).beat_at(1.0) is None
+
+
+def test_assembly_reads_the_listener_late():
+    host = SimpleNamespace(voice_listener=None, soothe_runner=None)
+    source = dance_beat(host)
+    music = Music(bpm=120.0)
+    host.voice_listener = SimpleNamespace(music_state=music.state)
+    assert source.beat_at(1.0).source == "room"
+    host.voice_listener = SimpleNamespace(music_state=lambda now: None)  # no detector
+    assert source.beat_at(1.0) is None
+
+
+def test_assembly_without_speech_output_is_not_speaking():
+    host = SimpleNamespace(speech_output=None)
+    assert speech_playing(host)(1.0) is False
+    host.speech_output = SimpleNamespace(speaking_at=lambda now: True)
+    assert speech_playing(host)(1.0) is True
+
+
+def test_speaking_at_covers_the_gap_between_sentences_and_not_a_raw_sound():
+    out = SpeechOutput(RoboEmotConfig(), TimelineSink(), FakeBackend())
+    assert not out.speaking_at(1.0)
+    out._jobs.append(object.__new__(_RawJob))
+    assert not out.speaking_at(1.0)  # a queued hum is not speech
+    out._jobs.clear()
+    out._jobs.append(object.__new__(_Job))
+    assert out.speaking_at(1.0)  # the next sentence waits: the gap counts
+    out._jobs.clear()
+    out._in_flight = True
+    assert out.speaking_at(1.0)  # a sentence being synthesized
+    out._raw_current = 7
+    assert not out.speaking_at(1.0)  # the job in flight is the hum
+    out._in_flight, out._raw_current = False, None
+    out.timeline._sentence_at = lambda t: object()
+    assert out.speaking_at(1.0)  # the last sentence still plays out of the sink

@@ -337,8 +337,9 @@ Wire the renderer after `p.speaking.commands(now)` in `core/runtime/loop.py:187`
 
 **Tests:**
 - `test_own_beat_wins_over_room`.
-- `test_tempo_folding`: at 170 BPM `bob` moves every second beat, at a period below `min_half_s / 2` every
-  fourth. Every half lasts ≥ `min_half_s`.
+- `test_tempo_folding`: a full `bob` takes 2 x `min_half_s` (1 s by default). At 170 BPM (period 0.353 s)
+  doubling gives 0.706 s and quadrupling 1.41 s, so `bob` moves every fourth beat; at 100 BPM (0.6 s) every
+  second beat suffices. Every half lasts ≥ `min_half_s`.
 - `test_lead_ms_shifts_peak`.
 - `test_speaking_gain_scales_amplitude` while the speech timeline plays.
 - `test_speaking_channel_handover`: a channel in the speaking `beat` map fades out of the dance while the
