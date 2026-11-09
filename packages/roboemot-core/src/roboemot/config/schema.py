@@ -3612,6 +3612,13 @@ class MusicConfig(Strict):
         "Length of one analysis hop (one band-energy value per band and hop)",
         unit="ms", ge=8, le=128,
     )  # fmt: skip
+    batch_ms: float = param(
+        256.0,
+        "Audio collected before its hops are analysed together. Longer costs less CPU (most of "
+        "the cost is per analysis call) and delays the music state by at most this. 0 analyses "
+        "every chunk",
+        unit="ms", ge=0, le=1000,
+    )  # fmt: skip
     bands_hz: list[tuple[float, float]] = param(
         [(30.0, 150.0), (150.0, 2000.0), (2000.0, 7000.0)],
         "Frequency bands [low, high) whose energy rises make the onset envelope (low: kick, "

@@ -8,11 +8,11 @@ was made, its sha256). Each is under 1 s and peaks at -18 dBFS before the runtim
 ``voice.cues.volume_db``.
 
 ``listening`` is the exception: a blip, one rising chirp of the same synth (``render_blirp`` of a
-one-event plan, no seed), 100 ms at -30 dBFS, 12 dB under the other cues (-36 dBFS as played
+one-event plan, no seed), 80 ms at -30 dBFS, 12 dB under the other cues (-36 dBFS as played
 with the default ``voice.cues.volume_db``). It says "I heard you". Its length is tied to
 ``voice.vad.min_speech_ms`` (default 200 ms): ``SpeechOutput.play_aside`` refuses a sound that is
 not shorter (logged once, counted ``aside.too_long``), so the robot never takes its echo for
-speech, and a robot configured with ``min_speech_ms`` of 100 ms or less gets no blip (SPEC 8,
+speech, and a robot configured with ``min_speech_ms`` of 80 ms or less gets no blip (SPEC 8,
 Non-verbal cues).
 
     python scripts/make_cue_sounds.py           # write the WAVs and VENDORED.json
@@ -51,7 +51,7 @@ RATE_HZ = 16000
 GAIN_DB = -18.0
 PCM_FULL_SCALE = 32767
 CHECK_TOLERANCE = 2  # 16-bit steps a fresh render may differ by (float rounding across machines)
-BLIP = {"event": "chirp_up", "f0_hz": 660.0, "f1_hz": 990.0, "length_s": 0.1, "gain_db": -30.0}
+BLIP = {"event": "chirp_up", "f0_hz": 660.0, "f1_hz": 990.0, "length_s": 0.08, "gain_db": -30.0}
 CUES = {
     "listening": BLIP,
     "not_heard": {"seed": 167, "pitch_hz": 440.0, "tempo_bpm": 100.0, "length_s": 0.5},

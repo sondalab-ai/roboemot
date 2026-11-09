@@ -18,6 +18,7 @@ MANIFEST = load_manifest(
     app_module.DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True
 )
 QUIET_PEAK = 0.13  # about -18 dBFS: the cues are made quiet
+ROBOT_MIN_SPEECH_S = 0.096  # three VAD frames: the value QA read on the robot (2026-11-09)
 
 
 def test_the_library_is_registered_under_the_manifest_robot_id():
@@ -42,7 +43,7 @@ def test_the_listening_blip_is_shorter_than_speech_and_quieter_than_the_other_cu
     sounds = load_cue_sounds(MANIFEST)
     blip = sounds["listening"]
     min_speech_s = RoboEmotConfig().voice.vad.min_speech_ms / 1000
-    assert 0.06 <= blip.duration_s <= 0.12 < min_speech_s
+    assert 0.06 <= blip.duration_s < ROBOT_MIN_SPEECH_S < min_speech_s
     peak = float(np.max(np.abs(blip.samples)))
     others = min(float(np.max(np.abs(s.samples))) for k, s in sounds.items() if k != "listening")
     assert 20 * np.log10(others / peak) >= 10.0  # at least 10 dB under every other cue
