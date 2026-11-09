@@ -102,6 +102,7 @@ class OverclockProfile:
 class Overclock(Protocol):
     """A platform's overclock (``Platform.overclock``)."""
 
+    label: str  # what it is, as the keep-or-revert question names it (for example "1.8 GHz")
     warning: str  # said before the question: what a failed boot takes to recover
     reboot: str  # root command for a plain reboot
     trial_reboot: str  # root command that boots the trial config once
@@ -129,6 +130,8 @@ class Plan:
     root: bool = False
     checks: list[Check] = field(default_factory=list)
     rerun: str = ""  # the installer command line that boots the trial config later
+    found: OverclockRecord | None = None  # a block in the boot config that no record names
+    forget: bool = False  # the recorded block is gone: ``apply`` drops the record entry
 
 
 Save = Callable[[OverclockRecord | None], None]
@@ -410,6 +413,42 @@ def report_checks(ui: Ui, checks: list[Check]) -> None:
         (ui.ok if check.ok else ui.warn)(check.name, check.detail)
 
 
+def applied_block(oc: Overclock, config: str) -> str | None:
+    """The known block that ``config`` holds exactly once, or None."""
+    return next((b for b in oc.known_blocks if config.count(b) == 1), None)
+
+
+def find_unrecorded(remote: Remote, oc: Overclock) -> OverclockRecord | None:
+    """An ``on`` record entry for a known block in the live boot config, for a robot whose
+    install record no longer names it; None without such a block. The block is one of the
+    platform's own, so the entry passes ``require_trusted``; ``backup`` is the live file
+    without the block."""
+    config = read(remote, oc.config_path) or ""
+    block = applied_block(oc, config)
+    if block is None:
+        return None
+    return OverclockRecord(oc.config_path, block, config.replace(block, "", 1), state="on")
+
+
+def _ask_active(
+    ui: Ui, remote: Remote, oc: Overclock, rec: OverclockRecord
+) -> tuple[bool | None, bool]:
+    """What the live boot config says for a run with no overclock flag: the choice (None: the
+    normal opt-in decides) and whether the record entry still counts. A block in place gets
+    only the keep-or-revert question (default keep; ``-y`` keeps). A block edited by hand is
+    kept, and ``apply`` prints the difference. A recorded block that is gone counts as no
+    overclock."""
+    config = read(remote, oc.config_path) or ""
+    if applied_block(oc, config) is not None:
+        if ui.assume_yes:
+            ui.ok("Kept the overclock", f"-y keeps it, --no-{FLAG[2:]} removes it")
+        question = f"Overclock is on ({oc.label}). Keep it (no reverts it)?"
+        return ui.confirm(question, True, flag=FLAG), True
+    if rec.state != "on":
+        return None, True
+    return (True, True) if has_markers(config, rec.block) else (None, False)
+
+
 def settle(
     ui: Ui,
     remote: Remote,
@@ -417,16 +456,27 @@ def settle(
     rec: OverclockRecord | None,
     want: bool | None,
     dry_run: bool,
+    adopt: bool = False,
 ) -> tuple[bool, Plan]:
-    """Before anything on the robot changes: run the support checks when a new overclock may
-    be written, ask the opt-in (after the recovery warning; default no, ``-y`` never answers
-    it), and settle root. Returns the choice and the plan for ``apply``. An unsupported robot is
-    a clean no: each check is printed, and the robot stays unchanged."""
+    """Before anything on the robot changes: an overclock already in the boot config gets only
+    the keep-or-revert question. Otherwise run the support checks when a new overclock may be
+    written, ask the opt-in (after the recovery warning; default no, ``-y`` never answers it).
+    Then settle root. ``adopt`` (install only) also treats a known block that no record names
+    as applied. Returns the choice and the plan for ``apply``. An unsupported robot is a clean
+    no: each check is printed, and the robot stays unchanged."""
     plan = Plan()
-    if want is False and rec is None:
-        return False, plan
     if rec is not None:
         require_trusted(oc, rec)  # before anything changes
+    elif adopt and oc is not None:
+        rec = plan.found = find_unrecorded(remote, oc)
+        if rec is not None:
+            ui.ok("Found an overclock", f"{oc.config_path}: not in the install record")
+    if want is False and rec is None:
+        return False, plan
+    if want is None and rec is not None and oc is not None:
+        want, counts = _ask_active(ui, remote, oc, rec)
+        plan.forget = not counts
+        rec = rec if counts else None
     if oc is not None and rec is None:
         plan.profile, plan.checks = oc.support(remote)
         report_checks(ui, plan.checks)
@@ -468,7 +518,17 @@ def apply(
     save: Save,
 ) -> None:
     """The install's last step: write, promote or remove the block as ``want`` and the record
-    say. ``save`` writes the record with its new overclock entry (None: none)."""
+    say. ``save`` writes the record with its new overclock entry (None: none). A block found
+    without a record entry is recorded first, and a recorded block that is gone is forgotten
+    first, except in a dry run."""
+    if rec is None and plan.found is not None:
+        rec = plan.found
+        if not dry_run:
+            save(rec)
+    if plan.forget:
+        rec = None
+        if not dry_run:
+            save(None)
     if rec is not None and rec.state != "on":
         rec = finish_promote(ui, remote, oc, plan, rec, dry_run, save) or rec
     if rec is not None and rec.state != "on":
@@ -705,7 +765,7 @@ def finish_promote(
     record (not saved in a dry run), or None when no promote was begun."""
     oc = require_trusted(oc, rec)
     config = read(remote, oc.config_path) or ""
-    block = next((b for b in oc.known_blocks if config.count(b) == 1), None)
+    block = applied_block(oc, config)
     if block is None:
         return None
     done = replace(rec, state="on", trial=None, block=block)

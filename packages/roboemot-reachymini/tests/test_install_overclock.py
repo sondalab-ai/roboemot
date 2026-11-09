@@ -281,7 +281,10 @@ def test_a_failed_support_check_leaves_the_robot_unchanged_and_names_it(
         ({CONFIG: ORIGINAL + "arm_freq=2000\n"}, "already sets arm_freq (line 12)"),
         ({CONFIG: ORIGINAL + "over_voltage_delta=50000\n"}, "already sets over_voltage_delta"),
         ({CONFIG: ORIGINAL + "force_turbo=1\n"}, "already sets force_turbo"),
-        ({CONFIG: ORIGINAL + reachy_oc.BLOCK}, "already has a RoboEmot block"),
+        (
+            {CONFIG: ORIGINAL + reachy_oc.BLOCK.replace("arm_freq=1800", "arm_freq=2000")},
+            "already has a RoboEmot block",
+        ),
         ({CONFIG: ORIGINAL, TRIAL: "foreign\n"}, "tryboot.txt exists and is not the installer's"),
         ({}, "config.txt not found"),
         ({CONFIG: ORIGINAL.rstrip("\n")}, "does not end in a newline"),
@@ -497,7 +500,7 @@ def promoted(robot_: BootRobot) -> None:
     assert robot_.boot == {CONFIG: overclocked()}
 
 
-def test_a_reinstall_without_the_option_removes_exactly_the_block(offline_boot, daemon, capsys):
+def test_the_no_overclock_flag_removes_exactly_the_block(offline_boot, daemon, capsys):
     promoted(offline_boot)
     offline_boot.boot[CONFIG] += "dtparam=i2c_arm=on\n"  # the owner's later edit stays
     install(overclock=False)
@@ -597,6 +600,167 @@ def test_a_reinstall_with_the_option_keeps_the_block(offline_boot, daemon, capsy
     assert "Overclock on" in flat(capsys.readouterr().out)
     assert offline_boot.boot == {CONFIG: overclocked()}
     assert offline_boot.reboots == [reachy_oc.TRIAL_REBOOT]
+
+
+# ---------------------------------------------------------------- already on
+
+
+def reinstall_on_terminal(ui: Ui, monkeypatch, **kw) -> None:
+    """A reinstall on a terminal, the overclock flag not given unless ``kw`` gives it."""
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    args = {"overclock": None, "start": False, "startup": False, "piper": False, "models": False}
+    opts = options(**{**args, **kw})
+    inst.run_install(Options(**{**vars(opts), "yes": ui.assume_yes, "secrets": []}), ui, ROOT)
+
+
+def lose_the_record_entry(robot_: BootRobot) -> None:
+    """The boot config keeps the block; the install record no longer names it."""
+    data = robot_.record
+    data["overclock"] = None
+    robot_.files[RECORD] = json.dumps(data)
+
+
+def test_enter_keeps_an_active_overclock_and_asks_nothing_else(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    promoted(offline_boot)
+    capsys.readouterr()
+    roots, commands = list(offline_boot.roots), len(offline_boot.commands)
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch)
+    captured = capsys.readouterr()
+    assert "Overclock is on (1.8 GHz, from 1.5). Keep it" in captured.err
+    assert "Overclock the CPU" not in captured.err
+    assert "rpiboot" not in captured.out + captured.err
+    assert "Board" not in flat(captured.out)  # no support check runs
+    assert "Reboot the robot now" not in captured.err
+    assert "Overclock on" in flat(captured.out)
+    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.roots == roots
+    assert not [c for c in offline_boot.commands[commands:] if c.startswith(oc_mod.SUDO)]
+
+
+def test_no_reverts_an_active_overclock_byte_for_byte(offline_boot, daemon, monkeypatch, capsys):
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] += "dtparam=i2c_arm=on\n"
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["n\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    assert "Removed overclock block" in flat(capsys.readouterr().out)
+    assert offline_boot.boot == {CONFIG: ORIGINAL + "dtparam=i2c_arm=on\n"}
+    assert offline_boot.record["overclock"] is None
+
+
+def test_yes_keeps_an_active_overclock(offline_boot, daemon, monkeypatch, capsys):
+    promoted(offline_boot)
+    capsys.readouterr()
+    roots = list(offline_boot.roots)
+    reinstall_on_terminal(Ui(interactive=True, assume_yes=True, read=answers()), monkeypatch)
+    out = flat(capsys.readouterr().out)
+    assert "Overclock on" in out and "-y keeps it, --no-overclock removes it" in out
+    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.roots == roots
+    assert offline_boot.record["overclock"]["state"] == "on"
+
+
+def test_the_flag_records_a_found_block_unattended_without_root(offline_boot, daemon, capsys):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    offline_boot.passwordless = False  # sudo would ask, and there is no terminal
+    capsys.readouterr()
+    roots = list(offline_boot.roots)
+    install(overclock_reboot=False)
+    assert "Found an overclock" in flat(capsys.readouterr().out)
+    assert offline_boot.record["overclock"]["state"] == "on"
+    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.roots == roots
+
+
+def test_a_gone_block_written_again_runs_the_checks_once(offline_boot, daemon, monkeypatch, capsys):
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] = ORIGINAL
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["y\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    out = flat(capsys.readouterr().out)
+    assert out.count("Board") == 1 and "Overclock block gone" not in out
+    assert offline_boot.boot[TRIAL] == overclocked()
+    assert offline_boot.record["overclock"]["state"] == "trial"
+
+
+def test_a_block_without_a_record_entry_is_kept_and_recorded(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    capsys.readouterr()
+    roots = list(offline_boot.roots)
+    reinstall_on_terminal(Ui(interactive=True, assume_yes=True, read=answers()), monkeypatch)
+    assert "Found an overclock" in flat(capsys.readouterr().out)
+    entry = offline_boot.record["overclock"]
+    assert entry["state"] == "on" and entry["block"] == reachy_oc.BLOCK
+    assert entry["backup"] == ORIGINAL and entry["trial"] is None
+    assert offline_boot.boot == {CONFIG: overclocked()} and offline_boot.roots == roots
+
+
+def test_no_reverts_a_block_without_a_record_entry(offline_boot, daemon, monkeypatch, capsys):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["n\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch, overclock_reboot=False)
+    assert "Overclock is on" in capsys.readouterr().err
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+    assert offline_boot.record["overclock"] is None
+
+
+def test_the_no_flag_reverts_a_block_without_a_record_entry(offline_boot, daemon):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    install(overclock=False)
+    assert offline_boot.boot == {CONFIG: ORIGINAL}
+    assert offline_boot.record["overclock"] is None
+
+
+def test_a_dry_run_does_not_record_a_block_it_found(offline_boot, daemon, monkeypatch):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    reinstall_on_terminal(
+        Ui(interactive=True, assume_yes=True, read=answers()), monkeypatch, dry_run=True
+    )
+    assert offline_boot.record["overclock"] is None
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_uninstall_leaves_a_block_it_has_no_record_of(offline_boot, daemon):
+    promoted(offline_boot)
+    lose_the_record_entry(offline_boot)
+    uninstall()
+    assert offline_boot.boot == {CONFIG: overclocked()}
+
+
+def test_a_recorded_block_that_is_gone_gets_the_normal_question(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    promoted(offline_boot)
+    offline_boot.boot[CONFIG] = ORIGINAL
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch)
+    captured = capsys.readouterr()
+    assert "Overclock the CPU (1.8 GHz, from 1.5)?" in captured.err
+    assert "Keep it" not in captured.err and "rpiboot" in captured.out + captured.err
+    assert offline_boot.record["overclock"] is None and offline_boot.boot == {CONFIG: ORIGINAL}
+
+
+def test_an_edited_block_is_left_alone_without_the_question(
+    offline_boot, daemon, monkeypatch, capsys
+):
+    promoted(offline_boot)
+    edited = overclocked().replace("arm_freq=1800", "arm_freq=2000")
+    offline_boot.boot[CONFIG] = edited
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=False, read=answers(*["\n"] * 20))
+    reinstall_on_terminal(ui, monkeypatch)
+    captured = capsys.readouterr()
+    assert "Keep it" not in captured.err and "Overclock the CPU" not in captured.err
+    assert "Overclock block edited" in flat(captured.out)
+    assert offline_boot.boot == {CONFIG: edited}
 
 
 # ---------------------------------------------------------------- opt-in

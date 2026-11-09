@@ -285,6 +285,8 @@ class FakeRobot:
             self.stray = {m: [p for p in ps if p != path] for m, ps in self.stray.items()}
             self.stray = {m: ps for m, ps in self.stray.items() if ps}
             return ""
+        if command.startswith("if [ -e /boot/firmware/"):
+            return ""  # no boot config on this fake: BootRobot has one
         raise AssertionError(f"unexpected robot command: {command}")
 
     def _pip(self, command: str) -> tuple[str, int]:
