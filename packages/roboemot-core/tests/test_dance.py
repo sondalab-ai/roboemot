@@ -311,6 +311,64 @@ def test_snapshot_is_counts_and_a_label_only(manifest, mapping):
     assert snap == {"started": 1, "accent": 0, "skipped": 0, "source": "own"}
 
 
+def test_live_snapshot_shows_the_source_and_each_roles_share(manifest, mapping):
+    beats = Beats(beat(strength=0.5))
+    r = make(manifest, mapping, beats)
+    assert r.live_snapshot(0.0).active is False  # nothing ticked yet
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.active and snap.source == "own"
+    assert snap.bob == pytest.approx(min(1.0, r.scale(0.5)))
+    assert snap.sway == snap.bob
+
+
+def test_live_snapshot_passes_a_room_beat_through(manifest, mapping):
+    room = Beat(PERIOD, 0.0, 1.0, "room")
+    r = make(manifest, mapping, Beats(room))
+    run(r, 0.0, 1.0)
+    assert r.live_snapshot(0.95).source == "room"
+
+
+def test_live_snapshot_fades_with_the_beat(manifest, mapping):
+    beats = Beats(beat())
+    r = make(manifest, mapping, beats, cfg=DanceConfig(lead_ms=0.0, fade_in_s=0.1, fade_out_s=1.0))
+    run(r, 0.0, 1.0)
+    full = r.live_snapshot(0.95).bob
+    beats.beat = None
+    run(r, 1.0, 1.5)
+    fading = r.live_snapshot(1.45)
+    assert fading.active and fading.source is None and 0.0 < fading.bob < full
+    run(r, 1.5, 3.0)
+    done = r.live_snapshot(2.95)
+    assert not done.active and done.bob == 0.0
+
+
+def test_live_snapshot_is_idle_once_the_tick_stops(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat()))
+    run(r, 0.0, 1.0)
+    stale = r.live_snapshot(0.95 + r.cfg.command_ttl_s + 0.1)
+    assert not stale.active and stale.source is None and stale.bob == 0.0 and stale.sway == 0.0
+
+
+def test_live_snapshot_of_a_rested_role_is_zero(manifest, mapping):
+    r = make(manifest, mapping, Beats(beat(period=0.1)), cfg=DanceConfig(**NO_LEAD))  # no fold fits
+    run(r, 0.0, 1.0)
+    snap = r.live_snapshot(0.95)
+    assert snap.source == "own" and snap.bob == 0.0
+
+
+def test_live_snapshot_accent_age(manifest, mapping):
+    beats = Beats()
+    r = make(manifest, mapping, beats)
+    run(r, 0.0, 0.5)
+    assert r.live_snapshot(0.45).last_accent_age_s(0.45) is None
+    beats.stamps = [1.0]
+    run(r, 0.5, 1.5)
+    snap = r.live_snapshot(1.45)
+    assert snap.last_accent_age_s(1.25) == pytest.approx(0.25)
+    assert snap.last_accent_age_s(0.8) == 0.0  # found ahead of the clock: never negative
+
+
 def test_a_yielded_channel_leaves_within_the_speaking_fade(manifest, mapping):
     speaking: set[str] = set()
     cfg = DanceConfig(lead_ms=0.0, fade_in_s=0.1, fade_out_s=5.0)

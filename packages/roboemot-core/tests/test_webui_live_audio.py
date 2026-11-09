@@ -37,7 +37,7 @@ def served(tmp_path, stack):
     host = SimpleNamespace(
         circadian=SimpleNamespace(state="awake", reason=None), phase=ConversationPhase(),
         activity=None, realtime_route=None,
-        voice_listener=None, levels=levels, transcript=ring,
+        voice_listener=None, dance=None, levels=levels, transcript=ring,
     )  # fmt: skip
     parts = pipeline()
     live = LiveState(host, parts, stack.effective(), clock=lambda: NOW)

@@ -52,6 +52,15 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 .live-event { margin: 0; overflow-wrap: anywhere; }
 .live-note { margin: 0; }
 .live-meter { display: grid; gap: var(--sl-space-1); }
+.live-pulse { display: block; width: var(--sl-space-8); height: var(--sl-space-8); margin-block-end: var(--sl-space-2); border-radius: 50%; background: var(--slc-border-subtle); }
+.live-pulse--on { background: var(--slc-accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .live-pulse--on { animation: live-beat var(--live-beat-period) var(--sl-motion-ease) var(--live-beat-delay) infinite; }
+  @keyframes live-beat {
+    from { transform: scale(1.2); opacity: 1; }
+    to { transform: scale(0.85); opacity: 0.5; }
+  }
+}
 #live-audio { margin-top: var(--sl-space-4); }
 .live-video { display: block; width: 100%; height: auto; border-radius: var(--sl-radius-2, 0.5rem); }
 #live-video-banner { margin-bottom: var(--sl-space-4); }

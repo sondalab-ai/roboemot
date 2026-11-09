@@ -24,6 +24,7 @@
 const LIVE_RETRY_MS = 5000;
 const LIVE_PERCENT = 100;
 const LIVE_METER_FLOOR_DB = -60;
+const LIVE_SECONDS_PER_MINUTE = 60;
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
@@ -50,6 +51,7 @@ const LIVE_CARDS = [
   { key: "attention", render: liveAttentionCard },
   { key: "reflexes", render: liveReflexesCard },
   { key: "motion", render: liveMotionCard },
+  { key: "beat", render: liveBeatCard },
   { key: "system", render: liveSystemCard },
   { key: "video", render: liveVideoCard },
 ];
@@ -132,6 +134,53 @@ function liveMotionCard(d) {
   const s = d.motion.state;
   const tone = { writing: "success", external: "warning", held: "warning", motors_off: "info" }[s] || "info";
   return card(t("tab_live"), t("live_motion"), el("p", {}, badge(state.strings["live_motion_" + s] || s, tone)));
+}
+
+// The circle that beats. Cards are rebuilt on each poll, so the new element starts its CSS animation
+// at the phase the server just reported: that is the resync, and the browser animates in between.
+function liveBeatPulse(m) {
+  const beating = m && m.playing && m.tempo_bpm > 0 && m.beat_age_s !== null;
+  if (!beating) return el("span", { class: "live-pulse", id: "live-pulse", "aria-hidden": "true" });
+  return el("span", {
+    class: "live-pulse live-pulse--on", id: "live-pulse", "aria-hidden": "true",
+    style: {
+      "--live-beat-period": (LIVE_SECONDS_PER_MINUTE / m.tempo_bpm).toFixed(3) + "s",
+      "--live-beat-delay": (-m.beat_age_s).toFixed(3) + "s",
+    },
+  });
+}
+
+// A bar for a share in [0, 1], whatever the server sends.
+function liveShare(label, share) {
+  const pct = Math.round(Math.min(Math.max(share || 0, 0), 1) * LIVE_PERCENT);
+  return el("div", { class: "live-meter" }, el("span", { class: "sl-eyebrow" }, label), progress(label, pct, LIVE_PERCENT));
+}
+
+function liveBeatMusic(m) {
+  const tempo = m && m.tempo_bpm !== null ? t("live_bpm", { n: Math.round(m.tempo_bpm) }) : t("live_none");
+  return [
+    liveRow(t("live_tempo"), tempo),
+    liveRow(t("live_music"), t(m && m.playing ? "live_yes" : "live_no")),
+    liveShare(t("live_music_confidence"), m ? m.confidence : 0),
+  ];
+}
+
+function liveBeatDance(d) {
+  const active = Boolean(d) && d.state === "active";
+  const age = d ? d.last_accent_age_s : null;
+  return [
+    liveRow(t("live_dance"), badge(word("live_dance_state_", active ? "active" : "idle"), active ? "success" : "info")),
+    d && d.source ? [liveRow(t("live_dance_source"), word("live_dance_source_", d.source))] : [],
+    liveShare(t("live_dance_bob"), d ? d.bob : 0),
+    liveShare(t("live_dance_sway"), d ? d.sway : 0),
+    liveRow(t("live_dance_accent"), age === null ? t("live_none") : t("live_dance_accent_ago", { n: age.toFixed(1) })),
+  ];
+}
+
+function liveBeatCard(d) {
+  const node = card(t("tab_live"), t("live_beat"), liveBeatPulse(d.music), liveBeatMusic(d.music), liveBeatDance(d.dance));
+  node.id = "live-beat-card";
+  return node;
 }
 
 function liveSystemCard(d) {

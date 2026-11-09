@@ -28,14 +28,15 @@ add up for long. Never moves the body yaw or a translation: a map naming one is 
 and by :meth:`DanceRenderer.apply_config`.
 
 Threads: the app tick calls everything except :meth:`DanceRenderer.apply_config`, which the config
-reload calls. It swaps one immutable bundle; each tick reads the bundle once.
+reload calls, and :meth:`DanceRenderer.live_snapshot`, which the web thread calls. Each swaps or
+reads one immutable object by assignment: no lock, and each tick reads the settings bundle once.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..config.schema import DanceConfig, DanceMotionMap, ExpressionEntry
 from ..manifest import Dof
@@ -75,6 +76,27 @@ class _Settings:
     ceilings: dict[str, float]  # per channel: the cap of the summed offset, radians
 
 
+@dataclass(frozen=True)
+class DanceLive:
+    """The Live tab's view of one tick (SPEC 7, 12), swapped whole. ``active``: the offsets are
+    not back at zero yet. ``source``: the beat followed now (None: no beat, also during the
+    fade-out). ``bob`` and ``sway``: each role's envelope as a share of its degrees in [0, 1],
+    0 for a role that rests; not the waveform, which a poll would only alias. The two stamps are
+    on the monotonic clock and stay in the process."""
+
+    active: bool = False
+    source: str | None = None
+    bob: float = 0.0
+    sway: float = 0.0
+    last_accent_s: float = -math.inf
+    stamp: float = -math.inf
+
+    def last_accent_age_s(self, now: float) -> float | None:
+        """Seconds since the last accent played, None before the first. At least 0: an accent
+        is found ahead of the clock so that it can peak on its stamp."""
+        return None if math.isinf(self.last_accent_s) else max(0.0, now - self.last_accent_s)
+
+
 @dataclass
 class _Play:
     """The accent playing, on the lead clock; ``gain`` is radians per unit of the shape."""
@@ -103,6 +125,8 @@ class _State:
     tail_gain: float = 0.0
     duck: dict[str, float] = field(default_factory=dict)
     started: bool = False
+    bob: float = 0.0  # share of the role's degrees before the fade, for the Live tab
+    sway: float = 0.0
 
 
 def fold(period_s: float, min_half_s: float) -> int | None:
@@ -152,6 +176,7 @@ class DanceRenderer:
         self._sent: frozenset[str] = frozenset()  # channels of the last command sent
         self._s = _State()
         self._source: str | None = None
+        self._live = DanceLive()
         self.counts = {"started": 0, "accent": 0, "skipped": 0}
         self.apply_config(cfg, dance_map, max_amplitude, beats_per_bar)
 
@@ -246,9 +271,18 @@ class DanceRenderer:
             self.counts["started"] += 1
         accent = self._accent_offsets(t, b, moving)
         if s.gain <= GAIN_EPSILON and s.tail_gain <= GAIN_EPSILON and not accent:
-            self._s = _State()
+            s = self._s = _State()
+            self._publish(now, beat, s, False)
             return self._emit(now, cfg, {})  # a last zero for every channel still held
+        self._publish(now, beat, s, True)
         return self._emit(now, cfg, self._mix(raw, accent, s, b, dt))
+
+    def _publish(self, now: float, beat: Beat | None, s: _State, active: bool) -> None:
+        """Swap in the Live tab's view of this tick: the only work the tab adds to the tick."""
+        source = beat.source if beat is not None else None
+        self._live = DanceLive(
+            active, source, s.bob * s.gain, s.sway * s.gain, self._last_accent, now
+        )
 
     def _step_clock(self, now: float, cfg: DanceConfig) -> float:
         """Seconds since the last tick. A gap longer than the command's lifetime (the app tick
@@ -322,33 +356,38 @@ class DanceRenderer:
         """The ``bob`` and ``sway`` offsets at lead time ``t`` before the fade."""
         if beat is None:
             return {}
-        k, cfg = self.scale(beat.strength, b), b.cfg
+        k, cfg, s = self.scale(beat.strength, b), b.cfg, self._s
+        share = min(1.0, k)
         raw: dict[str, float] = {}
-        bob = math.radians(cfg.bob_deg) * self._bob(t, beat, cfg) * k
+        factor = fold(beat.period_s, cfg.min_half_s)
+        bob = math.radians(cfg.bob_deg) * self._bob(t, beat, factor) * k
         for n, sign in b.bob.items():
             raw[n] = raw.get(n, 0.0) + sign * bob
-        sway = math.radians(cfg.sway_deg) * self._sway(t, beat, b) * k
+        s.bob = share if b.bob and factor is not None and cfg.bob_deg > 0 else 0.0
+        bar = beat.period_s * b.beats_per_bar
+        factor = fold(bar, cfg.min_half_s)
+        sway = math.radians(cfg.sway_deg) * self._sway(t, bar, beat.phase_s, factor) * k
         for n, sign in b.sway.items():
             raw[n] = raw.get(n, 0.0) + sign * sway
+        s.sway = share if b.sway and factor is not None and cfg.sway_deg > 0 else 0.0
         return raw
 
     @staticmethod
-    def _bob(t: float, beat: Beat, cfg: DanceConfig) -> float:
-        """Depth of the dip in [0, 1]: 1 on the beat, 0 halfway between two moves."""
-        factor = fold(beat.period_s, cfg.min_half_s)
+    def _bob(t: float, beat: Beat, factor: int | None) -> float:
+        """Depth of the dip in [0, 1]: 1 on the beat, 0 halfway between two moves. ``factor``
+        is the fold of the beat; None rests."""
         if factor is None:
             return 0.0
         p = ((t - beat.phase_s) / (factor * beat.period_s)) % 1.0
         return min_jerk(abs(2 * p - 1))
 
     @staticmethod
-    def _sway(t: float, beat: Beat, b: _Settings) -> float:
-        """Sway in [-1, 1]: out and back on one side during a bar, the other side the next."""
-        bar = beat.period_s * b.beats_per_bar
-        factor = fold(bar, b.cfg.min_half_s)
+    def _sway(t: float, bar: float, phase_s: float, factor: int | None) -> float:
+        """Sway in [-1, 1]: out and back on one side during a bar, the other side the next.
+        ``factor`` is the fold of the bar; None rests."""
         if factor is None:
             return 0.0
-        q = ((t - beat.phase_s) / (factor * bar)) % 2.0
+        q = ((t - phase_s) / (factor * bar)) % 2.0
         side = 1.0 if q < 1.0 else -1.0
         return side * min_jerk(1 - abs(2 * (q % 1.0) - 1))
 
@@ -401,5 +440,14 @@ class DanceRenderer:
         beat source plays now (None: no beat). Counts and a label only."""
         return {**self.counts, "source": self._source}
 
+    def live_snapshot(self, now: float) -> DanceLive:
+        """The last tick's view for the Live tab (any thread: one read, no lock). A tick older
+        than ``command_ttl_s`` (the app tick stopped, for example while asleep) means the
+        offsets have expired: idle, with the accent stamp kept."""
+        live = self._live
+        if now - live.stamp <= self._b.cfg.command_ttl_s:
+            return live
+        return replace(live, active=False, source=None, bob=0.0, sway=0.0)
 
-__all__ = ["SOURCE", "DanceRenderer", "fold"]
+
+__all__ = ["SOURCE", "DanceLive", "DanceRenderer", "fold"]

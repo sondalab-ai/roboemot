@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.dance import DanceLive
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationPhase
 from roboemot.runtime.live import LiveState
+from roboemot.voice.music import MusicState
 from roboemot.world.types import Entry
 
 NOW = 500.0
@@ -75,6 +77,7 @@ def live(p=None, config=None, host=None, **kw):
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     return LiveState(
         host, p or parts(), config or cfg(), clock=lambda: NOW, temperature=lambda: None, **kw
@@ -111,6 +114,8 @@ def test_the_payload_shape():
         "attention",
         "reflexes",
         "motion",
+        "music",
+        "dance",
         "system",
         "video",
         "audio_egress",
@@ -141,6 +146,7 @@ def test_modes_follow_the_parts():
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     p = parts(
         sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["vision", "listener"]),
@@ -180,6 +186,7 @@ def test_the_modes_card_names_the_circadian_rest_apart_from_the_motors(state, re
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     s = live(host=host).state()
     assert s["modes"]["rest"] == rest
@@ -194,6 +201,7 @@ def test_motors_off_and_a_nap_show_both_and_the_status_says_motors_off():
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     p = parts(sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["app_tick"]))
     s = live(p, host=host).state()
@@ -208,6 +216,7 @@ def test_the_conversation_card_is_the_phase():
         activity=None,
         realtime_route=None,
         voice_listener=None,
+        dance=None,
     )
     host.phase.begin_thinking()
     host.phase.set_route("lan")
@@ -295,6 +304,7 @@ def test_the_temperature_is_read_once_per_cache_window():
             activity=None,
             realtime_route=None,
             voice_listener=None,
+            dance=None,
         ),
         parts(),
         cfg(system_cache_s=5.0),
@@ -333,3 +343,72 @@ def test_the_state_names_the_video_flag_and_its_poll_interval():
     on = ConfigStack(app={"webui": {"live": {"enabled": True, "video": True, "video_fps": 5.0}}})
     state.apply_config(SimpleNamespace(config=on.effective()))
     assert state.state()["video"] == {"enabled": True, "poll_ms": 200, "idle_stop_ms": 600000}
+
+
+# ---------------------------------------------------------------- the beat card (SPEC 7, 12)
+
+MUSIC_KEYS = {"playing", "tempo_bpm", "confidence", "beat_age_s"}
+DANCE_KEYS = {"state", "source", "bob", "sway", "last_accent_age_s"}
+
+
+def music_host(detector, frame=None):
+    return SimpleNamespace(
+        circadian=SimpleNamespace(state="awake", reason=None),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=SimpleNamespace(music=detector, awaiting_transcript=lambda: False),
+        dance=None if frame is None else SimpleNamespace(live_snapshot=lambda now: frame),
+    )
+
+
+def detector(state):
+    return SimpleNamespace(state=lambda now: state, snapshot=lambda: {"SPECTRUM": [1.0]})
+
+
+def test_the_beat_blocks_for_a_detector_and_a_dance():
+    playing = MusicState(True, 120.04, 0.12345, 0.87654, NOW)
+    frame = DanceLive(True, "room", 0.61234, 0.4, NOW - 3.25, NOW)
+    s = live(host=music_host(detector(playing), frame)).state()
+    assert s["music"] == {
+        "playing": True, "tempo_bpm": 120.04, "confidence": 0.877, "beat_age_s": 0.123,
+    }  # fmt: skip
+    assert s["dance"] == {
+        "state": "active", "source": "room", "bob": 0.612, "sway": 0.4, "last_accent_age_s": 3.25,
+    }  # fmt: skip
+
+
+def test_the_beat_blocks_carry_only_the_listed_keys_and_no_monotonic_stamp():
+    playing = MusicState(True, 120.0, 0.1, 0.8, NOW)
+    frame = DanceLive(True, "own", 0.5, 0.5, NOW - 1.0, NOW)
+    s = live(host=music_host(detector(playing), frame)).state()
+    assert set(s["music"]) == MUSIC_KEYS
+    assert set(s["dance"]) == DANCE_KEYS
+    assert NOW not in [*s["music"].values(), *s["dance"].values()]
+    json.dumps(s)
+
+
+def test_no_detector_and_no_renderer_are_null():
+    s = live().state()
+    assert s["music"] is None and s["dance"] is None
+
+
+def test_music_off_is_null_even_with_a_detector():
+    off = ConfigStack(app={"webui": {"live": {"enabled": True}}, "music": {"enabled": False}})
+    silent = MusicState(False, None, None, 0.0, NOW)
+    s = live(host=music_host(detector(silent)), config=off.effective()).state()
+    assert s["music"] is None
+
+
+def test_no_music_and_an_idle_dance_have_no_beat():
+    silent = MusicState(False, None, None, 0.2, NOW)
+    s = live(host=music_host(detector(silent), DanceLive(stamp=NOW))).state()
+    assert s["music"] == {
+        "playing": False,
+        "tempo_bpm": None,
+        "confidence": 0.2,
+        "beat_age_s": None,
+    }
+    assert s["dance"] == {
+        "state": "idle", "source": None, "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
+    }  # fmt: skip

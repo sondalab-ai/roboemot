@@ -17,6 +17,7 @@ from test_live_state import cfg, live, parts
 class Listener:
     def __init__(self):
         self.waiting = False
+        self.music = None
 
     def awaiting_transcript(self):
         return self.waiting
@@ -33,6 +34,7 @@ def rig(**live_cfg):
         phase=ConversationPhase(),
         activity=ring,
         voice_listener=Listener(),
+        dance=None,
         realtime_route=SimpleNamespace(state="connected", reason=None),
     )
     p = parts()

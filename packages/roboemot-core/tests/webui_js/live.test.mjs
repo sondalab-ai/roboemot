@@ -32,6 +32,11 @@ const STRINGS = {
   live_cpu_temp: "CPU temperature: {n} C",
   live_people: "People: {n}",
   live_elapsed: "Waiting for {n} s",
+  live_bpm: "{n} BPM",
+  live_dance_accent_ago: "{n} s ago",
+  live_dance_state_active: "dancing",
+  live_dance_state_idle: "still",
+  live_dance_source_room: "room music",
 };
 
 async function livePage(t, extra = {}) {
@@ -65,7 +70,7 @@ test("the Live tab sits next to the others and draws one card per group", async 
   assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "emotions", "debug"]);
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
-  assert.equal(grid.children.length, 8);
+  assert.equal(grid.children.length, 9);
   const text = grid.textContent;
   for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2"]) {
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
@@ -172,7 +177,7 @@ test("an old snapshot without the rest field draws the modes card with no rest b
   const text = page.document.querySelector("#live-cards").textContent;
   assert.ok(text.includes("MOTORS ON"));
   for (const label of ["DROWSY BADGE", "REST BADGE", "NAP BADGE", "undefined"]) assert.ok(!text.includes(label), label);
-  assert.equal(page.document.querySelector("#live-cards").children.length, 8);
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9);
 });
 
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {
@@ -288,7 +293,7 @@ test("live_disabled shows how to turn it on and keeps retrying at the slow delay
   enabled = true;
   retries.forEach((x) => x.fn());
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 8, "self-healed");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "self-healed");
 });
 
 test("coming back into view keeps the last cards until the next reply", async (t) => {
@@ -303,7 +308,7 @@ test("coming back into view keeps the last cards until the next reply", async (t
   hold = true;
   visibility(page, "visible");
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 8, "cards kept while the poll is pending");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "cards kept while the poll is pending");
   release();
   await settle();
   visibility(page, "hidden");
@@ -358,4 +363,68 @@ test("a Live poll carries the activity mark only after a click, key or touch (R3
   assert.ok(after.length > 1);
   assert.equal(after.filter(marked).length, 1);
   assert.ok(page.calls.filter((c) => c.path === "/api/live/viewers").every((c) => !marked(c)), "the banner poll stays passive");
+});
+
+const BEAT = {
+  music: { playing: true, tempo_bpm: 120, confidence: 0.75, beat_age_s: 0.125 },
+  dance: { state: "active", source: "room", bob: 0.5, sway: 0.25, last_accent_age_s: 3.25 },
+};
+const beatCard = (page) => page.document.querySelector("#live-beat-card");
+const bars = (node) => [...node.querySelectorAll(".sl-progress")].map((b) => b.getAttribute("aria-valuenow"));
+
+test("the beat card shows the tempo, the music, the dance and pulses from the server's phase", async (t) => {
+  const page = await livePage(t, { "GET /api/live/state": { ...STATE, ...BEAT } });
+  await openLive(page);
+  const node = beatCard(page);
+  for (const expected of ["120 BPM", "live_yes", "dancing", "room music", "3.3 s ago"]) {
+    assert.ok(node.textContent.includes(expected), expected);
+  }
+  assert.deepEqual(bars(node), ["75", "50", "25"]);
+  const pulse = node.querySelector("#live-pulse");
+  assert.ok(pulse.classList.contains("live-pulse--on"));
+  assert.equal(pulse.style.getPropertyValue("--live-beat-period"), "0.500s");
+  assert.equal(pulse.style.getPropertyValue("--live-beat-delay"), "-0.125s");
+});
+
+test("the beat card redraws the pulse on each poll, at the new phase", async (t) => {
+  let age = 0.1;
+  const page = await livePage(t, {
+    "GET /api/live/state": () => ({ ...STATE, ...BEAT, music: { ...BEAT.music, beat_age_s: (age += 0.1) } }),
+  });
+  await openLive(page);
+  const delay = () => beatCard(page).querySelector("#live-pulse").style.getPropertyValue("--live-beat-delay");
+  const first = delay();
+  await sleep(WAIT_MS);
+  assert.notEqual(delay(), first);
+});
+
+for (const [name, data] of [
+  ["null", { music: null, dance: null }],
+  ["absent", {}],
+]) {
+  test(`the beat card is idle and static with ${name} blocks`, async (t) => {
+    const page = await livePage(t, { "GET /api/live/state": { ...STATE, ...data } });
+    await openLive(page);
+    const node = beatCard(page);
+    assert.ok(node.textContent.includes("still"));
+    assert.deepEqual(bars(node), ["0", "0", "0"]);
+    const pulse = node.querySelector("#live-pulse");
+    assert.ok(!pulse.classList.contains("live-pulse--on"));
+    assert.equal(pulse.style.getPropertyValue("--live-beat-period"), "");
+  });
+}
+
+test("the beat card is idle without a beat and hides the source of a dance fading out", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": {
+      ...STATE,
+      music: { playing: false, tempo_bpm: null, confidence: 0.2, beat_age_s: null },
+      dance: { state: "active", source: null, bob: 0.1, sway: 0, last_accent_age_s: null },
+    },
+  });
+  await openLive(page);
+  const node = beatCard(page);
+  assert.ok(!node.querySelector("#live-pulse").classList.contains("live-pulse--on"));
+  assert.ok(!node.textContent.includes("room music"));
+  assert.ok(node.textContent.includes("dancing"));
 });
