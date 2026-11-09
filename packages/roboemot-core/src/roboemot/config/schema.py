@@ -3329,9 +3329,21 @@ class BargeInConfig(Strict):
     min_speech_ms: float = param(
         96.0,
         "Continuous user speech needed before the robot is cut off. The onset-to-stop latency "
-        "(SPEC 13: 200 ms) is this plus up to one microphone chunk, so keep it low; rounded up "
+        "(SPEC 13) adds this plus up to one microphone chunk to sustain_ms; rounded up "
         "to whole VAD frames",
         unit="ms", ge=32, le=150,
+    )  # fmt: skip
+    sustain_ms: float = param(
+        1000.0,
+        "How long the person must keep talking, from the speech onset, before the robot is cut "
+        "off; until then its voice only ducks, so a short phrase does not end the answer. The "
+        "stop keyword does not wait. 0: cut off at min_speech_ms",
+        unit="ms", ge=0, le=5000,
+    )  # fmt: skip
+    sustain_gap_ms: float = param(
+        300.0,
+        "A pause of this length ends the hold of sustain_ms and the answer plays on at full gain",
+        unit="ms", ge=32, le=2000,
     )  # fmt: skip
     onset_enabled: bool = param(
         True,
