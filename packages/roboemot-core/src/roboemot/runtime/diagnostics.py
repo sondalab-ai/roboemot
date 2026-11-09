@@ -52,6 +52,7 @@ def build_diagnostics(
                     **({"cues": q.snapshot()} if (q := host.cues) else {}),
                     **({"soothe": r.snapshot()} if (r := host.soothe_runner) else {}),
                     "speaking": p.speaking.snapshot(),
+                    "dance": p.dance.snapshot(),
                 }
                 if listener is not None
                 else {"state": "off"}

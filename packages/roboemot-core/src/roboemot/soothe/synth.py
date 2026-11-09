@@ -102,13 +102,14 @@ class HumNote:
 @dataclass(frozen=True)
 class HumPlan:
     """The melody of a hum. ``freq_hz`` of each note is ``base_hz`` raised by the pentatonic
-    interval of its degree; the last note is the tonic."""
+    interval of its degree; the last note is the tonic. ``beat_s`` is one beat in seconds."""
 
     base_hz: float
     length_s: float
     gain: float
     vibrato_hz: float
     notes: tuple[HumNote, ...]
+    beat_s: float
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,8 @@ def plan_hum(shape: SoundShape, rng: random.Random) -> HumPlan:
         dur = beats * beat_s
         notes.append(HumNote(deg, degree_freq_hz(base_hz, deg), start, dur))
         start += dur
-    return HumPlan(base_hz, length_s, _gain(shape), _draw(rng, VIBRATO_RATE_HZ), tuple(notes))
+    vibrato_hz = _draw(rng, VIBRATO_RATE_HZ)
+    return HumPlan(base_hz, length_s, _gain(shape), vibrato_hz, tuple(notes), beat_s)
 
 
 def plan_blirp(shape: SoundShape, rng: random.Random) -> BlirpPlan:
@@ -359,13 +361,24 @@ def render_blirp(plan: BlirpPlan, rate_hz: int) -> np.ndarray:
     return _finish(out, plan.gain, rate_hz)
 
 
+def plan_sound(sound: SoundKind, shape: SoundShape, rng: random.Random) -> HumPlan | BlirpPlan:
+    """The plan of one new sound of kind ``sound`` ("hum" or "blirp"), drawn from ``rng`` inside
+    the shape's ranges. The caller keeps it: a hum's plan holds the beat the dance follows."""
+    if sound == "hum":
+        return plan_hum(shape, rng)
+    if sound == "blirp":
+        return plan_blirp(shape, rng)
+    raise ValueError(f"unknown sound kind {sound!r}")
+
+
+def render_plan(plan: HumPlan | BlirpPlan, rate_hz: int) -> np.ndarray:
+    """The samples of ``plan``: float32, mono, ``rate_hz``. Draws nothing."""
+    return render_hum(plan, rate_hz) if isinstance(plan, HumPlan) else render_blirp(plan, rate_hz)
+
+
 def synthesize(sound: SoundKind, shape: SoundShape, rng: random.Random, rate_hz: int) -> np.ndarray:
     """One new sound of kind ``sound`` ("hum" or "blirp"): float32, mono, ``rate_hz``, starting
     and ending at exactly 0, peak at the shape's ``gain_db``. Everything that varies is drawn
     from ``rng`` inside the shape's ranges, so the same seed repeats a sound and no two seeds
     give the same one."""
-    if sound == "hum":
-        return render_hum(plan_hum(shape, rng), rate_hz)
-    if sound == "blirp":
-        return render_blirp(plan_blirp(shape, rng), rate_hz)
-    raise ValueError(f"unknown sound kind {sound!r}")
+    return render_plan(plan_sound(sound, shape, rng), rate_hz)

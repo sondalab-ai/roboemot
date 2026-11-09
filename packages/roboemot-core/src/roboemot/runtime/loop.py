@@ -50,7 +50,7 @@ def run_loop(
     stop_event: threading.Event,
 ) -> None:
     """Tick until ``stop_event`` is set: circadian, affect, attention, expression, scanning,
-    idle breathing, speaking motion and the commands of every layer into the motion loop. On
+    idle breathing, speaking motion, dance and the commands of every layer into the motion loop. On
     the way out the object stage leaves its shown-object rate (SPEC 5)."""
     try:
         _tick_until_stopped(host, stack, p, clock, pitch_dof, stop_event)
@@ -115,9 +115,11 @@ def _tick_until_stopped(
         register = p.tracker.tick(now, live.register, fx)
         p.expression.set_register(register)
         p.speaking.set_register(register)
+        p.dance.set_register(register)
         if state is not None:
             p.expression.update(state, register, now)
             p.speaking.set_affect(state)
+            p.dance.set_affect(state)
         p.perception.enrollment.expire()
         if host.autoenroll is not None:
             host.autoenroll.tick()  # retention does not wait for a sighting
@@ -186,5 +188,7 @@ def _tick_until_stopped(
         for cmd in p.expression.commands(now):
             p.loop.feed(cmd)
         for cmd in p.speaking.commands(now):  # after the expression: it ducks under it
+            p.loop.feed(cmd)
+        for cmd in p.dance.commands(now):  # after the speaking motion: it yields its channels
             p.loop.feed(cmd)
         stop_event.wait(1.0 / live.motion.app_tick_hz)

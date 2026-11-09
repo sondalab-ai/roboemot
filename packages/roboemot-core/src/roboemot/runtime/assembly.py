@@ -17,6 +17,7 @@ from typing import Any
 
 from roboemot import paths, priority
 from roboemot.affect.clips import load_clip_library
+from roboemot.affect.dance import DanceRenderer
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -34,6 +35,7 @@ from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import Manifest
 from roboemot.motion import MotionLoop
+from roboemot.motion.beat import Beat, BeatSource
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.realtime.route import select_provider
 from roboemot.reflex import ReflexEngine
@@ -77,6 +79,7 @@ class Pipeline:
     cfg: Any
     expression: ExpressionRenderer
     speaking: SpeakingRenderer
+    dance: DanceRenderer
     responder: OfflineResponder
     loop: MotionLoop
     bus: Bus
@@ -136,6 +139,24 @@ def ducked_channels(expression: ExpressionRenderer, circ: CircadianRunner) -> fr
     """Channels the speaking motion yields: those of the expression playing and of the circadian
     yawn or stretch playing (SPEC 7, Speaking motion)."""
     return expression.channels | (circ.motion.channels if circ.motion else frozenset())
+
+
+RESTING = "resting"  # the circadian state name (circadian.model.State)
+
+
+def own_sound_beat(host: RuntimeHost) -> BeatSource:
+    """The dance's beat source (SPEC 7, Dance motion): the runner's planned hum grid and blirp
+    accents, read lazily because the runner is built after assembly (startup); no room music yet."""
+
+    def own(now: float) -> Beat | None:
+        runner = host.soothe_runner
+        return runner.beat_at(now) if runner is not None else None
+
+    def accents(since: float, now: float) -> list[float]:
+        runner = host.soothe_runner
+        return runner.accents(since, now) if runner is not None else []
+
+    return BeatSource(own, lambda now: None, accents=accents)
 
 
 def preview_landmarks(stack: ConfigStack) -> Callable[[], bool]:
@@ -302,6 +323,20 @@ def assemble(
         ducked=lambda: ducked_channels(expression, circ),
     )
     speaking.circadian_factor = circ.amplitude_factor
+    dance = host.dance = DanceRenderer(
+        cfg.dance,
+        cfg.dance_motion_map,
+        manifest.dofs,
+        body_yaw=gaze_map.body_yaw,
+        max_amplitude=cfg.expression.max_amplitude,
+        beats_per_bar=cfg.music.beats_per_bar,
+        beat=own_sound_beat(host),
+        yield_fade_s=lambda: speaking.cfg.fade_ms / MS_PER_S,
+        speaking_channels=lambda: speaking.channels,
+        ducked=lambda: ducked_channels(expression, circ),
+    )
+    dance.circadian_factor = circ.amplitude_factor
+    dance.resting = lambda: circ.enabled and circ.model.state == RESTING
     host.circadian = circ.model if cfg.circadian.enabled else None
     # One lock for the vision pump and the idle light reader: the camera is read by one
     # thread at a time.
@@ -438,6 +473,7 @@ def assemble(
         cfg=cfg,
         expression=expression,
         speaking=speaking,
+        dance=dance,
         responder=responder,
         loop=loop,
         bus=bus,
