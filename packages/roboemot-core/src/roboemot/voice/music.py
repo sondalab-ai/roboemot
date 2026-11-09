@@ -1,12 +1,15 @@
 """Music in the room, from the audio the listener hears (SPEC 8, 11A).
 
 The listener feeds every chunk it ingests (never one heard while the robot speaks). Per hop of
-``music.hop_ms`` one real FFT gives the energy in each of ``music.bands_hz``; the onset strength
-of a band is the half-wave-rectified rise of its log energy (floored at ``music.min_level_db``,
-so a band with nothing in it carries no onsets). The summed onsets form an envelope of about
-31 values a second, kept for ``music.window_s``. Chunks wait in a batch of ``music.batch_ms`` and
-their hops are analysed together, because most of the CPU cost is per NumPy call and not per
-sample (QA 2026-11-09); a hole in the audio analyses what waits first.
+``music.hop_ms`` one real FFT over the last ``music.fft_ms`` gives the energy in each of
+``music.bands_hz``; the onset strength of a band is the half-wave-rectified rise of its log energy
+(floored at ``music.min_level_db``, so a band with nothing in it carries no onsets). The summed
+onsets form an envelope of about 31 values a second, kept for ``music.window_s``. Before an
+estimate the envelope loses its moving average over ``music.detrend_s`` (half-wave rectified), so
+a dense sound such as metal keeps only the rises above its own level, and a triangular smoothing
+of ``music.smooth_radius_hops`` lines up a beat spread over two hops. Chunks wait in a batch of
+``music.batch_ms`` and their hops are analysed together, because most of the CPU cost is per NumPy
+call and not per sample (QA 2026-11-09); a hole in the audio analyses what waits first.
 
 Every ``music.estimate_interval_s``, once the envelope holds two periods of the slowest tempo
 and when the last interval's level is above ``music.min_level_db``, the mean-removed envelope is
@@ -97,22 +100,22 @@ class _Estimate:
 
 
 class _Bands:
-    """Band energies of whole hops: one batched real FFT under a Hann window, summed per band
-    and scaled so that a band's value is its share of the hop's mean-square level."""
+    """Band energies of analysis windows: one batched real FFT under a Hann window, summed per
+    band and scaled so that a band's value is its share of the window's mean-square level."""
 
-    def __init__(self, cfg: MusicConfig, rate_hz: int, hop: int) -> None:
+    def __init__(self, cfg: MusicConfig, rate_hz: int, size: int) -> None:
         nyquist = rate_hz / 2
         if max(hi for _, hi in cfg.bands_hz) > nyquist:
             raise ValueError(f"music.bands_hz reaches above the Nyquist frequency {nyquist} Hz")
-        self._window = np.hanning(hop)
-        freqs = np.fft.rfftfreq(hop, 1.0 / rate_hz)
-        scale = 2 / (hop * float(np.sum(self._window**2)))
+        self._window = np.hanning(size)
+        freqs = np.fft.rfftfreq(size, 1.0 / rate_hz)
+        scale = 2 / (size * float(np.sum(self._window**2)))
         self._weights = np.stack(
             [((freqs >= lo) & (freqs < hi)) * scale for lo, hi in cfg.bands_hz], axis=1
         )
 
     def energy(self, frames: np.ndarray) -> np.ndarray:
-        """(hops, hop) samples to (hops, bands) band energies."""
+        """(hops, window size) samples to (hops, bands) band energies."""
         spectrum = np.fft.rfft(frames * self._window, axis=1)
         power = spectrum.real**2 + spectrum.imag**2
         return power @ self._weights
@@ -149,7 +152,11 @@ class MusicDetector:
         self._cfg = cfg
         self._hop = _hop_samples(cfg, self._rate)
         self._hop_s = self._hop / self._rate
-        self._bands = _Bands(cfg, self._rate, self._hop)
+        self._fft = _fft_samples(cfg, self._rate)
+        self._detrend_hops = round(cfg.detrend_s / self._hop_s)
+        kernel = np.bartlett(2 * (cfg.smooth_radius_hops + 1) + 1)[1:-1]
+        self._kernel = kernel / np.sum(kernel)
+        self._bands = _Bands(cfg, self._rate, self._fft)
         self._batch_samples = round(cfg.batch_ms / MS_PER_S * self._rate)
         self._ring_n = max(2, round(cfg.window_s / self._hop_s))
         self._interval_hops = max(1, round(cfg.estimate_interval_s / self._hop_s))
@@ -164,7 +171,7 @@ class MusicDetector:
         """Hot reload (any thread): ``cfg`` takes effect at the next ``feed``, which rebuilds
         the analysis and clears the envelope; state, tempo and history are kept. Disabling ends
         music at that feed."""
-        _Bands(cfg, self._rate, _hop_samples(cfg, self._rate))  # a bad band fails here, not later
+        _Bands(cfg, self._rate, _fft_samples(cfg, self._rate))  # a bad band fails here, not later
         self._pending = cfg
 
     def _clear(self) -> None:
@@ -178,6 +185,7 @@ class MusicDetector:
         self._head = 0
         self._carry = np.zeros(0, dtype=np.float32)
         self._carry_start = 0.0
+        self._tail = np.zeros(self._fft - self._hop)  # samples before the next hop, for its window
         self._batch: list[np.ndarray] = []
         self._batch_n = 0
         self._batch_start = self._batch_end = 0.0
@@ -297,9 +305,12 @@ class MusicDetector:
         self._carry_start = first + count * self._hop_s
         if count == 0:
             return []
-        frames = audio[: count * self._hop].reshape(count, self._hop).astype(np.float64)
-        energy = self._bands.energy(frames)
-        powers = np.mean(frames * frames, axis=1)
+        hops = audio[: count * self._hop].astype(np.float64)
+        joined = np.concatenate([self._tail, hops])
+        self._tail = joined[joined.size - self._tail.size :]
+        starts = self._hop * np.arange(count)
+        energy = self._bands.energy(joined[starts[:, None] + np.arange(self._fft)[None, :]])
+        powers = np.mean(hops.reshape(count, self._hop) ** 2, axis=1)
         logs = np.log(energy + self._floor)
         prev = logs[0] if self._prev_log is None else self._prev_log
         rises = np.maximum(0.0, np.diff(np.vstack([prev, logs]), axis=0))
@@ -361,23 +372,38 @@ class MusicDetector:
         self._publish(result)
         return event
 
+    def _shaped(self, onsets: np.ndarray) -> np.ndarray:
+        """``onsets`` as the estimate reads them: above their moving average, then smoothed."""
+        return np.convolve(_detrend(onsets, self._detrend_hops), self._kernel, "same")
+
+    def _bands_carrying(self, onsets: np.ndarray, lag: float) -> int:
+        """Bands that carry the beat at ``lag``: periodic on their own envelope and not nearly
+        empty. The last check of an estimate, because it costs one correlation per band."""
+        cfg = self._cfg
+        strengths = onsets.mean(axis=0)
+        least = cfg.min_band_onset_share * float(np.max(strengths))
+        return sum(
+            1
+            for band, strength in zip(onsets.T, strengths, strict=True)
+            if strength >= least
+            and _autocorr_at(self._shaped(band), lag) >= cfg.min_band_periodicity
+        )
+
     def _periodic(self) -> _Estimate:
         """Tempo, beat anchor and periodicity of the current envelope, and whether it is
         periodic on its own (periodicity, bands carrying the beat, heard share)."""
         cfg = self._cfg
         onsets, stamps, heard = self._ordered()
-        envelope = onsets.sum(axis=1)
+        envelope = self._shaped(onsets.sum(axis=1))
         corr = _autocorr(envelope, self._lag_hi + 1)
         lags = np.arange(self._lag_lo, self._lag_hi + 1)
         peak = int(lags[np.argmax(corr[lags])])
         lag = self._fold(corr, _refine(corr, peak))
         periodicity = float(_at(corr, lag))
-        per_band = [_at(_autocorr(band, self._lag_hi + 1), lag) for band in onsets.T]
-        bands = sum(1 for value in per_band if value >= cfg.min_band_periodicity)
         periodic = (
             periodicity >= cfg.min_periodicity
-            and bands >= cfg.min_bands_active
             and float(np.mean(heard)) >= cfg.min_active_share
+            and self._bands_carrying(onsets, lag) >= cfg.min_bands_active
         )
         anchor = _comb(envelope, stamps, lag)
         return _Estimate(lag * self._hop_s, anchor, periodicity, periodic, corr)
@@ -524,6 +550,22 @@ def _hop_samples(cfg: MusicConfig, rate_hz: int) -> int:
     return max(2, round(cfg.hop_ms / MS_PER_S * rate_hz))
 
 
+def _fft_samples(cfg: MusicConfig, rate_hz: int) -> int:
+    """Samples in one analysis window of ``music.fft_ms`` at ``rate_hz`` (at least one hop)."""
+    return max(_hop_samples(cfg, rate_hz), round(cfg.fft_ms / MS_PER_S * rate_hz))
+
+
+def _detrend(x: np.ndarray, hops: int) -> np.ndarray:
+    """``x`` above its centred moving average of ``hops`` values, half-wave rectified. The
+    average shrinks at the edges; ``hops`` under 2 returns ``x`` unchanged."""
+    if hops < 2:
+        return x
+    total = np.concatenate([[0.0], np.cumsum(x)])
+    index = np.arange(x.size)
+    lo, hi = np.maximum(0, index - hops // 2), np.minimum(x.size, index + hops // 2 + 1)
+    return np.maximum(0.0, x - (total[hi] - total[lo]) / (hi - lo))
+
+
 def _autocorr(x: np.ndarray, lags: int) -> np.ndarray:
     """Normalised, unbiased autocorrelation of mean-removed ``x`` for lags 0 to ``lags``
     (inclusive); all zero when ``x`` has no variance."""
@@ -537,6 +579,20 @@ def _autocorr(x: np.ndarray, lags: int) -> np.ndarray:
     count = n - np.arange(full.size)
     out[: full.size] = full / count / energy
     return out
+
+
+def _autocorr_at(x: np.ndarray, lag: float) -> float:
+    """``_autocorr`` of ``x`` at one fractional lag, linearly between the two lags around it;
+    0 when ``x`` has no variance. Costs two dot products instead of a full correlation."""
+    x = x - np.mean(x)
+    n = x.size
+    energy = float(np.dot(x, x)) / n
+    if energy <= 0:
+        return 0.0
+    below = math.floor(lag)
+    weight = lag - below
+    near, far = (float(np.dot(x[: n - k], x[k:])) / (n - k) / energy for k in (below, below + 1))
+    return (1 - weight) * near + weight * far
 
 
 def _refine(corr: np.ndarray, peak: int) -> float:

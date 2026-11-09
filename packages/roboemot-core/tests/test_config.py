@@ -655,7 +655,10 @@ def test_music_bands_must_fit_under_the_voice_nyquist(tmp_path):
     assert off.effective().voice.sample_rate_hz == 8000  # music off: no band check
     stack = ConfigStack()
     with pytest.raises(ConfigError, match=r"music\.bands_hz"):
-        stack.set("music.bands_hz", [[30.0, 150.0], [150.0, 9000.0]])  # over 8 kHz
+        stack.set(
+            "music.bands_hz",
+            [[30.0, 150.0], [150.0, 500.0], [500.0, 2000.0], [2000.0, 9000.0]],  # over 8 kHz
+        )
     assert stack.get("music.bands_hz")[-1][1] == 7000.0  # rolled back
     app = tmp_path / "app.yaml"
     app.write_text("affect: {half_life_s: 7}\n")

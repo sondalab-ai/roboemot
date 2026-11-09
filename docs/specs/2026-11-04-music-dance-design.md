@@ -76,7 +76,8 @@ thread and no queue. The listener pauses while the robot sleeps, and the detecto
 **Signal (cheap by construction).**
 
 1. Split each chunk into hops of `music.hop_ms` (for example 32 ms, 512 samples at 16 kHz).
-2. Per hop, compute the energy in `music.bands` (3 to 4 bands, for example low, low-mid, high).
+2. Per hop, compute the energy in `music.bands_hz` (eight bands since QA 2026-11-09: SPEC 8, Music
+   detector, also for the overlapping windows, the drift removal and the smoothing).
    Use one real FFT per hop, or IIR band filters, whichever measures cheaper on the CM4. The
    builder measures both.
 3. The onset strength is the half-wave-rectified log-energy rise per band, summed. This is a

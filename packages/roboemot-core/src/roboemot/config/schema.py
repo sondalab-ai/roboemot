@@ -3612,6 +3612,24 @@ class MusicConfig(Strict):
         "Length of one analysis hop (one band-energy value per band and hop)",
         unit="ms", ge=8, le=128,
     )  # fmt: skip
+    fft_ms: float = param(
+        64.0,
+        "Length of the analysis window of one hop; longer than hop_ms overlaps the windows, so "
+        "a beat that falls between two hops still counts",
+        unit="ms", ge=8, le=256,
+    )  # fmt: skip
+    detrend_s: float = param(
+        0.5,
+        "The moving average of this length is removed from the onset envelope before the tempo "
+        "estimate, so a dense sound keeps only the rises above its own level. 0 removes nothing",
+        unit="s", ge=0, le=5,
+    )  # fmt: skip
+    smooth_radius_hops: int = param(
+        1,
+        "Hops on each side of a triangular smoothing of the onset envelope, so a beat that "
+        "spreads over two hops still lines up. 0 smooths nothing",
+        ge=0, le=8,
+    )  # fmt: skip
     batch_ms: float = param(
         256.0,
         "Audio collected before its hops are analysed together. Longer costs less CPU (most of "
@@ -3620,9 +3638,18 @@ class MusicConfig(Strict):
         unit="ms", ge=0, le=1000,
     )  # fmt: skip
     bands_hz: list[tuple[float, float]] = param(
-        [(30.0, 150.0), (150.0, 2000.0), (2000.0, 7000.0)],
-        "Frequency bands [low, high) whose energy rises make the onset envelope (low: kick, "
-        "mid: snare and voices, high: hats); the top edge must stay under half the sample rate",
+        [
+            (30.0, 60.0),
+            (60.0, 120.0),
+            (120.0, 230.0),
+            (230.0, 460.0),
+            (460.0, 900.0),
+            (900.0, 1800.0),
+            (1800.0, 3500.0),
+            (3500.0, 7000.0),
+        ],
+        "Frequency bands [low, high) whose energy rises make the onset envelope, each counted "
+        "alike; the top edge must stay under half the sample rate",
         unit="Hz",
     )
     window_s: float = param(
@@ -3657,7 +3684,7 @@ class MusicConfig(Strict):
         ge=0, le=1,
     )  # fmt: skip
     min_band_periodicity: float = param(
-        0.35,
+        0.25,
         "Least normalised autocorrelation of one band's own onset envelope at the tempo for the "
         "band to count as carrying the beat; lower than min_periodicity, since speech or noise in "
         "a band dilutes its beat",
@@ -3673,8 +3700,14 @@ class MusicConfig(Strict):
         "Least share of the envelope window whose level was above min_level_db",
         ge=0, le=1,
     )  # fmt: skip
+    min_band_onset_share: float = param(
+        0.1,
+        "Least mean onset strength of a band, as a share of the strongest band's, for the band "
+        "to count as carrying the beat: a nearly empty band can look periodic by chance",
+        ge=0, le=1,
+    )  # fmt: skip
     min_bands_active: int = param(
-        2,
+        4,
         "Least bands that carry the beat on their own; a ticking clock is one narrow band",
         ge=1, le=MUSIC_BANDS_MAX,
     )  # fmt: skip
@@ -3732,6 +3765,8 @@ class MusicConfig(Strict):
 
     @model_validator(mode="after")
     def _consistent(self) -> MusicConfig:
+        if self.fft_ms < self.hop_ms:
+            raise ValueError("music.fft_ms must not be shorter than music.hop_ms")
         if self.min_bands_active > len(self.bands_hz):
             raise ValueError("music.min_bands_active must not exceed the number of bands")
         if self.prior_bpm[0] < self.tempo_bpm[0] or self.prior_bpm[1] > self.tempo_bpm[1]:
