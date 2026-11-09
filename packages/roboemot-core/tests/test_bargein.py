@@ -43,7 +43,9 @@ class World:
     stop. The reference is written the way the speaker writes it."""
 
     def __init__(self, script=("ciao",), cfg=None, reference=True, hear_echo=True, **bargein):
-        self.cfg = cfg or RoboEmotConfig()
+        self.cfg = cfg or RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0}}}
+        )
         self.rig = Rig(
             script,
             cfg=self.cfg,
@@ -140,7 +142,9 @@ def test_the_robots_own_playback_in_the_microphone_is_not_a_barge_in():
 
 
 def test_the_echo_alone_would_have_triggered_without_the_guard():
-    cfg = RoboEmotConfig.model_validate({"voice": {"barge_in": {"echo_corr_max": 1.0}}})
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"barge_in": {"sustain_ms": 0.0, "echo_corr_max": 1.0}}}
+    )
     w = World(cfg=cfg)
     w.speak(3.0)
     w.feed(3.0)
@@ -195,7 +199,7 @@ def test_bound_reports_whether_the_actions_are_connected():
 
 def test_barge_in_can_be_disabled():
     cfg = RoboEmotConfig.model_validate(
-        {"voice": {"barge_in": {"enabled": False, "keyword_enabled": False}}}
+        {"voice": {"barge_in": {"sustain_ms": 0.0, "enabled": False, "keyword_enabled": False}}}
     )
     w = World(cfg=cfg)
     w.speak(4.0)
@@ -245,7 +249,9 @@ def test_the_robot_saying_stop_does_not_stop_itself():
 
 
 def test_the_keyword_path_can_be_switched_off():
-    cfg = RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}})
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+    )
     w = World(["stop"], cfg=cfg, hear_echo=False)
     w.speak(4.0)
     w.feed(2.0, user_voice(1.0, 0.065), user_at=0.3)
@@ -294,7 +300,11 @@ def test_the_reference_is_a_timeline_with_silence_and_a_cut():
 def test_the_config_rejects_a_reference_too_short_for_the_echo_window():
     with pytest.raises(ValueError):
         RoboEmotConfig.model_validate(
-            {"voice": {"barge_in": {"echo_reference_s": 0.5, "echo_max_lag_ms": 600}}}
+            {
+                "voice": {
+                    "barge_in": {"sustain_ms": 0.0, "echo_reference_s": 0.5, "echo_max_lag_ms": 600}
+                }
+            }
         )
 
 
@@ -312,7 +322,7 @@ def test_a_config_reload_between_chunks_keeps_working():
     w.speak(3.0)
     w.feed(0.5)
     cfg = RoboEmotConfig.model_validate(
-        {"voice": {"barge_in": {"echo_window_ms": 256, "min_speech_ms": 64}}}
+        {"voice": {"barge_in": {"sustain_ms": 0.0, "echo_window_ms": 256, "min_speech_ms": 64}}}
     )
     w.bargein.apply_config(cfg)
     w.feed(2.0, user_voice(1.0, 0.21), user_at=0.3)
@@ -397,7 +407,9 @@ def hiss(frames, rms=0.02, seed=5):
 def onset_run(probs, audio, reference=None, motion=None, face_offset=None, **cfg):
     """Feed ``audio`` in microphone chunks through a scripted VAD; return (stops, BargeIn)."""
     config = (
-        RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else RoboEmotConfig()
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"sustain_ms": 0.0, **cfg}}})
+        if cfg
+        else RoboEmotConfig.model_validate({"voice": {"barge_in": {"sustain_ms": 0.0}}})
     )
     now = [0.0]
     stops: list[float] = []
@@ -478,7 +490,7 @@ def test_a_confident_frame_with_a_middling_echo_correlation_cuts_on_the_main_pat
     ref = PlaybackReference(RATE, 2.0)
     ref.add(0.0, robot)
     corr = echo_correlation(mic, robot)
-    b = RoboEmotConfig().voice.barge_in
+    b = RoboEmotConfig.model_validate({"voice": {"barge_in": {"sustain_ms": 0.0}}}).voice.barge_in
     assert b.onset_echo_corr_max <= corr < b.echo_corr_max, corr  # measured, not assumed
     # The main path needs five frames here (150 ms); the onset path would cut after two.
     cfg = {"keyword_enabled": False, "min_speech_ms": 150}
@@ -523,7 +535,9 @@ def test_a_run_does_not_survive_the_end_of_speech_and_nothing_fires_after_the_st
     now = [0.0]
     stops: list[float] = []
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.5] * 12),
         SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
         None,
@@ -552,9 +566,13 @@ def test_a_run_does_not_survive_the_end_of_speech_and_nothing_fires_after_the_st
 
 def test_the_onset_thresholds_may_not_be_stricter_than_the_main_path():
     with pytest.raises(ValueError, match="onset_threshold"):
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"onset_threshold": 0.9}}})
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "onset_threshold": 0.9}}}
+        )
     with pytest.raises(ValueError, match="onset_echo_corr_max"):
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"onset_echo_corr_max": 0.7}}})
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "onset_echo_corr_max": 0.7}}}
+        )
 
 
 def test_the_pre_roll_of_an_onset_cut_starts_before_the_fricative():
@@ -562,7 +580,9 @@ def test_the_pre_roll_of_an_onset_cut_starts_before_the_fricative():
     handed = []
     now = [0.0]
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.0, 0.0, 0.5, 0.6, 0.55, 0.5]),
         SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
         None,
@@ -642,7 +662,9 @@ def test_the_robots_own_echo_does_not_duck():
 
 def test_real_speech_ducks_then_cuts_at_the_same_latency_as_without_ducking():
     def run(enabled):
-        cfg = RoboEmotConfig.model_validate({"voice": {"barge_in": {"duck": {"enabled": enabled}}}})
+        cfg = RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "duck": {"enabled": enabled}}}}
+        )
         w = World(["ciao", "ciao robot come stai"], cfg=cfg)
         w.speak(5.0)
         w.feed(1.0)
@@ -672,7 +694,9 @@ def test_the_end_of_the_robots_speech_releases_the_duck_and_clears_the_gain():
 def test_the_snapshot_reports_the_audio_out_of_reach_when_the_duck_started():
     now = [0.0]
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.9, 0.0, 0.0, 0.0]),
         SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
         None,
@@ -724,7 +748,9 @@ def test_a_gap_mid_episode_ramps_the_voice_back_but_keeps_one_episode():
     candidates after it continue the same episode (counted once)."""
     now = [0.0]
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.9, 0.0, 0.9, 0.0, 0.0, 0.0]),
         SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
         None,
@@ -749,7 +775,9 @@ def test_a_gap_mid_episode_ramps_the_voice_back_but_keeps_one_episode():
 def test_a_gap_releases_the_gain_with_the_ramp_not_a_step():
     now = [0.0]
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.9, 0.0]),
         SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
         None,
@@ -911,7 +939,11 @@ def test_a_hot_reload_resizes_the_ring():
     probs = [p for _ in range(4) for p in (0.9, 0.0, 0.0, 0.0)]
     _, bi = onset_run(probs, user_voice(len(probs) * FRAME / RATE, 0.1), keyword_enabled=False)
     assert len(bi.recent()) == 4
-    bi.apply_config(RoboEmotConfig.model_validate({"voice": {"barge_in": {"recent_triggers": 2}}}))
+    bi.apply_config(
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "recent_triggers": 2}}}
+        )
+    )
     assert len(bi.recent()) == 2
 
 
@@ -999,7 +1031,9 @@ def test_a_raising_reference_window_still_cuts_and_interrupts(caplog):
 
     interrupts = []
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD([0.5, 0.6, 0.55]),
         SimpleNamespace(),
         Ref(),
@@ -1072,7 +1106,9 @@ def test_recent_can_be_read_while_a_chunk_is_processed():
     # trailing hiss frame opened a new (rightly open) episode after the cut record.
     now = [T0]
     bi = BargeIn(
-        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        RoboEmotConfig.model_validate(
+            {"voice": {"barge_in": {"sustain_ms": 0.0, "keyword_enabled": False}}}
+        ),
         ScriptedVAD(probs),
         SimpleNamespace(),
         None,
@@ -1160,3 +1196,80 @@ def test_over_the_robots_speech_cut_own_declines_and_the_cut_off_is_as_before():
     w.feed(1.5, user_voice(1.0, 0.3), user_at=0.2)
     assert order == ["prepare", "stop", "interrupt"]
     assert w.bargein.snapshot()["own_sound_cuts"] == 0
+
+
+# ---- sustain: the owner's rule of 2026-11-09, a short phrase does not end the answer
+
+
+def sustain_world(script=("ciao",)):
+    """A world with the library defaults: ``voice.barge_in.sustain_ms`` is on."""
+    return World(script, cfg=RoboEmotConfig.model_validate({}))
+
+
+def test_a_short_phrase_over_the_robot_ducks_but_does_not_end_the_answer():
+    w = sustain_world()
+    w.speak(5.0)
+    w.feed(1.0)
+    w.feed(1.5, user_voice(0.4, 0.21), user_at=0.2)
+    snap = w.bargein.snapshot()
+    assert w.stops == [] and w.interrupts == 0
+    assert snap["sustain"]["held"] == 1 and snap["sustain"]["released"] == 1
+    assert snap["duck"]["started"] == 1 and snap["duck"]["released"] == 1
+
+
+def test_a_person_who_keeps_talking_for_a_second_cuts_the_robot_and_keeps_the_words():
+    w = sustain_world(["ciao", "ciao robot come stai"])
+    w.speak(5.0)
+    w.feed(1.0)
+    onset = w.rig.t + 0.5
+    w.feed(2.5, user_voice(1.8, 0.21), user_at=0.5)
+    b = RoboEmotConfig().voice.barge_in
+    assert len(w.stops) == 1 and w.interrupts == 1
+    assert b.sustain_ms / 1000 <= w.stops[0] - onset < b.sustain_ms / 1000 + 0.2
+    w.feed(2.0)
+    (u,) = w.rig.utterances
+    assert u.text == "ciao robot come stai"
+    assert u.start_stamp <= onset + 0.1  # the words of the hold were not lost
+
+
+def test_a_short_breath_does_not_restart_the_second():
+    w = sustain_world()
+    w.speak(5.0)
+    w.feed(1.0)
+    voice = user_voice(1.6, 0.21)
+    voice[round(0.5 * RATE) : round(0.6 * RATE)] = 0.0  # 100 ms, under sustain_gap_ms
+    w.feed(2.5, voice, user_at=0.2)
+    assert len(w.stops) == 1
+
+
+def test_a_pause_longer_than_the_gap_ends_the_hold():
+    w = sustain_world()
+    w.speak(5.0)
+    w.feed(1.0)
+    voice = user_voice(1.4, 0.21)
+    voice[round(0.4 * RATE) : round(1.0 * RATE)] = 0.0  # 600 ms, over sustain_gap_ms
+    w.feed(2.5, voice, user_at=0.2)
+    assert w.stops == []
+    assert w.bargein.snapshot()["sustain"]["released"] >= 1
+
+
+def test_the_answer_ending_during_a_hold_keeps_the_first_words():
+    w = sustain_world(["ciao", "ciao robot"])
+    w.speak(1.5)
+    w.feed(1.0)
+    onset = w.rig.t + 0.2
+    w.feed(2.5, user_voice(1.2, 0.21), user_at=0.2)  # the robot ends about 0.3 s into the hold
+    w.feed(1.5)
+    assert w.stops == [] and w.interrupts == 0
+    assert w.bargein.snapshot()["sustain"]["ended_by_speech_end"] == 1
+    (u,) = w.rig.utterances
+    assert u.start_stamp <= onset + 0.1
+
+
+def test_the_stop_keyword_does_not_wait_for_the_second():
+    w = World(["stop"], cfg=RoboEmotConfig.model_validate({}), hear_echo=False)
+    w.speak(4.0)
+    onset = w.rig.t + 0.3
+    w.feed(2.0, user_voice(1.0, 0.065), user_at=0.3)
+    assert len(w.stops) == 1
+    assert w.stops[0] - onset < RoboEmotConfig().voice.barge_in.sustain_ms / 1000

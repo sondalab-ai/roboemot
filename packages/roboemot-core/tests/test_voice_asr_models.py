@@ -32,7 +32,9 @@ RATE = 16000
 CHUNK = 512
 CHUNK_20MS = 320
 LEAD_S = 0.5
-CFG = reachy_config()
+_BASE = reachy_config()
+_IMMEDIATE = _BASE.voice.barge_in.model_copy(update={"sustain_ms": 0.0})  # the cut-off point
+CFG = _BASE.model_copy(update={"voice": _BASE.voice.model_copy(update={"barge_in": _IMMEDIATE})})
 
 
 def load(name: str) -> np.ndarray:
@@ -214,7 +216,11 @@ def over_the_robot(
     from roboemot.voice.bargein import BargeIn, PlaybackReference
 
     vad_path, _ = models
-    config = RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else CFG
+    config = (
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"sustain_ms": 0.0, **cfg}}})
+        if cfg
+        else CFG
+    )
     robot = load(robot_clip)
     seconds = robot.size / RATE
     t0 = 1000.0

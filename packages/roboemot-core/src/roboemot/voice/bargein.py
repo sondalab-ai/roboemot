@@ -93,6 +93,13 @@ ends the stream, a false barge-in). A refused stream is cut off locally as befor
 person still talking after a release in the same speaking window. The stop keyword cuts
 locally at any time. ``barge_ins`` in the snapshot counts the paths of both modes alike.
 
+Sustain (owner decision 2026-11-09): a short phrase over the robot must not end its answer. The
+cut-off point above only starts a hold: the voice stays ducked, and the robot is cut off once
+``sustain_ms`` passed since the speech onset with no pause of ``sustain_gap_ms`` in it. A longer
+pause releases the hold and the answer plays on at full gain. If the answer ends during a hold,
+the listener restarts on the audio from the onset, so the first words are kept. The stop keyword
+and a cut of the robot's own sounds do not wait.
+
 Audio and text are never logged or published.
 """
 
@@ -314,6 +321,10 @@ class BargeIn:
         self._duck_quiet = 0
         self._last_end = 0.0  # end stamp of the last frame seen
         self._duck_counts = {"started": 0, "released": 0, "cut": 0}
+        self._sustain = {"held": 0, "released": 0, "ended_by_speech_end": 0}
+        self._held_onset: float | None = None  # a hold in progress: the speech onset (sustain)
+        self._held_last = 0.0
+        self._held_path = ""
         self._duck_ms: dict[str, float | None] = {
             "last_ms": None,
             "max_ms": None,
@@ -385,11 +396,12 @@ class BargeIn:
         self._echo_frames = max(1, math.ceil(b.echo_window_ms / frame_ms))
         self._pre_frames = math.ceil(b.pre_roll_ms / frame_ms)
         self._release_frames = max(1, math.ceil(b.duck.release_ms / frame_ms))
+        self._sustain_s = b.sustain_ms / MS_PER_S
+        self._sustain_gap_s = b.sustain_gap_ms / MS_PER_S
         self._confirm_s = b.duck.confirm_ms / MS_PER_S
         self.duck.apply_config(b.duck)  # built in __init__ before the first apply_config
-        ring = (
-            max(self._pre_frames + max(self._min_frames, self._onset_frames), self._echo_frames) + 1
-        )
+        cut_frames = max(self._min_frames, self._onset_frames, math.ceil(b.sustain_ms / frame_ms))
+        ring = max(self._pre_frames + cut_frames, self._echo_frames) + 1
         self._ring_len = ring  # applied on the listener thread, which owns the ring
         if not hasattr(self, "_ring"):
             self._ring: collections.deque[tuple[float, np.ndarray]] = collections.deque(maxlen=ring)
@@ -464,6 +476,10 @@ class BargeIn:
             self.duck.clear()
             self._safe(self._close_record, "released", None, self._last_end, "speech_end")
             self._speaking_since = None
+        heard = None if gap or self._held_onset is None else self._audio_from(self._held_onset)
+        if heard is not None:
+            self._sustain["ended_by_speech_end"] += 1
+        self._held_onset = None
         self.handback_asr()
         self._vad.reset()
         self._ring.clear()
@@ -473,6 +489,8 @@ class BargeIn:
         self._onset = 0.0
         self._weak_run = 0
         self._weak_onset = 0.0
+        if heard is not None and self._resume is not None:
+            self._resume(*heard)
 
     def snapshot(self) -> dict[str, Any]:
         """Counters and latencies (ms) for the debug report; no audio, no text."""
@@ -487,6 +505,7 @@ class BargeIn:
             "duck": {**self._duck_counts, "capped": self.duck.capped, **self._duck_ms},
             "cuts_by_path": dict(self._cuts_by_path),
             "barge_ins": self._barge_ins(),
+            "sustain": dict(self._sustain),
             "recent": self.recent(),
         }
 
@@ -579,16 +598,25 @@ class BargeIn:
         elif speech and b.onset_enabled and not weak:
             self._counts["onset_echo_frames"] += 1
         candidate = candidate and corr < b.keyword_echo_corr_max
-        self._duck_frame(speech or weak, stamp + self._frame_s)
+        end = stamp + self._frame_s
+        quiet = not (speech or weak)
+        if self._held_onset is not None and quiet and end - self._held_last >= self._sustain_gap_s:
+            self._held_onset = None  # the pause ended the hold: the answer plays on
+            self._sustain["released"] += 1
+        self._duck_frame(speech or weak or self._held_onset is not None, end)
         self._safe(self._record_frame, frame, prob, corr, speech, weak, stamp + self._frame_s)
         if self._await is not None:  # handed to the server: no second cut-off point (S2)
             speech = weak = False
+        if self._held_onset is not None and (speech or weak):
+            self._held_last = end
+            if end - self._held_onset >= self._sustain_s:
+                self._trigger("speech", self._held_onset, end, rest, path=self._held_path)
+                return True
         if speech:
             if self._run == 0:
                 self._onset = stamp
             self._run += 1
-            if self._run >= self._min_frames:
-                self._trigger("speech", self._onset, stamp + self._frame_s, rest, path="vad")
+            if self._run >= self._min_frames and self._reached(self._onset, end, rest, "vad"):
                 return True
         else:
             self._run = 0
@@ -596,12 +624,36 @@ class BargeIn:
             if self._weak_run == 0:
                 self._weak_onset = stamp
             self._weak_run += 1
-            if self._weak_run >= self._onset_frames:
-                self._trigger("speech", self._weak_onset, stamp + self._frame_s, rest, path="onset")
+            if self._weak_run >= self._onset_frames and self._reached(
+                self._weak_onset, end, rest, "onset"
+            ):
                 return True
         else:
             self._weak_run = 0
         return b.keyword_enabled and self._keywords(frame, stamp, candidate)
+
+    def _reached(self, onset: float, end: float, rest: np.ndarray, path: str) -> bool:
+        """A run reached its cut-off point. True when the robot was cut off now: no sustain is
+        asked, or only the robot's own sound plays. Else a hold starts (``sustain_ms``)."""
+        if self._held_onset is not None:
+            return False
+        if self._sustain_s <= 0.0:
+            self._trigger("speech", onset, end, rest, path=path)
+            return True
+        if self._own_cut():
+            self._trigger("speech", onset, end, rest, path=path, own=True)
+            return True
+        self._held_onset, self._held_last, self._held_path = onset, end, path
+        self._sustain["held"] += 1
+        return False
+
+    def _audio_from(self, onset: float) -> tuple[np.ndarray, float]:
+        """The audio of the ring from the pre-roll before ``onset``, and the stamp it starts at."""
+        audio_from = onset - self._pre_frames * self._frame_s
+        kept = [(t, f) for t, f in self._ring if t >= audio_from - EDGE_S]
+        if not kept:
+            return np.empty(0, dtype=np.float32), onset
+        return np.concatenate([f for _, f in kept]), kept[0][0]
 
     # ----------------------------------------------------------------- ducking
 
@@ -684,7 +736,8 @@ class BargeIn:
                 rec["vad_peak"] = round(max(rec["vad_peak"], prob), DIGITS)
                 rec["_end"] = end
             self._rec_quiet = 0
-        elif rec is not None and self._await is None:  # handed to the server: it decides
+        elif rec is not None and self._await is None and self._held_onset is None:
+            # handed to the server it decides; a hold ends by its own pause rule
             self._rec_quiet += 1
             if self._rec_quiet >= self._release_frames:
                 self._false[self._episode_mode] += 1  # a candidate that never stopped the robot
@@ -976,22 +1029,28 @@ class BargeIn:
     # ----------------------------------------------------------------- the cut
 
     def _trigger(
-        self, kind: str, onset: float, detected: float, rest: np.ndarray, *, path: str
+        self,
+        kind: str,
+        onset: float,
+        detected: float,
+        rest: np.ndarray,
+        *,
+        path: str,
+        own: bool = False,
     ) -> None:
         """Cut the robot off. ``stop`` comes first (it is the budgeted step), then the
         conversation, then the listener's handoff. ``path`` (``vad``, ``onset``, ``keyword``)
-        is the one that confirmed the cut, for the trigger record."""
-        audio_from = onset - self._pre_frames * self._frame_s
-        audio = [f for t, f in self._ring if t >= audio_from - EDGE_S]
-        audio_stamp = min((t for t, _ in self._ring if t >= audio_from - EDGE_S), default=onset)
-        audio.append(rest)
-        samples = np.concatenate(audio)
+        is the one that confirmed the cut, for the trigger record. ``own``: the robot's own
+        sound was already cut (``_reached``)."""
+        self._held_onset = None
+        heard, audio_stamp = self._audio_from(onset)
+        samples = np.concatenate([heard, rest])
         self._end_session()  # not blocking: the stop is the budgeted step; ``reset`` waits later
         stop = self._stop
         if stop is None:  # unbound: on_chunk never gets here, but a caller may
             return
         t0 = time.perf_counter()
-        own = kind == "speech" and self._own_cut()
+        own = own or (kind == "speech" and self._own_cut())
         server = not own and kind == "speech"
         if server and self._hand_to_server(samples, audio_stamp, onset, detected):
             return
