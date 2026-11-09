@@ -4,7 +4,9 @@ The listener feeds every chunk it ingests (never one heard while the robot speak
 ``music.hop_ms`` one real FFT gives the energy in each of ``music.bands_hz``; the onset strength
 of a band is the half-wave-rectified rise of its log energy (floored at ``music.min_level_db``,
 so a band with nothing in it carries no onsets). The summed onsets form an envelope of about
-31 values a second, kept for ``music.window_s``.
+31 values a second, kept for ``music.window_s``. Chunks wait in a batch of ``music.batch_ms`` and
+their hops are analysed together, because most of the CPU cost is per NumPy call and not per
+sample (QA 2026-11-09); a hole in the audio analyses what waits first.
 
 Every ``music.estimate_interval_s``, once the envelope holds two periods of the slowest tempo
 and when the last interval's level is above ``music.min_level_db``, the mean-removed envelope is
@@ -148,6 +150,7 @@ class MusicDetector:
         self._hop = _hop_samples(cfg, self._rate)
         self._hop_s = self._hop / self._rate
         self._bands = _Bands(cfg, self._rate, self._hop)
+        self._batch_samples = round(cfg.batch_ms / MS_PER_S * self._rate)
         self._ring_n = max(2, round(cfg.window_s / self._hop_s))
         self._interval_hops = max(1, round(cfg.estimate_interval_s / self._hop_s))
         periods_s = [SECONDS_PER_MINUTE / bpm for bpm in cfg.tempo_bpm]
@@ -175,6 +178,10 @@ class MusicDetector:
         self._head = 0
         self._carry = np.zeros(0, dtype=np.float32)
         self._carry_start = 0.0
+        self._batch: list[np.ndarray] = []
+        self._batch_n = 0
+        self._batch_start = self._batch_end = 0.0
+        self._batch_hole: float | None = None
         self._prev_log: np.ndarray | None = None
         self._powers: deque[float] = deque(maxlen=self._interval_hops)
         self._since_estimate = self._interval_hops  # the first full-enough window estimates
@@ -196,16 +203,48 @@ class MusicDetector:
         t0 = self._timer()
         audio = np.asarray(samples, dtype=np.float32)
         try:
-            return self._feed(audio, start)
+            return self._feed_batched(audio, start)
         finally:
             self._account(self._timer() - t0, audio.size / self._rate)
 
-    def _feed(self, samples: np.ndarray, start: float) -> str | None:
-        """``feed`` without the cost account: a pending reload first, then the hole before
-        the chunk, its hops and the estimates that fall due, and the release check at its end."""
+    def _feed_batched(self, samples: np.ndarray, start: float) -> str | None:
+        """A pending reload first, then ``samples`` join the batch, which is analysed once it
+        holds ``music.batch_ms``. A hole before the chunk analyses the waiting batch first, so
+        the audio on each side of the hole stays apart."""
         if self._pending is not None:
             cfg, self._pending = self._pending, None
             self._configure(cfg)
+        if not self._cfg.enabled:
+            return self._analyse(samples, start)
+        event = None
+        joined = abs(start - self._batch_end) <= self._hop_s and self._blind_from is None
+        if self._batch and not joined:
+            event = self._flush()
+        if not self._batch:
+            self._batch_start, self._batch_hole = start, self._blind_from
+            self._blind_from = None
+        self._batch.append(samples)
+        self._batch_n += samples.size
+        self._batch_end = start + samples.size / self._rate
+        if self._batch_n >= self._batch_samples:
+            event = self._flush() or event
+        return event
+
+    def _flush(self) -> str | None:
+        """Analyse the waiting batch with the hole that came before it. A hole reported after
+        the batch began stays for the next batch."""
+        audio = self._batch[0] if len(self._batch) == 1 else np.concatenate(self._batch)
+        self._batch, self._batch_n = [], 0
+        later, self._blind_from = self._blind_from, self._batch_hole
+        self._batch_hole = None
+        try:
+            return self._analyse(audio, self._batch_start)
+        finally:
+            self._blind_from = later
+
+    def _analyse(self, samples: np.ndarray, start: float) -> str | None:
+        """The hole before the audio, its hops and the estimates that fall due, and the release
+        check at its end."""
         cfg = self._cfg
         end = start + samples.size / self._rate
         if not cfg.enabled:
