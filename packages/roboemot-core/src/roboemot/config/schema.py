@@ -4647,10 +4647,9 @@ class DanceMotionMap(Strict):
 
 
 class DanceConfig(Strict):
-    """Dance motion: small moves locked to a beat (SPEC 7, Dance motion). ``speaking_gain`` is
-    read once the dance follows room music; the robot's own sounds never overlap its speech."""
+    """Dance motion: small moves locked to a beat (SPEC 7, Dance motion)."""
 
-    enabled: bool = param(True, "Dance to the beat of the robot's own sounds")
+    enabled: bool = param(True, "Dance to the beat of the robot's own sounds and of room music")
     bob_deg: float = param(
         3.0, "Size of the dip on the beat before the scaling factors", unit="deg", ge=0, le=15
     )
@@ -4667,6 +4666,20 @@ class DanceConfig(Strict):
         unit="s",
         ge=0.1,
         le=3,
+    )
+    fold_margin: float = param(
+        0.1,
+        "How far a shorter fold must clear the least half time before the moves switch to it "
+        "(share); a tempo that jitters around a threshold keeps its fold",
+        ge=0,
+        le=0.5,
+    )
+    phase_correction_beats_per_s: float = param(
+        0.5,
+        "Fastest correction of a move toward the beat grid when the grid or the source changes",
+        unit="beats/s",
+        ge=0.05,
+        le=4,
     )
     lead_ms: float = param(
         100.0,

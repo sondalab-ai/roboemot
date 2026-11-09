@@ -10,13 +10,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from ..config.schema import SECONDS_PER_MINUTE
+
+if TYPE_CHECKING:
+    from ..voice.music import MusicState
 
 
 @dataclass(frozen=True)
 class Beat:
-    """A beat grid. ``phase_s`` is the stamp of one beat on the monotonic clock, ``strength`` a
-    share in [0, 1] that scales the amplitude, ``source`` which provider it came from."""
+    """A beat grid. ``phase_s`` is the stamp of one beat on the monotonic clock (any beat of the
+    grid: it may differ from read to read), ``strength`` a share in [0, 1] that scales the
+    amplitude, ``source`` which provider it came from."""
 
     period_s: float
     phase_s: float
@@ -49,4 +55,19 @@ class BeatSource:
         return self._accents(since, now)
 
 
-__all__ = ["Beat", "BeatSource"]
+def room_beat(state: MusicState | None) -> Beat | None:
+    """The beat of room music from the detector's state; None without a state, while no music
+    plays or without a tempo. Its strength is the detector's confidence.
+
+    The detector gives the time since the last beat, so ``phase_s`` is that last beat: it moves
+    forward one period per beat and jumps when the grid is re-estimated. It tells where a beat
+    falls and nothing about which beat it is; the dance layer keeps its own place in a move."""
+    if state is None or not state.playing or state.tempo_bpm is None:
+        return None
+    if state.beat_phase_s is None:
+        return None
+    period_s = SECONDS_PER_MINUTE / state.tempo_bpm
+    return Beat(period_s, state.stamp - state.beat_phase_s, state.confidence, "room")
+
+
+__all__ = ["Beat", "BeatSource", "room_beat"]
