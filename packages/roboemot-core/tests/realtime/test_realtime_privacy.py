@@ -38,6 +38,7 @@ def real_report(rig, listener=None):
         circ=empty,
         reflexes=empty,
         speaking=empty,
+        dance=empty,
     )
     manifest = load_manifest(
         CONFIGS / "manifests" / "desk-head-v1.yaml",

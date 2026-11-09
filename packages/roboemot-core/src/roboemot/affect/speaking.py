@@ -520,6 +520,11 @@ class SpeakingRenderer:
         dof = self.dofs[name]
         return max(dof.min - dof.home, min(dof.max - dof.home, offset))
 
+    @property
+    def channels(self) -> frozenset[str]:
+        """Channels of the last offset sent (the dance layer yields them, SPEC 7)."""
+        return self._sent
+
     def snapshot(self) -> dict[str, int]:
         """Counts since start for the debug report (SPEC 12A): gestures per role, late events,
         gestures skipped because one was playing, cuts. Integers only."""

@@ -4626,6 +4626,94 @@ class SpeechMotionMap(Strict):
         return out
 
 
+class DanceMotionMap(Strict):
+    """The robot's dance channels and accent shape (SPEC 4A, 7); the robot manifest ships it.
+
+    ``bob`` and ``sway`` map a channel to a sign. ``accent`` is an expression entry whose
+    keyframes give the shape only: it is scaled so that its largest offset is ``accent_deg``.
+    Empty: the layer does not move anything.
+    """
+
+    bob: dict[str, Literal[-1, 1]] = param(
+        {}, "Channel to sign of the dip on the beat (the sign that dips the head)"
+    )
+    sway: dict[str, Literal[-1, 1]] = param({}, "Channel to sign of the side-to-side sway per bar")
+    accent: ExpressionEntry | None = param(None, "Shape of the accent flick on a sound's onset")
+
+    def channels(self) -> dict[str, list[str]]:
+        """Every channel named, by role."""
+        accent = list(self.accent.channels) if self.accent is not None else []
+        return {"bob": list(self.bob), "sway": list(self.sway), "accent": accent}
+
+
+class DanceConfig(Strict):
+    """Dance motion: small moves locked to a beat (SPEC 7, Dance motion)."""
+
+    enabled: bool = param(True, "Dance to the beat of the robot's own sounds and of room music")
+    bob_deg: float = param(
+        3.0, "Size of the dip on the beat before the scaling factors", unit="deg", ge=0, le=15
+    )
+    sway_deg: float = param(
+        2.0, "Size of the sway to each side before the scaling factors", unit="deg", ge=0, le=15
+    )
+    accent_deg: float = param(
+        5.0, "Size of the accent flick before the scaling factors", unit="deg", ge=0, le=30
+    )
+    min_half_s: float = param(
+        0.5,
+        "Least time of one half of a move; a tempo too fast for it moves on every second, "
+        "then every fourth beat",
+        unit="s",
+        ge=0.1,
+        le=3,
+    )
+    fold_margin: float = param(
+        0.1,
+        "How far a shorter fold must clear the least half time before the moves switch to it "
+        "(share); a tempo that jitters around a threshold keeps its fold",
+        ge=0,
+        le=0.5,
+    )
+    phase_correction_beats_per_s: float = param(
+        0.5,
+        "Fastest correction of a move toward the beat grid when the grid or the source changes",
+        unit="beats/s",
+        ge=0.05,
+        le=4,
+    )
+    lead_ms: float = param(
+        100.0,
+        "How far the moves run ahead of the beat, to cover the command to motion delay "
+        "(negative: behind it); tuned on the robot",
+        unit="ms",
+        ge=-500,
+        le=1000,
+    )
+    arousal_gain: float = param(
+        0.5, "How much arousal raises the amplitude: 1 + gain x arousal", ge=0, le=2
+    )
+    speaking_gain: float = param(
+        0.3, "Share of the amplitude kept while the robot speaks", ge=0, le=1
+    )
+    accent_min_interval_s: float = param(
+        1.0, "Least time between two accent flicks", unit="s", ge=0.1, le=30
+    )
+    fade_in_s: float = param(
+        2.0, "The dance fades in over this once the beat is there", unit="s", ge=0.1, le=10
+    )
+    fade_out_s: float = param(
+        1.0, "The dance fades out over this when the beat goes", unit="s", ge=0.1, le=10
+    )
+    command_ttl_s: float = param(
+        0.25,
+        "Lifetime of each dance command in the arbiter: the offset drops to zero by itself if "
+        "the app stops feeding it",
+        unit="s",
+        ge=0.05,
+        le=2,
+    )
+
+
 class SpeechMotionConfig(Strict):
     """Speech timeline built from the robot's own TTS output (SPEC 8): the energy envelope and
     the phrase and emphasis events; and the speaking motion layer that reads it (SPEC 7,
@@ -5795,6 +5883,10 @@ with warnings.catch_warnings():
             {},
             "SPEC 4A, 7: channels and shapes of the speaking motion; the robot manifest ships it",
         )
+        dance: DanceConfig = param({}, "SPEC 7: dance motion, small moves locked to a beat")
+        dance_motion_map: DanceMotionMap = param(
+            {}, "SPEC 4A, 7: channels and shape of the dance motion; the robot manifest ships it"
+        )
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
@@ -5907,6 +5999,11 @@ with warnings.catch_warnings():
             if sm.fade_ms > self.motion.arbiter.crossfade_ms:
                 raise ValueError(
                     "speech_motion.fade_ms must be at most motion.arbiter.crossfade_ms"
+                )
+            if self.dance.command_ttl_s <= 1 / self.motion.app_tick_hz:
+                raise ValueError(
+                    "dance.command_ttl_s must exceed one app tick (1 / motion.app_tick_hz), "
+                    "or the offset drops between two ticks"
                 )
             return self
 

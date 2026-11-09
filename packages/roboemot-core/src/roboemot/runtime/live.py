@@ -8,6 +8,10 @@ needs come from a copy kept up to date by ``apply_config`` (a stack subscriber),
 validates the whole configuration on every read. State only: no audio, text, embeddings, registry
 ids, bearings or positions, and nothing is logged or stored. The preview frame is ``LiveVideo``'s.
 
+``music`` and ``dance`` feed the beat card: numbers and codes only, never audio, a spectrum or an
+envelope (SPEC 12). Ages are computed here because a monotonic stamp means nothing to the browser.
+Each block is None without its part (no voice listener, music off, no dance renderer).
+
 ``activity`` is the "What's happening" panel (``webui.live.activity``): a status code for what the
 robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
@@ -108,6 +112,8 @@ class LiveState:
             "attention": self._attention(cfg, now),
             "reflexes": self._reflexes(now),
             "motion": self._motion(),
+            "music": self._music(cfg, now),
+            "dance": self._dance(now),
             "system": self._system(cfg, now),
             "activity": self._activity(cfg, rest) if cfg.webui.live.activity else None,
             "video": {
@@ -276,6 +282,41 @@ class LiveState:
         else:  # holding on an unreachable target (SPEC 12A): the loop writes nothing there
             state = "held" if loop.unreachable_held else "writing"
         return {"state": state}
+
+    def _music(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any] | None:
+        """The detector's lock-free state, or None without a detector or with ``music.enabled``
+        off. ``beat_phase_s`` is already the time since the last beat."""
+        listener = self._host.voice_listener
+        detector = listener.music if listener is not None else None
+        if detector is None or not cfg.music.enabled:
+            return None
+        m = detector.state(now)
+        return {
+            "playing": m.playing,
+            "tempo_bpm": None if m.tempo_bpm is None else round(m.tempo_bpm, ROUND_DIGITS),
+            "confidence": round(float(m.confidence), ROUND_DIGITS),
+            "beat_age_s": None if m.beat_phase_s is None else round(m.beat_phase_s, ROUND_DIGITS),
+        }
+
+    def _dance(self, now: float) -> dict[str, Any] | None:
+        """The dance layer's last tick, or None without a renderer: ``state`` is ``active`` or
+        ``idle``, ``bob`` and ``sway`` each role's share of its amplitude, ``tempo_bpm`` and
+        ``beat_age_s`` those of the beat the dance follows (None with no beat)."""
+        renderer = self._host.dance
+        if renderer is None:
+            return None
+        d = renderer.live_snapshot(now)
+        age = d.last_accent_age_s(now)
+        tempo, beat_age = d.tempo_bpm(), d.beat_age_s(now)
+        return {
+            "state": "active" if d.active else "idle",
+            "source": d.source,
+            "tempo_bpm": None if tempo is None else round(tempo, ROUND_DIGITS),
+            "beat_age_s": None if beat_age is None else round(beat_age, ROUND_DIGITS),
+            "bob": round(d.bob, ROUND_DIGITS),
+            "sway": round(d.sway, ROUND_DIGITS),
+            "last_accent_age_s": None if age is None else round(age, ROUND_DIGITS),
+        }
 
     def _system(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any]:
         cached = self._temp

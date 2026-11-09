@@ -29,7 +29,8 @@ from typing import Any, Protocol
 import numpy as np
 
 from ..config.schema import SootheConfig, SootheVariant
-from .synth import synthesize
+from ..motion.beat import Beat
+from .synth import BlirpPlan, HumPlan, plan_sound, render_plan
 
 EVENT = "self.soothe"
 RESTING = "resting"  # the circadian state name (circadian.model.State)
@@ -41,6 +42,7 @@ class RawOutput(Protocol):
     def play(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> int | None: ...
     def cancel(self, job_id: int) -> None: ...
     def live(self, job_id: int) -> bool: ...
+    def started_at(self, job_id: int) -> float | None: ...
 
 
 class SootheRunner:
@@ -67,6 +69,7 @@ class SootheRunner:
         self._cooldown_until = -math.inf
         self._last: SootheVariant | None = None
         self._job: int | None = None  # id of the sound queued or playing
+        self._plan: HumPlan | BlirpPlan | None = None  # the plan of that sound
         self._sound_end = -math.inf  # estimate of the end of the sound from its start
         self._ended = -math.inf  # when the last sound was seen to be over (or was cut)
         self._held = False  # speech holds the sound back now (counted once per stretch)
@@ -89,6 +92,32 @@ class SootheRunner:
         ago. The app uses it so that the "speaking" window our sound opens on the speaker, and
         its end, do not count as somebody else's audio and cancel it or reset the idle clock."""
         return self._job is not None or now < self._ended + tail_s
+
+    def beat_at(self, now: float) -> Beat | None:
+        """The planned beat grid of the hum playing at ``now`` (SPEC 7B, 7 Dance motion): its
+        ``beat_s`` from the moment the output really started it, not the queue time. None for
+        a blirp (irregular), before the hum reached the output, once it is over and at once
+        after a barge-in cut it (the next ``tick`` is not waited for)."""
+        with self._lock:
+            plan, job = self._plan, self._job
+            if job is None or not isinstance(plan, HumPlan) or not self.output.live(job):
+                return None
+            start = self.output.started_at(job)
+        if start is None or not start <= now < start + plan.length_s:
+            return None
+        return Beat(plan.beat_s, start, 1.0, "own")
+
+    def accents(self, since: float, now: float) -> list[float]:
+        """Stamps of the events of the blirp playing that fall in ``(since, now]``, from the
+        moment the output really started it. Empty for a hum or with nothing playing."""
+        with self._lock:
+            plan, job = self._plan, self._job
+            if job is None or not isinstance(plan, BlirpPlan) or not self.output.live(job):
+                return []
+            start = self.output.started_at(job)
+        if start is None:
+            return []
+        return [start + e.start_s for e in plan.events if since < start + e.start_s <= now]
 
     def snapshot(self) -> dict[str, Any]:
         """Counts for the debug report (SPEC 12A): sounds played, held back and cut by speech."""
@@ -188,12 +217,13 @@ class SootheRunner:
             self._schedule(now)
             return
         variant = self.rng.choices(pool, weights=[v.weight for v in pool])[0]
-        samples = synthesize(variant.sound, variant.shape, self.rng, self.cfg.rate_hz)
+        plan = plan_sound(variant.sound, variant.shape, self.rng)
+        samples = render_plan(plan, self.cfg.rate_hz)
         job = self.output.play(samples, self.cfg.rate_hz, self.volume_db())
         if job is None:  # queue full: no event, try again at the next schedule
             self._schedule(now)
             return
-        self._job, self._last = job, variant
+        self._job, self._plan, self._last = job, plan, variant
         self._sound_end = now + samples.size / self.cfg.rate_hz
         self._cooldown_until = self._sound_end + self.cfg.cooldown_s
         self._schedule(self._sound_end)

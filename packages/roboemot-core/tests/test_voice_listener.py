@@ -1235,6 +1235,15 @@ def test_music_off_builds_no_detector_until_a_reload_turns_it_on():
     assert r.listener.music is not None
 
 
+def test_music_state_is_none_without_a_detector_or_while_off():
+    r = Rig(["ciao"], cfg=RoboEmotConfig.model_validate({"music": {"enabled": False}}))
+    assert r.listener.music_state(1.0) is None
+    r.listener.apply_config(RoboEmotConfig.model_validate({"music": {"enabled": True}}))
+    assert r.listener.music_state(1.0).playing is False
+    r.listener.apply_config(RoboEmotConfig.model_validate({"music": {"enabled": False}}))
+    assert r.listener.music_state(1.0) is None
+
+
 def test_wake_word_over_music_is_addressed():
     r = music_rig(["ehi"], final="ehi robot che ore sono")
     r.say()

@@ -262,3 +262,18 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
       curve: minjerk
       channels:
         head.pitch: [[0.0, 0], [0.5, -1], [1.0, 0]]
+  # Dance motion (SPEC 7, Dance motion): `bob` and `sway` map a channel to a sign, the accent's
+  # keyframes are the shape only, scaled to dance.accent_deg. head.pitch positive is down, so
+  # the bob dips. The sway tilts the head (roll positive lowers the right ear) and turns it the
+  # same way (yaw positive turns left, so -1); the map holds signs only, so the yaw moves as far
+  # as the roll: "a little" is dance.sway_deg being small. The accent flicks the antennas
+  # outward (right -, left +, SDK order [right, left]), halves of 0.6 s as the speaking accent.
+  # Never the body yaw or a translation. First guesses, not yet seen on the robot.
+  dance_motion_map:
+    bob: {head.pitch: 1}
+    sway: {head.roll: 1, head.yaw: -1}
+    accent:
+      curve: minjerk
+      channels:
+        antenna_right: [[0.0, 0], [0.6, -1], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.6, 1], [1.2, 0]]

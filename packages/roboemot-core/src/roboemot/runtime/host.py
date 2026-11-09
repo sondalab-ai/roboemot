@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from roboemot.affect.dance import DanceRenderer
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -68,6 +69,7 @@ class RuntimeHost:
     yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive motion
     speaking: SpeakingRenderer | None = None  # speech timeline -> additive motion (SPEC 7)
+    dance: DanceRenderer | None = None  # beat -> additive motion (SPEC 7, Dance motion)
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
     audio: AudioHub | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: Speaker | None = None  # playback; only when voice.enabled

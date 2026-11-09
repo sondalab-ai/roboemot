@@ -307,6 +307,8 @@ class SpeechOutput:
         # before that are in ``_unplayed``
         self._audible: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._unplayed: set[int] = set()
+        # raw job id -> clock stamp at which its first sample starts to play (the beat grid)
+        self._raw_started: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
         # utterance -> (index of its next sentence, delivery of its last one)
@@ -721,12 +723,34 @@ class SpeechOutput:
                 isinstance(job, _RawJob) and job.id == job_id for job in self._jobs
             )
 
+    def started_at(self, job_id: int) -> float | None:
+        """Clock stamp at which raw job ``job_id`` starts (or started) to play: where its first
+        sample landed on the sink's queue, not when it was queued. None until it reached the
+        sink, or after the last ``PLAYED_WINDOW`` raw jobs. Safe from any thread."""
+        with self._lock:
+            return self._raw_started.get(job_id)
+
     def raw_only(self) -> bool:
         """Whether a raw sound is queued or playing and nothing else is: no sentence or stream
         job, and no sentence on the speech timeline now. A person speaking over such a sound is
         not cutting the robot's speech (SPEC 7B, 8). Safe from any thread."""
         with self._lock:
             return self._raw_only()
+
+    def speaking_at(self, now: float) -> bool:
+        """Whether speech is under way at ``now``: a sentence or stream job queued or running, or
+        a sentence on the timeline. So the gap between two sentences of an answer counts and a
+        raw sound does not. The app tick asks on every tick and ``_lock`` is held while the sink
+        takes samples, so this reads without it: a read racing a change is one tick old."""
+        try:
+            jobs = tuple(self._jobs)
+        except RuntimeError:  # the queue changed during the copy: something is being queued
+            return True
+        if any(not isinstance(job, _RawJob) for job in jobs):
+            return True
+        if self._in_flight and self._raw_current is None:
+            return True
+        return self.timeline.playing(now)
 
     def cut_raw(self) -> bool:
         """Cut the raw sounds if nothing but raw sounds is queued or playing (``raw_only``),
@@ -920,6 +944,9 @@ class SpeechOutput:
             self.sink.push_audio_sample(played, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
+                self._raw_started[job.id] = start
+                while len(self._raw_started) > PLAYED_WINDOW:
+                    self._raw_started.popitem(last=False)
             if speech:
                 self._last_speech = job.id
                 self._push_ms.append((self.clock() - now) * MS_PER_S)
