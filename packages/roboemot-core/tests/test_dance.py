@@ -19,6 +19,8 @@ from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
 from roboemot.motion.beat import Beat, BeatSource, room_beat
 from roboemot.voice.music import MusicDetector, MusicState
+from roboemot.voice.speech import SpeechOutput, _Job
+from test_speech import FakeBackend, TimelineSink
 
 MANIFEST = Path(__file__).resolve().parent / "data" / "dance-head.yaml"
 TICK = 0.05  # the 20 Hz app tick
@@ -828,7 +830,7 @@ def test_blind_hold_expiry_fades_out_then_restarts_cleanly(manifest, mapping):
         (),
         {"source": lambda self: BeatSource(lambda n: None, lambda n: room_beat(det.state(n)))},
     )()
-    cfg = DanceConfig(**{**NO_LEAD, "fade_out_s": 0.5})
+    cfg = DanceConfig(**{**NO_LEAD, "fade_in_s": 1.0, "fade_out_s": 0.5})
     r = make(manifest, mapping, holder, cfg=cfg)
     run(r, 6.0, 9.5)  # heard until about 8.0 (a batch may wait), held for 2 s more
     assert r.snapshot()["source"] == "room"
@@ -845,14 +847,19 @@ def test_blind_hold_expiry_fades_out_then_restarts_cleanly(manifest, mapping):
 
 
 def test_speaking_gain_holds_across_a_gap_between_sentences(manifest, mapping):
-    """The renderer takes one busy signal; the sentence gap is covered by ``speaking_at``, tested
-    in ``test_beat_source``. Here: an answer that stays busy keeps the gain steady."""
-    room = Room(100.0)
+    """The real busy signal: no sentence on the timeline, the next one queued. Then the answer
+    is over and the gain comes back."""
+    out = SpeechOutput(RoboEmotConfig(), TimelineSink(), FakeBackend())
+    playing = [True]
+    out.timeline._sentence_at = lambda t: object() if playing[0] else None
     cfg = DanceConfig(**NO_LEAD, speaking_gain=0.3)
-    r = make(manifest, mapping, room, cfg=cfg, speaking=lambda t: True)
+    r = make(manifest, mapping, Room(100.0), cfg=cfg, speaking=out.speaking_at)
     run(r, 0.0, SETTLE_S)
-    levels = []
-    for i in range(40):
-        r.commands(SETTLE_S + i * TICK)
-        levels.append(r._s.level)
-    assert all(level == pytest.approx(0.3) for level in levels)
+    assert r._s.level == pytest.approx(0.3)
+    playing[0] = False
+    out._jobs.append(object.__new__(_Job))
+    run(r, SETTLE_S, SETTLE_S + 1.0)
+    assert r._s.level == pytest.approx(0.3)  # the gap does not pump
+    out._jobs.clear()
+    run(r, SETTLE_S + 1.0, SETTLE_S + 2.0)
+    assert r._s.level == pytest.approx(1.0)
