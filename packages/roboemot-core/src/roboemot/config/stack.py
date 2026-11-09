@@ -685,7 +685,15 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "voice", "motion"}
+    {
+        "expression_map",
+        "gesture_map",
+        "circadian_motion",
+        "speech_motion_map",
+        "dance_motion_map",
+        "voice",
+        "motion",
+    }
 )  # what a robot manifest may set
 MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
 MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
@@ -1059,7 +1067,7 @@ class ConfigStack:
         self._runtime: dict[str, _RuntimeValue] = {}
         self.channels: frozenset[str] | None = None
         self.clips: frozenset[str] = frozenset()  # clip names of the robot's library (SPEC 7)
-        self.body_yaw: str | None = None  # refused in speech_motion_map (set with the channels)
+        self.body_yaw: str | None = None  # refused in the motion maps (set with the channels)
         self._listeners: list[Callable[[ConfigChange], None]] = []
         self._lock = threading.RLock()
         self._mtimes: dict[str, float] = {}
@@ -1132,8 +1140,9 @@ class ConfigStack:
         ``clips`` are the names in the robot's clip library (empty for a robot without one): a
         variant naming any other clip is refused too (SPEC 7, Recorded clips).
         ``body_yaw`` (``GazeMap.body_yaw``, None when the robot cannot turn its body) is refused
-        in ``speech_motion_map`` on top of that: the speaking motion never turns the body. It is
-        required (keyword), so a caller cannot forget it and silently accept a body turn.
+        in ``speech_motion_map`` and ``dance_motion_map`` on top of that: neither layer turns
+        the body. It is required (keyword), so a caller cannot forget it and silently accept a
+        body turn.
         The block becomes part of the installed configuration, so it also resets the approved
         baseline.
         """
@@ -1301,6 +1310,13 @@ class ConfigStack:
             if self.body_yaw is not None and self.body_yaw in names:
                 raise ConfigError(
                     f"speech_motion_map.{role}: {self.body_yaw!r} turns the body; the speaking "
+                    "motion never does"
+                )
+        for role, names in cfg.dance_motion_map.channels().items():
+            named[f"dance_motion_map.{role}"] = names
+            if self.body_yaw is not None and self.body_yaw in names:
+                raise ConfigError(
+                    f"dance_motion_map.{role}: {self.body_yaw!r} turns the body; the dance "
                     "motion never does"
                 )
         for where, names in named.items():

@@ -91,6 +91,15 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
                     cfg.speech_motion, cfg.speech_motion_map, cfg.expression.max_amplitude
                 ),
             ),
+            (
+                "dance",
+                lambda: p.dance.apply_config(
+                    cfg.dance,
+                    cfg.dance_motion_map,
+                    cfg.expression.max_amplitude,
+                    cfg.music.beats_per_bar,
+                ),
+            ),
             ("responder", lambda: _apply_responder(p, cfg)),
             ("network", lambda: _apply_network(p, cfg)),
         ]

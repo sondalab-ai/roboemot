@@ -8,6 +8,7 @@ import numpy as np
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
 from roboemot.manifest import load_manifest
+from roboemot.motion.beat import Beat
 from roboemot.runtime.assembly import assemble
 from roboemot.voice.envelope import SpeechTimeline
 from test_runtime import CONFIGS, DaytimeHost, RecordingPlatform
@@ -48,6 +49,44 @@ def test_the_assembled_speaking_motion_reads_the_speech_output_lazily():
         moved, t = [], 0.0
         while t < 1.6:
             moved += [c.targets for c in p.speaking.commands(t)]
+            t += 0.05
+        assert moved and set().union(*moved) == {"neck_tilt"}
+        assert max(m["neck_tilt"] for m in moved) > 0
+    finally:
+        p.perception.stop()
+
+
+def test_the_assembled_dance_reads_the_soothe_runner_lazily():
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    host = DaytimeHost()
+    p = assemble(host, stack, manifest, platform, platform.bind(object()))
+    try:
+        assert host.dance is p.dance
+        assert p.dance.commands(0.0) == []  # no soothe runner yet: no beat
+        stack.set("dance_motion_map.bob", {"neck_tilt": 1}, source="test", layer="app")
+        cfg = stack.effective()
+        p.dance.apply_config(
+            cfg.dance, cfg.dance_motion_map, cfg.expression.max_amplitude, cfg.music.beats_per_bar
+        )
+        p.dance.set_register(resolve_register([Person({})], cfg.register, cfg.persona))
+
+        class Runner:
+            def beat_at(self, now):
+                return Beat(1.2, 0.0, 1.0, "own")
+
+            def accents(self, since, now):
+                return []
+
+        host.soothe_runner = Runner()
+        moved, t = [], 0.0
+        while t < 3.0:
+            moved += [c.targets for c in p.dance.commands(t)]
             t += 0.05
         assert moved and set().union(*moved) == {"neck_tilt"}
         assert max(m["neck_tilt"] for m in moved) > 0
