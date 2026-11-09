@@ -20,7 +20,7 @@ before creating it (``env_created``) with the distributions it held afterwards
 (``env_baseline``); uninstall removes it again unless another app or package has moved in.
 An opt-in overclock (``--overclock``) is recorded as an :class:`OverclockRecord` before the boot
 config is written: the file, the exact block, a backup of the file as it was, and the trial
-config while the block is only there; a reinstall without the option and uninstall remove
+config while the block is only there; a reinstall that reverts it and uninstall remove
 exactly that block, and refuse a block edited by hand. This file is writable by the robot user,
 so root never trusts it: the overclock's paths and block must equal the platform's, the texts
 written are built from the live boot config, and the backup is kept only for the owner's

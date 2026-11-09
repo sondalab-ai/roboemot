@@ -208,6 +208,7 @@ def config_check(text: str | None, trial: str | None, autoboot: str | None = Non
 class ReachyOverclock:
     """``Platform.overclock`` of the Reachy Mini Wireless (``roboemot.install.overclock``)."""
 
+    label = LABEL
     warning = WARNING
     config_path = CONFIG
     trial_path = TRIAL

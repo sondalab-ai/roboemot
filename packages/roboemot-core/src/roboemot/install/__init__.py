@@ -41,7 +41,8 @@ The overclock (``--overclock``, opt-in, only where the platform's hardware suppo
 ``Platform.overclock``, ``roboemot.install.overclock``) writes one marked block into the robot's
 boot config, through a trial config booted once when the platform has one; the reboot for it
 has its own question (``--overclock-reboot``). ``-y`` turns neither on; an unattended run names
-``--overclock`` or ``--no-overclock``, and a reinstall without it removes the recorded block.
+``--overclock`` or ``--no-overclock``. A block already in the boot config gets only a
+keep-or-revert question (default keep, ``-y`` keeps it, ``--no-overclock`` reverts it).
 
 Later, ``scripts/run_on_robot.py`` (``roboemot.install.run``) starts the installed app and
 prints its web UI address.
@@ -2226,6 +2227,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     earlier.overclock if earlier else None,
                     opts.overclock,
                     opts.dry_run,
+                    adopt=True,
                 )
                 plan.rerun = _rerun(
                     replace(opts, overclock=True, overclock_reboot=True, dry_run=False)
@@ -2719,9 +2721,9 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         action=argparse.BooleanOptionalAction,
         help="overclock the CPU where the platform's hardware supports it (every support check "
         "passes), writing one marked block into the boot config, through a trial boot when the "
-        "board has one; --no-overclock (and a reinstall without it) removes the recorded block "
-        "(default: ask on a terminal, no; -y does not turn it on, and on a reinstall -y removes "
-        "an active overclock unless --overclock is passed)",
+        "board has one; --no-overclock removes the block (default: ask on a terminal, no; -y "
+        "does not turn it on; a block already there gets only a keep-or-revert question, "
+        "default keep, and -y keeps it)",
     )
     p.add_argument(
         overclocking.REBOOT_FLAG,
