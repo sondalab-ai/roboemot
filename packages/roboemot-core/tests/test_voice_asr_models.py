@@ -214,7 +214,11 @@ def over_the_robot(
     from roboemot.voice.bargein import BargeIn, PlaybackReference
 
     vad_path, _ = models
-    config = RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else CFG
+    config = (
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"sustain_ms": 0.0, **cfg}}})
+        if cfg
+        else CFG
+    )
     robot = load(robot_clip)
     seconds = robot.size / RATE
     t0 = 1000.0
