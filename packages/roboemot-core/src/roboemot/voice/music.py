@@ -25,7 +25,8 @@ The beat phase is the offset whose beat grid sums the most envelope (a comb).
 
 While music plays, an estimate that reaches ``music.keep_periodicity`` also restarts the release,
 unless ``speech_heard`` says someone is speaking: a song in a real room reads far below the start
-threshold, and speech must not keep the music state alive.
+threshold, and speech must not keep the music state alive. For the same reason an estimate made
+while someone speaks cannot start music: it does not count as periodic while no music plays.
 
 Music starts when an estimate holds and the evidence (back-dated to the first heard hop of the
 window of the first periodic estimate in the chain) spans ``music.confirm_s``; the music interval
@@ -64,8 +65,17 @@ RECENT_ESTIMATES = 60  # report only, not behaviour: about the last minute of es
 STARTED, STOPPED = "started", "stopped"
 HOLD, KEEP = "hold", "keep"
 QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS = "quiet", "low_periodicity", "low_heard", "few_bands"
+SPEECH = "speech"
 FIRST_PERIODIC, UNSTABLE_TEMPO = "first_periodic", "unstable_tempo"
-REJECTIONS = (QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS, FIRST_PERIODIC, UNSTABLE_TEMPO)
+REJECTIONS = (
+    QUIET,
+    LOW_PERIODICITY,
+    LOW_HEARD,
+    FEW_BANDS,
+    SPEECH,
+    FIRST_PERIODIC,
+    UNSTABLE_TEMPO,
+)
 
 
 @dataclass(frozen=True)
@@ -382,7 +392,7 @@ class MusicDetector:
         result = None
         level = statistics.fmean(self._powers) if self._powers else 0.0
         if level >= self._floor:
-            result = self._periodic()
+            result = self._unless_speech(self._periodic())
             with self._lock:
                 self._counts["estimates"] += 1
         previous, self._previous = self._previous, result
@@ -411,6 +421,16 @@ class MusicDetector:
         self._publish(result)
         return event
 
+    def _speaking(self) -> bool:
+        """Whether the listener hears someone speaking now."""
+        return self.speech_heard is not None and self.speech_heard()
+
+    def _unless_speech(self, result: _Estimate) -> _Estimate:
+        """``result``, no longer periodic when it could start music while someone speaks."""
+        if result.periodic and not self._view.playing and self._speaking():
+            return replace(result, periodic=False, rejected=SPEECH)
+        return result
+
     def _keeps_playing(self, result: _Estimate | None) -> bool:
         """Whether this estimate keeps music that already plays: periodic enough for the lower
         ``music.keep_periodicity``, and nobody is speaking."""
@@ -418,7 +438,7 @@ class MusicDetector:
             return False
         if result.periodicity < self._cfg.keep_periodicity:
             return False
-        return not (self.speech_heard is not None and self.speech_heard())
+        return not self._speaking()
 
     def _note(self, name: str, result: _Estimate | None, level: float) -> None:
         """Count one estimate interval's outcome and keep its numbers for the report (SPEC 12A):

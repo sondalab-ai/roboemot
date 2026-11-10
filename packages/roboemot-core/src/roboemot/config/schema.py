@@ -3685,7 +3685,7 @@ class MusicConfig(Strict):
         unit="bpm",
     )
     min_periodicity: float = param(
-        0.5,
+        0.4,
         "Least normalised autocorrelation of the onset envelope at the tempo",
         ge=0, le=1,
     )  # fmt: skip

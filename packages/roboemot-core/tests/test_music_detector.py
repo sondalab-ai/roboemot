@@ -78,15 +78,22 @@ def test_detects_click_and_drums(make, bpm):
     assert 0 < state.confidence <= 1
 
 
+def hearing_speech():
+    """A detector whose listener hears speech, as the listener's speech detector would."""
+    det = detector()
+    det.speech_heard = lambda: True
+    return det
+
+
 def test_speech_is_not_music():
     for seed in range(3):
-        events, first = run(detector(), speech_like(20.0, RATE, pauses=False, seed=seed))
+        events, first = run(hearing_speech(), speech_like(20.0, RATE, pauses=False, seed=seed))
         assert first is None and events == [], seed
 
 
 def test_speech_with_pauses_is_not_music():
     for seed in range(3):
-        events, first = run(detector(), speech_like(20.0, RATE, pauses=True, seed=seed))
+        events, first = run(hearing_speech(), speech_like(20.0, RATE, pauses=True, seed=seed))
         assert first is None and events == [], seed
 
 
@@ -383,6 +390,25 @@ def test_speech_does_not_keep_music_playing():
     _playing(det)
     _scripted(det, 0.4)
     assert det.snapshot()["keeps"] == 0 and det._last_hold_s == -math.inf
+
+
+def test_speech_cannot_start_music():
+    det = detector()
+    det.speech_heard = lambda: True
+    run(det, drum_loop(120, 12.0, RATE))
+    snap = det.snapshot()
+    assert snap["starts"] == 0 and snap["rejected"]["speech"] >= 1
+    assert not det.state(12.0).playing
+
+
+def test_music_starts_once_the_speech_ends():
+    heard = [True]
+    det = detector()
+    det.speech_heard = lambda: heard[0]
+    run(det, drum_loop(120, 8.0, RATE))
+    heard[0] = False
+    run(det, drum_loop(120, 8.0, RATE), t0=8.0)
+    assert det.snapshot()["starts"] == 1
 
 
 def test_keep_does_not_start_music():
