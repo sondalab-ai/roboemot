@@ -250,6 +250,9 @@ class Response:
     after: Callable[[], None] | None = None
     # Set with ``bytes`` data (a JPEG): the body is sent as is with this media type.
     content_type: str | None = None
+    # Objects inside ``data`` that already passed ``holds_vector`` (shared, never changed after
+    # the check): the guard skips them by identity instead of scanning them again.
+    vetted: tuple[Any, ...] = ()
 
 
 def live_cursor(query: str) -> tuple[int, str]:
@@ -282,13 +285,16 @@ class ApiError(Exception):
         self.field = field
 
 
-def holds_vector(value: Any) -> bool:
-    """True if ``value`` contains a list of ``VECTOR_GUARD_LEN`` or more numbers."""
+def holds_vector(value: Any, vetted: tuple[Any, ...] = ()) -> bool:
+    """True if ``value`` contains a list of ``VECTOR_GUARD_LEN`` or more numbers. An object in
+    ``vetted`` (matched by identity) was checked before and is not scanned again."""
+    if any(value is done for done in vetted):
+        return False
     if isinstance(value, dict):
-        return any(holds_vector(x) for x in value.values())
+        return any(holds_vector(x, vetted) for x in value.values())
     if isinstance(value, list | tuple):
         numbers = sum(isinstance(x, int | float) and not isinstance(x, bool) for x in value)
-        return numbers >= VECTOR_GUARD_LEN or any(holds_vector(x) for x in value)
+        return numbers >= VECTOR_GUARD_LEN or any(holds_vector(x, vetted) for x in value)
     return False
 
 
@@ -340,6 +346,8 @@ class WebApi:
         self.sessions = Sessions(lambda: self.web)
         self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
+        # GET /api/settings: (core rows, language, their localized copy that passed the guard)
+        self._settings_page: tuple[list[FieldDescriptor], str, list[Any]] | None = None
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -370,7 +378,7 @@ class WebApi:
         except Exception as exc:
             log.error("web ui handler failed: %s", type(exc).__name__)
             resp = Response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
-        if holds_vector(resp.data):
+        if holds_vector(resp.data, resp.vetted):
             log.error("web ui response blocked: it held a long list of numbers")
             return Response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "vector_leak"})
         return resp
@@ -873,14 +881,31 @@ class WebApi:
         rows it claims, which are then absent from ``fields``); ``pin_required``: the note that
         every write re-enters the PIN."""
         port = self._settings_port()
-        fields, robot = port.robot_split(port.fields())
+        rest, robot = port.robot_split(port.fields())
         lang = self._language()
         if robot is not None:
             prefix = f"{PATH_ROOT}.{robot['id']}."
             own = frozenset(f["path"] for f in robot["fields"] if f["path"].startswith(prefix))
             robot = {**robot, "fields": localize(robot["fields"], lang, own)}
-        fields = localize(fields, lang)
-        return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
+        fields, vetted = self._localized(rest, lang)
+        data = {"fields": fields, "robot": robot, "pin_required": True}
+        return Response(HTTPStatus.OK, data, vetted=vetted)
+
+    def _localized(
+        self, rest: list[FieldDescriptor], lang: str
+    ) -> tuple[list[Any], tuple[Any, ...]]:
+        """``rest`` localized and the objects the response guard may skip. The copy is reused
+        while the port hands back the same list (held, ``is``) for the same language, and only a
+        copy that passed ``holds_vector`` is kept and skipped; a failing one is returned unvetted,
+        so the guard blocks it. The robot block, built per request, is scanned every time."""
+        page = self._settings_page
+        if page is not None and page[0] is rest and page[1] == lang:
+            return page[2], (page[2],)
+        fields = list(localize(rest, lang))
+        if holds_vector(fields):
+            return fields, ()
+        self._settings_page = (rest, lang, fields)
+        return fields, (fields,)
 
     def _settings_reveal(self, req: Request) -> Response:
         """The private fields (privacy, location) with their real values. Admin only: the
