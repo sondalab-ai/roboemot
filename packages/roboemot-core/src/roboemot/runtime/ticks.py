@@ -14,6 +14,7 @@ from roboemot.attention import AttentionSelector, GazeController, InterestMod, i
 from roboemot.circadian import CircadianModel, in_window
 from roboemot.conversation.phase import SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
+from roboemot.persona import PersonaEffects
 from roboemot.persona import effects as persona_effects
 from roboemot.soothe import SootheRunner
 from roboemot.voice.activity import SpeechActivity
@@ -27,14 +28,23 @@ OBJECTS = "objects"  # the governor stage of the object detector
 
 
 def idle_command(
-    cfg: Any, t: float, scale: float = 1.0, phase_t: float | None = None, *, dof: str
+    cfg: Any,
+    t: float,
+    scale: float = 1.0,
+    phase_t: float | None = None,
+    *,
+    dof: str,
+    effects: PersonaEffects | None = None,
 ) -> Command:
     """Breathing on the gaze pitch dof ``dof`` (SPEC 10, Idle; parameters from motion.idle,
     period scaled by the persona's energy, SPEC 11A). ``scale`` is the circadian state's idle
     motion scale (SPEC 7A); ``phase_t`` is the breathing phase clock (default ``t``): the caller
-    integrates it at the state's slower pace so the head does not jump when the period changes."""
+    integrates it at the state's slower pace so the head does not jump when the period changes.
+    ``effects`` are the persona's effects of ``cfg`` (computed here when the caller has not
+    cached them)."""
     idle = cfg.motion.idle
-    period = idle.breathing_period_s * persona_effects(cfg.persona).idle_period_x
+    fx = effects if effects is not None else persona_effects(cfg.persona)
+    period = idle.breathing_period_s * fx.idle_period_x
     phase = t if phase_t is None else phase_t
     pitch = scale * idle.breathing_amplitude * math.sin(2 * math.pi * phase / period)
     return Command("idle", Priority.IDLE, {dof: pitch}, t)
@@ -49,16 +59,17 @@ def feed_idle(
     phase_t: float | None = None,
     *,
     dof: str,
+    effects: PersonaEffects | None = None,
 ) -> None:
     """Feed idle breathing. While attention owns the head it rides on top as an additive layer
     (additive commands stack on any winner of idle priority or lower precedence); otherwise it
     is the plain idle command. A ``scale`` of 0 (circadian resting) feeds none: the rest posture
-    replaces it."""
+    replaces it. ``effects``: the persona's effects of ``cfg``, as for ``idle_command``."""
     if scale <= 0:
         loop.clear("idle")
         loop.clear(ADDITIVE_IDLE)
         return
-    cmd = idle_command(cfg, now, scale, phase_t, dof=dof)
+    cmd = idle_command(cfg, now, scale, phase_t, dof=dof, effects=effects)
     if attending:
         loop.feed(
             replace(
