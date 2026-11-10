@@ -147,3 +147,16 @@ test("a failed poll marks the emotion cards as old until the next good one", asy
   assert.equal(grid.getAttribute("aria-busy"), null);
   assert.equal(note.hidden, true);
 });
+
+test("a poll with equal data keeps the emotion cards; a change replaces only its card", async (t) => {
+  const p = await emotionsPage(t, { state: { ...STATE, poll_ms: 15 } });
+  const grid = p.document.querySelector("#emo-state");
+  const first = [...grid.children];
+  await new Promise((r) => setTimeout(r, 60));
+  assert.ok([...grid.children].every((node, i) => node === first[i]), "same nodes after equal polls");
+  p.setState({ ...STATE, poll_ms: 15, circadian: { ...STATE.circadian, sleepiness: 0.9 } });
+  await new Promise((r) => setTimeout(r, 60));
+  const now = [...grid.children];
+  assert.equal(now.filter((node, i) => node !== first[i]).length, 1, "only the circadian card is new");
+  assert.notEqual(now[2], first[2]);
+});

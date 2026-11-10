@@ -599,3 +599,40 @@ test("a recovering poll leaves a newer message from something else", async (t) =
   await sleep(POLL_MS * 2);
   assert.equal(page.document.querySelector("#notice").textContent, "Saved.");
 });
+
+test("el() styles through the CSSOM, which isEqualNode compares as the style attribute", async (t) => {
+  const page = await livePage(t);
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).getAttribute("style")'), "--a: 1s;");
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).isEqualNode(el("span", { style: { "--a": "1s" } }))'), true);
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).isEqualNode(el("span", { style: { "--a": "2s" } }))'), false);
+});
+
+test("a poll with equal data keeps every card node; a changed value replaces only its card", async (t) => {
+  let valence = 0.25;
+  const page = await livePage(t, { "GET /api/live/state": () => ({ ...STATE, mood: { ...STATE.mood, valence } }) });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const first = [...grid.children];
+  await sleep(POLL_MS * 4);
+  assert.ok(polls(page) >= 3);
+  assert.ok([...grid.children].every((node, i) => node === first[i]), "same nodes after equal polls");
+  valence = 0.5;
+  await sleep(POLL_MS * 4);
+  const now = [...grid.children];
+  assert.equal(now.length, 9);
+  assert.notEqual(now[0], first[0], "the mood card is new");
+  assert.ok(now[0].textContent.includes("0.50"));
+  assert.ok(now.slice(1).every((node, i) => node === first[i + 1]), "the other cards are the same nodes");
+});
+
+test("a beating pulse replaces the beat card on each poll (the resync), and only that card", async (t) => {
+  const page = await livePage(t, { "GET /api/live/state": { ...STATE, ...BEAT } });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const first = [...grid.children];
+  const pulse = page.document.querySelector("#live-pulse");
+  const index = first.findIndex((n) => n.id === "live-beat-card");
+  await sleep(POLL_MS * 4);
+  assert.notEqual(page.document.querySelector("#live-pulse"), pulse, "a new pulse element restarts the animation");
+  assert.ok([...grid.children].every((node, i) => i === index || node === first[i]));
+});

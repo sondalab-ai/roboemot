@@ -27,7 +27,8 @@ const LIVE_METER_FLOOR_DB = -60;
 const LIVE_SECONDS_PER_MINUTE = 60;
 const LIVE_SECONDS_PER_HOUR = 3600;
 const LIVE_MS_PER_S = 1000;
-const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null, reply: { rttMs: 0, receivedMs: 0 } };
+const LIVE_SCROLL_SLACK_PX = 2; // sub-pixel rounding: a log this close to its end is at the bottom
+const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null, activity: null, resync: 0, reply: { rttMs: 0, receivedMs: 0 } };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
 const liveInput = { at: Date.now(), reported: 0 }; // reported 0: loading the page counts as input
@@ -154,14 +155,18 @@ function liveReplyAgeS() {
   return (rttMs / 2 + performance.now() - receivedMs) / LIVE_MS_PER_S;
 }
 
-// The circle that beats. Cards are rebuilt on each poll, so the new element starts its CSS animation
-// at the phase the server just reported: that is the resync, and the browser animates in between.
+// The circle that beats. A new element starts its CSS animation at the phase the server just
+// reported: that is the resync, and the browser animates in between. An equal delay does not mean
+// the running animation is in phase (the time since it started counts too), so a beating pulse
+// carries a new `data-resync` on every build: the beat card never equals the one on screen and
+// liveKeep replaces it. A still pulse has no animation and is kept like any other card.
 function liveBeatPulse(beat) {
   if (beat === null) return el("span", { class: "live-pulse", id: "live-pulse", "aria-hidden": "true" });
   const period = LIVE_SECONDS_PER_MINUTE / beat.tempo_bpm;
   const age = (beat.beat_age_s + liveReplyAgeS()) % period;
+  liveState.resync += 1;
   return el("span", {
-    class: "live-pulse live-pulse--on", id: "live-pulse", "aria-hidden": "true",
+    class: "live-pulse live-pulse--on", id: "live-pulse", "aria-hidden": "true", "data-resync": liveState.resync,
     style: {
       "--live-beat-period": period.toFixed(3) + "s",
       "--live-beat-delay": (-age).toFixed(3) + "s",
@@ -261,13 +266,35 @@ function liveSystemCard(d) {
 }
 
 function liveDisabledView(box) {
-  liveActivityBox().replaceChildren();
+  liveRenderActivity(null);
   box.replaceChildren(card(t("tab_live"), t("live_disabled_title"), el("p", {}, t("live_disabled_body"))));
+}
+
+// A detached copy of each node liveKeep put on screen, as it was built: the on-screen node gains
+// classes and children from the page (eyebrow glyphs) and the effects runtime, so it is never
+// compared itself. A node it is equal to was built from the same data.
+const liveBuilt = new WeakMap();
+const liveInert = document.implementation.createHTMLDocument(""); // a copy here loads no image
+
+// Makes `fresh` the children of `box`, in order, keeping each child on screen whose build equals
+// the new one (isEqualNode: element names, attributes, the CSSOM style as its style attribute, and
+// text). Only the children that changed are replaced, in place; a node that is already the one on
+// screen (a card kept across polls, such as the video card) stays.
+function liveKeep(box, fresh) {
+  const pool = [...box.children];
+  const want = fresh.map((node) => {
+    const same = pool.findIndex((old) => old === node || (liveBuilt.has(old) && liveBuilt.get(old).isEqualNode(node)));
+    if (same >= 0) return pool.splice(same, 1)[0];
+    liveBuilt.set(node, liveInert.importNode(node, true));
+    return node;
+  });
+  want.forEach((node, i) => { if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null); });
+  while (box.children.length > want.length) box.lastElementChild.remove();
 }
 
 function liveRender(box, data) {
   liveRenderActivity(data.activity || null);
-  box.replaceChildren(...LIVE_CARDS.map((c) => c.render(data)));
+  liveKeep(box, LIVE_CARDS.map((c) => c.render(data)));
 }
 
 // ---------------------------------------------------------------- what's happening
@@ -339,20 +366,35 @@ function liveEventRow(ev) {
     el("span", { class: "sl-eyebrow" }, stamp), " ", liveEventText(ev), count);
 }
 
-function liveRenderActivity(a) {
-  const box = liveActivityBox();
-  if (a === null) { box.replaceChildren(); return; }
-  const status = el("p", { id: "live-status", role: "status" },
-    badge(liveWord("live_status_", a.status), LIVE_STATUS_TONE[a.status] || "info"));
-  const notes = a.notes.map((n) => el("p", { class: "hint live-note" },
-    t("live_note_" + n.code, { reason: liveValue(n.reason) })));
-  const feed = a.events.length
-    ? el("ul", { class: "sl-list live-events", id: "live-events" }, a.events.map(liveEventRow))
-    : el("p", { class: "hint", id: "live-events-empty" }, t("live_activity_empty"));
+// The activity card, built once per view: its status line is one live region that is always there
+// (a region inserted with its content is not announced), and its notes and events are kept.
+function liveActivityBuild(box) {
+  const status = el("p", { id: "live-status", role: "status", "aria-live": "polite" });
+  const notes = el("div", { class: "stack" });
+  const list = el("ul", { class: "sl-list live-events", id: "live-events" });
+  const none = el("p", { class: "hint", id: "live-events-empty" }, t("live_activity_empty"));
   box.replaceChildren(card(t("tab_live"), t("live_activity"),
     el("p", { class: "sl-eyebrow" }, t("live_activity_now")), status, notes,
-    el("p", { class: "sl-eyebrow" }, t("live_activity_recent")), feed,
+    el("p", { class: "sl-eyebrow" }, t("live_activity_recent")), list, none,
     el("p", { class: "hint" }, t("live_activity_note"))));
+  liveState.activity = { status, notes, list, none };
+}
+
+function liveRenderActivity(a) {
+  const box = liveActivityBox();
+  if (a === null) { box.replaceChildren(); liveState.activity = null; return; }
+  if (liveState.activity === null || !box.contains(liveState.activity.status)) liveActivityBuild(box);
+  const ui = liveState.activity;
+  if (ui.status.dataset.status !== a.status) {
+    ui.status.dataset.status = a.status;
+    ui.status.replaceChildren(badge(liveWord("live_status_", a.status), LIVE_STATUS_TONE[a.status] || "info"));
+  }
+  liveKeep(ui.notes, a.notes.map((n) => el("p", { class: "hint live-note" },
+    t("live_note_" + n.code, { reason: liveValue(n.reason) }))));
+  ui.notes.hidden = a.notes.length === 0;
+  liveKeep(ui.list, a.events.map(liveEventRow));
+  ui.list.hidden = a.events.length === 0;
+  ui.none.hidden = a.events.length > 0;
 }
 
 // ---------------------------------------------------------------- stale data
@@ -657,7 +699,7 @@ function liveAudioBuild(box) {
   const floor = el("p", { class: "hint" });
   const levelsCard = card(t("tab_live"), t("live_levels"), mic.node, out.node, floor, el("p", { class: "hint" }, t("live_levels_note")));
   levelsCard.id = "live-levels";
-  const list = el("div", { class: "live-transcript", id: "live-transcript", role: "log", "aria-live": "polite", tabindex: "0" });
+  const list = el("div", { class: "live-transcript", id: "live-transcript", role: "log", "aria-live": "polite", "aria-label": t("live_transcript"), tabindex: "0" });
   const off = el("p", { class: "hint" }, t("live_transcript_off"));
   const none = el("p", { class: "hint" }, t("live_transcript_empty"));
   const clear = button(t("live_transcript_clear"), "plain", () => guarded(liveClearTranscript), { small: true, attrs: { id: "live-transcript-clear" } });
@@ -704,6 +746,8 @@ function liveRenderTranscript(ui, tr) {
     liveState.epoch = tr.epoch;
     return;
   }
+  const list = ui.list;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight <= LIVE_SCROLL_SLACK_PX;
   if (liveState.epoch !== tr.epoch) ui.list.replaceChildren();
   liveState.epoch = tr.epoch;
   for (const turn of tr.turns) liveUpsertTurn(ui.list, turn);
@@ -711,7 +755,7 @@ function liveRenderTranscript(ui, tr) {
   while (tr.max_turns > 0 && ui.list.children.length > tr.max_turns) ui.list.firstChild.remove();
   liveState.after = tr.rev;
   ui.none.hidden = ui.list.children.length > 0;
-  if (tr.turns.length) ui.list.scrollTop = ui.list.scrollHeight;
+  if (tr.turns.length && atBottom) list.scrollTop = list.scrollHeight; // a reader scrolled up stays put
 }
 
 function liveAudioRender(box, data) {

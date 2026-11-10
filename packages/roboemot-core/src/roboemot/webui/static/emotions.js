@@ -165,13 +165,13 @@ async function emoInject(index) {
 
 // ---------------------------------------------------------------- view and poll
 
-// The state cards are redrawn on each poll; the control card is updated in place (a redraw would
-// close an open list and drop the focus).
+// The state cards are rebuilt on each poll and only those that changed replace theirs (liveKeep);
+// the control card is updated in place (a redraw would close an open list and drop the focus).
 function emoRender(box, d) {
   const controls = emoControlsCard(d);
   const cards = box.querySelector("#emo-state") || el("div", { class: "live-grid", id: "emo-state" });
-  cards.replaceChildren(emoAffectCard(d.affect), emoExpressionCard(d.expression), emoCircadianCard(d.circadian),
-    emoRegisterCard(d), emoMovedCard(d.moved));
+  liveKeep(cards, [emoAffectCard(d.affect), emoExpressionCard(d.expression), emoCircadianCard(d.circadian),
+    emoRegisterCard(d), emoMovedCard(d.moved)]);
   if (cards.parentNode !== box || controls.parentNode !== box) box.replaceChildren(cards, controls);
 }
 

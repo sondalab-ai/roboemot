@@ -199,17 +199,45 @@ test("the poll sends the epoch it has, and a page back in view starts over from 
   assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=0"), "asked from the start");
 });
 
-test("a new turn scrolls the log to the bottom", async (t) => {
-  const ring = ringOf([turn(1, "user", "one")]);
+// jsdom lays nothing out: the log is 100 px tall and each row 100 px.
+function sized(box) {
+  Object.defineProperty(box, "clientHeight", { configurable: true, value: 100 });
+  Object.defineProperty(box, "scrollHeight", { configurable: true, get: () => box.children.length * 100 });
+}
+
+test("a new turn scrolls the log to the bottom when it was at the bottom", async (t) => {
+  const ring = ringOf([turn(1, "user", "one"), turn(2, "robot", "two")]);
   const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
   await openLive(page);
   const box = page.document.querySelector("#live-transcript");
-  Object.defineProperty(box, "scrollHeight", { configurable: true, value: 500 });
-  box.scrollTop = 0;
-  ring.all.push(turn(2, "robot", "two"));
-  ring.rev = 2;
+  sized(box);
+  box.scrollTop = 100;
+  ring.all.push(turn(3, "user", "three"));
+  ring.rev = 3;
   await sleep(WAIT_MS);
-  assert.equal(box.scrollTop, 500);
+  assert.equal(box.scrollTop, 300);
+});
+
+test("a new turn leaves the log where it is when the reader scrolled up", async (t) => {
+  const ring = ringOf([turn(1, "user", "one"), turn(2, "robot", "two"), turn(3, "user", "three")]);
+  const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
+  await openLive(page);
+  const box = page.document.querySelector("#live-transcript");
+  sized(box);
+  box.scrollTop = 0;
+  ring.all.push(turn(4, "robot", "four"));
+  ring.rev = 4;
+  await sleep(WAIT_MS);
+  assert.equal(turns(page).length, 4);
+  assert.equal(box.scrollTop, 0);
+});
+
+test("the log has an accessible name", async (t) => {
+  const page = await livePage(t, undefined, {
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_transcript: "Conversation" } },
+  });
+  await openLive(page);
+  assert.equal(page.document.querySelector("#live-transcript").getAttribute("aria-label"), "Conversation");
 });
 
 test("turns the server dropped (min_seq) and an over-long list leave the page too", async (t) => {
