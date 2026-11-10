@@ -34,7 +34,7 @@ body {
 #tabs .sl-tabs__tab { margin-bottom: 0; }
 /* Forced colours paint no box-shadow: the line comes back as the border (the tabs no longer reach into it). */
 @media (forced-colors: active) { #tabs { border-bottom: 1px solid var(--slc-border); } }
-main, #view, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
+main, #view, .view-grid, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
 main { padding-block: var(--sl-space-4); }
 .stack { gap: var(--sl-space-3); }
 .sl-toast svg { width: var(--sl-space-4); height: var(--sl-space-4); }

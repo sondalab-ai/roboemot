@@ -434,12 +434,14 @@ function loginView() {
 
 // ---------------------------------------------------------------- enrollment
 
+// The status poll runs while enrollment collects; a failed request is retried at the slow delay
+// (LIVE_RETRY_MS, live.js) with the cards on screen marked as old, as on the Live tab.
 function enrollmentView() {
   const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
-  const box = el("div", { class: "stack" });
-  view.append(box);
+  const box = el("div", { class: "stack", id: "enroll-cards" });
+  view.append(staleNote("enroll-stale", ["enroll-cards"]), box);
   const poll = async () => {
     if (!current()) return;
     stopPolling();
@@ -447,13 +449,16 @@ function enrollmentView() {
       const s = await api("GET", "/api/enrollment/status");
       if (!current()) return;
       await renderEnrollment(box, s, current);
-      if (current() && ["collecting", "ready"].includes(s.state)) {
+      if (!current()) return;
+      pollGood(box);
+      if (["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
     } catch (err) {
       if (!current()) return;
       if (err.status === 401) { await boot(); return; }
-      notice(explain(err), true);
+      pollFailed(box, explain(err));
+      state.timer = setTimeout(poll, LIVE_RETRY_MS);
     }
   };
   state.refresh = poll;
@@ -799,14 +804,15 @@ function routeForm(route, secrets, nameMax, save) {
   for (const n of names) keys.push([n, n]);
   const key = el("select", { id: id("key"), class: "sl-field__input" }, keys.map(([v, label]) => el("option", { value: v }, label)));
   key.value = current;
+  const send = submitButton(t(route ? "route_save" : "route_add"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(() => save({
+      whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
         locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
-      }));
+      })));
     },
   },
   name ? field(id("name"), t("route_name"), name) : [],
@@ -815,7 +821,7 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
   kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
   field(id("key"), t("route_key"), key, t("route_key_hint")),
-  el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
+  el("div", { class: "row" }, send));
   return form;
 }
 
@@ -945,6 +951,7 @@ function checkReason(c) {
 async function routesView() {
   const current = newView();
   const view = document.getElementById("view");
+  const before = document.getElementById("routes-cards"); // the cards a failed poll marked as old
   const data = await api("GET", "/api/routes");
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
@@ -1013,26 +1020,47 @@ async function routesView() {
     refusedBox.replaceChildren(!out.enabled ? el("p", { class: "hint" }, t("refused_off")) :
       (out.names.length ? el("ul", {}, out.names.map((n) => el("li", {}, n))) : el("p", { class: "hint" }, t("refused_none"))));
   };
-  view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
+  const grid = el("div", { class: "view-grid", id: "routes-cards" },
+    card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
     addCard,
     ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
+  view.append(staleNote("routes-stale", ["routes-cards"]), grid);
+  if (before) pollRecovered(before);
+  pollGood(grid);
   if (data.routes.some((r) => r.running)) {
     clearTimeout(state.timer);
-    state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
+    state.timer = setTimeout(refreshRoutes, ROUTES_POLL_MS);
   }
 }
 
-// The poll redraws the page; it waits while a form field has the focus so typing is not lost.
+// The poll redraws the page; it waits while a form field has the focus so typing is not lost. A
+// failed request keeps the cards, marks them as old and is retried at the slow delay (LIVE_RETRY_MS).
 async function refreshRoutes() {
+  if (state.tab !== "routes") return;
   const focus = document.activeElement;
   const typing = focus && document.getElementById("view").contains(focus) && ["INPUT", "SELECT", "TEXTAREA"].includes(focus.tagName);
-  if (!typing) { await routesView(); return; }
-  if (state.tab !== "routes") return;
+  let delay = ROUTES_POLL_MS;
+  if (!typing) {
+    const grid = document.getElementById("routes-cards");
+    let current = null;
+    try {
+      const pending = routesView();
+      current = viewToken();
+      await pending;
+      return;
+    } catch (err) {
+      if ((current && !current()) || state.tab !== "routes") return;
+      if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+      if (grid && grid.isConnected) pollFailed(grid, explain(err));
+      else notice(explain(err), true);
+      delay = LIVE_RETRY_MS;
+    }
+  }
   clearTimeout(state.timer);
-  state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
+  state.timer = setTimeout(refreshRoutes, delay);
 }
 
 async function debugView() {
@@ -1092,6 +1120,7 @@ function showTab(name) {
   view.setAttribute("aria-labelledby", "tab-" + name);
   view.replaceChildren();
   notice("");
+  pollForget();
   for (const b of tabButtons()) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));
