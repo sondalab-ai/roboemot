@@ -350,7 +350,7 @@ motor_modes: {active: enabled, limp: disabled, teach: gravity_compensation}
 dynamics:               # velocity and acceleration caps, measured in M0; required before release (section 12)
   head:     {max_vel_dps: 180, max_acc_dps2: 2000}   # rotations, sine sweep of 2026-11-10; translations stay null
   body_yaw: {max_vel_dps: null, max_acc_dps2: null}
-  antennas: {max_vel_dps: null, max_acc_dps2: null}
+  antennas: {max_vel_dps: 500, max_acc_dps2: 6000}   # sine sweep of 2026-11-10
 retargeting:            # mirror module (section 9)
   head.yaw:      {source: head_yaw,   scale: 1.0}
   head.pitch:    {source: head_pitch, scale: 1.0}

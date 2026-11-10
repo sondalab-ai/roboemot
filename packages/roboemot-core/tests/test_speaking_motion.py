@@ -158,11 +158,7 @@ CASES = {
 # Cases the dev fallback dynamics (0.5 rad/s, 2 rad/s^2) clip until the robot's dynamics are
 # measured in M0 (design ZT 4): their lag check is an expected failure; when one passes, the test
 # fails and asks for the entry to be removed (strict). Visibility itself is never excused.
-EXPECTED_CLIPPED = {
-    ("lively", "accent", 0.0),
-    ("natural", "accent", 1.0),
-    ("lively", "accent", 1.0),
-}
+EXPECTED_CLIPPED: set[tuple[str, str, float]] = set()
 
 
 def visibility_cases():

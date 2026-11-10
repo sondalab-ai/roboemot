@@ -40,7 +40,7 @@ def test_reachy_manifest_dev_mode_dofs_and_units():
     }
     pitch = m.dofs["head.pitch"]
     assert pitch.min == pytest.approx(math.radians(-40)) and pitch.measured
-    assert not m.dofs["body_yaw"].measured and not m.dofs["antenna_right"].measured
+    assert m.dofs["antenna_right"].measured and not m.dofs["body_yaw"].measured
     assert m.dofs["head.z"].max == pytest.approx(0.015) and m.dofs["head.z"].kind == "translation"
     assert m.dofs["antenna_right"].home == pytest.approx(math.radians(-10))
     assert m.constraints[0].max_deg == 65
