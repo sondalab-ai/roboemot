@@ -3,6 +3,7 @@
 import json
 
 import numpy as np
+import pytest
 from roboemot.config.schema import MusicClassifierConfig, RoboEmotConfig
 from roboemot.voice.music_classifier import WINDOW_SAMPLES, MusicClassifier
 from roboemot.voice.pipeline import build_music_classifier
@@ -88,3 +89,72 @@ def test_without_a_backend_it_is_unavailable_and_idle():
 def test_a_missing_model_leaves_it_unavailable(tmp_path):
     snap = build_music_classifier(RoboEmotConfig(), tmp_path).snapshot()
     assert (snap["state"], snap["reason"]) == ("unavailable", "model")
+
+
+class Recorder:
+    """A backend that keeps a copy of every window it scores."""
+
+    def __init__(self):
+        self.windows = []
+
+    def scores(self, window):
+        self.windows.append(np.array(window, copy=True))
+        return 0.5, 0.5
+
+
+class ConcatWindow:
+    """The window logic before the ring buffer (a reference copy): concatenate every chunk and
+    keep the last WINDOW_SAMPLES, so the ring buffer can be checked against it."""
+
+    def __init__(self, interval_s, backend):
+        self.interval_s, self.backend = interval_s, backend
+        self.window = np.zeros(0, dtype=np.float32)
+        self.expected, self.last_run_s, self.holes, self.runs = float("nan"), -float("inf"), 0, []
+
+    def feed(self, samples, start):
+        audio = np.asarray(samples, dtype=np.float32)
+        chunk_s = audio.size / RATE
+        if abs(start - self.expected) > chunk_s:
+            self.window = np.zeros(0, dtype=np.float32)
+            self.holes += 1
+        self.expected = start + chunk_s
+        self.window = np.concatenate([self.window, audio])[-WINDOW_SAMPLES:]
+        if self.window.size == WINDOW_SAMPLES and start - self.last_run_s >= self.interval_s:
+            self.last_run_s = start
+            self.runs.append(start)
+            return self.backend.scores(self.window)
+        return None
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("hole_share", [0.0, 0.01])
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        (320,),
+        (WINDOW_SAMPLES,),
+        (WINDOW_SAMPLES + 1, 20000),
+        (1, 7, 333, 1000, 4096, WINDOW_SAMPLES - 1, WINDOW_SAMPLES, 31201),
+    ],
+)
+def test_the_ring_buffer_scores_the_same_windows_as_concatenating(seed, hole_share, sizes):
+    rng = np.random.default_rng(seed)
+    new_rec, old_rec = Recorder(), Recorder()
+    new = MusicClassifier(MusicClassifierConfig(interval_s=1.0), RATE, new_rec, timer=clock())
+    old = ConcatWindow(1.0, old_rec)
+    start, new_runs = 0.0, []
+    for i in range(400):
+        chunk = rng.normal(0, 0.1, int(rng.choice(sizes))).astype(np.float32)
+        if hole_share and (i == 200 or rng.random() < hole_share):
+            start += rng.uniform(0.1, 3.0)
+        if new.feed(chunk, start) is not None:
+            new_runs.append(start)
+        old.feed(chunk, start)
+        start += chunk.size / RATE
+    assert new_runs == old.runs and len(new_runs) > 0
+    assert len(new_rec.windows) == len(old_rec.windows)
+    for a, b in zip(new_rec.windows, old_rec.windows, strict=True):
+        assert a.dtype == b.dtype and np.array_equal(a, b)
+    snap = new.snapshot()
+    assert (snap["runs"], snap["holes"]) == (len(old.runs), old.holes)
+    assert (old.holes > 0) == (hole_share > 0)
