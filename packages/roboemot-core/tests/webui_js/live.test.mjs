@@ -554,3 +554,48 @@ test("a long accent age reads in minutes, then hours", async (t) => {
     assert.ok(beatCard(page).textContent.includes(expected), expected);
   }
 });
+
+test("a failed poll marks the cards as old with the time of the last good update, once", async (t) => {
+  let down = false;
+  const page = await livePage(t, {
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, stale_since: "Last updated at {at}.", err_unreachable: "Cannot reach the robot." } },
+    "GET /api/live/state": () => { if (down) throw new TypeError("Failed to fetch"); return STATE; },
+  });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const note = page.document.querySelector("#live-stale");
+  assert.equal(grid.getAttribute("aria-busy"), null);
+  assert.equal(note.hidden, true);
+  const goodAt = page.run("when(pollMarks.get(document.getElementById('live-cards')).goodMs, true)");
+  down = true;
+  await sleep(POLL_MS * 3);
+  assert.equal(grid.getAttribute("aria-busy"), "true");
+  assert.equal(note.hidden, false);
+  assert.ok(note.classList.contains("sl-callout--warning"));
+  assert.equal(note.textContent, `Last updated at ${goodAt}.`);
+  assert.equal(page.document.querySelectorAll("#live-stale").length, 1, "one callout");
+  assert.equal(grid.children.length, 9, "the last values stay");
+  const toast = page.document.querySelector("#notice .sl-toast");
+  assert.equal(toast.textContent, "Cannot reach the robot.");
+  await sleep(POLL_MS * 3);
+  assert.equal(page.document.querySelector("#notice .sl-toast"), toast, "reported once");
+  down = false;
+  visibility(page, "hidden");
+  visibility(page, "visible"); // the retry waits 5 s: coming back into view polls at once
+  await sleep(POLL_MS * 2);
+  assert.equal(grid.getAttribute("aria-busy"), null);
+  assert.equal(note.hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "", "the poll takes back its own failure");
+});
+
+test("a recovering poll leaves a newer message from something else", async (t) => {
+  let down = true;
+  const page = await livePage(t, { "GET /api/live/state": () => (down ? reply(500, { error: "generic" }) : STATE) });
+  await openLive(page);
+  page.run('notice("Saved.")');
+  down = false;
+  visibility(page, "hidden");
+  visibility(page, "visible");
+  await sleep(POLL_MS * 2);
+  assert.equal(page.document.querySelector("#notice").textContent, "Saved.");
+});

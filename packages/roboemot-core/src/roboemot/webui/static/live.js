@@ -355,6 +355,58 @@ function liveRenderActivity(a) {
     el("p", { class: "hint" }, t("live_activity_note"))));
 }
 
+// ---------------------------------------------------------------- stale data
+
+// Per grid of polled cards: when its last good reply came and the error its last failure reported.
+const pollMarks = new WeakMap();
+
+// The kit warning callout a polled view shows while its cards are old; `grids` are the ids of the
+// grids it speaks for. Hidden until one of them is stale.
+function staleNote(id, grids) {
+  const note = el("div", { class: "sl-callout sl-callout--warning", id, "data-stale-for": grids.join(" ") }, el("div", { class: "sl-callout__body" }));
+  note.hidden = true;
+  return note;
+}
+
+// Shows each stale note with the oldest last good update among its stale grids, or hides it.
+function staleNotesRefresh() {
+  for (const note of document.querySelectorAll("[data-stale-for]")) {
+    const since = note.dataset.staleFor.split(" ").map((id) => document.getElementById(id))
+      .filter((grid) => grid && grid.getAttribute("aria-busy") === "true")
+      .map((grid) => (pollMarks.get(grid) || {}).goodMs).filter(Number.isFinite);
+    note.hidden = since.length === 0;
+    const text = since.length ? t("stale_since", { at: when(Math.min(...since), true) }) : "";
+    if (note.firstChild.textContent !== text) note.firstChild.textContent = text;
+  }
+}
+
+// A good reply for `grid`: its cards are current again, and its own failure toast goes.
+function pollGood(grid) {
+  const mark = pollMarks.get(grid) || {};
+  noticeWithdraw(mark.error);
+  pollMarks.set(grid, { goodMs: Date.now(), error: null });
+  grid.removeAttribute("aria-busy");
+  staleNotesRefresh();
+}
+
+// A failed poll for `grid` (null while it has no cards yet): the toast reports `message` (once,
+// however often it repeats) and the cards that stay on screen are marked as old.
+function pollFailed(grid, message) {
+  notice(message, true);
+  if (!grid) return;
+  pollMarks.set(grid, { ...(pollMarks.get(grid) || {}), error: message });
+  grid.setAttribute("aria-busy", "true");
+  staleNotesRefresh();
+}
+
+// The grid's cards were replaced by a state the server named (off, unavailable): nothing is stale.
+function pollReset(grid) {
+  noticeWithdraw((pollMarks.get(grid) || {}).error);
+  pollMarks.delete(grid);
+  grid.removeAttribute("aria-busy");
+  staleNotesRefresh();
+}
+
 // True while a request started for `serial` may still draw and re-arm the timer.
 function liveActive(serial) {
   return serial === liveState.serial && state.tab === "live" && state.csrf !== null && document.visibilityState === "visible";
@@ -371,18 +423,19 @@ async function livePoll(box, serial) {
     if (!liveActive(serial)) return;
     const receivedMs = performance.now();
     liveState.reply = { rttMs: receivedMs - sentMs, receivedMs };
-    notice("");
     liveRender(box, data);
+    pollGood(box);
     delay = data.poll_ms || LIVE_RETRY_MS;
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled") liveDisabledView(box);
+    if (err.message === "live_disabled") { liveDisabledView(box); pollReset(box); }
     else if (err.message === "live_unavailable") {
       liveActivityBox().replaceChildren();
       box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
+      pollReset(box);
     }
-    else notice(explain(err), true);
+    else pollFailed(box, explain(err));
   }
   state.timer = setTimeout(() => livePoll(box, serial), delay);
 }
@@ -686,12 +739,13 @@ async function liveAudioPoll(box, serial) {
     const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch, undefined, liveActivity());
     if (!liveActive(serial)) return;
     liveAudioRender(box, data);
+    pollGood(box);
     delay = data.audio_poll_ms || LIVE_RETRY_MS;
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled" || err.message === "live_unavailable") liveAudioReset(box);
-    else notice(explain(err), true);
+    if (err.message === "live_disabled" || err.message === "live_unavailable") { liveAudioReset(box); pollReset(box); }
+    else pollFailed(box, explain(err));
   }
   liveState.audioTimer = setTimeout(() => liveAudioPoll(box, serial), delay);
 }
@@ -702,7 +756,8 @@ function liveView() {
   const box = el("div", { class: "live-grid", id: "live-cards" });
   const audio = el("div", { class: "live-grid", id: "live-audio" });
   const activity = el("div", { id: "live-activity" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), activity, box, audio));
+  const stale = staleNote("live-stale", ["live-cards", "live-audio"]);
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), stale, activity, box, audio));
   liveAudioReset(audio);
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);

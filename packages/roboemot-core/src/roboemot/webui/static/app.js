@@ -201,6 +201,12 @@ function notice(message, isError) {
   if (!isError) toastState.timer = setTimeout(dismiss, NOTICE_SUCCESS_MS);
 }
 
+// Clears the error `message` if it is still the one reported last: a poll that recovers takes back
+// its own failure, never a newer message from something else.
+function noticeWithdraw(message) {
+  if (message && message === toastState.error) notice("");
+}
+
 // ---------------------------------------------------------------- api
 
 async function api(method, path, body, extra) {

@@ -188,14 +188,17 @@ async function emoPoll(box, serial) {
     const data = await api("GET", "/api/emotions/state", undefined, liveActivity());
     if (!emoActive(serial)) return;
     emoRender(box, data);
+    pollGood(box.querySelector("#emo-state"));
     delay = data.poll_ms || EMO_RETRY_MS;
   } catch (err) {
     if (!emoActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "emotions_disabled") {
       emoState.controls = null;
+      const grid = box.querySelector("#emo-state");
+      if (grid) pollReset(grid);
       box.replaceChildren(card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
-    } else notice(explain(err), true);
+    } else pollFailed(box.querySelector("#emo-state"), explain(err));
   }
   state.timer = setTimeout(() => emoPoll(box, serial), delay);
 }
@@ -205,7 +208,7 @@ function emotionsView() {
   view.replaceChildren();
   emoState.controls = null;
   const box = el("div", { class: "stack", id: "emo-cards" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("emo_intro")), box));
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("emo_intro")), staleNote("emo-stale", ["emo-state"]), box));
   return emoPoll(box, ++emoState.serial);
 }
 
