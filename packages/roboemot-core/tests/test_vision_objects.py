@@ -178,6 +178,32 @@ def test_the_object_detector_does_not_spin_by_default():
     assert RoboEmotConfig().vision.object_spinning is False
 
 
+def reference_input(image: np.ndarray) -> np.ndarray:
+    """The NanoDet input as the detector built it before blobFromImage: bilinear resize, float,
+    subtract the mean, divide by the std, NCHW."""
+    import cv2
+
+    resized = cv2.resize(image, (onnx.NANODET_SIZE,) * 2, interpolation=cv2.INTER_LINEAR)
+    x = (resized.astype(np.float32) - np.array(onnx.NANODET_MEAN, np.float32)) / np.array(
+        onnx.NANODET_STD, np.float32
+    )
+    return np.ascontiguousarray(x.transpose(2, 0, 1)[None])
+
+
+@pytest.mark.parametrize("shape", [(720, 1280, 3), (300, 500, 3), (100, 90, 3)])
+def test_the_input_blob_matches_the_reference_steps(monkeypatch, shape):
+    det, session = detector(monkeypatch, raw_output())
+    image = np.random.default_rng(0).integers(0, 256, shape, dtype=np.uint8)
+    det.detect(image)
+    want = reference_input(image)
+    assert session.seen.shape == want.shape and session.seen.dtype == np.float32
+    assert session.seen.flags["C_CONTIGUOUS"]
+    assert np.abs(session.seen - want).max() < 1e-6
+    view = image[10:-10, 5:-5]  # a crop view of the frame, as the object crop passes
+    det.detect(view)
+    assert np.abs(session.seen - reference_input(view)).max() < 1e-6
+
+
 def test_detect_scales_boxes_to_the_original_image_and_names_the_class(monkeypatch):
     out = raw_output()
     put(out, LEVEL1_START + 5 * 20 + 7, CAT, 0.9)  # 320x320 box (80, 32, 176, 96)
