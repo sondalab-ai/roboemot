@@ -135,6 +135,17 @@ def test_scrolling_and_the_settings_nav_clear_the_sticky_header():
     assert narrow and re.search(r"\.settings-nav \{ display: none; \}", narrow.group(1))
 
 
+def test_the_tab_strip_does_not_overflow_downwards():
+    # the kit tab's margin-bottom: -1px reached past the scrolling strip (a 1px vertical scroll,
+    # measured in Chrome); jsdom has no layout, so the rules that remove it are checked as text
+    css = (STATIC / "style.css").read_text()
+    strip = re.search(r"(?m)^#tabs \{(.*?)\}", css, re.S)
+    assert strip and "border-bottom: 0" in strip.group(1)
+    assert "inset 0 -1px var(--slc-border)" in strip.group(1)
+    assert "--sl-focus-ring-offset: calc(-1 * var(--sl-focus-ring-width" in strip.group(1)
+    assert re.search(r"(?m)^#tabs \.sl-tabs__tab \{ margin-bottom: 0; \}", css)
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()

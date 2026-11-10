@@ -18,7 +18,17 @@ body {
 }
 .top { display: flex; align-items: center; gap: var(--sl-space-4); flex-wrap: wrap; padding-block: var(--sl-space-3); }
 .top h1 { flex: 1; margin: 0; font: 600 var(--sl-text-lg) var(--sl-font-display); color: var(--slc-text); }
-#tabs { overflow-x: auto; white-space: nowrap; }
+/* The strip scrolls sideways on a narrow screen, so it clips both ways. The kit's tab reaches 1px
+   past the list (margin-bottom: -1px, to lay its underline over the list's border), which gave the
+   strip a 1px vertical scroll. The list's line is drawn as an inset shadow instead, under the tabs,
+   so the underline still covers it without overflow, and the focus ring is drawn inside the tab
+   (the kit's own offset token) where the strip cannot cut it. */
+#tabs {
+  overflow-x: auto; white-space: nowrap;
+  border-bottom: 0; box-shadow: inset 0 -1px var(--slc-border);
+  --sl-focus-ring-offset: calc(-1 * var(--sl-focus-ring-width, 2px));
+}
+#tabs .sl-tabs__tab { margin-bottom: 0; }
 main, #view, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
 main { padding-block: var(--sl-space-4); }
 .stack { gap: var(--sl-space-3); }
