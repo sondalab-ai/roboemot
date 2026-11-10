@@ -6,10 +6,10 @@ files listed in the vendored kit's ``VENDORED.json``; those are checked against 
 start-up and served with ``Cache-Control: no-cache`` and a strong ETag (304 on a match), while
 every other response stays ``no-store``.
 
-Compression: a vendored text file is gzipped once at start-up, a JSON body of at least
-``JSON_GZIP_MIN_BYTES`` per response (``JSON_GZIP_LEVEL``, cheap); each is sent gzipped only when
-the request accepts it, with ``Vary: Accept-Encoding`` on both forms. First-party files are sent
-as they are (SPEC 12 keeps them ``no-store``).
+Compression: every static file but an already compressed type (fonts) is gzipped once at
+start-up, a JSON body of at least ``JSON_GZIP_MIN_BYTES`` per response (``JSON_GZIP_LEVEL``,
+cheap); each is sent gzipped only when the request accepts it, with ``Vary: Accept-Encoding`` on
+both forms. First-party files keep ``no-store`` and no ETag in both forms (SPEC 12).
 """
 
 from __future__ import annotations
@@ -143,6 +143,23 @@ def accepts_gzip(header: str | None) -> bool:
     return found.get("gzip", found.get("*", 0.0)) > 0
 
 
+def packed_form(body: bytes) -> bytes | None:
+    """The gzip form of a static file, made once at start-up at ``STATIC_GZIP_LEVEL``; ``None``
+    when it would not be smaller (then the file is only ever sent as it is)."""
+    packed = gzipped(body, STATIC_GZIP_LEVEL)
+    return packed if len(packed) < len(body) else None
+
+
+def load_first_party() -> dict[str, Static]:
+    """The first-party files of ``STATIC_FILES``, keyed by URL path, with their gzip form. No
+    ETag: SPEC 12 keeps them ``no-store``, so they are never revalidated, only compressed."""
+    out: dict[str, Static] = {}
+    for route, (name, ctype) in STATIC_FILES.items():
+        body = (STATIC_DIR / name).read_bytes()
+        out[route] = Static(body, ctype, packed=packed_form(body))
+    return out
+
+
 def load_vendor() -> dict[str, Static]:
     """The vendored kit files named in ``VENDORED.json``, keyed by URL path.
 
@@ -162,9 +179,7 @@ def load_vendor() -> dict[str, Static]:
         body = path.read_bytes()
         if hashlib.sha256(body).hexdigest() != digest:
             raise RuntimeError(f"vendored file {name} does not match VENDORED.json")
-        packed = None if path.suffix in COMPRESSED_TYPES else gzipped(body, STATIC_GZIP_LEVEL)
-        if packed is not None and len(packed) >= len(body):
-            packed = None
+        packed = None if path.suffix in COMPRESSED_TYPES else packed_form(body)
         packed_etag = f'"{digest}{GZIP_ETAG_SUFFIX}"' if packed is not None else None
         out[VENDOR_ROUTE + name] = Static(body, ctype, f'"{digest}"', packed, packed_etag)
     return out
@@ -328,7 +343,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_static(self, item: Static) -> None:
         """A file from memory: its gzip form when it has one and the request accepts gzip, 304
-        when ``If-None-Match`` names the ETag of the form this request would get."""
+        when ``If-None-Match`` names the ETag of the form this request would get (a file
+        without an ETag, first-party, is always sent whole and ``no-store``)."""
         vary = item.packed is not None
         if vary and accepts_gzip(self.headers.get("Accept-Encoding")):
             body, etag, encoding = item.packed or b"", item.packed_etag, "gzip"
@@ -527,9 +543,6 @@ def make_server(
     httpd = _Httpd((bind, web.port), _Handler)
     httpd.slots = threading.BoundedSemaphore(web.max_connections)  # restart field
     httpd.api = api
-    httpd.statics = {
-        route: Static((STATIC_DIR / name).read_bytes(), ctype)
-        for route, (name, ctype) in STATIC_FILES.items()
-    }
+    httpd.statics = load_first_party()
     httpd.statics.update(load_vendor())
     return Server(httpd, pins)

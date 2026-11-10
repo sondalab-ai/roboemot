@@ -1,8 +1,8 @@
 """Compression and validators of the web UI server (SPEC 12).
 
-Vendored text files and large JSON bodies are sent gzipped only to a request that accepts gzip,
-with ``Vary: Accept-Encoding`` on both forms; first-party files stay as they are (``no-store``,
-no ETag). Every security header is present on gzipped and 304 responses alike.
+Static text files and large JSON bodies are sent gzipped only to a request that accepts gzip,
+with ``Vary: Accept-Encoding`` on both forms; first-party files keep ``no-store`` and no ETag in
+both forms. Every security header is present on gzipped and 304 responses alike.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from test_webui_settings import serve
 
 ROUTE = server_module.VENDOR_ROUTE
 VENDOR = server_module.VENDOR_DIR
+STATIC = server_module.STATIC_DIR
 MANIFEST = json.loads((VENDOR / "VENDORED.json").read_text())
 CSS = "tokens.css"
 FONT = "assets/fonts/geist-latin.woff2"
@@ -134,12 +135,42 @@ def test_a_range_request_gets_the_whole_file(served):
 # ------------------------------------------------------------------ first-party files
 
 
-@pytest.mark.parametrize("path", ["/", "/static/app.js", "/static/style.css"])
-def test_first_party_files_stay_no_store_and_uncompressed(served, path):
+FIRST_PARTY = {"/": "index.html", "/static/app.js": "app.js", "/static/style.css": "style.css"}
+
+
+@pytest.mark.parametrize(("path", "name"), FIRST_PARTY.items())
+def test_a_first_party_file_is_gzipped_when_accepted_and_stays_no_store(served, path, name):
     resp = served.request("GET", path, headers={**GZIP, "If-None-Match": "*"})
-    assert resp.status == 200 and "Content-Encoding" not in resp.headers
+    assert resp.status == 200 and resp.headers["Content-Encoding"] == "gzip"
+    assert gzip.decompress(resp.body) == (STATIC / name).read_bytes()
+    assert int(resp.headers["Content-Length"]) == len(resp.body)
     assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
-    assert "Vary" not in resp.headers
+    assert resp.headers["Vary"] == "Accept-Encoding"
+    secure(resp)
+
+
+@pytest.mark.parametrize("header", [None, "identity", "gzip;q=0"])
+@pytest.mark.parametrize(("path", "name"), FIRST_PARTY.items())
+def test_a_first_party_file_without_gzip_is_sent_as_it_is(served, path, name, header):
+    headers = {"If-None-Match": "*"} | ({} if header is None else {"Accept-Encoding": header})
+    resp = bare(served, "GET", path, headers)
+    assert resp.status == 200 and "Content-Encoding" not in resp.headers
+    assert resp.body == (STATIC / name).read_bytes()
+    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
+    assert resp.headers["Vary"] == "Accept-Encoding"
+    secure(resp)
+
+
+@pytest.mark.parametrize("gz", [True, False])
+def test_head_of_a_first_party_file_has_the_length_of_its_form(served, gz):
+    headers = GZIP if gz else {"Accept-Encoding": "identity"}
+    full = served.request("GET", "/static/app.js", headers=headers)
+    resp = served.request("HEAD", "/static/app.js", headers=headers)
+    assert resp.status == 200 and resp.body == b""
+    assert int(resp.headers["Content-Length"]) == len(full.body)
+    assert ("Content-Encoding" in resp.headers) is gz
+    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
+    secure(resp)
 
 
 # ------------------------------------------------------------------ JSON
