@@ -13,6 +13,7 @@ const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
 const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
+const SETTING_LANGUAGE = "conversation.language"; // the page language (webui/api.py `_language`)
 
 const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
@@ -582,6 +583,7 @@ function settingActions(node, ctl, failure) {
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: out.value });
     }
+    if (result.changed && row.path === SETTING_LANGUAGE) { await settingsRelanguage(result, "saved", row.path); return; }
     writeNotice(result, "saved");
     await settingsReload(result.changed ? row.path : null);
   };
@@ -592,6 +594,7 @@ function settingActions(node, ctl, failure) {
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: result.value });
     }
+    if (result.changed && row.path === SETTING_LANGUAGE) { await settingsRelanguage(result, "settings_reset_done", row.path); return; }
     writeNotice(result, "settings_reset_done");
     await settingsReload(row.path);
   };
@@ -750,8 +753,23 @@ async function settingsReload(changedPath) {
   settingsState.data = data;
   settingsApplyModel(settingsState.data);
   refreshSettings();
-  if (!changedPath) return;
-  const shown = document.querySelector('[data-path="' + CSS.escape(changedPath) + '"]');
+  if (changedPath) settingsFocus(changedPath);
+}
+
+// After a write of the page language: the whole page is drawn again in it (the shell, the tab names,
+// this view; app.js `relanguage`), then the result is announced in the new language. The kept rows
+// carry text in the old language, so they are dropped; the filter and the open groups stay.
+async function settingsRelanguage(result, verbKey, path) {
+  settingsState.leaves = new Map();
+  await relanguage();
+  writeNotice(result, verbKey);
+  refreshSettings();
+  settingsFocus(path);
+}
+
+// Moves the focus to the first control of the row at `path` and marks its name as just saved.
+function settingsFocus(path) {
+  const shown = document.querySelector('[data-path="' + CSS.escape(path) + '"]');
   const focus = shown && shown.querySelector("input, select, textarea, button");
   if (focus) focus.focus();
   const name = shown && shown.querySelector(".sl-code");

@@ -1056,7 +1056,7 @@ function viewLoading(on) {
 
 // The tab's view starts on an empty #view. A view that draws before its first await shows no
 // loading line; the others show it until they put something in #view (the observer below) or
-// settle, unless a later view took #view meanwhile.
+// settle, unless a later view took #view meanwhile. Resolves once the view settled.
 function showTab(name) {
   stopPolling();
   newView();
@@ -1076,6 +1076,7 @@ function showTab(name) {
   const current = viewToken();
   viewLoading(!view.hasChildNodes());
   done.then(() => { if (current()) viewLoading(false); });
+  return done;
 }
 
 function tabKeys(ev) {
@@ -1118,20 +1119,33 @@ function shell() {
     await boot();
   });
   liveBannerStart();
-  showTab(state.tab);
+  return showTab(state.tab);
+}
+
+// Takes the page strings of GET /api/strings: the text, the `lang` of the document, the title and
+// the theme control, which is drawn outside the views.
+function applyStrings(strings) {
+  state.strings = strings.strings;
+  state.lang = strings.language;
+  document.documentElement.lang = strings.language;
+  document.title = t("title");
+  document.getElementById("title").textContent = t("title");
+  themeControl();
+}
+
+// The page language changed (a saved `conversation.language`): loads its strings and redraws the
+// shell on the current tab, so no text stays in the old language. Resolves once the tab has drawn.
+async function relanguage() {
+  applyStrings(await api("GET", "/api/strings"));
+  return shell();
 }
 
 async function boot() {
   stopPolling();
   liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
-  state.strings = strings.strings;
-  state.lang = strings.language;
   state.session = session;
-  document.documentElement.lang = strings.language;
-  document.title = t("title");
-  document.getElementById("title").textContent = t("title");
-  themeControl();
+  applyStrings(strings);
   if (session.authenticated) {
     state.csrf = session.csrf;
     shell();

@@ -1205,3 +1205,72 @@ test("a nullable enum stored as an empty string or outside its choices is marked
   assert.equal(c.getAttribute("aria-invalid"), null, "an empty string that is a choice is valid");
   assert.equal(c.options[c.selectedIndex].textContent, "settings_choice_none");
 });
+
+test("saving the page language redraws the page in it and keeps the Settings tab, its filter and open groups", async () => {
+  let lang = "en";
+  const words = {
+    en: { title: "RoboEmot", tab_settings: "Settings", tab_live: "Live", settings_intro: "Every setting.", saved: "Saved.", settings_save: "Save" },
+    it: { title: "RoboEmot", tab_settings: "Impostazioni", tab_live: "Dal vivo", settings_intro: "Ogni impostazione.", saved: "Salvato.", settings_save: "Salva" },
+  };
+  const catalogue = () => ({
+    pin_required: true,
+    fields: [
+      d("conversation.language", "enum", { value: lang, default: "en", choices: ["en", "it"], description: lang === "it" ? "Lingua" : "Language" }),
+      d("conversation.max_turns", "int", { value: 3, default: 3, ge: 1, le: 9 }),
+    ],
+  });
+  const page = await loadPage({
+    "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 },
+    "GET /api/strings": () => ({ language: lang, strings: words[lang] }),
+    "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
+    "GET /api/live/viewers": { video_viewers_active: false, poll_ms: 60000 },
+    "GET /api/settings": catalogue,
+    "POST /api/settings": (b) => { lang = b.value; return { path: b.path, changed: true, value: b.value, layer: "app", persisted: true }; },
+  });
+  page.document.querySelector('#tabs button[data-tab="settings"]').click();
+  await settle();
+  await settle();
+  await typeQuery(page, "conv");
+  const select = row(page, "conversation.language").querySelector("select");
+  select.value = "1";
+  button(row(page, "conversation.language"), "Save").click();
+  await settle();
+  await answerPin(page);
+  await settle();
+  await settle();
+  const doc = page.document;
+  assert.equal(doc.documentElement.lang, "it");
+  assert.equal(doc.querySelector('#tabs button[data-tab="settings"]').textContent, "Impostazioni");
+  assert.equal(doc.querySelector('#tabs button[data-tab="live"]').textContent, "Dal vivo");
+  assert.ok(doc.title.includes("RoboEmot"));
+  assert.equal(doc.querySelector('#tabs [aria-selected="true"]').dataset.tab, "settings", "the Settings tab stays");
+  assert.ok(doc.querySelector("#view").textContent.includes("Ogni impostazione."), "the view is in the new language");
+  assert.ok(!doc.querySelector("#view").textContent.includes("Every setting."));
+  const saved = row(page, "conversation.language");
+  assert.ok(saved, "the group is still open");
+  assert.ok(saved.textContent.includes("Lingua"));
+  assert.ok(button(saved, "Salva"), "the row's own buttons are in the new language too");
+  assert.equal(doc.querySelector("#settings-search").value, "conv", "the filter text is kept");
+  assert.equal(doc.querySelector("#notice").textContent, "Salvato. settings_layer_app", "the toast in the new language");
+});
+
+test("a language save that changed nothing does not redraw the shell", async () => {
+  const page = await loadPage({
+    "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 },
+    "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
+    "GET /api/live/viewers": { video_viewers_active: false, poll_ms: 60000 },
+    "GET /api/settings": { pin_required: true, fields: [d("conversation.language", "enum", { value: "en", default: "en", choices: ["en", "it"] })] },
+    "POST /api/settings": (b) => ({ path: b.path, changed: false, value: b.value }),
+  });
+  page.document.querySelector('#tabs button[data-tab="settings"]').click();
+  await settle();
+  await settle();
+  await open(page, "core-conversation");
+  const select = row(page, "conversation.language").querySelector("select");
+  select.value = "1";
+  button(row(page, "conversation.language"), "settings_save").click();
+  await settle();
+  await answerPin(page);
+  await settle();
+  assert.equal(page.calls.filter((c) => c.path === "/api/strings").length, 1, "strings loaded once, at boot");
+});
