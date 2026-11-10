@@ -144,7 +144,7 @@ class ReachyMiniWireless:
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
     modules = ("roboemot", "roboemot_reachymini")
-    extras = ("voice", "realtime")  # realtime: websockets, already in the apps venv
+    extras = ("voice", "realtime", "music-classifier")  # realtime: websockets, in the apps venv
     clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
     cloud_voice = CLOUD_VOICE
     overclock = ReachyOverclock(REBOOT_HINT)  # CM4 at 1.8 GHz, where every check passes

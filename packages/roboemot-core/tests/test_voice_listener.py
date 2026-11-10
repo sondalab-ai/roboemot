@@ -916,6 +916,7 @@ def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
         "grammar",
         "decode",
         "music",
+        "music_classifier",
         "listener_total",
     }
     assert cost["asr_accept"] > 0 and cost["vad"] > 0
@@ -1202,6 +1203,29 @@ def test_a_chunk_gap_tells_the_detector_where_the_hole_began():
     r.t += 1.0
     r.feed(silence(0.1), gap=True)
     assert spy.gaps == [pytest.approx(hole_from)]
+
+
+class ClassifierSpy:
+    def __init__(self):
+        self.fed = 0
+
+    def feed(self, samples, start):
+        self.fed += 1
+
+    def snapshot(self):
+        return {"state": "running"}
+
+
+def test_the_music_classifier_hears_what_the_detector_hears():
+    r = Rig(["ciao"])
+    r.listener.music_classifier = spy = ClassifierSpy()
+    r.feed(silence(0.5))
+    assert spy.fed > 0
+    assert r.listener.snapshot()["music_classifier"] == {"state": "running"}
+    heard = spy.fed
+    r.speech.extend(r.t + 5.0)
+    r.say(1.0)
+    assert spy.fed == heard  # the robot's own sound never reaches it
 
 
 def test_music_stage_in_load():

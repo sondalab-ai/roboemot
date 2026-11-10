@@ -30,6 +30,8 @@ vision = ["onnxruntime>=1.18", "onnx>=1.16", "opencv-python-headless>=4.9"]
 # Voice (SPEC 8): Silero VAD on ONNX Runtime and Vosk streaming ASR. Piper is not a dependency: it
 # is GPL-3.0 and runs as a separate process.
 voice = ["onnxruntime>=1.18", "vosk>=0.3.44"]
+# Report-only music classifier (SPEC 8): YAMNet on LiteRT.
+music-classifier = ["ai-edge-litert>=2.3"]
 # Realtime speech route (SPEC 8): the WebSocket client. Off by default; on Reachy Mini the SDK
 # already requires websockets>=12,<16, so the robot's version is kept.
 realtime = ["websockets>=13,<16"]

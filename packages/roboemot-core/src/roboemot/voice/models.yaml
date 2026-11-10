@@ -4,7 +4,8 @@
 # to an exact release, tag or commit, and the digests were computed on the downloaded files.
 # `archive: zip` files are unpacked into the folder named by `path`; size_bytes and sha256 are
 # those of the zip, unpacked_bytes caps the unpacked total.
-# Licences: Silero VAD MIT; Vosk models Apache-2.0 (alphacephei.com/vosk/models). The Piper
+# Licences: Silero VAD MIT; YAMNet Apache-2.0 (the tensorflow/models repository); Vosk models
+# Apache-2.0 (alphacephei.com/vosk/models). The Piper
 # voices are fine-tuned from the lessac voice and each MODEL_CARD only points at the dataset
 # ("License: See URL"), so the voice licence is the dataset's and was not independently verified
 # (it_IT-paola: huggingface.co/datasets/paolapersico1/Voice-Dataset-Italian; en_US-amy:
@@ -20,6 +21,16 @@ models:
         url: https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx
         size_bytes: 2327524
         sha256: 2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f
+  - name: yamnet
+    role: music_classifier
+    licence: Apache-2.0
+    source: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
+    notes: report-only music and speech scores (input 15600 samples at 16 kHz, output 521 classes)
+    files:
+      - path: yamnet/yamnet_float32_1.tflite
+        url: https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite
+        size_bytes: 4126810
+        sha256: 4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf
   - name: vosk-small-it
     role: asr_it
     licence: Apache-2.0

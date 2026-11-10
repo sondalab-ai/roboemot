@@ -629,7 +629,9 @@ def core_targets(robot) -> list[str]:
 
 def test_install_adds_the_voice_extra_and_records_what_it_brings(offline, robot, daemon):
     install()
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == [
+        "voice,realtime,music-classifier]"
+    ]
     assert {"vosk", "scipy"} <= set(json.loads(robot.files[RECORD])["added"])
 
 
@@ -655,7 +657,9 @@ def test_the_default_install_adds_the_vision_extra_and_the_vision_weights(offlin
         quiet_ui(yes=True),
         ROOT,
     )
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime,vision]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == [
+        "voice,realtime,music-classifier,vision]"
+    ]
     assert robot.fetches == ["models fetch --all"]
 
 
@@ -694,7 +698,9 @@ def test_not_enough_space_for_the_vision_weights_suggests_no_vision(offline, rob
 
 def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot, daemon):
     install(vision=True)
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime,vision]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == [
+        "voice,realtime,music-classifier,vision]"
+    ]
     assert robot.fetches == ["models fetch --all"]
     assert "opencv-python-headless" in json.loads(robot.files[RECORD])["added"]
 
@@ -3276,7 +3282,7 @@ def test_without_a_port_in_the_app_config_the_default_is_printed(offline, robot,
 
 def test_the_realtime_extra_is_installed_with_voice():
     """SPEC 4A, Installer: the realtime route's extra (websockets) comes with the voice one."""
-    assert ReachyMiniWireless.extras == ("voice", "realtime")
+    assert ReachyMiniWireless.extras == ("voice", "realtime", "music-classifier")
     assert inst.EXTRA_DISK_MB["realtime"] == (1, 2)
 
 
