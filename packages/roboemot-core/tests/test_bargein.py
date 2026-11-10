@@ -10,7 +10,14 @@ import numpy as np
 import pytest
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.motion.state import MotionSample, MotionState
-from roboemot.voice.bargein import LABEL_MAX, BargeIn, PlaybackReference, echo_correlation
+from roboemot.voice.bargein import (
+    LABEL_MAX,
+    SILENT_POWER,
+    BargeIn,
+    PlaybackReference,
+    echo_correlation,
+    fft_size,
+)
 from roboemot.voice.vad import EnergyVAD
 from test_voice_listener import CHUNK, FRAME, RATE, T0, Rig
 
@@ -282,6 +289,66 @@ def test_echo_correlation_finds_a_delayed_copy_and_ignores_the_rest():
     assert echo_correlation(np.zeros(2048, np.float32), ref) == 0.0
     assert echo_correlation(mic, np.zeros(RATE, np.float32)) == 0.0
     assert echo_correlation(mic, ref[:100]) == 0.0
+
+
+def smooth_at_least(n):
+    """The smallest length >= n whose only prime factors are 2, 3 and 5, by counting up."""
+    k = max(n, 1)
+    while True:
+        rest = k
+        for p in (2, 3, 5):
+            while rest % p == 0:
+                rest //= p
+        if rest == 1:
+            return k
+        k += 1
+
+
+def test_the_fft_size_is_the_next_length_with_factors_2_3_and_5():
+    assert [fft_size(n) for n in (0, 1, 2, 7, 11, 13, 17, 97, 8895)] == [
+        1, 1, 2, 8, 12, 15, 18, 100, smooth_at_least(8895)
+    ]  # fmt: skip
+    assert all(fft_size(n) == smooth_at_least(n) for n in range(1, 20001))
+    assert fft_size(1 << 20) == 1 << 20 and fft_size((1 << 20) + 1) == smooth_at_least(2**20 + 1)
+
+
+def power_of_two_correlation(mic, ref):
+    """echo_correlation as it was with the FFT padded to a power of two: the reference."""
+    n, m = mic.size, ref.size
+    if n == 0 or m < n:
+        return 0.0
+    mic = mic.astype(np.float64) - float(np.mean(mic))
+    ref = ref.astype(np.float64) - float(np.mean(ref))
+    e_mic = float(np.dot(mic, mic))
+    if e_mic / n < SILENT_POWER:
+        return 0.0
+    size = 1 << (m + n - 1).bit_length()
+    cross = np.fft.irfft(np.fft.rfft(ref, size) * np.conj(np.fft.rfft(mic, size)), size)
+    cross = cross[: m - n + 1]
+    cum = np.concatenate([[0.0], np.cumsum(ref * ref)])
+    e_ref = cum[n:] - cum[: m - n + 1]
+    ok = e_ref / n >= SILENT_POWER
+    if not ok.any():
+        return 0.0
+    return float(min(1.0, (np.abs(cross[ok]) / np.sqrt(e_mic * e_ref[ok])).max()))
+
+
+@pytest.mark.parametrize(
+    ("n", "m"), [(2048, 6848), (2048, 2048), (2048, 2049), (2048, 100), (0, 500), (1, 1),
+                 (3, 7), (512, 1537), (1000, 9000), (4097, 8192)]
+)  # fmt: skip
+def test_the_smaller_fft_gives_the_power_of_two_result(n, m):
+    rng = np.random.default_rng(n * 7919 + m)
+    ref = rng.normal(0, 0.1, m).astype(np.float32)
+    cases = [rng.normal(0, 0.1, n).astype(np.float32), np.zeros(n, np.float32)]
+    if 0 < n <= m:
+        at = int(rng.integers(0, m - n + 1))
+        cases.append(0.5 * ref[at : at + n] + rng.normal(0, 0.01, n).astype(np.float32))
+    for mic in cases:
+        for r in (ref, np.zeros(m, np.float32)):
+            assert echo_correlation(mic, r) == pytest.approx(
+                power_of_two_correlation(mic, r), abs=1e-9
+            )
 
 
 def test_the_reference_is_a_timeline_with_silence_and_a_cut():

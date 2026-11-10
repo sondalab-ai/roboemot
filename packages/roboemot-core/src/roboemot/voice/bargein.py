@@ -129,6 +129,9 @@ log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
 # Mean-square level below which audio counts as silence for the echo check (about -80 dBFS).
 SILENT_POWER = 1e-8
+# The odd prime factors an FFT length may have besides 2 (NumPy's fast radices).
+FFT_RADIX_3 = 3
+FFT_RADIX_5 = 5
 # Decibels per decade of power, and the floor that keeps log10 finite on a silent frame.
 DB_PER_DECADE = 10.0
 LOG_FLOOR = 1e-12
@@ -229,6 +232,22 @@ class PlaybackReference:
         return out
 
 
+def fft_size(n: int) -> int:
+    """The smallest length of at least ``n`` whose only prime factors are 2, 3 and 5. NumPy's
+    FFT is fast on such lengths, and the next one is often far below the next power of two
+    (9000 against 16384 for the default echo window), which cuts the work per correlation
+    without scipy's ``next_fast_len`` (scipy is not a core dependency)."""
+    best = 1 << max(0, n - 1).bit_length()
+    fives = 1
+    while fives < best:
+        odd = fives  # 3^b * 5^c; the smallest power of two that lifts it to n completes it
+        while odd < best:
+            best = min(best, odd << (-(-n // odd) - 1).bit_length())
+            odd *= FFT_RADIX_3
+        fives *= FFT_RADIX_5
+    return best
+
+
 def echo_correlation(mic: np.ndarray, ref: np.ndarray) -> float:
     """Highest absolute normalised cross-correlation of ``mic`` with any ``mic.size`` long
     stretch of ``ref`` (which is the longer: the extra length is the lag searched). 0 when
@@ -241,7 +260,7 @@ def echo_correlation(mic: np.ndarray, ref: np.ndarray) -> float:
     e_mic = float(np.dot(mic, mic))
     if e_mic / n < SILENT_POWER:
         return 0.0
-    size = 1 << (m + n - 1).bit_length()
+    size = fft_size(m + n - 1)
     cross = np.fft.irfft(np.fft.rfft(ref, size) * np.conj(np.fft.rfft(mic, size)), size)[
         : m - n + 1
     ]
