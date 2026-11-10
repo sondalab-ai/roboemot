@@ -977,6 +977,13 @@ class LightConfig(Strict):
         ge=0.5,
         le=600,
     )
+    sample_row_step: int = param(
+        4,
+        "Light is measured on every this-many-th row of the frame, all columns kept (the noise "
+        "compares horizontal neighbours): 1 reads every row, 4 costs about a quarter",
+        ge=1,
+        le=16,
+    )
     history_h: float = param(
         24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
     )

@@ -158,6 +158,58 @@ def test_light_with_exposure_metadata():
     assert est.measure(frame(0.5), exposure_s=0.001, gain=1.0).level == "bright"
 
 
+def full_frame_stats(frame: np.ndarray) -> tuple[float, float]:
+    """The estimator's statistics before the row step: every row of the frame."""
+    img = np.asarray(frame, dtype=np.float32) / 255.0
+    luma_img = img @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    return float(luma_img.mean()), float(np.median(np.abs(np.diff(luma_img, axis=1))))
+
+
+def noisy_gradient(sigma: float, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:360, 0:640]
+    base = (40 + 150 * xx / 640 + 40 * yy / 360)[..., None] * np.array([0.9, 1.0, 1.1])
+    return np.clip(base + rng.normal(0, sigma, (360, 640, 3)), 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("sigma", [2.0, 8.0, 20.0])
+def test_light_on_every_fourth_row_stays_near_the_full_frame(sigma):
+    """Measured at 1280x720, step 4: luma within 4e-4 and noise within 1e-4 of the full frame
+    (the thresholds are 0.12, 0.35 and 0.04, hysteresis 0.01 to 0.03)."""
+    img = noisy_gradient(sigma)
+    luma, noise = full_frame_stats(img)
+    got_luma, got_noise = LightEstimator.stats(img, 4)
+    assert got_luma == pytest.approx(luma, abs=1e-3)
+    assert got_noise == pytest.approx(noise, abs=5e-4)
+
+
+def test_light_with_a_row_step_of_one_is_the_full_frame():
+    img = noisy_gradient(8.0)
+    assert LightEstimator.stats(img, 1) == full_frame_stats(img)
+    assert LightEstimator.stats(img) == full_frame_stats(img)
+    grey = img[..., 0]
+    assert LightEstimator.stats(grey, 1) == pytest.approx(
+        (float((grey / 255.0).mean()), float(np.median(np.abs(np.diff(grey / 255.0, axis=1)))))
+    )
+
+
+def test_the_estimator_and_the_sampler_read_the_configured_row_step():
+    from roboemot.circadian.sampler import LightSampler
+
+    img = np.zeros((40, 64, 3), np.uint8)
+    img[::4] = 255  # only the rows a step of 4 reads are white
+    assert CFG.light.sample_row_step == 4
+    assert LightEstimator(CFG.light).measure(img).luma == pytest.approx(1.0)
+    one = CFG.light.model_copy(update={"sample_row_step": 1})
+    assert LightEstimator(one).measure(img).luma == pytest.approx(0.25)
+    sampler = LightSampler(CFG.light, CFG.circadian, lambda: 0.0)
+    seen = []
+    sampler.offer_stats = lambda luma, noise, **kw: seen.append(luma)
+    assert sampler.offer(img, force=True) and seen == [pytest.approx(1.0)]
+    sampler.apply_config(one, CFG.circadian)
+    assert sampler.offer(img, force=True) and seen[-1] == pytest.approx(0.25)
+
+
 # ----------------------------------------------------------------------------- review fixes
 
 
