@@ -3606,12 +3606,30 @@ MUSIC_BANDS_MAX = 8
 SECONDS_PER_MINUTE = 60.0
 
 
+class MusicClassifierConfig(Strict):
+    """A pretrained audio classifier beside the music detector, report only (SPEC 8, 12A)."""
+
+    enabled: bool = param(
+        True,
+        "Report only: score the audio the listener hears for music and speech with a small "
+        "pretrained model, for the debug report; it changes no behaviour",
+        restart=True,
+    )
+    interval_s: float = param(
+        2.0, "Report only: time between two classifier runs", unit="s", ge=1, le=60, restart=True
+    )
+    threads: int = param(1, "Report only: CPU threads of the classifier", ge=1, le=4, restart=True)
+
+
 class MusicConfig(Strict):
     """Music in the room, from the audio the listener hears (SPEC 8): onset envelope per band,
     tempo by autocorrelation, beat phase by a comb, a confirm and release rule."""
 
     enabled: bool = param(
         True, "Detect music in the room; while it plays every utterance needs the wake word"
+    )
+    classifier: MusicClassifierConfig = param(
+        {}, "Report only: a pretrained audio classifier beside the music detector"
     )
     hop_ms: float = param(
         32.0,

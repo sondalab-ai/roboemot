@@ -39,6 +39,7 @@ from roboemot.voice.facing import FacingCheck
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.listener import Utterance, VoiceListener
+from roboemot.voice.music_classifier import MODEL_RATE_HZ, MusicClassifier, YamnetBackend
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.vad import Endpointer, SileroVAD
 from roboemot.world import Entry, WorldModel
@@ -48,6 +49,26 @@ log = logging.getLogger(__name__)
 
 LANGUAGE_PREFERENCE = "language"
 MS_PER_S = 1000.0
+
+
+def build_music_classifier(cfg: RoboEmotConfig, root: Path) -> MusicClassifier:
+    """The report-only classifier (SPEC 8). A missing model or runtime or another sample rate
+    leaves it unavailable, with the reason in the report: voice runs on without it."""
+    backend, reason = None, ""
+    rate = cfg.voice.sample_rate_hz
+    settings = cfg.music.classifier
+    try:
+        if rate == MODEL_RATE_HZ:
+            backend = YamnetBackend(voice_models.model_file(root, "yamnet"), settings.threads)
+        else:
+            reason = "sample_rate"
+    except ModelError:
+        reason = "model"
+    except (RuntimeError, OSError, ValueError):
+        reason = "runtime"
+    if reason:
+        log.warning("voice: music classifier unavailable (%s)", reason)
+    return MusicClassifier(settings, rate, backend, reason)
 
 
 def yaw_at(entry: Entry, now: float, max_age_s: float) -> float | None:
@@ -244,6 +265,8 @@ def build_listener(
             facing=FacingCheck(cfg.voice.facing),
         ),
     )
+    if cfg.music.classifier.enabled:
+        listener.music_classifier = build_music_classifier(cfg, root)
 
     def close() -> None:
         bargein.close()

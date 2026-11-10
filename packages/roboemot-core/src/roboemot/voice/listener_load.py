@@ -33,6 +33,7 @@ STAGES = (
     "grammar",
     "decode",
     "music",
+    "music_classifier",
 )
 
 

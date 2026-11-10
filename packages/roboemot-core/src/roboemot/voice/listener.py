@@ -111,6 +111,7 @@ from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
 from .music import STARTED, MusicDetector, MusicState
+from .music_classifier import MusicClassifier
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
 from .wake import AT_FACE, NO_FACE_AT_VOICE, NO_FACING_DATA, NOT_FACING, AtFace, WakeGate
@@ -293,6 +294,7 @@ class VoiceListener:
         self._direction = direction
         self._gate = WakeGate("always", 0.0, music=self._music_during)  # see apply_config
         self.music: MusicDetector | None = None  # built by apply_config while music.enabled
+        self.music_classifier: MusicClassifier | None = None  # report only, set by the pipeline
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self._face_info: dict[str, Any] = {}  # the last voice-at-face check's numbers
         self.load = ListenerLoad(cfg.voice.listener)
@@ -495,6 +497,8 @@ class VoiceListener:
         snap["realtime"] = {**self.load.snapshot(), "recognizers": self._asr.stats()}
         if self.music is not None:
             snap["music"] = self.music.snapshot()
+        if self.music_classifier is not None:
+            snap["music_classifier"] = self.music_classifier.snapshot()
         with self._lock:
             snap["realtime_audio"] = dict(self._audio)
             snap["grammar_handoff"] = {
@@ -691,7 +695,10 @@ class VoiceListener:
     def _hear_music(self, chunk: VoiceChunkLike, start: float, speaking: bool) -> None:
         """Feed the music detector one chunk the listener takes (the ``music`` stage) and
         publish a change of state. A chunk inside the robot's speaking window (the echo tail a
-        cut left open) is a hole to it: the robot's own sound must never count as music."""
+        cut left open) is a hole to it: the robot's own sound must never count as music. The
+        report-only classifier gets the same chunks (the ``music_classifier`` stage)."""
+        if not speaking and self.music_classifier is not None:
+            self._timed("music_classifier", self.music_classifier.feed, chunk.samples, start)
         music = self.music
         if music is None:
             return

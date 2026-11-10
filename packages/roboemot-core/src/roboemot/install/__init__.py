@@ -127,7 +127,12 @@ ENTRY_POINT_GROUP = "roboemot.installers"
 # vision alone also fits. Realtime is websockets 15.0.1 (0.18 MB downloaded, 0.83 MB unpacked,
 # measured 2026-10-27), rounded up to whole MB; a robot that already has it keeps its version.
 APP_DISK_MB = (60, 230)
-EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200), "realtime": (1, 2)}
+EXTRA_DISK_MB = {
+    "voice": (30, 85),
+    "vision": (70, 200),
+    "realtime": (1, 2),
+    "music-classifier": (20, 60),
+}
 REALTIME_EXTRA = "realtime"
 REALTIME_PACKAGE = "websockets"  # what the realtime extra brings (roboemot-core's pyproject)
 VERSION_OPS = {  # two-character operators first: ">=" must not read as ">"

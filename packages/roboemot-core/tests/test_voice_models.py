@@ -50,6 +50,7 @@ def test_voice_manifest_is_complete_and_pinned():
     specs = voice_models.load_manifest()
     assert set(specs) == {
         "silero-vad",
+        "yamnet",
         "vosk-small-it",
         "vosk-small-en",
         "piper-it-paola",
@@ -63,7 +64,7 @@ def test_voice_manifest_is_complete_and_pinned():
             assert f.url and f.url.startswith("https://")
             assert len(f.sha256 or "") == 64 and f.size_bytes
             assert not f.path.startswith("/") and ".." not in f.path
-            assert (f.archive is None) == f.path.startswith(("silero/", "piper/"))
+            assert (f.archive is None) == f.path.startswith(("silero/", "piper/", "yamnet/"))
     assert {f.archive for s in specs.values() for f in s.files} == {None, "zip"}
 
 

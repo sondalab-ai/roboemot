@@ -606,12 +606,12 @@ class MusicDetector:
             "playing": view.playing,
             "tempo_bpm": tempo,
             "confidence": view.confidence,
-            "cost_ms_per_audio_s": _spread(costs),
+            "cost_ms_per_audio_s": spread(costs),
             "recent": _recent_report(recent),
         }
 
 
-def _spread(values: list[float]) -> dict[str, Any]:
+def spread(values: list[float]) -> dict[str, Any]:
     """Number of ``values`` and their min, median, p90 and last, all None with no values."""
     if not values:
         return {"samples": 0, "min": None, "median": None, "p90": None, "last": None}
@@ -634,9 +634,9 @@ def _recent_report(recent: list[_Outcome]) -> dict[str, Any]:
         outcomes[item.name] = outcomes.get(item.name, 0) + 1
     return {
         "outcomes": outcomes,
-        "periodicity": _spread([i.periodicity for i in recent if i.periodicity is not None]),
-        "bands_carrying": _spread([float(i.bands) for i in recent if i.bands is not None]),
-        "level_db": _spread([i.level_db for i in recent if i.level_db is not None]),
+        "periodicity": spread([i.periodicity for i in recent if i.periodicity is not None]),
+        "bands_carrying": spread([float(i.bands) for i in recent if i.bands is not None]),
+        "level_db": spread([i.level_db for i in recent if i.level_db is not None]),
     }
 
 
