@@ -174,6 +174,7 @@ def _tick_until_stopped(
             state_fx.idle_motion_scale,
             clock.phase_s,
             dof=pitch_dof,
+            effects=fx,
         )
         if p.circ.motion is not None:
             p.circ.motion.set_register(

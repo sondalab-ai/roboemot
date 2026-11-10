@@ -174,6 +174,45 @@ def test_a_failing_registry_lookup_gives_the_register_without_overrides():
     assert got.people == 1 and got.params == BASE
 
 
+def test_the_tracker_memo_gives_the_uncached_result_as_each_input_changes_in_turn():
+    """Each input of the resolver changes in turn (register config, persona as config and as
+    effects, who is in view, a record's overrides edited in place, ``False`` against ``0``): the
+    tracker's result always equals a fresh ``resolve_register`` and changes when it should."""
+    from roboemot.persona import effects
+
+    bus, records = Bus(), {"a": {"speech_rate": 0.8}, "b": {}}
+    tracker = RegisterTracker(bus, CFG.expression, overrides_for=lambda pid: records[pid])
+    lively = PersonaConfig(traits={"energy": 1.0})
+    slow = REG.model_copy(update={"speech_rate": 0.7})
+    now = [0.0]
+
+    def tick(cfg=REG, persona=NEUTRAL):
+        now[0] += 0.1
+        got = tracker.tick(now[0], cfg, persona)
+        assert got == resolve_register(tracker.people(now[0]), cfg, persona)
+        return got
+
+    first = tick()
+    assert tick() is first  # nothing changed: the memo answers
+    assert tick(cfg=slow).params.speech_rate == 0.7
+    assert tick(cfg=type(REG).model_validate(REG.model_dump())) == first  # equal, a new object
+    assert tick(persona=lively).params.motion_amplitude == pytest.approx(1.2)
+    assert tick(persona=effects(lively)).params.motion_amplitude == pytest.approx(1.2)
+    assert tick() == first
+    bus.publish("percept.face", face(1, owner="a"), now[0])
+    assert tick().params.speech_rate == 0.8 and tracker.active.people == 1
+    records["a"]["speech_rate"] = 0.9  # the record edited in place
+    assert tick().params.speech_rate == 0.9
+    records["a"] = {"approach_allowed": False, "motion_amplitude": 99}  # invalid but tightens
+    assert not tick().params.approach_allowed
+    records["a"] = {"approach_allowed": 0, "motion_amplitude": 99}  # == the above, not a bool
+    assert tick().params.approach_allowed
+    bus.publish("percept.face", face(2, owner="b"), now[0])
+    assert tick().people == 2
+    bus.publish("percept.face", face(3), now[0])  # a stranger
+    assert tick().people == 3
+
+
 def test_register_overrides_are_validated_when_a_record_is_written():
     from roboemot.registry.records import check_register_overrides
 

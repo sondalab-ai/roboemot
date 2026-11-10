@@ -183,6 +183,7 @@ class RegisterTracker:
         self._seen: dict[int, _Seen] = {}
         self._lock = threading.Lock()
         self.active: ActiveRegister | None = None
+        self._memo: tuple[tuple[Any, ...], ActiveRegister] | None = None
         self._unsubscribe = bus.subscribe("percept.face", self._on_face)
 
     def close(self) -> None:
@@ -221,8 +222,23 @@ class RegisterTracker:
         self, now: float, cfg: RegisterConfig, persona: PersonaConfig | PersonaEffects
     ) -> ActiveRegister:
         """Resolve the register for this tick; publish it on ``register.active`` if it changed."""
-        active = resolve_register(self.people(now), cfg, persona)
+        active = self._resolve(self.people(now), cfg, persona)
         if active != self.active:
             self.active = active
             self.bus.publish(TOPIC, active, now)
+        return active
+
+    def _resolve(
+        self, people: list[Person], cfg: RegisterConfig, persona: PersonaConfig | PersonaEffects
+    ) -> ActiveRegister:
+        """``resolve_register`` memoised on its inputs: the register config and the persona
+        effects (frozen, compared by value) and each person's overrides in order, keyed by their
+        ``repr`` (the lookup returns a fresh dict per tick, and ``False`` and ``0`` differ), so
+        the pydantic rebuilds run only when one of them changes."""
+        fx = persona if isinstance(persona, PersonaEffects) else persona_effects(persona)
+        key = (cfg, fx, tuple(repr(dict(p.overrides)) for p in people))
+        if self._memo is not None and self._memo[0] == key:
+            return self._memo[1]
+        active = resolve_register(people, cfg, fx)
+        self._memo = (key, active)
         return active
