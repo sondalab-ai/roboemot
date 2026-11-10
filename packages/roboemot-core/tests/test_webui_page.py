@@ -125,6 +125,33 @@ def test_local_stylesheet_hides_every_hidden_element():
     assert re.search(r"(?m)^\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", css)
 
 
+def test_scrolling_and_the_settings_nav_clear_the_sticky_header():
+    # jsdom applies no stylesheet: the rules that use the measured header height (app.js
+    # headerWatch) and hide the nav on a narrow screen are checked here as text
+    css = (STATIC / "style.css").read_text()
+    assert re.search(r"(?m)^html \{ scroll-padding-top: calc\(var\(--app-header-h, 0px\)", css)
+    assert re.search(r"\.settings-nav \{[^}]*top: calc\(var\(--app-header-h, 0px\)", css)
+    # the header's controls cancel that padding, or focusing a tab scrolls the page up
+    assert re.search(
+        r"(?m)^\.sl-header :is\(button, a, input, select\) \{ scroll-margin-top: "
+        r"calc\(-1 \* \(var\(--app-header-h, 0px\) \+ var\(--sl-space-3\)\)\); \}",
+        css,
+    )
+    narrow = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.S)
+    assert narrow and re.search(r"\.settings-nav \{ display: none; \}", narrow.group(1))
+
+
+def test_the_tab_strip_does_not_overflow_downwards():
+    # the kit tab's margin-bottom: -1px reached past the scrolling strip (a 1px vertical scroll,
+    # measured in Chrome); jsdom has no layout, so the rules that remove it are checked as text
+    css = (STATIC / "style.css").read_text()
+    strip = re.search(r"(?m)^#tabs \{(.*?)\}", css, re.S)
+    assert strip and "border-bottom: 0" in strip.group(1)
+    assert "inset 0 -1px var(--slc-border)" in strip.group(1)
+    assert "--sl-focus-ring-offset: calc(-1 * var(--sl-focus-ring-width" in strip.group(1)
+    assert re.search(r"(?m)^#tabs \.sl-tabs__tab \{ margin-bottom: 0; \}", css)
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()

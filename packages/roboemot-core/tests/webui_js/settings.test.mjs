@@ -356,7 +356,7 @@ test("save: a client pre-check flags the field and sends nothing", async () => {
   await settle();
   const err = box.querySelector(".sl-field__error");
   assert.equal(err.hidden, false);
-  assert.equal(err.textContent, "err_value_range");
+  assert.equal(err.textContent, "settings_range_error", "the text that states the limits");
   assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.ok(input.getAttribute("aria-describedby").split(" ").includes(err.id));
   assert.equal(page.document.querySelector("dialog"), null);
@@ -1204,4 +1204,159 @@ test("a nullable enum stored as an empty string or outside its choices is marked
   const c = row(page, "voice.c").querySelector("select");
   assert.equal(c.getAttribute("aria-invalid"), null, "an empty string that is a choice is valid");
   assert.equal(c.options[c.selectedIndex].textContent, "settings_choice_none");
+});
+
+const RANGE_WORDS = {
+  settings_range_between: "Allowed: {min} to {max}.",
+  settings_range_min: "Allowed: {min} or more.",
+  settings_range_above: "Allowed: more than {min}.",
+  settings_range_above_max: "Allowed: more than {min}, up to {max}.",
+  settings_range_max: "Allowed: {max} or less.",
+  settings_unit: "Unit: {unit}.",
+  settings_range_error: "The value is outside the allowed range. {range}",
+  err_value_range: "The value is outside the allowed range.",
+};
+
+function rangePage(rows, extra = {}, lang = "en") {
+  return settingsPage({ "GET /api/strings": { language: lang, strings: RANGE_WORDS }, ...extra }, { fields: rows, pin_required: true });
+}
+const rangeLine = (page, path) => row(page, path).querySelector(".setting-range");
+
+test("a numeric field states its limits and unit under the control, for each combination", async () => {
+  const cases = [
+    [{ ge: 0, le: 10, unit: "s" }, "Allowed: 0 to 10. Unit: s."],
+    [{ ge: 1 }, "Allowed: 1 or more."],
+    [{ le: 5, unit: "dB" }, "Allowed: 5 or less. Unit: dB."],
+    [{ gt: 0, unit: "Hz" }, "Allowed: more than 0. Unit: Hz."],
+    [{ gt: 0, le: 2 }, "Allowed: more than 0, up to 2."],
+    [{ ge: 0, gt: -1, le: 1 }, "Allowed: 0 to 1."],
+  ];
+  const rows = cases.map(([limits], i) => d("voice.n" + i, "number", { value: 1, default: 1, ...limits }));
+  rows.push(d("voice.free", "number", { value: 1, default: 1, unit: "s" }));
+  const page = await rangePage(rows);
+  await open(page, "core-voice");
+  cases.forEach(([, want], i) => assert.equal(rangeLine(page, "voice.n" + i).textContent, want, JSON.stringify(cases[i][0])));
+  assert.equal(rangeLine(page, "voice.free"), null, "no line without a limit");
+  const line = rangeLine(page, "voice.n0");
+  assert.ok(line.classList.contains("hint"), "a muted line");
+});
+
+test("the limits line is in the field's description, with the error while one shows", async () => {
+  const page = await rangePage([
+    d("voice.a", "number", { value: 1, default: 1, ge: 0, le: 10, description: "Rate" }),
+    d("voice.b", "number", { value: 1, default: 1, ge: 0, le: 10 }),
+  ]);
+  await open(page, "core-voice");
+  const a = row(page, "voice.a");
+  const input = a.querySelector('input[type="number"]');
+  const ids = () => input.getAttribute("aria-describedby").split(" ");
+  const desc = a.querySelector("p.hint").id;
+  const range = rangeLine(page, "voice.a").id;
+  assert.deepEqual(ids(), [desc, range]);
+  input.value = "99";
+  button(a, "settings_save").click();
+  await settle();
+  const err = a.querySelector(".sl-field__error");
+  assert.deepEqual(ids(), [desc, range, err.id]);
+  assert.equal(err.textContent, "The value is outside the allowed range. Allowed: 0 to 10.");
+  input.value = "5";
+  button(a, "settings_save").click();
+  await settle();
+  assert.deepEqual(ids(), [desc, range], "the error leaves, the description stays");
+  page.document.querySelector("dialog .sl-dialog__actions button[type=button]").click();
+  const b = row(page, "voice.b").querySelector('input[type="number"]');
+  assert.deepEqual(b.getAttribute("aria-describedby").split(" "), [rangeLine(page, "voice.b").id], "linked without a description too");
+});
+
+test("a server range refusal states the limits the field has, else the generic text", async () => {
+  const page = await rangePage([
+    d("voice.a", "number", { value: 1, default: 1, ge: 0, le: 10 }),
+    d("voice.c", "number", { value: 1, default: 1 }),
+  ], { "POST /api/settings": reply(422, { error: "value_range" }) });
+  await open(page, "core-voice");
+  for (const [path, want] of [["voice.a", "The value is outside the allowed range. Allowed: 0 to 10."], ["voice.c", "The value is outside the allowed range."]]) {
+    const box = row(page, path);
+    box.querySelector('input[type="number"]').value = "3";
+    button(box, "settings_save").click();
+    await settle();
+    const dialog = await answerPin(page);
+    assert.equal(dialog.querySelector("#dialog-error").textContent, want, path);
+    dialog.querySelector(".sl-dialog__actions button[type=button]").click();
+    await settle();
+  }
+});
+
+test("the limits are written in the page language", async () => {
+  const page = await rangePage([d("voice.a", "number", { value: 1, default: 1, ge: 0.05, le: 15000 })], {}, "it");
+  await open(page, "core-voice");
+  assert.equal(rangeLine(page, "voice.a").textContent, "Allowed: 0,05 to 15.000.");
+});
+
+test("saving the page language redraws the page in it and keeps the Settings tab, its filter and open groups", async () => {
+  let lang = "en";
+  const words = {
+    en: { title: "RoboEmot", tab_settings: "Settings", tab_live: "Live", settings_intro: "Every setting.", saved: "Saved.", settings_save: "Save" },
+    it: { title: "RoboEmot", tab_settings: "Impostazioni", tab_live: "Dal vivo", settings_intro: "Ogni impostazione.", saved: "Salvato.", settings_save: "Salva" },
+  };
+  const catalogue = () => ({
+    pin_required: true,
+    fields: [
+      d("conversation.language", "enum", { value: lang, default: "en", choices: ["en", "it"], description: lang === "it" ? "Lingua" : "Language" }),
+      d("conversation.max_turns", "int", { value: 3, default: 3, ge: 1, le: 9 }),
+    ],
+  });
+  const page = await loadPage({
+    "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 },
+    "GET /api/strings": () => ({ language: lang, strings: words[lang] }),
+    "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
+    "GET /api/live/viewers": { video_viewers_active: false, poll_ms: 60000 },
+    "GET /api/settings": catalogue,
+    "POST /api/settings": (b) => { lang = b.value; return { path: b.path, changed: true, value: b.value, layer: "app", persisted: true }; },
+  });
+  page.document.querySelector('#tabs button[data-tab="settings"]').click();
+  await settle();
+  await settle();
+  await typeQuery(page, "conv");
+  const select = row(page, "conversation.language").querySelector("select");
+  select.value = "1";
+  button(row(page, "conversation.language"), "Save").click();
+  await settle();
+  await answerPin(page);
+  await settle();
+  await settle();
+  const doc = page.document;
+  assert.equal(doc.documentElement.lang, "it");
+  assert.equal(doc.querySelector('#tabs button[data-tab="settings"]').textContent, "Impostazioni");
+  assert.equal(doc.querySelector('#tabs button[data-tab="live"]').textContent, "Dal vivo");
+  assert.ok(doc.title.includes("RoboEmot"));
+  assert.equal(doc.querySelector('#tabs [aria-selected="true"]').dataset.tab, "settings", "the Settings tab stays");
+  assert.ok(doc.querySelector("#view").textContent.includes("Ogni impostazione."), "the view is in the new language");
+  assert.ok(!doc.querySelector("#view").textContent.includes("Every setting."));
+  const saved = row(page, "conversation.language");
+  assert.ok(saved, "the group is still open");
+  assert.ok(saved.textContent.includes("Lingua"));
+  assert.ok(button(saved, "Salva"), "the row's own buttons are in the new language too");
+  assert.equal(doc.querySelector("#settings-search").value, "conv", "the filter text is kept");
+  assert.equal(doc.querySelector("#notice").textContent, "Salvato. settings_layer_app", "the toast in the new language");
+});
+
+test("a language save that changed nothing does not redraw the shell", async () => {
+  const page = await loadPage({
+    "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 },
+    "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
+    "GET /api/live/viewers": { video_viewers_active: false, poll_ms: 60000 },
+    "GET /api/settings": { pin_required: true, fields: [d("conversation.language", "enum", { value: "en", default: "en", choices: ["en", "it"] })] },
+    "POST /api/settings": (b) => ({ path: b.path, changed: false, value: b.value }),
+  });
+  page.document.querySelector('#tabs button[data-tab="settings"]').click();
+  await settle();
+  await settle();
+  await open(page, "core-conversation");
+  const select = row(page, "conversation.language").querySelector("select");
+  select.value = "1";
+  button(row(page, "conversation.language"), "settings_save").click();
+  await settle();
+  await answerPin(page);
+  await settle();
+  assert.equal(page.calls.filter((c) => c.path === "/api/strings").length, 1, "strings loaded once, at boot");
 });

@@ -3,7 +3,7 @@
 // `npm test`.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadPage, settle } from "./harness.mjs";
+import { loadPage, reply, settle } from "./harness.mjs";
 
 const STATE = {
   poll_ms: 60000,
@@ -146,6 +146,58 @@ test("a failed poll marks the emotion cards as old until the next good one", asy
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(grid.getAttribute("aria-busy"), null);
   assert.equal(note.hidden, true);
+});
+
+test("a first poll that keeps failing announces once, with no card drawn yet", async (t) => {
+  const p = await emotionsPage(t, { routes: { "GET /api/emotions/state": () => { throw new TypeError("Failed to fetch"); } } });
+  const first = p.document.querySelector("#notice .sl-toast");
+  assert.ok(first, "the failure is reported");
+  for (let i = 0; i < 4; i++) await p.run("emoPoll(document.getElementById('emo-cards'), emoState.serial)");
+  assert.equal(p.document.querySelector("#notice .sl-toast"), first, "the same toast: not announced again");
+});
+
+const emoPolls = (p) => p.calls.filter((c) => c.path === "/api/emotions/state").length;
+const visibility = (p, value) => {
+  Object.defineProperty(p.document, "visibilityState", { configurable: true, get: () => value });
+  p.document.dispatchEvent(new p.window.Event("visibilitychange"));
+};
+
+test("emotions_disabled explains it and stops; entering the tab or coming back into view asks again", async (t) => {
+  let enabled = false;
+  const p = await emotionsPage(t, { routes: {
+    "GET /api/emotions/state": () => (enabled ? STATE : reply(404, { error: "emotions_disabled" })),
+  } });
+  assert.ok(p.document.querySelector("#emo-cards").textContent.includes("emo_disabled_body"));
+  assert.equal(p.document.querySelector("#notice").textContent, "", "not an error toast");
+  assert.equal(p.run("state.timer"), null, "no retry armed");
+  assert.equal(emoPolls(p), 1);
+  p.document.querySelector('#tabs button[data-tab="debug"]').click();
+  p.document.querySelector('#tabs button[data-tab="emotions"]').click();
+  await settle();
+  assert.equal(emoPolls(p), 2, "entering the tab asks again");
+  enabled = true;
+  visibility(p, "hidden");
+  visibility(p, "visible");
+  await settle();
+  await settle();
+  assert.equal(emoPolls(p), 3);
+  assert.ok(p.document.querySelector("#emo-controls"), "back in view: on again");
+  visibility(p, "hidden");
+});
+
+test("emotions_unavailable draws an explanation in the view, no toast, and keeps retrying", async (t) => {
+  let available = false;
+  const p = await emotionsPage(t, { routes: {
+    "GET /api/strings": { language: "en", strings: { ...EN, err_emotions_unavailable: "Not on this robot." } },
+    "GET /api/emotions/state": () => (available ? STATE : reply(503, { error: "emotions_unavailable" })),
+  } });
+  assert.ok(p.document.querySelector("#emo-cards").textContent.includes("Not on this robot."));
+  assert.equal(p.document.querySelector("#notice").textContent, "", "no toast");
+  assert.notEqual(p.run("state.timer"), null, "the retry stays armed");
+  available = true;
+  await p.run("emoPoll(document.getElementById('emo-cards'), emoState.serial)");
+  assert.ok(p.document.querySelector("#emo-controls"), "the cards come back");
+  assert.ok(!p.document.querySelector("#emo-cards").textContent.includes("Not on this robot."));
 });
 
 test("a poll with equal data keeps the emotion cards; a change replaces only its card", async (t) => {

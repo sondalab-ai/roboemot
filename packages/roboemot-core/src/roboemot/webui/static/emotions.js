@@ -13,7 +13,7 @@
 
 const EMO_RETRY_MS = 5000;
 const EMO_PERCENT = 100;
-const emoState = { serial: 0, controls: null };
+const emoState = { serial: 0, controls: null, grid: null }; // grid: the state cards of the open view
 
 function emoNumber(value) {
   return value.toFixed(2);
@@ -169,7 +169,7 @@ async function emoInject(index) {
 // the control card is updated in place (a redraw would close an open list and drop the focus).
 function emoRender(box, d) {
   const controls = emoControlsCard(d);
-  const cards = box.querySelector("#emo-state") || el("div", { class: "live-grid", id: "emo-state" });
+  const cards = emoState.grid;
   liveKeep(cards, [emoAffectCard(d.affect), emoExpressionCard(d.expression), emoCircadianCard(d.circadian),
     emoRegisterCard(d), emoMovedCard(d.moved)]);
   if (cards.parentNode !== box || controls.parentNode !== box) box.replaceChildren(cards, controls);
@@ -188,25 +188,38 @@ async function emoPoll(box, serial) {
     const data = await api("GET", "/api/emotions/state", undefined, liveActivity());
     if (!emoActive(serial)) return;
     emoRender(box, data);
-    pollGood(box.querySelector("#emo-state"));
+    pollGood(emoState.grid);
     delay = data.poll_ms || EMO_RETRY_MS;
   } catch (err) {
     if (!emoActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "emotions_disabled") {
-      emoState.controls = null;
-      const grid = box.querySelector("#emo-state");
-      if (grid) pollReset(grid);
-      box.replaceChildren(card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
-    } else pollFailed(box.querySelector("#emo-state"), explain(err));
+      // Off until the owner turns it on: no retry. Entering the tab or the page coming back into
+      // view asks again (emotionsView, the visibility handler below).
+      emoOff(box, card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
+      return;
+    }
+    if (err.message === "emotions_unavailable") emoOff(box, card(t("tab_emotions"), t("tab_emotions"), el("p", {}, explain(err))));
+    else pollFailed(emoState.grid, explain(err));
   }
   state.timer = setTimeout(() => emoPoll(box, serial), delay);
+}
+
+// A state the server named (off, unavailable) replaces the cards with `note`: nothing is stale,
+// and the controls are built again when the cards come back.
+function emoOff(box, note) {
+  emoState.controls = null;
+  pollReset(emoState.grid);
+  box.replaceChildren(note);
 }
 
 function emotionsView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   emoState.controls = null;
+  // Built before the first reply, so a first poll that fails has a grid to report for (pollFailed).
+  emoState.grid = el("div", { class: "live-grid", id: "emo-state" });
+  pollForget();
   const box = el("div", { class: "stack", id: "emo-cards" });
   view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("emo_intro")), staleNote("emo-stale", ["emo-state"]), box));
   return emoPoll(box, ++emoState.serial);

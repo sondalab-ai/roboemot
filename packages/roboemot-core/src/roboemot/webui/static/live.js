@@ -400,8 +400,23 @@ function liveRenderActivity(a) {
 
 // ---------------------------------------------------------------- stale data
 
-// Per grid of polled cards: when its last good reply came and the error its last failure reported.
+// Per grid of polled cards: when its last good reply came.
 const pollMarks = new WeakMap();
+// The grids of the open view whose poll is failing, each with the error it reported. Polls of one
+// view can fail with the same text (the robot is out of reach): that toast is theirs together.
+const pollFailing = new Map();
+
+// A new polled view starts: the failures of the one before are not its own.
+function pollForget() {
+  pollFailing.clear();
+}
+
+// `grid` stops failing: its toast goes, unless another grid still fails with the same text.
+function pollRecovered(grid) {
+  const message = pollFailing.get(grid);
+  pollFailing.delete(grid);
+  if (message !== undefined && ![...pollFailing.values()].includes(message)) noticeWithdraw(message);
+}
 
 // The kit warning callout a polled view shows while its cards are old; `grids` are the ids of the
 // grids it speaks for. Hidden until one of them is stale.
@@ -425,26 +440,27 @@ function staleNotesRefresh() {
 
 // A good reply for `grid`: its cards are current again, and its own failure toast goes.
 function pollGood(grid) {
-  const mark = pollMarks.get(grid) || {};
-  noticeWithdraw(mark.error);
-  pollMarks.set(grid, { goodMs: Date.now(), error: null });
+  pollRecovered(grid);
+  pollMarks.set(grid, { goodMs: Date.now() });
   grid.removeAttribute("aria-busy");
   staleNotesRefresh();
 }
 
-// A failed poll for `grid` (null while it has no cards yet): the toast reports `message` (once,
-// however often it repeats) and the cards that stay on screen are marked as old.
+// A failed poll for `grid`: the toast reports `message` when the grid starts failing (or fails in
+// a new way), not on every retry, and not when another grid already reported the same text. The
+// cards that stay on screen are marked as old.
 function pollFailed(grid, message) {
-  notice(message, true);
-  if (!grid) return;
-  pollMarks.set(grid, { ...(pollMarks.get(grid) || {}), error: message });
+  const was = pollFailing.get(grid);
+  const shared = [...pollFailing].some(([other, text]) => other !== grid && text === message);
+  pollFailing.set(grid, message);
+  if (was !== message && !shared) notice(message, true);
   grid.setAttribute("aria-busy", "true");
   staleNotesRefresh();
 }
 
 // The grid's cards were replaced by a state the server named (off, unavailable): nothing is stale.
 function pollReset(grid) {
-  noticeWithdraw((pollMarks.get(grid) || {}).error);
+  pollRecovered(grid);
   pollMarks.delete(grid);
   grid.removeAttribute("aria-busy");
   staleNotesRefresh();
@@ -605,7 +621,7 @@ async function liveVideoPoll(serial, chain) {
   if (Date.now() - liveInput.at > liveVideo.idleMs) { liveVideoIdleStop(); return; }
   let delay = liveVideo.pollMs;
   try {
-    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
+    const resp = await request("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
     if (!liveVideoLive(serial, chain)) return;
     if (resp.ok) {
       const blob = await resp.blob();
@@ -623,7 +639,7 @@ async function liveVideoPoll(serial, chain) {
   } catch (e) {
     if (!liveVideoLive(serial, chain)) return;
     liveRevokeVideo();
-    liveVideoText(t("err_generic"));
+    liveVideoText(e.message === "unreachable" ? explain(e) : t("err_generic"));
     delay = Math.max(delay, LIVE_RETRY_MS);
   }
   liveVideo.timer = setTimeout(() => liveVideoPoll(serial, chain), delay);
@@ -813,6 +829,7 @@ function liveView() {
   const stale = staleNote("live-stale", ["live-cards", "live-audio"]);
   view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), stale, activity, box, audio));
   liveAudioReset(audio);
+  pollForget();
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
 }

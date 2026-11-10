@@ -181,10 +181,10 @@ function toastIcon(name) {
 }
 
 // One toast at a time in the kit's toast stack (#notice, always in the page): a success in its
-// polite region, an error in its alert region; "" clears. An error equal to the last one reported
-// is not shown or announced again, even after a dismiss: a poll that keeps failing speaks once.
+// polite region, an error in its alert region; "" clears. It always shows what it is given (an
+// error equal to the last one is a new toast, announced again): a poll that keeps failing speaks
+// once because it calls this only when it starts failing (pollFailed, live.js).
 function notice(message, isError) {
-  if (isError && message && message === toastState.error) return;
   clearTimeout(toastState.timer);
   toastState.timer = null;
   toastState.error = isError && message ? message : null;
@@ -214,22 +214,26 @@ function noticeWithdraw(message) {
 
 // ---------------------------------------------------------------- api
 
+// `fetch`, with the one failure that has no response named as such: it rejects with the code
+// "unreachable" (network down, robot off, Wi-Fi lost), which `explain` words for the page.
+async function request(path, init) {
+  try {
+    return await fetch(path, init);
+  } catch (e) {
+    throw new Error("unreachable");
+  }
+}
+
 async function api(method, path, body, extra) {
   const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
-  let resp;
-  try {
-    resp = await fetch(path, {
-      method,
-      headers,
-      credentials: "same-origin",
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch (e) {
-    // fetch rejects only when no response came back (network down, robot off, Wi-Fi lost).
-    throw new Error("unreachable");
-  }
+  const resp = await request(path, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   let data = {};
   try { data = await resp.json(); } catch (e) { data = {}; }
   if (!resp.ok) {
@@ -242,8 +246,10 @@ async function api(method, path, body, extra) {
   return data;
 }
 
+// An error in the page language: `err.text` when the caller worded it for its context, else the
+// string of its code, with the host, what was saved and the wait the server named.
 function explain(err) {
-  const known = state.strings["err_" + err.message];
+  const known = err.text || state.strings["err_" + err.message];
   let text = known || t("err_generic");
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   if (err.saved) text += " " + err.saved;
@@ -263,7 +269,8 @@ async function guarded(fn) {
 
 // `guarded` for a call that draws a view. The view takes #view before its first await, so the token
 // read right after the call starts is its own; an error of a view that was dropped since (a tab
-// switch, a later view, logout) is not shown on the tab the user is on now.
+// switch, a later view, logout) is not shown on the tab the user is on now. A view that failed
+// before it drew anything also says so in #view, where the user looks, besides the toast.
 async function guardedView(view) {
   let current = null;
   try {
@@ -274,6 +281,35 @@ async function guardedView(view) {
     if (current && !current()) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     notice(explain(err), true);
+    viewFailed(explain(err));
+  }
+}
+
+// An empty #view after a failed load: a kit card with the error and a retry of the tab. A view
+// that drew content keeps it (its polls handle their own failures).
+function viewFailed(text) {
+  const view = document.getElementById("view");
+  if (view.hasChildNodes()) return;
+  const box = card(null, t("tab_" + state.tab), el("p", {}, text),
+    el("div", { class: "row" }, button(held("retry"), "primary", () => showTab(state.tab))));
+  box.id = "view-failed";
+  view.append(box);
+}
+
+// Runs `call` with `control` disabled and busy (aria-busy) and gives it back in a `finally`, so a
+// second tap on slow Wi-Fi sends nothing; a control that is disabled already does not run it. The
+// focus, lost when the control was disabled, comes back to it while it is still in the page.
+async function whileBusy(control, call) {
+  if (control.disabled) return undefined;
+  control.disabled = true;
+  control.setAttribute("aria-busy", "true");
+  try {
+    return await call();
+  } finally {
+    control.disabled = false;
+    control.removeAttribute("aria-busy");
+    const focus = document.activeElement;
+    if (control.isConnected && (!focus || focus === document.body || focus === control)) control.focus();
   }
 }
 
@@ -376,19 +412,22 @@ function loginView() {
     return;
   }
   const pin = textInput("pin", { type: "password", autocomplete: "off", inputmode: "numeric" });
+  const send = submitButton(t("login"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const data = await api("POST", "/api/login", { pin: pin.value });
         pin.value = "";
         state.csrf = data.csrf;
         notice("");
         await boot();
-      });
+        const tab = selectedTab(); // the login form is gone: the focus starts on the open tab
+        if (tab) tab.focus();
+      }));
     },
-  }, field("pin", t("pin"), pin), el("div", { class: "row" }, submitButton(t("login"))));
+  }, field("pin", t("pin"), pin), el("div", { class: "row" }, send));
   view.append(loginCard(form));
   pin.focus();
 }
@@ -467,11 +506,12 @@ function consentForm(pendingPeople) {
   const link = el("select", { id: "pending_id", class: "sl-field__input" },
     el("option", { value: "" }, t("pending_none")),
     pendingPeople.map((r) => el("option", { value: r.id }, r.display_name)));
+  const send = submitButton(t("enroll_complete"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
           consent_who: who.value,
@@ -481,7 +521,7 @@ function consentForm(pendingPeople) {
         });
         notice(t("saved"));
         await state.refresh();
-      });
+      }));
     },
   },
   el("div", { class: "sl-callout sl-callout--info" },
@@ -491,7 +531,7 @@ function consentForm(pendingPeople) {
   field("consent_who", t("consent_who"), who),
   el("fieldset", { class: "stack" }, el("legend", { class: "sl-field__label" }, t("scope_title")), el("div", { class: "check-list" }, scopes)),
   check(t("agree"), agreed),
-  el("div", { class: "row" }, submitButton(t("enroll_complete"))));
+  el("div", { class: "row" }, send));
   return card(t("tab_enroll"), t("consent_title"), form);
 }
 
@@ -603,11 +643,12 @@ async function catalogueView() {
   const xmp = el("input", { type: "file", id: "xmp_file", class: "sl-field__input", accept: ".xmp,application/rdf+xml,text/xml" });
   const photo = el("input", { type: "file", id: "photo_file", class: "sl-field__input", accept: "image/jpeg,image/png" });
   const result = el("div", { id: "import_result", role: "status" });
+  const send = submitButton(t("catalogue_import"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const file = xmp.files[0];
         if (!file) { notice(t("err_xmp_required"), true); return; }
         if (file.size > data.limits.max_xmp_bytes) { notice(t("err_xmp_too_large"), true); return; }
@@ -621,12 +662,12 @@ async function catalogueView() {
         await catalogueView();
         const shown = document.getElementById("import_result");
         if (shown) shown.replaceChildren(...importReport(report));
-      });
+      }));
     },
   },
   field("xmp_file", t("catalogue_xmp"), xmp),
   field("photo_file", t("catalogue_photo"), photo),
-  el("div", { class: "row" }, submitButton(t("catalogue_import"))));
+  el("div", { class: "row" }, send));
 
   const confirmBy = (record, entryId) => guarded(async () => {
     await api("POST", "/api/catalogue/" + record.id + "/confirm", entryId ? { entry_id: entryId } : {});
@@ -686,30 +727,33 @@ function secretsCard(data, reload) {
     maxlength: String(data.max_value_chars),
   });
   const pin = textInput("secret-pin", { type: "password", autocomplete: "off", inputmode: "numeric", required: true, maxlength: "64" });
+  const send = submitButton(t("secret_save"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
-      const body = { name: name.value.trim(), value: value.value, pin: pin.value };
-      value.value = "";
-      pin.value = "";
-      guarded(async () => {
-        try {
-          await api("POST", "/api/secrets/set", body);
-        } finally {
-          body.value = "";
-          body.pin = "";
-        }
-        name.value = "";
-        notice(t("secret_saved", { name: body.name }));
-        await reload();
+      whileBusy(send, () => {
+        const body = { name: name.value.trim(), value: value.value, pin: pin.value };
+        value.value = "";
+        pin.value = "";
+        return guarded(async () => {
+          try {
+            await api("POST", "/api/secrets/set", body);
+          } finally {
+            body.value = "";
+            body.pin = "";
+          }
+          name.value = "";
+          notice(t("secret_saved", { name: body.name }));
+          await reload();
+        });
       });
     },
   },
   field("secret-name", t("secret_name"), name, t("secret_name_hint")),
   field("secret-value", t("secret_value"), value, t("secret_value_hint")),
   field("secret-pin", t("pin"), pin),
-  el("div", { class: "row" }, submitButton(t("secret_save"))));
+  el("div", { class: "row" }, send));
   const remove = (s) => guarded(async () => {
     const done = await ask({
       title: t("secret_remove_title", { name: s.name }), message: t("secret_remove_message"),
@@ -935,10 +979,10 @@ async function routesView() {
     if (r.running) box.append(el("p", { class: "hint" }, t("route_running")));
     else if (r.last_check) show(box, r.last_check);
     else box.append(el("p", { class: "hint" }, t("route_never")));
-    const run = button(t("route_check"), "plain", () => guarded(async () => {
+    const run = button(t("route_check"), "plain", () => whileBusy(run, () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    }), { attrs: { disabled: r.running } });
+    })), { attrs: { disabled: r.running } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
     const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
@@ -1039,7 +1083,7 @@ function viewLoading(on) {
 
 // The tab's view starts on an empty #view. A view that draws before its first await shows no
 // loading line; the others show it until they put something in #view (the observer below) or
-// settle, unless a later view took #view meanwhile.
+// settle, unless a later view took #view meanwhile. Resolves once the view settled.
 function showTab(name) {
   stopPolling();
   newView();
@@ -1048,28 +1092,67 @@ function showTab(name) {
   view.setAttribute("aria-labelledby", "tab-" + name);
   view.replaceChildren();
   notice("");
-  for (const b of document.querySelectorAll("#tabs button")) {
+  for (const b of tabButtons()) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));
-    b.tabIndex = on ? 0 : -1;
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
+  const tab = selectedTab();
+  tabRove(tab);
+  // On a narrow screen the strip scrolls sideways: the open tab stays in sight.
+  if (tab && tab.scrollIntoView) tab.scrollIntoView({ inline: "nearest", block: "nearest" });
+  history.replaceState(null, "", "#" + name);
+  document.title = t("tab_" + name) + " · " + t("title");
   const done = guardedView(TABS[name]);
   const current = viewToken();
   viewLoading(!view.hasChildNodes());
   done.then(() => { if (current()) viewLoading(false); });
+  return done;
 }
 
-function tabKeys(ev) {
-  const names = Object.keys(TABS);
-  const step = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
-  if (!step) return;
-  ev.preventDefault();
-  const next = names[(names.indexOf(state.tab) + step + names.length) % names.length];
-  showTab(next);
-  document.querySelector('#tabs button[data-tab="' + next + '"]').focus();
+const DEFAULT_TAB = "enroll";
+const tabButtons = () => [...document.querySelectorAll("#tabs [role=tab]")];
+const selectedTab = () => document.querySelector('#tabs [aria-selected="true"]');
+
+// The tab a fragment names ("#live"), or null for one that names none.
+function tabOf(hash) {
+  const name = String(hash || "").replace(/^#/, "");
+  return Object.hasOwn(TABS, name) ? name : null;
 }
+
+// Roving tabindex: `target` is the one tab the Tab key reaches.
+function tabRove(target) {
+  for (const b of tabButtons()) b.tabIndex = b === target ? 0 : -1;
+}
+
+// Manual activation (WAI-ARIA tabs pattern): arrows, Home and End move the focus only, so moving
+// across Live does not start its polls on the robot. A click opens the focused tab; Enter and
+// Space click it, as on any button.
+function tabKeys(ev) {
+  const tabs = tabButtons();
+  const at = tabs.indexOf(document.activeElement);
+  const from = at >= 0 ? at : tabs.indexOf(selectedTab());
+  const to = { ArrowRight: from + 1, ArrowLeft: from - 1, Home: 0, End: tabs.length - 1 }[ev.key];
+  if (to === undefined) return;
+  ev.preventDefault();
+  const next = tabs[(to + tabs.length) % tabs.length];
+  tabRove(next);
+  next.focus();
+}
+
+// Focus that leaves the strip puts its tab stop back on the open tab, where Tab enters it again.
+function tabLeave(ev) {
+  if (!ev.currentTarget.contains(ev.relatedTarget)) tabRove(selectedTab());
+}
+document.getElementById("tabs").addEventListener("focusout", tabLeave);
+
+// A bookmark or a fragment typed by hand opens its tab; nothing while logged out.
+window.addEventListener("hashchange", () => {
+  const name = tabOf(location.hash);
+  if (state.csrf === null || document.getElementById("tabs").hidden || !name || name === state.tab) return;
+  showTab(name);
+});
 
 function themeControl() {
   const box = document.getElementById("theme");
@@ -1089,6 +1172,9 @@ function shell() {
   const tabs = document.getElementById("tabs");
   tabs.hidden = false;
   tabs.onkeydown = tabKeys;
+  tabs.setAttribute("aria-label", t("tabs_label"));
+  const asked = location.hash.replace(/^#/, "");
+  if (asked) state.tab = tabOf(asked) || DEFAULT_TAB;
   tabs.replaceChildren(...Object.keys(TABS).map((name) =>
     el("button", { type: "button", role: "tab", id: "tab-" + name, "aria-controls": "view", class: "sl-tabs__tab", "data-tab": name, onclick: () => showTab(name) }, t("tab_" + name))));
   const out = document.getElementById("logout");
@@ -1101,20 +1187,33 @@ function shell() {
     await boot();
   });
   liveBannerStart();
-  showTab(state.tab);
+  return showTab(state.tab);
+}
+
+// Takes the page strings of GET /api/strings: the text, the `lang` of the document, the title and
+// the theme control, which is drawn outside the views.
+function applyStrings(strings) {
+  state.strings = strings.strings;
+  state.lang = strings.language;
+  document.documentElement.lang = strings.language;
+  document.title = t("title");
+  document.getElementById("title").textContent = t("title");
+  themeControl();
+}
+
+// The page language changed (a saved `conversation.language`): loads its strings and redraws the
+// shell on the current tab, so no text stays in the old language. Resolves once the tab has drawn.
+async function relanguage() {
+  applyStrings(await api("GET", "/api/strings"));
+  return shell();
 }
 
 async function boot() {
   stopPolling();
   liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
-  state.strings = strings.strings;
-  state.lang = strings.language;
   state.session = session;
-  document.documentElement.lang = strings.language;
-  document.title = t("title");
-  document.getElementById("title").textContent = t("title");
-  themeControl();
+  applyStrings(strings);
   if (session.authenticated) {
     state.csrf = session.csrf;
     shell();
@@ -1132,6 +1231,19 @@ async function boot() {
 const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
 new MutationObserver(() => { if (viewRoot.hasChildNodes()) viewLoading(false); }).observe(viewRoot, { childList: true });
+
+// The kit header is sticky and wraps on a narrow screen, so its height is measured, not assumed:
+// published as --app-header-h on the root, it keeps what the page scrolls to (scroll-padding-top)
+// and the sticky settings nav below the header (style.css). Without ResizeObserver, window
+// resizes stand in for the header's own.
+function headerWatch() {
+  const header = document.querySelector(".sl-header");
+  const publish = () => document.documentElement.style.setProperty("--app-header-h", Math.ceil(header.getBoundingClientRect().height) + "px");
+  publish();
+  if (typeof ResizeObserver === "function") new ResizeObserver(publish).observe(header);
+  else window.addEventListener("resize", publish);
+}
+headerWatch();
 
 // Loads the page; a failure says the robot is out of reach and offers to try again.
 function start() {
