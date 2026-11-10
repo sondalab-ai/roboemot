@@ -125,6 +125,16 @@ def test_local_stylesheet_hides_every_hidden_element():
     assert re.search(r"(?m)^\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", css)
 
 
+def test_scrolling_and_the_settings_nav_clear_the_sticky_header():
+    # jsdom applies no stylesheet: the rules that use the measured header height (app.js
+    # headerWatch) and hide the nav on a narrow screen are checked here as text
+    css = (STATIC / "style.css").read_text()
+    assert re.search(r"(?m)^html \{ scroll-padding-top: calc\(var\(--app-header-h, 0px\)", css)
+    assert re.search(r"\.settings-nav \{[^}]*top: calc\(var\(--app-header-h, 0px\)", css)
+    narrow = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.S)
+    assert narrow and re.search(r"\.settings-nav \{ display: none; \}", narrow.group(1))
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()

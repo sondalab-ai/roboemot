@@ -1209,6 +1209,19 @@ const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
 new MutationObserver(() => { if (viewRoot.hasChildNodes()) viewLoading(false); }).observe(viewRoot, { childList: true });
 
+// The kit header is sticky and wraps on a narrow screen, so its height is measured, not assumed:
+// published as --app-header-h on the root, it keeps what the page scrolls to (scroll-padding-top)
+// and the sticky settings nav below the header (style.css). Without ResizeObserver, window
+// resizes stand in for the header's own.
+function headerWatch() {
+  const header = document.querySelector(".sl-header");
+  const publish = () => document.documentElement.style.setProperty("--app-header-h", Math.ceil(header.getBoundingClientRect().height) + "px");
+  publish();
+  if (typeof ResizeObserver === "function") new ResizeObserver(publish).observe(header);
+  else window.addEventListener("resize", publish);
+}
+headerWatch();
+
 // Loads the page; a failure says the robot is out of reach and offers to try again.
 function start() {
   boot().catch(bootFailed);
