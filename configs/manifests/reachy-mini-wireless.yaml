@@ -276,6 +276,32 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   dance_motion_map:
     bob: {head.pitch: 1}
     sway: {head.roll: 1, head.yaw: -1}
+    # Room music moves, one per beat. Shapes and sizes follow Pollen's reachy_mini_dances_library;
+    # head moves stay at 12 degrees or more, because the head follows only part of smaller ones
+    # (sweep of 2026-11-10). head.pitch positive is down: the pitch wave dips on the beat.
+    moves:
+      nod:
+        head.pitch:    {deg: 15}
+        antenna_right: {deg: -35, phase: 0.5}
+        antenna_left:  {deg: 35, phase: 0.5}
+      tilt:
+        head.roll:     {deg: 16, cycles: 0.5}
+        antenna_right: {deg: -30}
+        antenna_left:  {deg: 30}
+      headbang:
+        head.pitch:    {deg: 15}
+        antenna_right: {deg: -45}
+        antenna_left:  {deg: 45}
+      sway:
+        head.yaw:      {deg: -18, cycles: 0.5}
+        head.roll:     {deg: 12, cycles: 0.5}
+        antenna_right: {deg: -25}
+        antenna_left:  {deg: 25}
+      groove:
+        head.roll:     {deg: 14, cycles: 0.5}
+        head.pitch:    {deg: 12, phase: 0.25}
+        antenna_right: {deg: -40, cycles: 0.5}
+        antenna_left:  {deg: -40, cycles: 0.5}
     accent:
       curve: minjerk
       channels:
