@@ -296,6 +296,23 @@ function viewFailed(text) {
   view.append(box);
 }
 
+// Runs `call` with `control` disabled and busy (aria-busy) and gives it back in a `finally`, so a
+// second tap on slow Wi-Fi sends nothing; a control that is disabled already does not run it. The
+// focus, lost when the control was disabled, comes back to it while it is still in the page.
+async function whileBusy(control, call) {
+  if (control.disabled) return undefined;
+  control.disabled = true;
+  control.setAttribute("aria-busy", "true");
+  try {
+    return await call();
+  } finally {
+    control.disabled = false;
+    control.removeAttribute("aria-busy");
+    const focus = document.activeElement;
+    if (control.isConnected && (!focus || focus === document.body || focus === control)) control.focus();
+  }
+}
+
 function stopPolling() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
@@ -395,11 +412,12 @@ function loginView() {
     return;
   }
   const pin = textInput("pin", { type: "password", autocomplete: "off", inputmode: "numeric" });
+  const send = submitButton(t("login"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const data = await api("POST", "/api/login", { pin: pin.value });
         pin.value = "";
         state.csrf = data.csrf;
@@ -407,9 +425,9 @@ function loginView() {
         await boot();
         const tab = selectedTab(); // the login form is gone: the focus starts on the open tab
         if (tab) tab.focus();
-      });
+      }));
     },
-  }, field("pin", t("pin"), pin), el("div", { class: "row" }, submitButton(t("login"))));
+  }, field("pin", t("pin"), pin), el("div", { class: "row" }, send));
   view.append(loginCard(form));
   pin.focus();
 }
@@ -488,11 +506,12 @@ function consentForm(pendingPeople) {
   const link = el("select", { id: "pending_id", class: "sl-field__input" },
     el("option", { value: "" }, t("pending_none")),
     pendingPeople.map((r) => el("option", { value: r.id }, r.display_name)));
+  const send = submitButton(t("enroll_complete"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
           consent_who: who.value,
@@ -502,7 +521,7 @@ function consentForm(pendingPeople) {
         });
         notice(t("saved"));
         await state.refresh();
-      });
+      }));
     },
   },
   el("div", { class: "sl-callout sl-callout--info" },
@@ -512,7 +531,7 @@ function consentForm(pendingPeople) {
   field("consent_who", t("consent_who"), who),
   el("fieldset", { class: "stack" }, el("legend", { class: "sl-field__label" }, t("scope_title")), el("div", { class: "check-list" }, scopes)),
   check(t("agree"), agreed),
-  el("div", { class: "row" }, submitButton(t("enroll_complete"))));
+  el("div", { class: "row" }, send));
   return card(t("tab_enroll"), t("consent_title"), form);
 }
 
@@ -624,11 +643,12 @@ async function catalogueView() {
   const xmp = el("input", { type: "file", id: "xmp_file", class: "sl-field__input", accept: ".xmp,application/rdf+xml,text/xml" });
   const photo = el("input", { type: "file", id: "photo_file", class: "sl-field__input", accept: "image/jpeg,image/png" });
   const result = el("div", { id: "import_result", role: "status" });
+  const send = submitButton(t("catalogue_import"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const file = xmp.files[0];
         if (!file) { notice(t("err_xmp_required"), true); return; }
         if (file.size > data.limits.max_xmp_bytes) { notice(t("err_xmp_too_large"), true); return; }
@@ -642,12 +662,12 @@ async function catalogueView() {
         await catalogueView();
         const shown = document.getElementById("import_result");
         if (shown) shown.replaceChildren(...importReport(report));
-      });
+      }));
     },
   },
   field("xmp_file", t("catalogue_xmp"), xmp),
   field("photo_file", t("catalogue_photo"), photo),
-  el("div", { class: "row" }, submitButton(t("catalogue_import"))));
+  el("div", { class: "row" }, send));
 
   const confirmBy = (record, entryId) => guarded(async () => {
     await api("POST", "/api/catalogue/" + record.id + "/confirm", entryId ? { entry_id: entryId } : {});
@@ -707,30 +727,33 @@ function secretsCard(data, reload) {
     maxlength: String(data.max_value_chars),
   });
   const pin = textInput("secret-pin", { type: "password", autocomplete: "off", inputmode: "numeric", required: true, maxlength: "64" });
+  const send = submitButton(t("secret_save"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
-      const body = { name: name.value.trim(), value: value.value, pin: pin.value };
-      value.value = "";
-      pin.value = "";
-      guarded(async () => {
-        try {
-          await api("POST", "/api/secrets/set", body);
-        } finally {
-          body.value = "";
-          body.pin = "";
-        }
-        name.value = "";
-        notice(t("secret_saved", { name: body.name }));
-        await reload();
+      whileBusy(send, () => {
+        const body = { name: name.value.trim(), value: value.value, pin: pin.value };
+        value.value = "";
+        pin.value = "";
+        return guarded(async () => {
+          try {
+            await api("POST", "/api/secrets/set", body);
+          } finally {
+            body.value = "";
+            body.pin = "";
+          }
+          name.value = "";
+          notice(t("secret_saved", { name: body.name }));
+          await reload();
+        });
       });
     },
   },
   field("secret-name", t("secret_name"), name, t("secret_name_hint")),
   field("secret-value", t("secret_value"), value, t("secret_value_hint")),
   field("secret-pin", t("pin"), pin),
-  el("div", { class: "row" }, submitButton(t("secret_save"))));
+  el("div", { class: "row" }, send));
   const remove = (s) => guarded(async () => {
     const done = await ask({
       title: t("secret_remove_title", { name: s.name }), message: t("secret_remove_message"),
@@ -956,10 +979,10 @@ async function routesView() {
     if (r.running) box.append(el("p", { class: "hint" }, t("route_running")));
     else if (r.last_check) show(box, r.last_check);
     else box.append(el("p", { class: "hint" }, t("route_never")));
-    const run = button(t("route_check"), "plain", () => guarded(async () => {
+    const run = button(t("route_check"), "plain", () => whileBusy(run, () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    }), { attrs: { disabled: r.running } });
+    })), { attrs: { disabled: r.running } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
     const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
