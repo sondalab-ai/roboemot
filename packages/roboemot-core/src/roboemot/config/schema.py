@@ -4667,6 +4667,26 @@ class SpeechMotionMap(Strict):
         return out
 
 
+class DanceMove(Strict):
+    """A channel of one dance move: a wave of this size, cycles per beat and phase."""
+
+    deg: float = param(
+        ...,
+        "Peak offset of the wave (the sign sets the direction on the beat)",
+        unit="deg",
+        ge=-90,
+        le=90,
+    )
+    cycles: float = param(1.0, "Full cycles of the wave per beat; a multiple of 0.5", ge=0.5, le=4)
+    phase: float = param(0.0, "Start of the wave as a share of its cycle", ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _whole_half_cycles(self) -> DanceMove:
+        if (2 * self.cycles) % 1:
+            raise ValueError("cycles must be a multiple of 0.5, so a move loops without a step")
+        return self
+
+
 class DanceMotionMap(Strict):
     """The robot's dance channels and accent shape (SPEC 4A, 7); the robot manifest ships it.
 
@@ -4680,11 +4700,15 @@ class DanceMotionMap(Strict):
     )
     sway: dict[str, Literal[-1, 1]] = param({}, "Channel to sign of the side-to-side sway per bar")
     accent: ExpressionEntry | None = param(None, "Shape of the accent flick on a sound's onset")
+    moves: dict[str, dict[str, DanceMove]] = param(
+        {}, "Named moves for room music: channel to wave. The dance plays them in order"
+    )
 
     def channels(self) -> dict[str, list[str]]:
         """Every channel named, by role."""
         accent = list(self.accent.channels) if self.accent is not None else []
-        return {"bob": list(self.bob), "sway": list(self.sway), "accent": accent}
+        moves = sorted({name for move in self.moves.values() for name in move})
+        return {"bob": list(self.bob), "sway": list(self.sway), "accent": accent, "moves": moves}
 
 
 class DanceConfig(Strict):
@@ -4723,7 +4747,7 @@ class DanceConfig(Strict):
         le=4,
     )
     lead_ms: float = param(
-        100.0,
+        200.0,
         "How far the moves run ahead of the beat, to cover the command to motion delay "
         "(negative: behind it); tuned on the robot",
         unit="ms",
@@ -4742,6 +4766,21 @@ class DanceConfig(Strict):
         "much as this; 0 lets the confidence scale the moves all the way down",
         ge=0,
         le=1,
+    )
+    moves_enabled: bool = param(
+        True, "Dance room music with the manifest's moves, one per beat, instead of bob and sway"
+    )
+    move_bars: int = param(2, "Bars each move lasts before the next one", ge=1, le=16)
+    move_min_half_s: float = param(
+        0.2,
+        "Least time of one half of a dance move; a tempo too fast for it moves on every second, "
+        "then every fourth beat",
+        unit="s",
+        ge=0.1,
+        le=1,
+    )
+    move_blend_beats: float = param(
+        1.0, "Beats over which one move blends into the next", ge=0, le=8
     )
     calm_other_moves: bool = param(
         True,

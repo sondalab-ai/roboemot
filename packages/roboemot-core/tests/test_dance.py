@@ -14,7 +14,13 @@ from roboemot.affect import AffectState
 from roboemot.affect.dance import SOURCE, DanceRenderer, fold
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigError, ConfigStack
-from roboemot.config.schema import DanceConfig, DanceMotionMap, MusicConfig, RoboEmotConfig
+from roboemot.config.schema import (
+    DanceConfig,
+    DanceMotionMap,
+    DanceMove,
+    MusicConfig,
+    RoboEmotConfig,
+)
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
@@ -49,6 +55,13 @@ def manifest():
 
 @pytest.fixture(scope="module")
 def mapping(manifest):
+    return DanceMotionMap.model_validate(
+        {**manifest.model.behaviour["dance_motion_map"], "moves": {}}
+    )
+
+
+@pytest.fixture(scope="module")
+def moves_mapping(manifest):
     return DanceMotionMap.model_validate(manifest.model.behaviour["dance_motion_map"])
 
 
@@ -1019,3 +1032,80 @@ def test_other_moves_stay_calm_only_while_dancing_to_room_music(enabled, calm, p
 def test_nothing_stays_calm_without_a_listener():
     host = SimpleNamespace(dance=SimpleNamespace(cfg=DanceConfig()), voice_listener=None)
     assert dance_calm(host, 1.0) is False
+
+
+MOVES_CFG = {"lead_ms": 0.0, "fade_in_s": 0.1, "fade_out_s": 0.1, "min_strength": 1.0}
+MOVES_MAP = DanceMotionMap.model_validate(
+    {
+        "bob": {BOB: 1},
+        "moves": {
+            "nod": {BOB: {"deg": 15}},
+            "tilt": {SWAY: {"deg": 16, "cycles": 0.5}},
+        },
+    }
+)
+
+
+def test_room_music_plays_a_move_per_beat_at_full_size(manifest):
+    r = make(manifest, MOVES_MAP, Room(60.0), cfg=DanceConfig(**MOVES_CFG))
+    run(r, 0.0, 1.0)  # past the fade in
+    tilt = [t[BOB] for _, t in run(r, 1.0, 3.0)]
+    crossings = sum(1 for a, b in zip(tilt, tilt[1:], strict=False) if a < 0 <= b)
+    assert crossings == 2  # two beats at 60 BPM, one full nod each
+    assert max(tilt) >= math.radians(13.0)
+
+
+def test_the_own_sound_keeps_the_gentle_bob(manifest):
+    r = make(manifest, MOVES_MAP, Beats(beat()), cfg=DanceConfig(**MOVES_CFG))
+    run(r, 0.0, 1.0)
+    track = run(r, 1.0, 3.0)
+    assert max(t[BOB] for _, t in track) < math.radians(4.0)
+    assert all(SWAY not in t for _, t in track)
+
+
+def test_moves_can_be_turned_off(manifest):
+    cfg = DanceConfig(**MOVES_CFG, moves_enabled=False)
+    r = make(manifest, MOVES_MAP, Room(60.0), cfg=cfg)
+    run(r, 0.0, 1.0)
+    assert max(t[BOB] for _, t in run(r, 1.0, 3.0)) < math.radians(4.0)
+
+
+def test_the_next_move_starts_after_the_bars_and_blends(manifest):
+    cfg = DanceConfig(**MOVES_CFG, move_bars=1, move_blend_beats=1.0)
+    r = make(manifest, MOVES_MAP, Room(60.0), cfg=cfg, beats_per_bar=2)
+    first = run(r, 0.0, 1.9)
+    assert all(abs((t or {}).get(SWAY, 0.0)) < 1e-9 for _, t in first)  # only the nod so far
+    later = run(r, 1.9, 6.0)
+    assert max(abs((t or {}).get(SWAY, 0.0)) for _, t in later) >= math.radians(13.0)
+
+
+def test_a_wave_is_reduced_to_what_the_caps_allow(manifest):
+    r = make(manifest, MOVES_MAP, Room(60.0), cfg=DanceConfig(**MOVES_CFG))
+    fast = {SWAY: DanceMove(deg=45.0, cycles=2.0)}
+    dof = manifest.dofs[SWAY]
+    out = r._move_offsets(fast, 0.0, 0.5, 1.0)
+    w = 2 * math.pi * 2.0 / 0.5
+    assert out[SWAY] == pytest.approx(min(dof.max_vel / w, dof.max_acc / w**2))
+
+
+def test_a_wave_keeps_its_direction(manifest):
+    r = make(manifest, MOVES_MAP, Room(60.0), cfg=DanceConfig(**MOVES_CFG))
+    assert r._move_offsets({SWAY: DanceMove(deg=-10.0)}, 0.0, 1.0, 1.0)[SWAY] < 0
+
+
+@pytest.mark.parametrize("cycles", [0.75, 1.25])
+def test_a_wave_must_loop_without_a_step(cycles):
+    with pytest.raises(ValidationError):
+        DanceMove(deg=10.0, cycles=cycles)
+
+
+def test_the_reachy_moves_stay_large_enough_to_show():
+    raw = load_manifest(
+        Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml",
+        allow_unmeasured_dynamics=True,
+    ).model.behaviour["dance_motion_map"]
+    moves = DanceMotionMap.model_validate(raw).moves
+    assert len(moves) >= 5
+    for move in moves.values():
+        sizes = [abs(w.deg) for name, w in move.items() if name.startswith("head.")]
+        assert sizes and max(sizes) >= 12.0
