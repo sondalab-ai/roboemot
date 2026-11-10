@@ -16,6 +16,7 @@ RATE = 16000
 CHUNK = 320
 MUSIC, NOT_MUSIC = (0.9, 0.0), (0.0, 0.0)
 FREE = (60.0, 0.6)
+CHUNKS_PER_RUN = round(2.0 * RIG_RATE / RIG_CHUNK)
 
 
 def primary(**overrides):
@@ -145,7 +146,7 @@ class Scripted:
 
     running = True
 
-    def __init__(self, scores, every=round(2.0 * RIG_RATE / RIG_CHUNK)):
+    def __init__(self, scores, every=CHUNKS_PER_RUN):
         self.scores, self.every, self.chunks = list(scores), every, 0
 
     def feed(self, samples, start):

@@ -217,13 +217,24 @@ def test_assembly_without_a_listener_gives_no_room_beat():
     assert dance_beat(host).beat_at(1.0) is None
 
 
+def test_assembly_gives_music_with_no_tempo_the_free_beat():
+    cfg = RoboEmotConfig()
+    host = SimpleNamespace(soothe_runner=None)
+    state = MusicState(True, None, None, 0.1, 1.0)
+    host.voice_listener = SimpleNamespace(music_state=lambda now: state, config=cfg)
+    beat = dance_beat(host).beat_at(1.0)
+    assert (beat.source, beat.strength) == ("free", cfg.dance.free_strength)
+
+
 def test_assembly_reads_the_listener_late():
     host = SimpleNamespace(voice_listener=None, soothe_runner=None)
     source = dance_beat(host)
     music = Music(bpm=120.0)
-    host.voice_listener = SimpleNamespace(music_state=music.state)
+    host.voice_listener = SimpleNamespace(music_state=music.state, config=RoboEmotConfig())
     assert source.beat_at(1.0).source == "room"
-    host.voice_listener = SimpleNamespace(music_state=lambda now: None)  # no detector
+    host.voice_listener = SimpleNamespace(
+        music_state=lambda now: None, config=RoboEmotConfig()
+    )  # no detector
     assert source.beat_at(1.0) is None
 
 
