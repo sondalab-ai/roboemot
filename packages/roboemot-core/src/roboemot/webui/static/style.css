@@ -19,7 +19,7 @@ body {
 main, #view, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
 main { padding-block: var(--sl-space-4); }
 .stack { gap: var(--sl-space-3); }
-#notice { margin: 0; }
+.sl-toast svg { width: var(--sl-space-4); height: var(--sl-space-4); }
 .row { display: flex; gap: var(--sl-space-2); flex-wrap: wrap; align-items: center; }
 ul.row { list-style: none; padding: 0; margin: 0; }
 .table-scroll { overflow-x: auto; }

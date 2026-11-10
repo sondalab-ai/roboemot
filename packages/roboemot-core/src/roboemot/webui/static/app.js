@@ -37,8 +37,19 @@ function when(value, timeOnly) {
   return timeOnly ? d.toLocaleTimeString(state.lang) : d.toLocaleString(state.lang);
 }
 
-// Shown when the page cannot load its strings: the only text the page holds itself.
-const UNREACHABLE = { en: "Cannot reach the robot.", it: "Impossibile raggiungere il robot." };
+// The only text the page holds itself, for when it cannot load its strings: the same keys and
+// texts as webui/strings.py (tests/test_webui_page.py checks that they match).
+const PAGE_HELD = {
+  en: { err_unreachable: "Cannot reach the robot.", notice_dismiss: "Dismiss", retry: "Try again" },
+  it: { err_unreachable: "Impossibile raggiungere il robot.", notice_dismiss: "Chiudi", retry: "Riprova" },
+};
+
+// `key` from the loaded strings, else from PAGE_HELD in the page (or browser) language.
+function held(key) {
+  if (state.strings[key]) return state.strings[key];
+  const lang = state.lang || String(navigator.language || "").slice(0, 2);
+  return (PAGE_HELD[lang] || PAGE_HELD.en)[key];
+}
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -152,12 +163,53 @@ function table(head, rows) {
     el("tbody", {}, rows)));
 }
 
+// A success toast leaves on its own after this long; an error stays until it is cleared, replaced or
+// dismissed. The kit gives no duration: this leaves time to read a two-line message twice.
+const NOTICE_SUCCESS_MS = 8000;
+const toastState = { error: null, timer: null };
+const SVG_NS = "http://www.w3.org/2000/svg";
+const TOAST_ICONS = { success: "M3.5 8.5l3 3 6-7", danger: "M8 3.5v5M8 12v0.5", close: "M4 4l8 8M12 4l-8 8" };
+
+// A 16-unit stroked glyph from TOAST_ICONS, hidden from assistive technology.
+function toastIcon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  const path = document.createElementNS(SVG_NS, "path");
+  for (const [k, v] of [["viewBox", "0 0 16 16"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(k, v);
+  for (const [k, v] of [["d", TOAST_ICONS[name]], ["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "2"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) path.setAttribute(k, v);
+  svg.append(path);
+  return svg;
+}
+
+// One toast at a time in the kit's toast stack (#notice, always in the page): a success in its
+// polite region, an error in its alert region; "" clears. An error equal to the last one reported
+// is not shown or announced again, even after a dismiss: a poll that keeps failing speaks once.
 function notice(message, isError) {
-  const n = document.getElementById("notice");
-  n.setAttribute("aria-live", isError ? "assertive" : "polite");
-  n.hidden = !message;
-  n.className = message ? "sl-callout sl-callout--" + (isError ? "danger" : "success") : "";
-  n.replaceChildren(...(message ? [el("div", { class: "sl-callout__body" }, message)] : []));
+  if (isError && message && message === toastState.error) return;
+  clearTimeout(toastState.timer);
+  toastState.timer = null;
+  toastState.error = isError && message ? message : null;
+  for (const region of document.querySelectorAll("#notice .sl-toast-stack__live")) region.replaceChildren();
+  if (!message) return;
+  const tone = isError ? "danger" : "success";
+  const toast = el("div", { class: "sl-toast sl-toast--" + tone },
+    el("span", { class: "sl-toast__mark", "aria-hidden": "true" }, toastIcon(tone)),
+    el("div", { class: "sl-toast__content" }, el("p", { class: "sl-toast__title" }, message)));
+  const dismiss = () => { clearTimeout(toastState.timer); toast.remove(); };
+  toast.append(el("button", { type: "button", class: "sl-icon-btn sl-toast__dismiss", "aria-label": held("notice_dismiss"), onclick: dismiss },
+    toastIcon("close")));
+  document.getElementById(isError ? "notice-alert" : "notice-polite").append(toast);
+  // A toast the user is pointing at or has focused waits: removing it would drop the focus.
+  const leave = () => {
+    if (toast.matches(":focus-within, :hover")) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
+    else dismiss();
+  };
+  if (!isError) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
+}
+
+// Clears the error `message` if it is still the one reported last: a poll that recovers takes back
+// its own failure, never a newer message from something else.
+function noticeWithdraw(message) {
+  if (message && message === toastState.error) notice("");
 }
 
 // ---------------------------------------------------------------- api
@@ -166,12 +218,18 @@ async function api(method, path, body, extra) {
   const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
-  const resp = await fetch(path, {
-    method,
-    headers,
-    credentials: "same-origin",
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method,
+      headers,
+      credentials: "same-origin",
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    // fetch rejects only when no response came back (network down, robot off, Wi-Fi lost).
+    throw new Error("unreachable");
+  }
   let data = {};
   try { data = await resp.json(); } catch (e) { data = {}; }
   if (!resp.ok) {
@@ -967,11 +1025,28 @@ const TABS = {
   debug: debugView,
 };
 
+// While a tab waits for its first answer: #view is busy (aria-busy, what assistive technology
+// reads) and a muted line says so on screen.
+function viewLoading(on) {
+  const line = document.getElementById("view-loading");
+  if (line.hidden === !on) return;
+  line.textContent = on ? t("loading") : "";
+  line.hidden = !on;
+  const view = document.getElementById("view");
+  if (on) view.setAttribute("aria-busy", "true");
+  else view.removeAttribute("aria-busy");
+}
+
+// The tab's view starts on an empty #view. A view that draws before its first await shows no
+// loading line; the others show it until they put something in #view (the observer below) or
+// settle, unless a later view took #view meanwhile.
 function showTab(name) {
   stopPolling();
   newView();
   state.tab = name;
-  document.getElementById("view").setAttribute("aria-labelledby", "tab-" + name);
+  const view = document.getElementById("view");
+  view.setAttribute("aria-labelledby", "tab-" + name);
+  view.replaceChildren();
   notice("");
   for (const b of document.querySelectorAll("#tabs button")) {
     const on = b.dataset.tab === name;
@@ -980,7 +1055,10 @@ function showTab(name) {
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
-  guardedView(TABS[name]);
+  const done = guardedView(TABS[name]);
+  const current = viewToken();
+  viewLoading(!view.hasChildNodes());
+  done.then(() => { if (current()) viewLoading(false); });
 }
 
 function tabKeys(ev) {
@@ -1053,8 +1131,22 @@ async function boot() {
 // that builds it. Mutation callbacks run before the next paint: a head never shows the wrong one.
 const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
+new MutationObserver(() => { if (viewRoot.hasChildNodes()) viewLoading(false); }).observe(viewRoot, { childList: true });
 
-boot().catch(() => {
-  const lang = state.lang || String(navigator.language || "").slice(0, 2);
-  notice(state.strings.err_unreachable || UNREACHABLE[lang] || UNREACHABLE.en, true);
-});
+// Loads the page; a failure says the robot is out of reach and offers to try again.
+function start() {
+  boot().catch(bootFailed);
+}
+
+// The strings may be missing here: the text comes from PAGE_HELD.
+function bootFailed() {
+  notice(held("err_unreachable"), true);
+  const view = document.getElementById("view");
+  view.replaceChildren(el("div", { class: "row" }, button(held("retry"), "primary", () => {
+    view.replaceChildren();
+    notice("");
+    start();
+  }, { attrs: { id: "boot-retry" } })));
+}
+
+start();

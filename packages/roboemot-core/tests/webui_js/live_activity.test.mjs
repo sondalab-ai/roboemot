@@ -84,7 +84,7 @@ async function livePage(t, { strings = EN, language = "en", activity = ACTIVITY 
     "GET /api/session": () => ({ authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 1000 }),
     "GET /api/strings": { language, strings },
     "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
-    "GET /api/live/state": () => ({ ...BASE, activity }),
+    "GET /api/live/state": () => ({ ...BASE, activity: typeof activity === "function" ? activity() : activity }),
     "GET /api/live/audio": { audio_poll_ms: 1000, levels: { mic: { state: "off", db: null }, out: { state: "off", db: null }, floor_db: null }, transcript: { enabled: false, epoch: "", rev: 0, min_seq: 0, max_turns: 0, turns: [] } },
   });
   t.after(() => page.window.close());
@@ -142,4 +142,34 @@ test("an empty feed says so, and no activity block shows no panel", async (t) =>
   const off = await livePage(t, { activity: null });
   assert.equal(off.document.querySelector("#live-activity").children.length, 0);
   assert.equal(off.document.querySelector("#live-cards").children.length, 9);
+});
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("the status line is one node across polls and changes only with the status", async (t) => {
+  let status = "cloud_down";
+  const page = await livePage(t, { activity: () => ({ ...ACTIVITY, status }) });
+  const line = page.document.querySelector("#live-status");
+  assert.equal(line.getAttribute("role"), "status");
+  const badgeNode = line.firstElementChild;
+  await sleep(POLL_MS * 4);
+  assert.equal(page.document.querySelector("#live-status"), line);
+  assert.equal(line.firstElementChild, badgeNode, "an unchanged status is not rewritten");
+  status = "listening";
+  await sleep(POLL_MS * 4);
+  assert.equal(page.document.querySelector("#live-status"), line, "the same live region");
+  assert.equal(line.textContent, "Listening");
+});
+
+test("a new event is added above the rows already shown, which stay the same nodes", async (t) => {
+  let events = EVENTS.slice(1);
+  const page = await livePage(t, { activity: () => ({ ...ACTIVITY, events }) });
+  const before = [...page.document.querySelectorAll("#live-events li")];
+  assert.equal(before.length, EVENTS.length - 1);
+  events = EVENTS;
+  await sleep(POLL_MS * 4);
+  const after = [...page.document.querySelectorAll("#live-events li")];
+  assert.equal(after.length, EVENTS.length);
+  assert.ok(after[0].textContent.includes("Fallback sound"), "newest first");
+  assert.ok(after.slice(1).every((row, i) => row === before[i]), "the older rows are kept");
 });

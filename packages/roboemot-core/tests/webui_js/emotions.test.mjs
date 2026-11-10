@@ -124,3 +124,39 @@ test("a later poll keeps the picked choice and the same control card", async (t)
   assert.equal(p.document.querySelector("#emo-controls"), card);
   assert.equal(p.document.querySelector("#emo-play").value, "calm");
 });
+
+test("a failed poll marks the emotion cards as old until the next good one", async (t) => {
+  let down = false;
+  const p = await emotionsPage(t, { routes: {
+    "GET /api/emotions/state": () => { if (down) throw new TypeError("Failed to fetch"); return { ...STATE, poll_ms: 15 }; },
+  } });
+  const grid = p.document.querySelector("#emo-state");
+  const note = p.document.querySelector("#emo-stale");
+  assert.equal(note.hidden, true);
+  down = true;
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(grid.getAttribute("aria-busy"), "true");
+  assert.equal(note.hidden, false);
+  assert.ok(note.textContent.startsWith("stale_since"), note.textContent);
+  down = false;
+  for (const value of ["hidden", "visible"]) { // the retry waits 5 s: coming back into view polls at once
+    Object.defineProperty(p.document, "visibilityState", { configurable: true, get: () => value });
+    p.document.dispatchEvent(new p.window.Event("visibilitychange"));
+  }
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(grid.getAttribute("aria-busy"), null);
+  assert.equal(note.hidden, true);
+});
+
+test("a poll with equal data keeps the emotion cards; a change replaces only its card", async (t) => {
+  const p = await emotionsPage(t, { state: { ...STATE, poll_ms: 15 } });
+  const grid = p.document.querySelector("#emo-state");
+  const first = [...grid.children];
+  await new Promise((r) => setTimeout(r, 60));
+  assert.ok([...grid.children].every((node, i) => node === first[i]), "same nodes after equal polls");
+  p.setState({ ...STATE, poll_ms: 15, circadian: { ...STATE.circadian, sleepiness: 0.9 } });
+  await new Promise((r) => setTimeout(r, 60));
+  const now = [...grid.children];
+  assert.equal(now.filter((node, i) => node !== first[i]).length, 1, "only the circadian card is new");
+  assert.notEqual(now[2], first[2]);
+});

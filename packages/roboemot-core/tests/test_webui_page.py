@@ -93,9 +93,16 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
 
 def test_effects_are_wired_from_the_vendored_runtime():
     fx = (STATIC / "fx.js").read_text()
-    assert 'from "./vendor/sondalab-ui-kit/effects.js"' in fx
+    assert 'import("./vendor/sondalab-ui-kit/effects.js")' in fx
     assert "mount()" in fx
     assert not re.search(r"glass", fx)
+
+
+def test_effects_load_after_the_first_paint():
+    # a static import would fetch and parse the runtime (~0.2 MB with its modules) before it
+    fx = (STATIC / "fx.js").read_text()
+    assert not re.search(r"(?m)^\s*import\s", fx)
+    assert "requestIdleCallback(loadEffects, { timeout: FX_IDLE_TIMEOUT_MS })" in fx
 
 
 def test_local_stylesheet_has_only_the_registered_product_accent():
@@ -129,6 +136,8 @@ def test_first_party_scripts_have_no_inline_style_or_html_injection():
             "document.write",
         ):
             assert banned not in text, (name, banned)
+        # the SVG namespace names the toast icons' element type; it is never fetched
+        text = text.replace('"http://www.w3.org/2000/svg"', "")
         assert "http://" not in text and "https://" not in text
 
 
@@ -348,3 +357,13 @@ def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
         assert "settings_edit" not in lang and "settings_platform_name" not in lang
     js = _page_js()
     assert "SETTING_GROUPS" not in js and "settingEditor" not in js
+
+
+def test_text_the_page_holds_itself_matches_the_string_tables():
+    # PAGE_HELD in app.js is shown when /api/strings cannot be loaded; it must say the same
+    js = (STATIC / "app.js").read_text()
+    block = js[js.index("const PAGE_HELD = {") : js.index("};", js.index("const PAGE_HELD = {"))]
+    for lang, table in (("en", EN), ("it", IT)):
+        line = re.search(rf"^\s+{lang}: \{{(.*)\}},$", block, re.M).group(1)
+        pairs = dict(re.findall(r'([a-z_]+): "([^"]*)"', line))
+        assert pairs and pairs == {k: table[k] for k in pairs}, lang

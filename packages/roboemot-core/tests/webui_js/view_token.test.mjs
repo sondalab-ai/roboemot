@@ -73,7 +73,7 @@ for (const c of CASES) {
 for (const c of CASES.filter((x) => ["registry", "debug"].includes(x.view))) {
   test(`${c.view}: an error of a view dropped by a tab switch shows no notice`, async () => {
     const { page, drawn } = await dropView(c, {}, reply(500, { error: "generic" }));
-    assert.equal(page.document.querySelector("#notice").hidden, true);
+    assert.equal(page.document.querySelector("#notice").textContent, "");
     assert.equal(page.document.querySelector("#view").innerHTML, drawn);
   });
 }
@@ -81,7 +81,7 @@ for (const c of CASES.filter((x) => ["registry", "debug"].includes(x.view))) {
 test("routes: a secret store error that arrives after a tab switch shows no notice", async () => {
   const c = { view: "routes", path: "GET /api/secrets", other: "debug" };
   const { page, drawn } = await dropView(c, {}, reply(500, { error: "secret_store" }));
-  assert.equal(page.document.querySelector("#notice").hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "");
   assert.equal(page.document.querySelector("#view").innerHTML, drawn);
 });
 
@@ -248,6 +248,6 @@ test("catalogue: an import whose redraw is dropped by a tab switch shows no erro
   await settle();
   held.open();
   await flush();
-  assert.equal(page.document.querySelector("#notice").hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "");
   assert.equal(page.document.querySelector("#import_result"), null);
 });
