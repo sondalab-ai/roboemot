@@ -84,6 +84,8 @@ def test_a_loud_sound_from_the_microphone_startles_through_the_motion_loop(data)
     try:
         assert wait_for(lambda: app.reflexes is not None and app.audio is not None)
         assert wait_for(lambda: app.audio.snapshot()["chunks"] > 20)  # the floor is learned
+        # the start-up move is fast enough to shut the own-motion gate (SPEC 10)
+        assert wait_for(lambda: time.monotonic() > app.reflexes._quiet_from + 0.1)
         scripted.bang.set()
         assert wait_for(lambda: app.reflexes.snapshot()["rules"]["startle-loud"]["fired"] == 1)
         lat = app.reflexes.snapshot()["latency"]["loud_onset"]["command_ms"]
@@ -124,6 +126,7 @@ def test_the_robot_turns_toward_a_voice_from_its_first_ticks(data):  # noqa: F81
         assert wait_for(lambda: not voice() and turn()["gate"]["suppressed"]["no_vad"] >= 1)
         assert turn()["fired"] == 0
         app.reflexes.vad = lambda: True  # ... a listener hearing speech does
+        assert wait_for(lambda: time.monotonic() > app.reflexes._quiet_from + 0.1)
         assert wait_for(voice)
     finally:
         stop.set()

@@ -118,7 +118,8 @@ def test_the_robot_turns_toward_a_voice_with_an_unknown_age_face_in_view(data): 
             app.bus.publish("percept.entity", obs, now, joint_state={"head.yaw": 0.0})
             return app.reflexes.snapshot()["rules"]["turn-to-voice"]["fired"] > 0
 
-        assert wait_for(voice, 15), "the turn toward the voice never fired"
+        assert wait_for(lambda: time.monotonic() > app.reflexes._quiet_from + 0.1, 15)
+        assert wait_for(voice, 30), "the turn toward the voice never fired"
     finally:
         stop.set()
         thread.join(15)

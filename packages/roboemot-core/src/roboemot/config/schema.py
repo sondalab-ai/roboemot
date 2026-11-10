@@ -1186,6 +1186,12 @@ class MotionConfig(Strict):
         "runs at arbiter.loop_hz)",
         unit="Hz", ge=1, le=100,
     )  # fmt: skip
+    ramp_app_commands: bool = param(
+        True,
+        "Ramp each app tick's command over one app tick on the motor loop, so a high acceleration "
+        "cap does not turn slow moves into stop and go; delays those moves by at most one app "
+        "tick. Reflexes and safety commands are never ramped",
+    )
     platform_move_grace_s: float = param(
         5.0,
         "After external control of the robot is detected (the platform runs a move of its own, "
