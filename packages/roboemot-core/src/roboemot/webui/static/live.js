@@ -18,7 +18,8 @@
 //
 // Polling: the state timer is `state.timer` and the audio timer `liveState.audioTimer` (stopPolling
 // clears both, so leaving the tab, logging out and showTab stop them), only while the document is
-// visible. `liveState.serial` retires a request that was in flight when the
+// visible. A `live_disabled` reply stops its poll; entering the tab or the page coming back into
+// view starts both again. `liveState.serial` retires a request that was in flight when the
 // tab was left, hidden or reopened, so a late reply neither draws nor re-arms the timer.
 
 const LIVE_RETRY_MS = 5000;
@@ -471,7 +472,14 @@ async function livePoll(box, serial) {
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled") { liveDisabledView(box); pollReset(box); }
+    if (err.message === "live_disabled") {
+      // Off until the owner turns it on: no retry. Entering the tab or the page coming back into
+      // view asks again (liveView, liveResume).
+      liveDisabledView(box);
+      pollReset(box);
+      liveStopVideo(true);
+      return;
+    }
     else if (err.message === "live_unavailable") {
       liveActivityBox().replaceChildren();
       box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
@@ -789,6 +797,7 @@ async function liveAudioPoll(box, serial) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "live_disabled" || err.message === "live_unavailable") { liveAudioReset(box); pollReset(box); }
+    if (err.message === "live_disabled") return; // as the state poll: asked again on the next visit
     else pollFailed(box, explain(err));
   }
   liveState.audioTimer = setTimeout(() => liveAudioPoll(box, serial), delay);

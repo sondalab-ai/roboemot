@@ -318,25 +318,57 @@ test("a re-opened tab runs one timer, not one per visit", async (t) => {
   assert.ok(rate <= 1.6, `about one request per interval, got ${rate}`);
 });
 
-test("live_disabled shows how to turn it on and keeps retrying at the slow delay", async (t) => {
+const audioPolls = (page) => page.calls.filter((c) => c.path.startsWith("/api/live/audio")).length;
+
+test("live_disabled shows how to turn it on and stops both polls", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": reply(404, { error: "live_disabled" }),
+    "GET /api/live/audio": reply(404, { error: "live_disabled" }),
+  });
+  const timers = [];
+  const real = page.window.setTimeout.bind(page.window);
+  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(fn, ms, ...rest); };
+  await openLive(page);
+  assert.equal(polls(page), 1);
+  assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
+  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
+  assert.deepEqual(timers.filter((x) => x.ms === 5000 || x.ms === POLL_MS), [], "no retry armed");
+  assert.equal(page.run("state.timer"), null);
+  assert.equal(page.run("liveState.audioTimer"), null);
+  await sleep(WAIT_MS);
+  assert.equal(polls(page), 1);
+  assert.equal(audioPolls(page), 1);
+});
+
+test("a disabled Live tab asks again when it is entered again or the page comes back into view", async (t) => {
   let enabled = false;
   const page = await livePage(t, {
     "GET /api/live/state": () => (enabled ? STATE : reply(404, { error: "live_disabled" })),
     "GET /api/live/audio": () => (enabled ? AUDIO : reply(404, { error: "live_disabled" })),
   });
-  const timers = [];
-  const real = page.window.setTimeout.bind(page.window);
-  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
-  assert.equal(polls(page), 1);
-  assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
-  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
-  const retries = timers.filter((x) => x.ms === 5000);
-  assert.ok(retries.length >= 1, "retry armed at the slow delay");
+  page.document.querySelector('#tabs button[data-tab="debug"]').click();
+  await openLive(page);
+  assert.equal(polls(page), 2, "entering the tab asks again");
+  assert.equal(audioPolls(page), 2);
   enabled = true;
-  retries.forEach((x) => x.fn());
+  visibility(page, "hidden");
+  visibility(page, "visible");
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "self-healed");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "back in view: on again");
+  assert.ok(page.document.querySelector("#live-levels"), "the audio cards too");
+  visibility(page, "hidden");
+});
+
+test("live_unavailable and a network failure keep retrying at the slow delay", async (t) => {
+  for (const failure of [() => reply(503, { error: "live_unavailable" }), () => { throw new TypeError("Failed to fetch"); }]) {
+    const page = await livePage(t, { "GET /api/live/state": failure, "GET /api/live/audio": failure });
+    const timers = [];
+    const real = page.window.setTimeout.bind(page.window);
+    page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
+    await openLive(page);
+    assert.equal(timers.filter((x) => x.ms === 5000).length, 2, "both polls retry");
+  }
 });
 
 test("coming back into view keeps the last cards until the next reply", async (t) => {

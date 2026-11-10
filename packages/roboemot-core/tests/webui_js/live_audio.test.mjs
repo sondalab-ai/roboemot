@@ -341,23 +341,23 @@ test("the state poll's own timer does not stop the audio poll", async (t) => {
   assert.ok(stateCalls >= 5 && audioCalls(page).length >= 8, `${stateCalls} state, ${audioCalls(page).length} audio`);
 });
 
-test("live_disabled removes the audio cards and the poll comes back when it is switched on", async (t) => {
+test("live_disabled removes the audio cards and stops; back in view the poll asks again", async (t) => {
   let enabled = false;
   const page = await livePage(t, undefined, {
     "GET /api/live/audio": () => (enabled ? AUDIO : reply(404, { error: "live_disabled" })),
   });
-  const timers = [];
-  const real = page.window.setTimeout.bind(page.window);
-  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
   assert.equal(page.document.querySelector("#live-levels"), null);
   assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
-  const retry = timers.filter((x) => x.ms === 5000).at(-1);
-  assert.ok(retry, "retry armed at the slow delay");
+  assert.equal(page.run("liveState.audioTimer"), null, "no retry");
+  await sleep(WAIT_MS);
+  assert.equal(audioCalls(page).length, 1);
   enabled = true;
-  retry.fn();
+  visibility(page, "hidden");
+  visibility(page, "visible");
   await settle();
   assert.ok(page.document.querySelector("#live-levels"));
+  visibility(page, "hidden");
 });
 
 test("an expired session on the audio poll goes to the login", async (t) => {
