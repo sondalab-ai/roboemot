@@ -30,7 +30,6 @@ test("a tab that waits for its answer shows the loading line and a busy view unt
   open(page, "debug");
   assert.equal(line(page).hidden, false);
   assert.equal(line(page).textContent, "Loading...");
-  assert.equal(line(page).getAttribute("role"), "status");
   assert.equal(view(page).getAttribute("aria-busy"), "true");
   release();
   await settle();

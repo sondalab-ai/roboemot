@@ -679,11 +679,12 @@ document.addEventListener("visibilitychange", () => {
 
 // ---------------------------------------------------------------- audio cards
 
-// `drop`: also forget the drawn rows (leaving the tab, logging out), so their text is not kept.
+// `drop`: also forget the drawn rows and the activity card (leaving the tab, logging out), so
+// their text is not kept.
 function liveStopAudio(drop) {
   clearTimeout(liveState.audioTimer);
   liveState.audioTimer = null;
-  if (drop) liveState.ui = null;
+  if (drop) { liveState.ui = null; liveState.activity = null; }
 }
 
 function liveMeter(label) {

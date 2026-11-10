@@ -198,7 +198,12 @@ function notice(message, isError) {
   toast.append(el("button", { type: "button", class: "sl-icon-btn sl-toast__dismiss", "aria-label": held("notice_dismiss"), onclick: dismiss },
     toastIcon("close")));
   document.getElementById(isError ? "notice-alert" : "notice-polite").append(toast);
-  if (!isError) toastState.timer = setTimeout(dismiss, NOTICE_SUCCESS_MS);
+  // A toast the user is pointing at or has focused waits: removing it would drop the focus.
+  const leave = () => {
+    if (toast.matches(":focus-within, :hover")) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
+    else dismiss();
+  };
+  if (!isError) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
 }
 
 // Clears the error `message` if it is still the one reported last: a poll that recovers takes back
@@ -1020,7 +1025,8 @@ const TABS = {
   debug: debugView,
 };
 
-// While a tab waits for its first answer: #view is busy and a muted status line says so.
+// While a tab waits for its first answer: #view is busy (aria-busy, what assistive technology
+// reads) and a muted line says so on screen.
 function viewLoading(on) {
   const line = document.getElementById("view-loading");
   if (line.hidden === !on) return;

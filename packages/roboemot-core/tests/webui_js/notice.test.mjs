@@ -56,6 +56,23 @@ test("a success leaves after its reading time, an error stays", async () => {
   assert.equal(toasts(page).length, 0);
 });
 
+test("a success the user has focused or points at waits for them", async () => {
+  const page = await loadPage();
+  const timers = [];
+  const real = page.window.setTimeout.bind(page.window);
+  page.window.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
+  page.run('notice("Saved.")');
+  const dismiss = page.document.querySelector("#notice .sl-toast__dismiss");
+  dismiss.focus();
+  timers.shift().fn();
+  assert.equal(toasts(page).length, 1, "kept while it has the focus");
+  assert.equal(page.document.activeElement, dismiss);
+  assert.deepEqual(timers.map((x) => x.ms), [8000], "asked again later");
+  dismiss.blur();
+  timers.shift().fn();
+  assert.equal(toasts(page).length, 0);
+});
+
 test("the dismiss button has an accessible name in the page language", async () => {
   const page = await loadPage({ "GET /api/strings": { language: "it", strings: { notice_dismiss: "Chiudi" } } });
   page.run('notice("Salvato.")');
