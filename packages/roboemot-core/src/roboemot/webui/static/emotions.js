@@ -194,12 +194,23 @@ async function emoPoll(box, serial) {
     if (!emoActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "emotions_disabled") {
-      emoState.controls = null;
-      pollReset(emoState.grid);
-      box.replaceChildren(card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
-    } else pollFailed(emoState.grid, explain(err));
+      // Off until the owner turns it on: no retry. Entering the tab or the page coming back into
+      // view asks again (emotionsView, the visibility handler below).
+      emoOff(box, card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
+      return;
+    }
+    if (err.message === "emotions_unavailable") emoOff(box, card(t("tab_emotions"), t("tab_emotions"), el("p", {}, explain(err))));
+    else pollFailed(emoState.grid, explain(err));
   }
   state.timer = setTimeout(() => emoPoll(box, serial), delay);
+}
+
+// A state the server named (off, unavailable) replaces the cards with `note`: nothing is stale,
+// and the controls are built again when the cards come back.
+function emoOff(box, note) {
+  emoState.controls = null;
+  pollReset(emoState.grid);
+  box.replaceChildren(note);
 }
 
 function emotionsView() {

@@ -214,22 +214,26 @@ function noticeWithdraw(message) {
 
 // ---------------------------------------------------------------- api
 
+// `fetch`, with the one failure that has no response named as such: it rejects with the code
+// "unreachable" (network down, robot off, Wi-Fi lost), which `explain` words for the page.
+async function request(path, init) {
+  try {
+    return await fetch(path, init);
+  } catch (e) {
+    throw new Error("unreachable");
+  }
+}
+
 async function api(method, path, body, extra) {
   const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
-  let resp;
-  try {
-    resp = await fetch(path, {
-      method,
-      headers,
-      credentials: "same-origin",
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch (e) {
-    // fetch rejects only when no response came back (network down, robot off, Wi-Fi lost).
-    throw new Error("unreachable");
-  }
+  const resp = await request(path, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   let data = {};
   try { data = await resp.json(); } catch (e) { data = {}; }
   if (!resp.ok) {

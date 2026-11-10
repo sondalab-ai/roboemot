@@ -92,6 +92,18 @@ test("an error code hides the picture and shows its text", async (t) => {
   assert.ok(frames(page) <= 2, "a slow retry, not the picture rate: " + frames(page));
 });
 
+test("a network failure on a frame says the robot is out of reach and retries slowly", async (t) => {
+  const page = await videoPage(t, {
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, err_unreachable: "Cannot reach the robot." } },
+    "GET /api/live/frame.jpg": () => { throw new TypeError("Failed to fetch"); },
+  });
+  await openLive(page);
+  await sleep(WAIT_MS);
+  assert.equal(img(page).hidden, true);
+  assert.equal(page.document.querySelector("#live-video-text").textContent, "Cannot reach the robot.");
+  assert.ok(frames(page) <= 2, "a slow retry, not the picture rate: " + frames(page));
+});
+
 test("a good frame after waiting for the first one brings the picture and clears the text", async (t) => {
   let ready = false;
   const page = await videoPage(t, {

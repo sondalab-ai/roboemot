@@ -621,7 +621,7 @@ async function liveVideoPoll(serial, chain) {
   if (Date.now() - liveInput.at > liveVideo.idleMs) { liveVideoIdleStop(); return; }
   let delay = liveVideo.pollMs;
   try {
-    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
+    const resp = await request("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
     if (!liveVideoLive(serial, chain)) return;
     if (resp.ok) {
       const blob = await resp.blob();
@@ -639,7 +639,7 @@ async function liveVideoPoll(serial, chain) {
   } catch (e) {
     if (!liveVideoLive(serial, chain)) return;
     liveRevokeVideo();
-    liveVideoText(t("err_generic"));
+    liveVideoText(e.message === "unreachable" ? explain(e) : t("err_generic"));
     delay = Math.max(delay, LIVE_RETRY_MS);
   }
   liveVideo.timer = setTimeout(() => liveVideoPoll(serial, chain), delay);
