@@ -23,6 +23,10 @@ that lag (a ticking clock is one narrow band) and the window was heard for
 with the new envelope still periodic at the previous lag (an octave flip of real music).
 The beat phase is the offset whose beat grid sums the most envelope (a comb).
 
+While music plays, an estimate that reaches ``music.keep_periodicity`` also restarts the release,
+unless ``speech_heard`` says someone is speaking: a song in a real room reads far below the start
+threshold, and speech must not keep the music state alive.
+
 Music starts when an estimate holds and the evidence (back-dated to the first heard hop of the
 window of the first periodic estimate in the chain) spans ``music.confirm_s``; the music interval
 starts at the evidence. It ends after ``music.release_s`` of heard audio without a holding
@@ -58,7 +62,7 @@ DB_PER_DECADE = 10.0
 COST_SAMPLES = 600  # report only, not behaviour: one per estimate interval, ten minutes
 RECENT_ESTIMATES = 60  # report only, not behaviour: about the last minute of estimates
 STARTED, STOPPED = "started", "stopped"
-HOLD = "hold"
+HOLD, KEEP = "hold", "keep"
 QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS = "quiet", "low_periodicity", "low_heard", "few_bands"
 FIRST_PERIODIC, UNSTABLE_TEMPO = "first_periodic", "unstable_tempo"
 REJECTIONS = (QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS, FIRST_PERIODIC, UNSTABLE_TEMPO)
@@ -152,7 +156,15 @@ class MusicDetector:
         self._rate = rate_hz
         self._timer = timer
         self._lock = threading.Lock()  # leaf lock: counts and cost samples for snapshot
-        self._counts = {"estimates": 0, "holds": 0, "starts": 0, "stops": 0, "resets": 0}
+        self._counts = {
+            "estimates": 0,
+            "holds": 0,
+            "keeps": 0,
+            "starts": 0,
+            "stops": 0,
+            "resets": 0,
+        }
+        self.speech_heard: Callable[[], bool] | None = None  # "someone is speaking now"
         self._rejected = dict.fromkeys(REJECTIONS, 0)
         self._recent: deque[_Outcome] = deque(maxlen=RECENT_ESTIMATES)
         self._costs: deque[float] = deque(maxlen=COST_SAMPLES)
@@ -374,15 +386,20 @@ class MusicDetector:
             with self._lock:
                 self._counts["estimates"] += 1
         previous, self._previous = self._previous, result
+        kept = self._keeps_playing(result)
+        if kept:
+            self._last_hold_s = now
         if result is None or not result.periodic:
             self._evidence_from = None
-            self._note(QUIET if result is None else str(result.rejected), result, level)
+            reason = QUIET if result is None else str(result.rejected)
+            self._note(KEEP if kept else reason, result, level)
             self._publish(result)
             return None
         chained = previous is not None and previous.periodic
         if not (chained and previous is not None and self._stable(previous, result)):
             self._evidence_from = self._first_heard()
-            self._note(UNSTABLE_TEMPO if chained else FIRST_PERIODIC, result, level)
+            reason = UNSTABLE_TEMPO if chained else FIRST_PERIODIC
+            self._note(KEEP if kept else reason, result, level)
             self._publish(result)
             return None
         self._last_hold_s = now
@@ -393,6 +410,15 @@ class MusicDetector:
             event = self._start(since, now)
         self._publish(result)
         return event
+
+    def _keeps_playing(self, result: _Estimate | None) -> bool:
+        """Whether this estimate keeps music that already plays: periodic enough for the lower
+        ``music.keep_periodicity``, and nobody is speaking."""
+        if result is None or not self._view.playing:
+            return False
+        if result.periodicity < self._cfg.keep_periodicity:
+            return False
+        return not (self.speech_heard is not None and self.speech_heard())
 
     def _note(self, name: str, result: _Estimate | None, level: float) -> None:
         """Count one estimate interval's outcome and keep its numbers for the report (SPEC 12A):
@@ -406,6 +432,8 @@ class MusicDetector:
         with self._lock:
             if name == HOLD:
                 self._counts["holds"] += 1
+            elif name == KEEP:
+                self._counts["keeps"] += 1
             else:
                 self._rejected[name] += 1
             self._recent.append(outcome)

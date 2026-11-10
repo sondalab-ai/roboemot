@@ -398,6 +398,7 @@ class VoiceListener:
             self.music.apply_config(cfg.music)
         elif cfg.music.enabled:
             self.music = MusicDetector(cfg.music, cfg.voice.sample_rate_hz)
+            self.music.speech_heard = self.voice_active
 
     def bind_own_sound(self, cut: Callable[[], bool]) -> None:
         """``cut()`` cuts a sound of the robot's own that is not speech, when only such a sound
