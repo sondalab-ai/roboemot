@@ -131,6 +131,12 @@ def test_scrolling_and_the_settings_nav_clear_the_sticky_header():
     css = (STATIC / "style.css").read_text()
     assert re.search(r"(?m)^html \{ scroll-padding-top: calc\(var\(--app-header-h, 0px\)", css)
     assert re.search(r"\.settings-nav \{[^}]*top: calc\(var\(--app-header-h, 0px\)", css)
+    # the header's controls cancel that padding, or focusing a tab scrolls the page up
+    assert re.search(
+        r"(?m)^\.sl-header :is\(button, a, input, select\) \{ scroll-margin-top: "
+        r"calc\(-1 \* \(var\(--app-header-h, 0px\) \+ var\(--sl-space-3\)\)\); \}",
+        css,
+    )
     narrow = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.S)
     assert narrow and re.search(r"\.settings-nav \{ display: none; \}", narrow.group(1))
 

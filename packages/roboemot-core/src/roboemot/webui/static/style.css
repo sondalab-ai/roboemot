@@ -8,6 +8,9 @@
 /* What the page scrolls to (a group jump, a focused field) lands below the sticky header, whose
    height app.js publishes as --app-header-h. */
 html { scroll-padding-top: calc(var(--app-header-h, 0px) + var(--sl-space-3)); }
+/* The header's own controls sit inside that padding: without the matching negative margin, focusing a
+   tab (arrow keys, Tab) or bringing it into view scrolled the whole page up (measured in Chrome). */
+.sl-header :is(button, a, input, select) { scroll-margin-top: calc(-1 * (var(--app-header-h, 0px) + var(--sl-space-3))); }
 /* `hidden` always wins: an author `display` (.stack, .row, ...) would otherwise show a hidden element. */
 [hidden] { display: none !important; }
 body {
