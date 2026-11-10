@@ -93,9 +93,16 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
 
 def test_effects_are_wired_from_the_vendored_runtime():
     fx = (STATIC / "fx.js").read_text()
-    assert 'from "./vendor/sondalab-ui-kit/effects.js"' in fx
+    assert 'import("./vendor/sondalab-ui-kit/effects.js")' in fx
     assert "mount()" in fx
     assert not re.search(r"glass", fx)
+
+
+def test_effects_load_after_the_first_paint():
+    # a static import would fetch and parse the runtime (~0.2 MB with its modules) before it
+    fx = (STATIC / "fx.js").read_text()
+    assert not re.search(r"(?m)^\s*import\s", fx)
+    assert "requestIdleCallback(loadEffects, { timeout: FX_IDLE_TIMEOUT_MS })" in fx
 
 
 def test_local_stylesheet_has_only_the_registered_product_accent():

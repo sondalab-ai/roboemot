@@ -1,6 +1,7 @@
 // Behaviour of the web UI page script (SPEC 12 Web UI, 14): the dialog helper `ask()`, the PIN
 // handling. The settings page is covered in settings.test.mjs. Run with `npm test` in this folder.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { loadPage, settle, storageDump } from "./harness.mjs";
 
@@ -138,4 +139,30 @@ test("a network failure reads as the robot being out of reach, in the page langu
   submit(page.window, input.closest("form"));
   await settle();
   assert.equal(page.document.querySelector("#notice").textContent, "Impossibile raggiungere il robot.");
+});
+
+const FX = readFileSync(new URL("../../src/roboemot/webui/static/fx.js", import.meta.url), "utf8");
+
+test("fx.js loads the effects when the browser is idle, and a burst before that does nothing", async () => {
+  const page = await loadPage();
+  const idle = [];
+  page.window.requestIdleCallback = (fn, opts) => { idle.push({ fn, opts }); };
+  page.run(FX);
+  assert.equal(idle.length, 1, "nothing is loaded at once");
+  assert.ok(idle[0].opts.timeout > 0, "loaded even if the browser never goes idle");
+  page.run("window.roboemotFx.burst(document.body)");
+  await idle[0].fn(); // the harness cannot import a module: the load fails and the page carries on
+  page.run("window.roboemotFx.burst(document.body)");
+});
+
+test("fx.js waits for the load event where requestIdleCallback does not exist", async () => {
+  const page = await loadPage();
+  delete page.window.requestIdleCallback;
+  const timers = [];
+  const real = page.window.setTimeout.bind(page.window);
+  page.run(FX);
+  page.window.setTimeout = (fn, ms) => { timers.push(ms); return real(() => {}, 1e9); };
+  assert.deepEqual(timers, []);
+  page.window.dispatchEvent(new page.window.Event("load"));
+  assert.deepEqual(timers, [0]);
 });
