@@ -23,7 +23,8 @@ NOW = 500.0
 SECRET_ID = "7f3c9a52-registry-id"
 FORBIDDEN = {
     "embedding", "identity", "entry_id", "person_id", "azimuth", "elevation", "distance",
-    "bearing", "location", "latitude", "longitude", "image", "frame", "audio", "text",
+    "bearing", "location", "latitude", "longitude", "image", "frame", "audio", "text", "ssid",
+    "bssid",
 }  # fmt: skip
 
 
@@ -83,6 +84,7 @@ def live(p=None, config=None, host=None, **kw):
         voice_listener=None,
         dance=None,
     )
+    kw.setdefault("hardware", dict)
     return LiveState(
         host, p or parts(), config or cfg(), clock=lambda: NOW, temperature=lambda: None, **kw
     )
@@ -139,7 +141,7 @@ def test_the_payload_shape():
     assert s["attention"] == {"count": 0, "faces": []}
     assert s["reflexes"] == {"last": {"name": "startle", "age_s": 2.346}}
     assert s["motion"] == {"state": "writing"}
-    assert s["system"] == {"cpu_temp_c": None}
+    assert s["system"]["cpu_temp_c"] is None
     json.dumps(s, allow_nan=False)
 
 
@@ -314,8 +316,9 @@ def test_the_temperature_is_read_once_per_cache_window():
         cfg(system_cache_s=5.0),
         clock=lambda: clock[0],
         temperature=sensor,
+        hardware=lambda: {"cpu": {"percent": 12.5}},
     )
-    assert state.state()["system"] == {"cpu_temp_c": 61.2}
+    assert state.state()["system"] == {"cpu_temp_c": 61.2, "cpu": {"percent": 12.5}}
     clock[0] += 4.9
     state.state()
     assert len(reads) == 1

@@ -12,6 +12,9 @@ ids, bearings or positions, and nothing is logged or stored. The preview frame i
 envelope (SPEC 12). Ages are computed here because a monotonic stamp means nothing to the browser.
 Each block is None without its part (no voice listener, music off, no dance renderer).
 
+``system`` is the System card: the CPU temperature and the blocks of ``HardwareReader``, read at
+most once per ``webui.live.system_cache_s``.
+
 ``activity`` is the "What's happening" panel (``webui.live.activity``): a status code for what the
 robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
@@ -21,6 +24,7 @@ no route or listener (None): the status then comes from the other parts.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -32,6 +36,7 @@ from roboemot.conversation.sources import entry_name
 from roboemot.diag import ROUTE_REASONS, code
 
 from .levels import AudioLevels
+from .live_hardware import HardwareReader
 from .live_video import LiveVideo
 
 MS_PER_S = 1000
@@ -70,12 +75,15 @@ class LiveState:
         *,
         clock: Callable[[], float] = time.monotonic,
         temperature: Callable[[], float | None] = cpu_temperature_c,
+        hardware: Callable[[], dict[str, Any]] | None = None,
         audio_egress: Callable[[], bool] = lambda: False,
     ) -> None:
         self._host, self._p, self._clock, self._read_temp = host, p, clock, temperature
         self._cfg = cfg
         self._egress = audio_egress  # microphone audio may leave for the realtime route
-        self._temp: tuple[float, float | None] | None = None  # (read at, value)
+        self._read_hardware = hardware or HardwareReader()
+        self._system_read: tuple[float, dict[str, Any]] | None = None  # (read at, block)
+        self._system_lock = threading.Lock()  # requests run on their own threads
         self.video = LiveVideo(host, p, cfg, clock=clock)
 
     def apply_config(self, change: Any) -> None:
@@ -319,8 +327,14 @@ class LiveState:
         }
 
     def _system(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any]:
-        cached = self._temp
-        if cached is None or now - cached[0] >= cfg.webui.live.system_cache_s:
-            cached = self._temp = (now, self._read_temp())
-        value = cached[1]
-        return {"cpu_temp_c": None if value is None else round(value, 1)}
+        """The System card's block: one read per cache window, whichever request asks."""
+        with self._system_lock:
+            cached = self._system_read
+            if cached is None or now - cached[0] >= cfg.webui.live.system_cache_s:
+                temp = self._read_temp()
+                block = {
+                    "cpu_temp_c": None if temp is None else round(temp, 1),
+                    **self._read_hardware(),
+                }
+                cached = self._system_read = (now, block)
+            return cached[1]
