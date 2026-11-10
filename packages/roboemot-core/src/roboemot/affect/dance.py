@@ -8,6 +8,9 @@ Roles, bound to channels by the manifest's ``dance_motion_map`` (core names no j
 - ``accent``: a flick on an accent stamp (a blirp's event), at most one per
   ``accent_min_interval_s``, peaking on the stamp.
 
+Music with no readable beat (the ``free`` source) plays only the ``dance.free_move`` move at
+``dance.free_bpm``. When the detector finds a tempo, the same move goes on at that tempo.
+
 Room music plays the manifest's ``moves`` instead of ``bob`` and ``sway`` (``dance.moves_enabled``):
 each channel of a move is a cosine of its size, cycles per beat and phase, on the place of one move
 per beat, whose half lasts at least ``move_min_half_s``. A move lasts ``move_bars`` bars and blends
@@ -103,6 +106,7 @@ class _Settings:
     accent: _Shape | None
     ceilings: dict[str, float]  # per channel: the cap of the summed offset, radians
     moves: tuple[dict[str, DanceMove], ...] = ()  # the room music moves this robot can play
+    free_move: int | None = None  # index in ``moves`` of ``dance.free_move``
 
 
 @dataclass(frozen=True)
@@ -271,11 +275,13 @@ class DanceRenderer:
         bob, sway = self._signs(dance_map.bob), self._signs(dance_map.sway)
         accent = self._shape(dance_map.accent) if dance_map.accent is not None else None
         accent_names = accent.prim.keyframes[0].values if accent is not None else {}
-        moves = tuple(
-            filtered
-            for move in dance_map.moves.values()
+        named = [
+            (key, filtered)
+            for key, move in dance_map.moves.items()
             if (filtered := {n: c for n, c in move.items() if n in self.dofs})
-        )
+        ]
+        moves = tuple(move for _, move in named)
+        free_move = next((i for i, (key, _) in enumerate(named) if key == cfg.free_move), None)
         degrees: dict[str, float] = {
             name: max(abs(m[name].deg) for m in moves if name in m)
             for name in {n for m in moves for n in m}
@@ -288,7 +294,9 @@ class DanceRenderer:
             for name in names:
                 degrees[name] = max(degrees.get(name, 0.0), deg)
         ceilings = {name: math.radians(deg) * max_amplitude for name, deg in degrees.items()}
-        self._b = _Settings(cfg, max_amplitude, beats_per_bar, bob, sway, accent, ceilings, moves)
+        self._b = _Settings(
+            cfg, max_amplitude, beats_per_bar, bob, sway, accent, ceilings, moves, free_move
+        )
 
     @property
     def cfg(self) -> DanceConfig:
@@ -448,8 +456,8 @@ class DanceRenderer:
         target = beat.strength
         if beat.source == "room":
             target = max(target, b.cfg.min_strength)
-            if self.speaking(t):
-                target *= b.cfg.speaking_gain
+        if beat.source != "own" and self.speaking(t):
+            target *= b.cfg.speaking_gain
         if s.level is None:
             s.level = target
         elif target > s.level:
@@ -462,7 +470,8 @@ class DanceRenderer:
         """The ``bob`` and ``sway`` offsets at lead time ``t`` before the fade."""
         if beat is None:
             return {}
-        if beat.source == "room" and b.cfg.moves_enabled and b.moves:
+        free = beat.source == "free" and b.free_move is not None
+        if (beat.source == "room" or free) and b.cfg.moves_enabled and b.moves:
             return self._render_moves(t, beat, b, dt)
         k, cfg, s = self.scale(self._level(t, beat, b, dt), b), b.cfg, self._s
         share = min(1.0, k)
@@ -486,7 +495,10 @@ class DanceRenderer:
         if place is None:
             return {}
         s.bob = s.sway = min(1.0, k)
-        self._advance_move(beat, b, dt)
+        if beat.source == "free" and b.free_move is not None:
+            s.move, s.previous_move, s.blend = b.free_move, None, 1.0
+        else:
+            self._advance_move(beat, b, dt)
         move_s = s.moves[MOVE_ROLE].factor * beat.period_s
         raw = self._move_offsets(b.moves[s.move], place, move_s, k)
         if s.blend >= 1.0 or s.previous_move is None:

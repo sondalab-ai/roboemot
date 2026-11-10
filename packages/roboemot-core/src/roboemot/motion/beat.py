@@ -22,12 +22,13 @@ if TYPE_CHECKING:
 class Beat:
     """A beat grid. ``phase_s`` is the stamp of one beat on the monotonic clock (any beat of the
     grid: it may differ from read to read), ``strength`` a share in [0, 1] that scales the
-    amplitude, ``source`` which provider it came from."""
+    amplitude, ``source`` which provider it came from: ``free`` is room music with no readable
+    beat, a slow grid that follows nothing."""
 
     period_s: float
     phase_s: float
     strength: float
-    source: Literal["own", "room"]
+    source: Literal["own", "room", "free"]
 
 
 class BeatSource:
@@ -55,17 +56,20 @@ class BeatSource:
         return self._accents(since, now)
 
 
-def room_beat(state: MusicState | None) -> Beat | None:
-    """The beat of room music from the detector's state; None without a state, while no music
-    plays or without a tempo. Its strength is the detector's confidence.
+def room_beat(state: MusicState | None, free: tuple[float, float] | None = None) -> Beat | None:
+    """The beat of room music from the detector's state; None without a state or while no music
+    plays. Its strength is the detector's confidence. Music with no tempo gets a ``free`` grid
+    from ``free`` (tempo in bpm, strength), else None.
 
     The detector gives the time since the last beat, so ``phase_s`` is that last beat: it moves
     forward one period per beat and jumps when the grid is re-estimated. It tells where a beat
     falls and nothing about which beat it is; the dance layer keeps its own place in a move."""
-    if state is None or not state.playing or state.tempo_bpm is None:
+    if state is None or not state.playing:
         return None
-    if state.beat_phase_s is None:
-        return None
+    if state.tempo_bpm is None or state.beat_phase_s is None:
+        if free is None:
+            return None
+        return Beat(SECONDS_PER_MINUTE / free[0], 0.0, free[1], "free")
     period_s = SECONDS_PER_MINUTE / state.tempo_bpm
     return Beat(period_s, state.stamp - state.beat_phase_s, state.confidence, "room")
 

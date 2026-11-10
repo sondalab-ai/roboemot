@@ -1206,6 +1206,8 @@ def test_a_chunk_gap_tells_the_detector_where_the_hole_began():
 
 
 class ClassifierSpy:
+    running = True
+
     def __init__(self):
         self.fed = 0
 
