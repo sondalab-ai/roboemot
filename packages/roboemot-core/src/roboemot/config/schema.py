@@ -977,6 +977,13 @@ class LightConfig(Strict):
         ge=0.5,
         le=600,
     )
+    sample_row_step: int = param(
+        4,
+        "Light is measured on every this-many-th row of the frame, all columns kept (the noise "
+        "compares horizontal neighbours): 1 reads every row, 4 costs about a quarter",
+        ge=1,
+        le=16,
+    )
     history_h: float = param(
         24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
     )
@@ -2512,6 +2519,13 @@ class VisionConfig(Strict):
         "Let the appearance embedder's (DINOv2-S) ONNX Runtime threads spin-wait between "
         "operators. Off: it runs beside the face and object detectors, and on four cores two "
         "spinning pools take cycles from each other and from audio",
+        restart=True,
+    )
+    object_spinning: bool = param(
+        False,
+        "Let the object detector's (NanoDet-Plus-m) ONNX Runtime threads spin-wait between "
+        "operators. Off: it runs beside the face detector and the appearance embedder, and on "
+        "four cores spinning pools take cycles from each other and from audio",
         restart=True,
     )
     appearance_threads: int = param(

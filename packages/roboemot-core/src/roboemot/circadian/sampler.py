@@ -148,7 +148,7 @@ class LightSampler:
             return False
         if bgr and img.ndim == COLOR_NDIM:
             img = img[..., ::-1]
-        luma, noise = self._estimator.stats(img)
+        luma, noise = self._estimator.stats(img, self.cfg.sample_row_step)
         self.offer_stats(luma, noise, exposure_s=exposure_s, gain=gain)
         return True
 

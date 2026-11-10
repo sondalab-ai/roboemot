@@ -358,10 +358,13 @@ def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypat
     monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: tmp_path / name)
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
-    monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append(a) or "detector")
+    monkeypatch.setattr(
+        onnx, "NanoDetDetector", lambda *a, **kw: built.append((*a, kw)) or "detector"
+    )
     cfg = RoboEmotConfig().vision
     stages = onnx.load_stages(tmp_path, cfg, appearance=False)
-    path, labels, classes, score_min, nms_iou, threads = built[0]
+    path, labels, classes, score_min, nms_iou, threads, options = built[0]
+    assert options == {"spinning": cfg.object_spinning}
     assert stages.object_detector == "detector" and path.name == "nanodet-plus-m-320"
     assert len(labels) == 80 and classes == [*cfg.animal_categories, *cfg.object_categories]
     assert (score_min, nms_iou, threads) == (cfg.object_low_score, cfg.object_nms_iou, cfg.threads)
@@ -386,7 +389,9 @@ def _optional_stage_rig(monkeypatch, tmp_path, missing):
     monkeypatch.setattr(onnx, "_file", file)
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: "yunet")
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "sface")
-    monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append("nanodet") or "nanodet")
+    monkeypatch.setattr(
+        onnx, "NanoDetDetector", lambda *a, **kw: built.append("nanodet") or "nanodet"
+    )
     monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a, **kw: built.append("dino") or "dino")
     return onnx, built
 

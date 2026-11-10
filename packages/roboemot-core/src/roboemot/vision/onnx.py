@@ -399,7 +399,11 @@ class NanoDetDetector:
         score_min: float,
         nms_iou: float,
         threads: int,
+        *,
+        spinning: bool = True,
     ):
+        """``spinning`` False keeps the pool threads from spin-waiting (``_session``); the app
+        passes ``vision.object_spinning``."""
         unknown = sorted(set(classes) - set(labels))
         if unknown:
             raise ModelError(f"object classes not known to {NANODET_NAME}: {unknown}")
@@ -408,10 +412,9 @@ class NanoDetDetector:
         self._score_min = score_min
         self._nms_iou = nms_iou
         self._priors = nanodet_priors()
-        self._sess = _session(path, threads)
+        self._sess = _session(path, threads, spinning)
         self._input = self._sess.get_inputs()[0].name
-        self._mean = np.array(NANODET_MEAN, np.float32)
-        self._std = np.array(NANODET_STD, np.float32)
+        self._inv_std = (1 / np.array(NANODET_STD, np.float32)).reshape(1, CHANNELS, 1, 1)
         shape = self._sess.get_inputs()[0].shape
         if shape[2:] != [NANODET_SIZE, NANODET_SIZE]:
             raise ModelError(f"{path.name}: input {shape}, expected {NANODET_SIZE}x{NANODET_SIZE}")
@@ -430,9 +433,7 @@ class NanoDetDetector:
         ratio), run, decoded and merged per class; boxes are scaled back to ``image``.
         """
         height, width = image.shape[:2]
-        resized = cv2.resize(image, (NANODET_SIZE, NANODET_SIZE), interpolation=cv2.INTER_LINEAR)
-        x = ((resized.astype(np.float32) - self._mean) / self._std).transpose(2, 0, 1)[None]
-        output = self._sess.run(None, {self._input: np.ascontiguousarray(x)})[0][0]
+        output = self._sess.run(None, {self._input: self._blob(image)})[0][0]
         boxes, scores, classes = decode_nanodet(
             output, self._priors, self._columns, self._score_min, self._nms_iou
         )
@@ -441,6 +442,17 @@ class NanoDetDetector:
             Detection(tuple(float(v) for v in box * scale), float(s), self._labels[c])
             for box, s, c in zip(boxes, scores, classes, strict=True)
         ]
+
+    def _blob(self, image: np.ndarray) -> np.ndarray:
+        """The ``(1, 3, 320, 320)`` float32 input: ``blobFromImage`` resizes the uint8 image
+        (bilinear, BGR kept, no crop), subtracts the mean and lays it out NCHW in one pass, then
+        one in-place scale by the reciprocal std; it equals resize, subtract, divide and
+        transpose to float rounding with fewer full-size temporaries."""
+        blob = cv2.dnn.blobFromImage(
+            image, 1.0, (NANODET_SIZE, NANODET_SIZE), NANODET_MEAN, swapRB=False, crop=False
+        )
+        blob *= self._inv_std
+        return blob
 
 
 class VitTracker:
@@ -504,7 +516,8 @@ def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
     """The NanoDet-Plus-m detector for the configured animal and object classes.
 
     It returns detections down to ``vision.object_low_score``, so the object tracker's low-score
-    pass sees them; only those at ``vision.object_score_min`` start tracks.
+    pass sees them; only those at ``vision.object_score_min`` start tracks. Its session threads
+    spin-wait between operators only with ``vision.object_spinning``.
 
     Raises ``ModelError`` when the file is missing or unverified. Callers that can run without
     objects (the app) catch it so the rest of vision keeps working.
@@ -519,6 +532,7 @@ def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
         cfg.object_low_score,
         cfg.object_nms_iou,
         cfg.threads,
+        spinning=cfg.object_spinning,
     )
 
 

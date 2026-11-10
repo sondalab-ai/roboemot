@@ -1056,3 +1056,54 @@ def test_report_window_settings_have_defaults_and_ranges():
     for bad in ({"report_window": 5}, {"report_rate_window_s": 1.0}):
         with pytest.raises(ValidationError):
             RoboEmotConfig(vision=bad)
+
+
+def old_predict(mean, cov, dt):
+    """The Kalman predict as the tracker computed it before the cached matrices."""
+    from roboemot.vision import tracker as tr
+
+    h = max(mean[tr.HEIGHT], 1.0)
+    transition = np.eye(tr.STATE_DIM)
+    transition[: tr.MEASURE_DIM, tr.MEASURE_DIM :] = np.eye(tr.MEASURE_DIM) * dt
+    noise = np.diag(
+        [(tr.POSITION_STD * h) ** 2] * tr.MEASURE_DIM
+        + [(tr.VELOCITY_STD * h) ** 2] * tr.MEASURE_DIM
+    )
+    return transition @ mean, transition @ cov @ transition.T + noise
+
+
+def old_correct(mean, cov, box):
+    """The Kalman update as the tracker computed it before the solve (explicit inverse)."""
+    from roboemot.vision import tracker as tr
+
+    h = max(mean[tr.HEIGHT], 1.0)
+    proj = np.zeros((tr.MEASURE_DIM, tr.STATE_DIM))
+    proj[:, : tr.MEASURE_DIM] = np.eye(tr.MEASURE_DIM)
+    innovation = tr._cxcywh(box) - proj @ mean
+    s = proj @ cov @ proj.T + np.eye(tr.MEASURE_DIM) * (tr.POSITION_STD * h) ** 2
+    gain = cov @ proj.T @ np.linalg.inv(s)
+    return mean + gain @ innovation, (np.eye(tr.STATE_DIM) - gain @ proj) @ cov
+
+
+def test_the_kalman_steps_match_the_explicit_inverse_formulas():
+    from roboemot.vision.tracker import Track
+
+    rng = np.random.default_rng(0)
+    for start in ((100, 80, 180, 200), (5.0, 5.0, 5.5, 5.4), (600, 300, 1100, 700)):
+        track = Track(1, "face", 0.9, 0.0, 0.0)
+        track._start(Detection(start, 0.9), 0.0)
+        mean, cov = track._mean.copy(), track._cov.copy()
+        stamp = 0.0
+        for _ in range(40):
+            dt = float(rng.choice([0.0, 0.033, 0.125, 1.0]))
+            stamp += dt
+            track._predict(stamp)
+            mean, cov = old_predict(mean, cov, dt)
+            assert track._mean == pytest.approx(mean, rel=1e-9, abs=1e-9)
+            assert track._cov == pytest.approx(cov, rel=1e-9, abs=1e-9)
+            jitter = rng.normal(0, 3, 4)
+            box = tuple(float(v) for v in np.array(start) + jitter + stamp * 10)
+            track._correct_box(box)
+            mean, cov = old_correct(mean, cov, box)
+            assert track._mean == pytest.approx(mean, rel=1e-9, abs=1e-9)
+            assert track._cov == pytest.approx(cov, rel=1e-9, abs=1e-9)
