@@ -348,9 +348,9 @@ expressive_channels:
   body:  {type: pose_groups, groups: [head, body_yaw, antennas]}
 motor_modes: {active: enabled, limp: disabled, teach: gravity_compensation}
 dynamics:               # velocity and acceleration caps, measured in M0; required before release (section 12)
-  head:     {max_vel_dps: null, max_acc_dps2: null}
+  head:     {max_vel_dps: 180, max_acc_dps2: 2000}   # rotations, sine sweep of 2026-11-10; translations stay null
   body_yaw: {max_vel_dps: null, max_acc_dps2: null}
-  antennas: {max_vel_dps: null, max_acc_dps2: null}
+  antennas: {max_vel_dps: 500, max_acc_dps2: 6000}   # sine sweep of 2026-11-10
 retargeting:            # mirror module (section 9)
   head.yaw:      {source: head_yaw,   scale: 1.0}
   head.pitch:    {source: head_pitch, scale: 1.0}
@@ -1130,6 +1130,7 @@ Arbitration is per joint: a commanded nod claims the neck but leaves the LEDs an
 - Rate 100 Hz (configurable 50 to 200 Hz per robot); jitter target under 2 ms on a dedicated core with real-time priority.
 - Each cycle: read joint state, collect targets from sources, arbitrate, apply the safety limiter (position, velocity, acceleration, and current if the driver reports it), write to the drivers.
 - The loop runs on even when Python stalls; if no command arrives for `watchdog_ms`, it returns joints to home slowly.
+- Each app tick's command ramps from where its source stands to its new targets over one app tick (`motion.ramp_app_commands`, on by default), so a high acceleration cap does not turn a slow move into stop and go. It delays those moves by at most one app tick. Reflexes, safety commands, a source's first command and one after a pause of more than two app ticks are not ramped.
 
 ### Reflexes
 

@@ -58,6 +58,7 @@ from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, Limiter, MotionCore
 from .external import ExternalControl, Unit
+from .ramps import CommandRamps
 from .state import MeasuredPair, MotionSample, MotionState
 
 MS_PER_S = 1000.0
@@ -93,6 +94,7 @@ class MotionLoop:
             watchdog_return_factor=1.0,
         )
         self._lock = threading.Lock()
+        self.ramps = CommandRamps()
         self.external_ctl = ExternalControl(
             manifest.dofs, manifest.constraints, cfg.motion.external, self.rate_hz
         )
@@ -136,6 +138,7 @@ class MotionLoop:
         self._hold_limiter.constraint_margin = self.core.limiter.constraint_margin
         self.link.policy = cfg.connectivity.robot
         self.platform_move_grace_s = cfg.motion.platform_move_grace_s
+        self.ramps.ramp_s = 1.0 / cfg.motion.app_tick_hz if cfg.motion.ramp_app_commands else 0.0
         self.external_ctl.configure(cfg.motion.external)
 
     @property
@@ -188,11 +191,12 @@ class MotionLoop:
 
     def feed(self, cmd: Command) -> None:
         with self._lock:
-            self.core.feed(cmd)
+            self.core.feed(self.ramps.admit(cmd))
 
     def clear(self, source: str) -> None:
         """Drop a source's command so lower-priority motion (idle) takes the dofs back."""
         with self._lock:
+            self.ramps.clear(source)
             self.core.arbiter.clear(source)
 
     def pose(self) -> dict[str, float]:
@@ -273,6 +277,8 @@ class MotionLoop:
                     self._note_hook_error(exc)
             if not failed:
                 self._hook_error = None
+            for ramped in self.ramps.step(now):
+                self.core.arbiter.submit(ramped)
             out = self.core.tick(now, dt)
             goal = self.core.arbiter.goal  # the arbiter's target this tick, before the fade
             held = ext.held

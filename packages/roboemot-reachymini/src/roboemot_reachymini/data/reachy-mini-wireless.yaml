@@ -31,9 +31,13 @@ pose_groups:                      # the SDK addresses poses, not servos
 constraints:
   - {type: yaw_delta, a: head.yaw, b: body_yaw, max_deg: 65}
 dynamics:               # velocity and acceleration caps, measured in M0; required before release
-  head:     {max_vel_dps: null, max_acc_dps2: null, max_lin_vel_mps: null, max_lin_acc_mps2: null}
+  # Head rotations: below what the robot followed in a sine sweep (2026-11-10, set_target at
+  # 50 Hz, 188 to 226 deg/s and 2369 to 2842 deg/s2 at 91 to 101 %). Translations are not measured.
+  head:     {max_vel_dps: 180, max_acc_dps2: 2000, max_lin_vel_mps: null, max_lin_acc_mps2: null}
   body_yaw: {max_vel_dps: null, max_acc_dps2: null}
-  antennas: {max_vel_dps: null, max_acc_dps2: null}
+  # Antennas: below what they followed in a sine sweep (2026-11-10, 45 deg at 2 Hz, 565 deg/s and
+  # 7106 deg/s2 at 110 %).
+  antennas: {max_vel_dps: 500, max_acc_dps2: 6000}
 sensors:
   camera_main: {driver: reachy_mini_media}
   mic_array:   {driver: reachy_mini_media, doa: true}
@@ -153,7 +157,7 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # Named gestures for the play skill (SPEC 7, 11): same format as above, not affect labels.
   # head.pitch positive is down, so a nod dips then lifts a little; yaw is symmetric. Degrees
   # are well inside the +-40 / +-180 limits; the renderer scales and clamps them at runtime.
-  # Segments last about 0.3 s so the motion still reads under the dev fallback caps (0.5 rad/s).
+  # Segments last about 0.3 s so the motion still read under the first, unmeasured caps (0.5 rad/s).
   gesture_map:
     nod:                        # head pitch oscillation ("yes"), 2 cycles in 1.8 s, 0.3 s per dip
       repeat: 2
@@ -238,7 +242,7 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # to the preset's degrees (speech_motion.levels). head.pitch positive is down (the beat and the
   # nod dip, the breath lifts); the tilt rolls like curiosity and lifts a little; the accent flicks
   # the antennas outward (right -, left +). Minjerk halves of 0.5 s or more, so the motion still
-  # reads under the dev fallback caps (0.5 rad/s, 2 rad/s^2): a min-jerk move of D rad needs
+  # reads under the first, unmeasured caps (0.5 rad/s, 2 rad/s^2): a min-jerk move of D rad needs
   # T >= sqrt(5.77 D / a). Never the body yaw or a translation. Signs not yet checked on the robot.
   speech_motion_map:
     beat: {head.pitch: 1}

@@ -109,7 +109,7 @@ def test_cli_voice_sample_needs_dev_for_a_manifest_with_unmeasured_dynamics(tmp_
         cli.Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
     )
     assert cli.main(["voice", "sample", "--out", str(tmp_path), "--manifest", str(manifest)]) == 1
-    assert "allow_unmeasured_dynamics" in capsys.readouterr().err
+    assert "required for translations" in capsys.readouterr().err
 
 
 def test_cli_voice_sample_errors_say_what_to_do_and_leave_no_folder(tmp_path, monkeypatch, capsys):

@@ -723,16 +723,16 @@ def commanded_peak(cfg, name, dof, amplitude):
     return amplitude * math.radians(max(abs(v) for _, v in cfg.gesture_map[name].channels[dof]))
 
 
-def test_a_nod_still_reads_as_a_nod_under_the_dev_fallback_caps(cfg, manifest):
-    assert manifest.dofs["head.pitch"].max_vel == pytest.approx(0.5)
-    assert manifest.dofs["head.pitch"].max_acc == pytest.approx(2.0)
+def test_a_nod_still_reads_as_a_nod_under_the_measured_head_caps(cfg, manifest):
+    assert manifest.dofs["head.pitch"].max_vel == pytest.approx(math.radians(180))
+    assert manifest.dofs["head.pitch"].max_acc == pytest.approx(math.radians(2000))
     out, amp = through_core(cfg, manifest, "nod", "head.pitch")
     want = commanded_peak(cfg, "nod", "head.pitch", amp)
     assert max(out) >= 0.5 * want and max(out) > 0.05  # the dip is not smeared away
     assert out[-1] == pytest.approx(0.0, abs=1e-6)  # and the head comes home
 
 
-def test_a_shake_swings_both_ways_under_the_dev_fallback_caps(cfg, manifest):
+def test_a_shake_swings_both_ways_under_the_measured_head_caps(cfg, manifest):
     out, amp = through_core(cfg, manifest, "shake", "head.yaw")
     want = commanded_peak(cfg, "shake", "head.yaw", amp)
     assert max(out) >= 0.5 * want and -min(out) >= 0.5 * want
