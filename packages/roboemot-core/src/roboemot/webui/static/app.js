@@ -246,8 +246,10 @@ async function api(method, path, body, extra) {
   return data;
 }
 
+// An error in the page language: `err.text` when the caller worded it for its context, else the
+// string of its code, with the host, what was saved and the wait the server named.
 function explain(err) {
-  const known = state.strings["err_" + err.message];
+  const known = err.text || state.strings["err_" + err.message];
   let text = known || t("err_generic");
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   if (err.saved) text += " " + err.saved;

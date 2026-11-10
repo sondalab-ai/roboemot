@@ -356,7 +356,7 @@ test("save: a client pre-check flags the field and sends nothing", async () => {
   await settle();
   const err = box.querySelector(".sl-field__error");
   assert.equal(err.hidden, false);
-  assert.equal(err.textContent, "err_value_range");
+  assert.equal(err.textContent, "settings_range_error", "the text that states the limits");
   assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.ok(input.getAttribute("aria-describedby").split(" ").includes(err.id));
   assert.equal(page.document.querySelector("dialog"), null);
@@ -1204,6 +1204,92 @@ test("a nullable enum stored as an empty string or outside its choices is marked
   const c = row(page, "voice.c").querySelector("select");
   assert.equal(c.getAttribute("aria-invalid"), null, "an empty string that is a choice is valid");
   assert.equal(c.options[c.selectedIndex].textContent, "settings_choice_none");
+});
+
+const RANGE_WORDS = {
+  settings_range_between: "Allowed: {min} to {max}.",
+  settings_range_min: "Allowed: {min} or more.",
+  settings_range_above: "Allowed: more than {min}.",
+  settings_range_above_max: "Allowed: more than {min}, up to {max}.",
+  settings_range_max: "Allowed: {max} or less.",
+  settings_unit: "Unit: {unit}.",
+  settings_range_error: "The value is outside the allowed range. {range}",
+  err_value_range: "The value is outside the allowed range.",
+};
+
+function rangePage(rows, extra = {}, lang = "en") {
+  return settingsPage({ "GET /api/strings": { language: lang, strings: RANGE_WORDS }, ...extra }, { fields: rows, pin_required: true });
+}
+const rangeLine = (page, path) => row(page, path).querySelector(".setting-range");
+
+test("a numeric field states its limits and unit under the control, for each combination", async () => {
+  const cases = [
+    [{ ge: 0, le: 10, unit: "s" }, "Allowed: 0 to 10. Unit: s."],
+    [{ ge: 1 }, "Allowed: 1 or more."],
+    [{ le: 5, unit: "dB" }, "Allowed: 5 or less. Unit: dB."],
+    [{ gt: 0, unit: "Hz" }, "Allowed: more than 0. Unit: Hz."],
+    [{ gt: 0, le: 2 }, "Allowed: more than 0, up to 2."],
+    [{ ge: 0, gt: -1, le: 1 }, "Allowed: 0 to 1."],
+  ];
+  const rows = cases.map(([limits], i) => d("voice.n" + i, "number", { value: 1, default: 1, ...limits }));
+  rows.push(d("voice.free", "number", { value: 1, default: 1, unit: "s" }));
+  const page = await rangePage(rows);
+  await open(page, "core-voice");
+  cases.forEach(([, want], i) => assert.equal(rangeLine(page, "voice.n" + i).textContent, want, JSON.stringify(cases[i][0])));
+  assert.equal(rangeLine(page, "voice.free"), null, "no line without a limit");
+  const line = rangeLine(page, "voice.n0");
+  assert.ok(line.classList.contains("hint"), "a muted line");
+});
+
+test("the limits line is in the field's description, with the error while one shows", async () => {
+  const page = await rangePage([
+    d("voice.a", "number", { value: 1, default: 1, ge: 0, le: 10, description: "Rate" }),
+    d("voice.b", "number", { value: 1, default: 1, ge: 0, le: 10 }),
+  ]);
+  await open(page, "core-voice");
+  const a = row(page, "voice.a");
+  const input = a.querySelector('input[type="number"]');
+  const ids = () => input.getAttribute("aria-describedby").split(" ");
+  const desc = a.querySelector("p.hint").id;
+  const range = rangeLine(page, "voice.a").id;
+  assert.deepEqual(ids(), [desc, range]);
+  input.value = "99";
+  button(a, "settings_save").click();
+  await settle();
+  const err = a.querySelector(".sl-field__error");
+  assert.deepEqual(ids(), [desc, range, err.id]);
+  assert.equal(err.textContent, "The value is outside the allowed range. Allowed: 0 to 10.");
+  input.value = "5";
+  button(a, "settings_save").click();
+  await settle();
+  assert.deepEqual(ids(), [desc, range], "the error leaves, the description stays");
+  page.document.querySelector("dialog .sl-dialog__actions button[type=button]").click();
+  const b = row(page, "voice.b").querySelector('input[type="number"]');
+  assert.deepEqual(b.getAttribute("aria-describedby").split(" "), [rangeLine(page, "voice.b").id], "linked without a description too");
+});
+
+test("a server range refusal states the limits the field has, else the generic text", async () => {
+  const page = await rangePage([
+    d("voice.a", "number", { value: 1, default: 1, ge: 0, le: 10 }),
+    d("voice.c", "number", { value: 1, default: 1 }),
+  ], { "POST /api/settings": reply(422, { error: "value_range" }) });
+  await open(page, "core-voice");
+  for (const [path, want] of [["voice.a", "The value is outside the allowed range. Allowed: 0 to 10."], ["voice.c", "The value is outside the allowed range."]]) {
+    const box = row(page, path);
+    box.querySelector('input[type="number"]').value = "3";
+    button(box, "settings_save").click();
+    await settle();
+    const dialog = await answerPin(page);
+    assert.equal(dialog.querySelector("#dialog-error").textContent, want, path);
+    dialog.querySelector(".sl-dialog__actions button[type=button]").click();
+    await settle();
+  }
+});
+
+test("the limits are written in the page language", async () => {
+  const page = await rangePage([d("voice.a", "number", { value: 1, default: 1, ge: 0.05, le: 15000 })], {}, "it");
+  await open(page, "core-voice");
+  assert.equal(rangeLine(page, "voice.a").textContent, "Allowed: 0,05 to 15.000.");
 });
 
 test("saving the page language redraws the page in it and keeps the Settings tab, its filter and open groups", async () => {
