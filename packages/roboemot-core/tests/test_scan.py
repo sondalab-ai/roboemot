@@ -104,6 +104,18 @@ def test_wake_up_while_engaged_does_not_sweep_afterwards():
     assert p.update(ctx(2.0)) is None  # the person was the look-around
 
 
+def test_room_music_holds_a_glance_and_drops_its_bearing():
+    p = ScanPolicy(CFG, random.Random(1))
+    p.note_unexplained(1.2, 0.1, 5.0)
+    assert p.update(ctx(5.5, music=True)) is None
+    assert p.update(ctx(5.6)) is None
+
+
+def test_room_music_holds_a_sweep_that_is_due():
+    p = ScanPolicy(CFG, random.Random(1))
+    assert first_decision(p, 0.0, music=True) is None
+
+
 def test_glance_toward_an_unexplained_bearing():
     p = ScanPolicy(CFG, random.Random(1))
     p.note_unexplained(1.2, 0.1, 5.0)

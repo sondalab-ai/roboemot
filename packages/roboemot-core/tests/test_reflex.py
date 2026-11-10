@@ -313,6 +313,25 @@ def test_without_an_enabled_withdraw_the_shared_settings_keep_their_directions()
 # --------------------------------------------------------------------------- loud onset
 
 
+def test_room_music_holds_the_startle():
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio()
+    rig.engine.music_calm = lambda _stamp: True
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.reflex_sources() == []
+    assert rig.engine.snapshot()["rules"]["r"]["gate"]["suppressed"]["music"] == 1
+
+
+def test_a_startle_fires_again_once_the_music_ends():
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio()
+    rig.engine.music_calm = lambda _stamp: False
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.reflex_sources() == ["reflex.r"]
+
+
 def test_a_loud_onset_plays_a_startle_at_reflex_priority_and_meets_the_audio_budget():
     rig = Rig(cfg_with(rule()))
     rig.settle_audio()

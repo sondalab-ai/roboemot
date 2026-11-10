@@ -59,7 +59,7 @@ HALF_PLANE = math.pi / 2
 SOURCE_PREFIX = "reflex."
 DB_PER_DECADE = 20.0  # amplitude ratio to dB
 GATED_TRIGGERS = {
-    "loud_onset": ("motion", "rearm"),
+    "loud_onset": ("music", "motion", "rearm"),
     "new_voice": ("no_vad", "own_speech", "motion"),  # in priority order (SPEC 12A)
 }
 
@@ -167,6 +167,7 @@ class ReflexEngine:
         self.audio_status: Callable[[], dict[str, Any]] | None = None
         self.speaking: Callable[[float], bool] | None = None  # "is the robot speaking at stamp"
         self.vad: Callable[[], bool] | None = None  # "the voice listener hears speech now"
+        self.music_calm: Callable[[float], bool] | None = None  # "no startle: music at this stamp"
         self.motion_sample: Callable[[], MotionSample | None] | None = None
         self.bad_payloads = 0
         self._lock = threading.Lock()
@@ -379,6 +380,8 @@ class ReflexEngine:
             gate.offered += 1
             if not armed:
                 gate.suppress("rearm")
+            elif rule.primitive == "startle" and self.music_calm and self.music_calm(stamp):
+                gate.suppress("music")
             elif moving:
                 gate.suppress("motion")
             else:

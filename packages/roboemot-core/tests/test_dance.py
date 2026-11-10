@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from audio_signals import drum_loop
@@ -19,6 +20,7 @@ from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
 from roboemot.motion.beat import Beat, BeatSource, room_beat
 from roboemot.motion.curves import min_jerk
+from roboemot.runtime.ticks import dance_calm
 from roboemot.voice.music import MusicDetector, MusicState
 from roboemot.voice.speech import SpeechOutput, _Job
 from test_speech import FakeBackend, TimelineSink
@@ -996,3 +998,24 @@ def test_speaking_gain_holds_across_a_gap_between_sentences(manifest, mapping):
     out._jobs.clear()
     run(r, SETTLE_S + 1.0, SETTLE_S + 2.0)
     assert r._s.level == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "calm", "playing", "want"),
+    [
+        pytest.param(True, True, True, True, id="music"),
+        pytest.param(True, True, False, False, id="no-music"),
+        pytest.param(True, False, True, False, id="calm-off"),
+        pytest.param(False, True, True, False, id="dance-off"),
+    ],
+)
+def test_other_moves_stay_calm_only_while_dancing_to_room_music(enabled, calm, playing, want):
+    cfg = DanceConfig(enabled=enabled, calm_other_moves=calm)
+    listener = SimpleNamespace(music_state=lambda _now: SimpleNamespace(playing=playing))
+    host = SimpleNamespace(dance=SimpleNamespace(cfg=cfg), voice_listener=listener)
+    assert dance_calm(host, 1.0) is want
+
+
+def test_nothing_stays_calm_without_a_listener():
+    host = SimpleNamespace(dance=SimpleNamespace(cfg=DanceConfig()), voice_listener=None)
+    assert dance_calm(host, 1.0) is False

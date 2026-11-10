@@ -70,6 +70,16 @@ def feed_idle(
         loop.feed(cmd)
 
 
+def dance_calm(host: Any, now: float) -> bool:
+    """Whether other moves stay calm at ``now`` so the dance shows (SPEC 7, Dance motion): room
+    music plays, and the dance and ``dance.calm_other_moves`` are on. Lock-free, any thread."""
+    dance, listener = host.dance, host.voice_listener
+    if dance is None or listener is None:
+        return False
+    cfg = dance.cfg
+    return cfg.enabled and cfg.calm_other_moves and listener.music_state(now).playing
+
+
 def attention_tick(
     now: float,
     world: WorldModel,
@@ -78,11 +88,12 @@ def attention_tick(
     loop: MotionLoop,
     conversing: bool = False,
     interest: Callable[[], InterestMod] | None = None,
+    min_hold_s: float = 0.0,
 ) -> bool:
     """One attention step: decay the world, pick the target, feed or release the gaze command.
     ``conversing`` (a conversation is in progress) holds off face habituation; ``interest`` gives
     how the robot's state scales the interest in a shown object (``interest_modulation``),
-    computed inside the guard.
+    computed inside the guard; ``min_hold_s`` is the least time on a target before a switch.
 
     Returns whether attention owns the head. A failure inside is logged (type and message
     only), the attention command is dropped and idle motion takes over; the app keeps running.
@@ -97,7 +108,9 @@ def attention_tick(
         )
         world.tick(now, in_view)
         mod = interest() if interest is not None else None
-        target = selector.update(now, world.entries, conversing=conversing, mod=mod)
+        target = selector.update(
+            now, world.entries, conversing=conversing, mod=mod, min_hold_s=min_hold_s
+        )
         was_active = gaze.active
         cmd = gaze.step(now, target, None if gaze.active else loop.pose())
         if cmd is not None:
@@ -121,11 +134,12 @@ def scan_context(
     effects: Any = None,
     circadian: CircadianModel | None = None,
     alone: bool = False,
+    music: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
     quiet hours (SPEC 7A) from the local ``hour``, whether the robot is alone (SPEC 5A,
-    ``AloneWatch``), the persona's energy effects (``effects``, computed from the persona when
-    the caller has not cached them)."""
+    ``AloneWatch``), whether the robot dances to room music (``music``, SPEC 7), the persona's
+    energy effects (``effects``, computed from the persona when the caller has not cached them)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     engaged = selector.engaged or selector.episode_active  # a shown thing: no time limit
@@ -137,6 +151,7 @@ def scan_context(
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
         alone=alone,
+        music=music,
         effects=effects if effects is not None else persona_effects(cfg.persona),
     )
 

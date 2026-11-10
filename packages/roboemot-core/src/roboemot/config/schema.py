@@ -4737,6 +4737,19 @@ class DanceConfig(Strict):
         ge=0,
         le=1,
     )
+    calm_other_moves: bool = param(
+        True,
+        "While room music plays: no startle at a loud sound, no glance or sweep, and fewer "
+        "changes of the person looked at, so that the dance can be seen",
+    )
+    calm_switch_hold_s: float = param(
+        6.0,
+        "While room music plays and calm_other_moves is on: least time on a target before "
+        "attention changes it; an active speaker still wins at once",
+        unit="s",
+        ge=0,
+        le=60,
+    )
     accent_min_interval_s: float = param(
         1.0, "Least time between two accent flicks", unit="s", ge=0.1, le=30
     )
