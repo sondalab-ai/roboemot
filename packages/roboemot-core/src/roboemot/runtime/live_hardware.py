@@ -12,13 +12,20 @@ itself. The first read has nothing to compare with and reports None.
 
 from __future__ import annotations
 
+import functools
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import psutil
 
-from roboemot.diagnostics.system import PROC_WIRELESS, parse_proc_wireless, throttling
+from roboemot.diagnostics.system import (
+    PROC_WIRELESS,
+    VCGENCMD,
+    parse_proc_wireless,
+    read_throttling,
+)
 
 PERCENT = 100
 BYTES_PER_MB = 1024**2
@@ -68,14 +75,16 @@ def throttle_state(flags: dict[str, Any] | None) -> dict[str, list[str]] | None:
 class HardwareReader:
     """Reads CPU, memory, throttling, disk, Wi-Fi and this process. Callers serialize the calls:
     ``LiveState`` holds its lock during a read. ``proc_wireless`` and ``flags`` are seams for
-    tests."""
+    tests. By default ``vcgencmd`` is looked up on ``PATH`` once, here, and the result (also
+    "not found") is reused by every refresh: the tools on the robot do not move at runtime."""
 
     def __init__(
         self,
         proc_wireless: Path = PROC_WIRELESS,
-        flags: Callable[[], dict[str, Any] | None] = throttling,
+        flags: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
-        self._proc_wireless, self._flags = proc_wireless, flags
+        self._proc_wireless = proc_wireless
+        self._flags = flags or functools.partial(read_throttling, shutil.which(VCGENCMD))
         self._cpu_times: Any = None
         self._process = _attempt(psutil.Process)
         self._process_sampled = False

@@ -89,6 +89,7 @@ SYSFS_FIELDS = (
     "manufacturer",
     *SYSFS_SCALE,
 )
+VCGENCMD = "vcgencmd"
 # vcgencmd get_throttled bits (Raspberry Pi firmware).
 THROTTLE_BITS = {
     0: "under_voltage_now",
@@ -191,12 +192,20 @@ def power_supplies(root: Path = POWER_SUPPLY_ROOT) -> dict[str, dict[str, Any]]:
 
 
 def throttling(run: Any = subprocess.run) -> dict[str, Any] | None:
-    """Raspberry Pi firmware flags (``vcgencmd get_throttled``); ``None`` off a Pi."""
-    if shutil.which("vcgencmd") is None:
+    """Raspberry Pi firmware flags (``vcgencmd get_throttled``); ``None`` off a Pi. Looks the
+    command up on ``PATH`` each call: right for a one-shot report; a periodic reader resolves
+    it once and calls ``read_throttling``."""
+    return read_throttling(shutil.which(VCGENCMD), run)
+
+
+def read_throttling(command: str | None, run: Any = subprocess.run) -> dict[str, Any] | None:
+    """``throttling`` with ``command`` already resolved (``shutil.which`` result, ``None`` when
+    the platform has no ``vcgencmd``), so a refresh costs one subprocess and no ``PATH`` scan."""
+    if command is None:
         return None
     try:
         res = run(
-            ["vcgencmd", "get_throttled"],
+            [command, "get_throttled"],
             capture_output=True,
             text=True,
             timeout=COMMAND_TIMEOUT_S,
@@ -453,6 +462,7 @@ __all__ = [
     "local_sources",
     "power_supplies",
     "process_info",
+    "read_throttling",
     "system_info",
     "temperatures",
     "throttling",
