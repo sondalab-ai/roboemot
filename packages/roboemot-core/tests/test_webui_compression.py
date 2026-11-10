@@ -170,17 +170,6 @@ def test_a_small_json_body_is_never_gzipped(served):
     assert "Vary" not in resp.headers
 
 
-def test_a_repeated_body_reuses_its_gzip_form(served, monkeypatch):
-    calls = []
-    real = server_module.gzipped
-    monkeypatch.setattr(
-        server_module, "gzipped", lambda body, level: calls.append(level) or real(body, level)
-    )
-    first = bare(served, "GET", "/api/settings", GZIP).body
-    again = bare(served, "GET", "/api/settings", GZIP).body
-    assert first == again and calls == [server_module.JSON_GZIP_LEVEL]
-
-
 @pytest.mark.parametrize("plugin", [None, FakePlugin()])
 def test_the_prebuilt_settings_body_is_the_json_of_its_data(tmp_path, stack, plugin):
     pins = PinStore(tmp_path)
@@ -198,7 +187,7 @@ def test_the_prebuilt_settings_body_is_the_json_of_its_data(tmp_path, stack, plu
         assert (resp.data["robot"] is None) is (plugin is None)
 
 
-def test_a_post_answer_is_gzipped_but_never_kept(tmp_path, stack):
+def test_a_post_answer_is_gzipped(tmp_path, stack):
     srv, client = serve(tmp_path, SettingsEditor(stack), stack)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=5)
@@ -216,7 +205,6 @@ def test_a_post_answer_is_gzipped_but_never_kept(tmp_path, stack):
         conn.close()
         assert resp.status == 200 and resp.headers["Content-Encoding"] == "gzip"
         assert json.loads(gzip.decompress(data))["fields"]
-        assert srv._httpd.packed_json == {}
     finally:
         srv.stop()
 

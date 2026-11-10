@@ -80,7 +80,6 @@ GZIP_WBITS = 31  # zlib's gzip container (16 + the 15-bit window): no file name,
 STATIC_GZIP_LEVEL = 9  # once at start-up: the smallest body is worth the time
 JSON_GZIP_LEVEL = 1  # per response on the request thread: fast, most of the gain on JSON
 JSON_GZIP_MIN_BYTES = 1024  # below this the gzip header and the CPU outweigh the saving
-GZIP_CACHE_ENTRIES = 8  # recent JSON bodies whose gzip form is reused while they repeat
 GZIP_ETAG_SUFFIX = "-gz"
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -214,8 +213,6 @@ class _Httpd(ThreadingHTTPServer):
     api: WebApi
     statics: dict[str, Static]
     slots: threading.BoundedSemaphore
-    packed_json: dict[bytes, bytes]  # JSON body -> its gzip form, oldest first
-    packed_lock: threading.Lock
 
     def server_bind(self) -> None:
         """``TCPServer.server_bind`` plus the two names ``HTTPServer`` sets, without its
@@ -378,28 +375,11 @@ class _Handler(BaseHTTPRequestHandler):
         if len(payload) < JSON_GZIP_MIN_BYTES:
             self._send(resp.status, payload, ctype, resp)
         elif accepts_gzip(self.headers.get("Accept-Encoding")):
-            packed = self._packed_json(payload)
+            packed = gzipped(payload, JSON_GZIP_LEVEL)
             self._send(resp.status, packed, ctype, resp, encoding="gzip", vary=True)
         else:
             self._send(resp.status, payload, ctype, resp, vary=True)
         return True
-
-    def _packed_json(self, payload: bytes) -> bytes:
-        """The gzip form of a JSON body. An identical body sent lately (the settings list, until
-        the configuration changes) reuses its form: the key is the exact bytes, so a hit is what
-        a fresh compression would give. Bounded to ``GZIP_CACHE_ENTRIES`` bodies, and only GET
-        bodies are kept: a POST answer (the PIN-checked reveal) must not outlive its request."""
-        cache = self.server.packed_json
-        packed = cache.get(payload)
-        if packed is None:
-            packed = gzipped(payload, JSON_GZIP_LEVEL)
-            if self.command != "GET":
-                return packed
-            with self.server.packed_lock:
-                cache[payload] = packed
-                while len(cache) > GZIP_CACHE_ENTRIES:
-                    cache.pop(next(iter(cache)))
-        return packed
 
     def _send_json(self, status: HTTPStatus, data: Any) -> None:
         self._send(status, json.dumps(data).encode(), "application/json; charset=utf-8")
@@ -551,6 +531,5 @@ def make_server(
         route: Static((STATIC_DIR / name).read_bytes(), ctype)
         for route, (name, ctype) in STATIC_FILES.items()
     }
-    httpd.packed_json, httpd.packed_lock = {}, threading.Lock()
     httpd.statics.update(load_vendor())
     return Server(httpd, pins)
