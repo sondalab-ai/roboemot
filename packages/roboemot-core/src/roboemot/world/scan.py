@@ -52,6 +52,7 @@ class ScanContext:
     circadian: str = "awake"  # awake | drowsy | resting
     quiet_hours: bool = False
     alone: bool = False  # no face and no sound for world.scan.alone_after_s (AloneWatch)
+    music: bool = False  # the robot dances to room music: hold the scans (SPEC 7, Dance motion)
     effects: PersonaEffects = PersonaEffects()
 
     @property
@@ -118,7 +119,7 @@ class ScanPolicy:
             self._next_at = None
             self._was_engaged = False
             return None
-        if ctx.alone:  # hold still; the idle clock restarts once a face or a sound ends it
+        if ctx.alone or ctx.music:  # hold still; the idle clock restarts when this ends
             self._drop_pending()
             self._wake_pending = False
             self._next_at = None
@@ -359,7 +360,7 @@ class ScanController:
         when the robot falls asleep, is left alone or engages with a person (attention takes the
         head).
         """
-        still = ctx.asleep or ctx.alone
+        still = ctx.asleep or ctx.alone or ctx.music
         if self.runner.active and (still or (ctx.engaged and not self._engaged_glance)):
             self.runner.cancel()
             self.policy.finished()

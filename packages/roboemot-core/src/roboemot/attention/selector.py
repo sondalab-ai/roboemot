@@ -119,6 +119,7 @@ class AttentionSelector:
         self._motion: dict[str, _Motion] = {}
         self._settled: dict[str, _Settled] = {}
         self._current: AttentionTarget | None = None
+        self._min_hold_s = 0.0
         self._since = 0.0
         self._published: AttentionTarget | None = None
         self._published_at = -math.inf
@@ -182,10 +183,14 @@ class AttentionSelector:
         *,
         conversing: bool = False,
         mod: InterestMod | None = None,
+        min_hold_s: float = 0.0,
     ) -> AttentionTarget | None:
         """Choose the target at ``now``, publish it when due and return it (None: no target).
         ``conversing``: a conversation is in progress, so no face habituates. ``mod``: how the
-        robot's state scales the shown-object interest (``interest_mod``; None: neutral)."""
+        robot's state scales the shown-object interest (``interest_mod``; None: neutral).
+        ``min_hold_s``: least time on a target before a switch, when longer than the hysteresis
+        (the dance over room music, SPEC 7)."""
+        self._min_hold_s = min_hold_s
         self._completed = False
         fresh = [e for e in entries if now - self._seen(e) <= self.cfg.stale_s]
         by_id = {e.entry_id: e for e in fresh}
@@ -245,7 +250,7 @@ class AttentionSelector:
         category, cand = best
         if category == SPEAKER:
             return True
-        if now - self._since < self.cfg.switch_hysteresis_s:
+        if now - self._since < max(self.cfg.switch_hysteresis_s, self._min_hold_s):
             return False
         if category != cur_category or cand.score is None or cur.score is None:
             return True

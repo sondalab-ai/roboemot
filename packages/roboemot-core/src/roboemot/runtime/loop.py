@@ -20,6 +20,7 @@ from .ticks import (
     company,
     conversation_vision_scale,
     conversing,
+    dance_calm,
     episode_rate,
     feed_idle,
     interest_modulation,
@@ -91,6 +92,7 @@ def _tick_until_stopped(
         host.circadian = p.circ.model if live.circadian.enabled else None
         if live.persona is not fx_for:  # recompute only after a reload
             fx_for, fx = live.persona, persona_effects(live.persona)
+        calm = dance_calm(host, now)
         attending = attention_tick(
             now,
             p.world,
@@ -101,6 +103,7 @@ def _tick_until_stopped(
             lambda live=live, fx=fx, now=now: interest_modulation(
                 live, p.runner.engine.state(now), host.circadian, fx
             ),
+            live.dance.calm_switch_hold_s if calm else 0.0,
         )
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
@@ -139,6 +142,7 @@ def _tick_until_stopped(
                 hour=p.clock.hour(),
                 circadian=host.circadian,
                 alone=alone,
+                music=calm,
             )
             scan_tick(ctx, p.scan, p.loop, live)
         if host.soothe_runner is not None and host.speech_output is not None:

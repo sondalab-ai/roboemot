@@ -75,6 +75,26 @@ def test_default_order_speaker_enrolled_nearest_motion():
     assert (t.entry_id, t.priority) == ("p2", "active_speaker")
 
 
+def _switch_candidates(stamp):
+    near = dataclasses.replace(entry("p1", distance_m=1.0), last_seen=stamp)
+    alice = dataclasses.replace(entry("p2", identity="alice", distance_m=3.0), last_seen=stamp)
+    return near, alice
+
+
+def test_a_longer_hold_keeps_the_target_past_the_hysteresis():
+    later = CFG.switch_hysteresis_s + 1.0
+    sel = AttentionSelector(CFG)
+    assert sel.update(0.0, [_switch_candidates(0.0)[0]]).entry_id == "p1"
+    t = sel.update(later, list(_switch_candidates(later)), min_hold_s=later + 5.0)
+    assert t.entry_id == "p1"
+    assert (
+        sel.update(
+            later + 6.0, list(_switch_candidates(later + 6.0)), min_hold_s=later + 5.0
+        ).entry_id
+        == "p2"
+    )
+
+
 def test_each_category_alone_and_custom_order():
     cup = entry("o1", kind="object")
     sel = AttentionSelector(CFG)

@@ -65,7 +65,7 @@ from .host import RuntimeHost
 from .levels import AudioLevels
 from .reports import register_overrides
 from .sleep import SleepGate
-from .ticks import in_conversation
+from .ticks import dance_calm, in_conversation
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -472,6 +472,7 @@ def assemble(
         # A turn needs a real voice: the speech detector confirms the chip's direction (SPEC 10);
         # without a listener the new-voice reflex never fires.
         reflexes.vad = listener.hearing
+        reflexes.music_calm = lambda stamp: dance_calm(host, stamp)
     if bargein is not None:
         bargein.events = host.events
     if cfg.voice.enabled and listener is None:
