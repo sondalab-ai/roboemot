@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import socket
+import socketserver
 import threading
 import time
 import zlib
@@ -215,6 +216,14 @@ class _Httpd(ThreadingHTTPServer):
     slots: threading.BoundedSemaphore
     packed_json: dict[bytes, bytes]  # JSON body -> its gzip form, oldest first
     packed_lock: threading.Lock
+
+    def server_bind(self) -> None:
+        """``TCPServer.server_bind`` plus the two names ``HTTPServer`` sets, without its
+        ``socket.getfqdn``: a reverse lookup of ``0.0.0.0`` can block start-up for seconds and
+        nothing here reads ``server_name``. The port is the bound one (``webui.port`` may be 0)."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name, self.server_port = str(host), int(port)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         """Serve on a new thread, or refuse with 503 when ``max_connections`` are in use."""
