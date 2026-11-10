@@ -159,7 +159,10 @@ def dance_beat(host: RuntimeHost) -> BeatSource:
 
     def room(now: float) -> Beat | None:
         listener = host.voice_listener
-        return room_beat(listener.music_state(now)) if listener is not None else None
+        if listener is None:
+            return None
+        dance = listener.config.dance
+        return room_beat(listener.music_state(now), (dance.free_bpm, dance.free_strength))
 
     return BeatSource(own, room, accents=accents)
 

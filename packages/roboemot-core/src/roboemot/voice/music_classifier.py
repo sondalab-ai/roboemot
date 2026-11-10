@@ -1,13 +1,13 @@
-"""Report-only audio classifier beside the music detector (SPEC 8, 12A).
+"""The audio classifier that decides whether music plays (SPEC 8, 12A).
 
-The beat detector cannot recognise music with no steady beat. This module measures whether a
-small pretrained classifier (YAMNet) hears such music through the robot's microphones. It changes
-no behaviour: the scores only reach the debug report.
+The beat detector cannot recognise music with no steady beat. A small pretrained classifier
+(YAMNet) can: its scores go to the music detector (``MusicDetector.classified``), which applies
+the start and keep rules of ``music.classifier``, and to the debug report.
 
 Every ``music.classifier.interval_s`` the listener's last ``WINDOW_SAMPLES`` of contiguous audio go
 through the model. A chunk that does not follow the last one (a hole, the robot speaking) restarts
-the window, so the robot's own sound never reaches the model. The window and the scores stay in
-memory; ``snapshot`` has numbers only (SPEC 12).
+the window, so the robot's own sound never reaches the model. The window stays in memory and
+``snapshot`` has numbers only (SPEC 12).
 """
 
 from __future__ import annotations
@@ -85,13 +85,20 @@ class MusicClassifier:
         self._expected = math.nan  # the stamp the next contiguous chunk starts at
         self._last_run_s = -math.inf
         self._runs = self._holes = self._errors = 0
+        self._failing = False  # the last run raised
         self._recent: deque[tuple[float, float, float]] = deque(maxlen=RECENT_RUNS)
 
-    def feed(self, samples: np.ndarray, start: float) -> None:
-        """Add one mono chunk that starts at ``start`` (seconds) and score the window when it
-        is full and the interval has passed. A model error is counted and never raised."""
+    @property
+    def running(self) -> bool:
+        """Whether the scores can be trusted: the model loaded and its last run did not raise."""
+        return self._backend is not None and not self._failing
+
+    def feed(self, samples: np.ndarray, start: float) -> tuple[float, float] | None:
+        """Add one mono chunk that starts at ``start`` (seconds). Scores the window when it is
+        full and the interval has passed, and returns (music, speech), else None. A model error
+        is counted and never raised."""
         if self._backend is None:
-            return
+            return None
         audio = np.asarray(samples, dtype=np.float32)
         chunk_s = audio.size / self._rate
         if abs(start - self._expected) > chunk_s:
@@ -101,20 +108,25 @@ class MusicClassifier:
         self._window = np.concatenate([self._window, audio])[-WINDOW_SAMPLES:]
         if self._window.size == WINDOW_SAMPLES and start - self._last_run_s >= self._interval_s:
             self._last_run_s = start
-            self._score(self._backend)
+            return self._score(self._backend)
+        return None
 
-    def _score(self, backend: ClassifierBackend) -> None:
-        """Run the model on the window and keep the scores and the CPU time for the report."""
+    def _score(self, backend: ClassifierBackend) -> tuple[float, float] | None:
+        """Run the model on the window; keep the scores and the CPU time for the report and
+        return (music, speech), or None when the model raised."""
         t0 = self._timer()
         try:
             music, speech = backend.scores(self._window)
         except Exception as exc:
             self._errors += 1
+            self._failing = True
             if self._errors == 1:
                 log.warning("music classifier: %s", type(exc).__name__)
-            return
+            return None
+        self._failing = False
         self._recent.append((music, speech, (self._timer() - t0) * MS_PER_S))
         self._runs += 1
+        return music, speech
 
     def snapshot(self) -> dict[str, Any]:
         """State, counts and the spread of the last scores and costs: numbers only (SPEC 12)."""

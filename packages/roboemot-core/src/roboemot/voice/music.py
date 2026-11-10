@@ -27,6 +27,14 @@ While music plays, an estimate that reaches ``music.keep_periodicity`` also rest
 unless ``speech_heard`` says someone is speaking: a song in a real room reads far below the start
 threshold, and speech must not keep the music state alive.
 
+While the classifier decides (``classifier_primary``, set by the listener while the model runs
+and ``music.classifier.decides`` is on), only its scores start and keep music (``classified``):
+music starts when ``start_runs`` of the last ``window_runs`` runs reach ``start_score`` with music
+above speech, and every run that reaches ``keep_score`` with music above speech restarts the
+release. The beat estimates then give only the tempo and the phase, and only a holding estimate
+changes them, so a chance periodic estimate in music with no beat moves no tempo. Music with no
+holding estimate plays with no tempo. Without the model the rules below decide alone.
+
 Music starts when an estimate holds and the evidence (back-dated to the first heard hop of the
 window of the first periodic estimate in the chain) spans ``music.confirm_s``; the music interval
 starts at the evidence. It ends after ``music.release_s`` of heard audio without a holding
@@ -161,10 +169,12 @@ class MusicDetector:
             "holds": 0,
             "keeps": 0,
             "starts": 0,
+            "classifier_starts": 0,
             "stops": 0,
             "resets": 0,
         }
         self.speech_heard: Callable[[], bool] | None = None  # "someone is speaking now"
+        self.classifier_primary = False  # listener thread: the classifier decides (see the top)
         self._rejected = dict.fromkeys(REJECTIONS, 0)
         self._recent: deque[_Outcome] = deque(maxlen=RECENT_ESTIMATES)
         self._costs: deque[float] = deque(maxlen=COST_SAMPLES)
@@ -182,6 +192,7 @@ class MusicDetector:
         """Size the hop, the rings and the band filter for ``cfg`` and clear the envelope.
         Raises ValueError when a band reaches above the Nyquist frequency."""
         self._cfg = cfg
+        self._scored: deque[tuple[float, bool]] = deque(maxlen=cfg.classifier.window_runs)
         self._hop = _hop_samples(cfg, self._rate)
         self._hop_s = self._hop / self._rate
         self._fft = _fft_samples(cfg, self._rate)
@@ -400,21 +411,22 @@ class MusicDetector:
             self._evidence_from = self._first_heard()
             reason = UNSTABLE_TEMPO if chained else FIRST_PERIODIC
             self._note(KEEP if kept else reason, result, level)
-            self._publish(result)
+            self._publish(result, tempo=not self.classifier_primary)
             return None
-        self._last_hold_s = now
         self._note(HOLD, result, level)
         event = None
         since = self._evidence_from
-        if not self._view.playing and since is not None and now - since >= cfg.confirm_s:
-            event = self._start(since, now)
+        if not self.classifier_primary:
+            self._last_hold_s = now
+            if not self._view.playing and since is not None and now - since >= cfg.confirm_s:
+                event = self._start(since, now)
         self._publish(result)
         return event
 
     def _keeps_playing(self, result: _Estimate | None) -> bool:
         """Whether this estimate keeps music that already plays: periodic enough for the lower
         ``music.keep_periodicity``, and nobody is speaking."""
-        if result is None or not self._view.playing:
+        if result is None or not self._view.playing or self.classifier_primary:
             return False
         if result.periodicity < self._cfg.keep_periodicity:
             return False
@@ -513,15 +525,40 @@ class MusicDetector:
 
     # ------------------------------------------------------------------ state changes
 
-    def _publish(self, result: _Estimate | None) -> None:
-        """Swap in a new view: the estimate's tempo and anchor when it was periodic (``state``
-        shows them only while music plays), its periodicity as the confidence always."""
+    def _publish(self, result: _Estimate | None, tempo: bool = True) -> None:
+        """Swap in a new view: with ``tempo``, the estimate's tempo and anchor when it was
+        periodic (``state`` shows them only while music plays), its periodicity as the confidence
+        always."""
         view = self._view
         confidence = 0.0 if result is None else min(1.0, max(0.0, result.periodicity))
         period, anchor = view.period_s, view.anchor_s
-        if result is not None and result.periodic:
+        if tempo and result is not None and result.periodic:
             period, anchor = result.period_s, result.anchor_s
         self._view = replace(view, period_s=period, anchor_s=anchor, confidence=confidence)
+
+    def classified(self, music: float, speech: float, stamp: float) -> str | None:
+        """One classifier run at ``stamp`` (listener thread): applies the start and keep rules
+        while the classifier decides. Returns ``"started"`` when music started with it."""
+        settings = self._cfg.classifier
+        if not (self._cfg.enabled and self.classifier_primary):
+            return None
+        over_speech = music > speech
+        self._scored.append((stamp, music >= settings.start_score and over_speech))
+        if self._view.playing:
+            if music >= settings.keep_score and over_speech:
+                self._last_hold_s = stamp
+            return None
+        oldest = stamp - settings.window_runs * settings.interval_s
+        hits = [s for s, hit in self._scored if hit and s >= oldest]
+        if len(hits) < settings.start_runs:
+            return None
+        if self._previous is None or not self._previous.periodic:
+            self._view = replace(self._view, period_s=None, anchor_s=None)  # a stale tempo
+        self._last_hold_s = stamp
+        self._scored.clear()
+        with self._lock:
+            self._counts["classifier_starts"] += 1
+        return self._start(hits[0], stamp)
 
     def _start(self, since: float, now: float) -> str:
         """Music starts: open an interval back-dated to ``since`` (merged with a closed one that
@@ -605,6 +642,8 @@ class MusicDetector:
             "rejected": rejected,
             "playing": view.playing,
             "tempo_bpm": tempo,
+            "classifier_primary": self.classifier_primary,
+            "beat_locked": bool(view.period_s) if view.playing else None,
             "confidence": view.confidence,
             "cost_ms_per_audio_s": spread(costs),
             "recent": _recent_report(recent),

@@ -3607,18 +3607,44 @@ SECONDS_PER_MINUTE = 60.0
 
 
 class MusicClassifierConfig(Strict):
-    """A pretrained audio classifier beside the music detector, report only (SPEC 8, 12A)."""
+    """A pretrained audio classifier that decides whether music plays (SPEC 8, 12A)."""
 
     enabled: bool = param(
         True,
-        "Report only: score the audio the listener hears for music and speech with a small "
-        "pretrained model, for the debug report; it changes no behaviour",
+        "Score the audio the listener hears for music and speech with a small pretrained model",
         restart=True,
     )
     interval_s: float = param(
-        2.0, "Report only: time between two classifier runs", unit="s", ge=1, le=60, restart=True
+        2.0, "Time between two classifier runs", unit="s", ge=1, le=60, restart=True
     )
-    threads: int = param(1, "Report only: CPU threads of the classifier", ge=1, le=4, restart=True)
+    threads: int = param(1, "CPU threads of the classifier", ge=1, le=4, restart=True)
+    decides: bool = param(
+        True,
+        "The classifier decides whether music plays and the beat detector only gives the tempo. "
+        "Off, or without the model, the beat detector decides alone",
+    )
+    start_score: float = param(
+        0.5, "Least music score for a classifier run to count toward starting music", ge=0, le=1
+    )
+    keep_score: float = param(
+        0.3,
+        "Least music score for a classifier run to keep music playing; lower than start_score, "
+        "since a confirmed song only needs to stay",
+        ge=0,
+        le=1,
+    )
+    start_runs: int = param(
+        3, "Runs of the last window_runs that must reach start_score to start music", ge=1, le=30
+    )
+    window_runs: int = param(5, "Classifier runs looked at to start music", ge=1, le=30)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> MusicClassifierConfig:
+        if self.start_runs > self.window_runs:
+            raise ValueError("music.classifier.start_runs must not exceed window_runs")
+        if self.keep_score > self.start_score:
+            raise ValueError("music.classifier.keep_score must not exceed start_score")
+        return self
 
 
 class MusicConfig(Strict):
@@ -3629,7 +3655,7 @@ class MusicConfig(Strict):
         True, "Detect music in the room; while it plays every utterance needs the wake word"
     )
     classifier: MusicClassifierConfig = param(
-        {}, "Report only: a pretrained audio classifier beside the music detector"
+        {}, "A pretrained audio classifier that decides whether music plays"
     )
     hop_ms: float = param(
         32.0,
@@ -4794,6 +4820,21 @@ class DanceConfig(Strict):
     )
     moves_enabled: bool = param(
         True, "Dance room music with the manifest's moves, one per beat, instead of bob and sway"
+    )
+    free_move: str = param(
+        "sway",
+        "The manifest move played to music with no readable beat; without that move the robot "
+        "plays bob and sway",
+    )
+    free_bpm: float = param(
+        60.0,
+        "Tempo of the free move, for music with no readable beat; not locked to the music",
+        unit="bpm",
+        ge=30,
+        le=120,
+    )
+    free_strength: float = param(
+        0.6, "Share of the free move's size, for music with no readable beat", ge=0, le=1
     )
     move_bars: int = param(2, "Bars each move lasts before the next one", ge=1, le=16)
     move_min_half_s: float = param(

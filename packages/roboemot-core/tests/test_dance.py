@@ -1046,6 +1046,45 @@ MOVES_MAP = DanceMotionMap.model_validate(
 )
 
 
+class Free:
+    """Music with no readable beat at ``bpm`` (the ``free`` source)."""
+
+    def __init__(self, bpm=60.0, strength=1.0):
+        self.beat = Beat(60.0 / bpm, 0.0, strength, "free")
+
+    def source(self) -> BeatSource:
+        return BeatSource(lambda now: None, lambda now: self.beat)
+
+
+def test_free_music_plays_only_the_free_move(manifest):
+    cfg = DanceConfig(**MOVES_CFG, free_move="tilt", move_bars=1)
+    r = make(manifest, MOVES_MAP, Free(), cfg=cfg, beats_per_bar=2)
+    run(r, 0.0, 1.0)
+    track = run(r, 1.0, 12.0)
+    assert max(abs(v) for _, v in channel(track, SWAY)) > 0.1
+    assert all(abs(v) < 1e-9 for _, v in channel(track, BOB))
+
+
+def test_without_the_free_move_free_music_plays_bob_and_sway(manifest):
+    cfg = DanceConfig(**MOVES_CFG, free_move="missing")
+    r = make(manifest, MOVES_MAP, Free(), cfg=cfg)
+    run(r, 0.0, 1.0)
+    assert max(abs(v) for _, v in channel(run(r, 1.0, 6.0), BOB)) > 0
+
+
+def test_a_tempo_continues_the_free_move_without_a_step(manifest):
+    cfg = DanceConfig(**MOVES_CFG, free_move="tilt", move_bars=4)
+    free, room = Free(), Beat(0.5, 0.0, 1.0, "room")
+    current = [free.beat]
+    source = BeatSource(lambda now: None, lambda now: current[0])
+    holder = SimpleNamespace(source=lambda: source)
+    r = make(manifest, MOVES_MAP, holder, cfg=cfg)
+    before = channel(run(r, 0.0, 5.0), SWAY)[-1][1]
+    current[0] = room
+    after = channel(run(r, 5.0, 5.0 + TICK * 2), SWAY)[0][1]
+    assert abs(after - before) < math.radians(3)
+
+
 def test_room_music_plays_a_move_per_beat_at_full_size(manifest):
     r = make(manifest, MOVES_MAP, Room(60.0), cfg=DanceConfig(**MOVES_CFG))
     run(r, 0.0, 1.0)  # past the fade in

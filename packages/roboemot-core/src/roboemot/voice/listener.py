@@ -294,7 +294,7 @@ class VoiceListener:
         self._direction = direction
         self._gate = WakeGate("always", 0.0, music=self._music_during)  # see apply_config
         self.music: MusicDetector | None = None  # built by apply_config while music.enabled
-        self.music_classifier: MusicClassifier | None = None  # report only, set by the pipeline
+        self.music_classifier: MusicClassifier | None = None  # set by the pipeline
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self._face_info: dict[str, Any] = {}  # the last voice-at-face check's numbers
         self.load = ListenerLoad(cfg.voice.listener)
@@ -696,23 +696,35 @@ class VoiceListener:
         """Feed the music detector one chunk the listener takes (the ``music`` stage) and
         publish a change of state. A chunk inside the robot's speaking window (the echo tail a
         cut left open) is a hole to it: the robot's own sound must never count as music. The
-        report-only classifier gets the same chunks (the ``music_classifier`` stage)."""
-        if not speaking and self.music_classifier is not None:
-            self._timed("music_classifier", self.music_classifier.feed, chunk.samples, start)
+        classifier gets the same chunks (the ``music_classifier`` stage), and while it decides
+        (``music.classifier.decides``) its scores go to the detector."""
+        classifier, scores = self.music_classifier, None
+        if not speaking and classifier is not None:
+            scores = self._timed("music_classifier", classifier.feed, chunk.samples, start)
         music = self.music
         if music is None:
             return
+        music.classifier_primary = (
+            classifier is not None and classifier.running and self._cfg.music.classifier.decides
+        )
         if speaking:
             music.gap(start)
             return
+        if scores is not None:
+            self._publish_music(music, music.classified(*scores, start), chunk.stamp)
         event = self._timed("music", music.feed, chunk.samples, start)
-        if event is not None and self._bus is not None:
-            topic = "music.started" if event == STARTED else "music.stopped"
-            payload = {"tempo_bpm": music.state(chunk.stamp).tempo_bpm}
-            try:
-                self._bus.publish(topic, payload, chunk.stamp)
-            except Exception as exc:
-                log.warning("voice listener: %s subscriber raised %s", topic, type(exc).__name__)
+        self._publish_music(music, event, chunk.stamp)
+
+    def _publish_music(self, music: MusicDetector, event: str | None, stamp: float) -> None:
+        """Put a change of the music state on the bus; no change publishes nothing."""
+        if event is None or self._bus is None:
+            return
+        topic = "music.started" if event == STARTED else "music.stopped"
+        payload = {"tempo_bpm": music.state(stamp).tempo_bpm}
+        try:
+            self._bus.publish(topic, payload, stamp)
+        except Exception as exc:
+            log.warning("voice listener: %s subscriber raised %s", topic, type(exc).__name__)
 
     def _music_during(self, start: float, end: float) -> bool:
         """The wake gate's music predicate: whether music played at any time in [start, end]
