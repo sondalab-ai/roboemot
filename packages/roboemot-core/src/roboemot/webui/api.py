@@ -258,6 +258,17 @@ class Response:
 
 
 @dataclass(frozen=True)
+class StringsPage:
+    """GET /api/strings for one language and consent mode: the data (never changed) and its
+    JSON."""
+
+    lang: str
+    pseudonyms: bool
+    data: dict[str, Any]
+    body: bytes
+
+
+@dataclass(frozen=True)
 class SettingsPage:
     """The core rows of GET /api/settings for one port result (``rest``) and language: the
     localized copy (passed ``holds_vector``, never changed) and its JSON."""
@@ -370,6 +381,7 @@ class WebApi:
         self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
         self._settings_page: SettingsPage | None = None
+        self._strings_page: StringsPage | None = None
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -556,15 +568,19 @@ class WebApi:
         return language_for(self.config.conversation.language)
 
     def _strings(self, req: Request) -> Response:
-        lang = self._language()
-        strings = dict(STRINGS[lang])
-        cloud = (
-            "consent_cloud_pseudonyms"
-            if self.config.privacy.pseudonyms_to_cloud
-            else ("consent_cloud_names")
-        )
-        strings["consent_cloud"] = strings[cloud]
-        return Response(HTTPStatus.OK, {"language": lang, "strings": strings})
+        """The page strings in the page language. The body depends only on the language and
+        ``privacy.pseudonyms_to_cloud`` (which consent text is shown), so it is built and
+        serialised once per pair of them; the table itself is a constant."""
+        lang, pseudonyms = self._language(), self.config.privacy.pseudonyms_to_cloud
+        page = self._strings_page
+        if page is None or page.lang != lang or page.pseudonyms != pseudonyms:
+            strings = dict(STRINGS[lang])
+            cloud = "consent_cloud_pseudonyms" if pseudonyms else "consent_cloud_names"
+            strings["consent_cloud"] = strings[cloud]
+            data = {"language": lang, "strings": strings}
+            page = StringsPage(lang, pseudonyms, data, json.dumps(data, allow_nan=False).encode())
+            self._strings_page = page
+        return Response(HTTPStatus.OK, page.data, body=page.body)
 
     def _session(self, req: Request) -> Response:
         session = self.sessions.get(
