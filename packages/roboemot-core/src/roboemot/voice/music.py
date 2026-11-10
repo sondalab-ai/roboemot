@@ -31,9 +31,10 @@ and phase run on (a flywheel) and the hole does not count toward the release. No
 longer than ``music.blind_hold_s`` ends it.
 
 ``state`` and ``during`` read one immutable view (state and intervals together), replaced by
-one assignment: no lock. ``snapshot`` has counts, tempo, confidence and cost (CPU ms of the
-feeding thread per second of audio, ``time.thread_time`` by default) only: no audio, no
-spectrum, no envelope (SPEC 12).
+one assignment: no lock. ``snapshot`` has counts (with the reason of each estimate that did not
+hold), tempo, confidence, cost (CPU ms of the feeding thread per second of audio,
+``time.thread_time`` by default) and a summary of the last estimates only: no audio, no spectrum,
+no envelope (SPEC 12).
 """
 
 from __future__ import annotations
@@ -55,7 +56,12 @@ from ..stats import P90, quantile
 MS_PER_S = 1000.0
 DB_PER_DECADE = 10.0
 COST_SAMPLES = 600  # report only, not behaviour: one per estimate interval, ten minutes
+RECENT_ESTIMATES = 60  # report only, not behaviour: about the last minute of estimates
 STARTED, STOPPED = "started", "stopped"
+HOLD = "hold"
+QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS = "quiet", "low_periodicity", "low_heard", "few_bands"
+FIRST_PERIODIC, UNSTABLE_TEMPO = "first_periodic", "unstable_tempo"
+REJECTIONS = (QUIET, LOW_PERIODICITY, LOW_HEARD, FEW_BANDS, FIRST_PERIODIC, UNSTABLE_TEMPO)
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,18 @@ class _Estimate:
     periodicity: float
     periodic: bool  # periodicity, bands and heard share pass; stability is checked apart
     corr: np.ndarray = field(compare=False, repr=False)  # the envelope's autocorrelation by lag
+    rejected: str | None = None  # the first rule the estimate failed, None when periodic
+    bands: int | None = None  # bands carrying the beat; None when an earlier rule failed
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """One estimate interval for the report: how it ended and the numbers behind it."""
+
+    name: str
+    periodicity: float | None
+    bands: int | None
+    level_db: float | None
 
 
 class _Bands:
@@ -135,6 +153,8 @@ class MusicDetector:
         self._timer = timer
         self._lock = threading.Lock()  # leaf lock: counts and cost samples for snapshot
         self._counts = {"estimates": 0, "holds": 0, "starts": 0, "stops": 0, "resets": 0}
+        self._rejected = dict.fromkeys(REJECTIONS, 0)
+        self._recent: deque[_Outcome] = deque(maxlen=RECENT_ESTIMATES)
         self._costs: deque[float] = deque(maxlen=COST_SAMPLES)
         self._cost_busy_s = 0.0
         self._cost_audio_s = 0.0
@@ -348,29 +368,47 @@ class MusicDetector:
         """One tempo estimate at ``now``; updates the evidence chain and the state."""
         cfg = self._cfg
         result = None
-        if self._powers and statistics.fmean(self._powers) >= self._floor:
+        level = statistics.fmean(self._powers) if self._powers else 0.0
+        if level >= self._floor:
             result = self._periodic()
             with self._lock:
                 self._counts["estimates"] += 1
         previous, self._previous = self._previous, result
         if result is None or not result.periodic:
             self._evidence_from = None
+            self._note(QUIET if result is None else str(result.rejected), result, level)
             self._publish(result)
             return None
-        stable = previous is not None and previous.periodic and self._stable(previous, result)
-        if not stable:
+        chained = previous is not None and previous.periodic
+        if not (chained and previous is not None and self._stable(previous, result)):
             self._evidence_from = self._first_heard()
+            self._note(UNSTABLE_TEMPO if chained else FIRST_PERIODIC, result, level)
             self._publish(result)
             return None
         self._last_hold_s = now
-        with self._lock:
-            self._counts["holds"] += 1
+        self._note(HOLD, result, level)
         event = None
         since = self._evidence_from
         if not self._view.playing and since is not None and now - since >= cfg.confirm_s:
             event = self._start(since, now)
         self._publish(result)
         return event
+
+    def _note(self, name: str, result: _Estimate | None, level: float) -> None:
+        """Count one estimate interval's outcome and keep its numbers for the report (SPEC 12A):
+        no audio, spectrum or envelope. ``level`` is the interval's mean power."""
+        outcome = _Outcome(
+            name,
+            None if result is None else result.periodicity,
+            None if result is None else result.bands,
+            DB_PER_DECADE * math.log10(level) if level > 0 else None,
+        )
+        with self._lock:
+            if name == HOLD:
+                self._counts["holds"] += 1
+            else:
+                self._rejected[name] += 1
+            self._recent.append(outcome)
 
     def _shaped(self, onsets: np.ndarray) -> np.ndarray:
         """``onsets`` as the estimate reads them: above their moving average, then smoothed."""
@@ -400,13 +438,19 @@ class MusicDetector:
         peak = int(lags[np.argmax(corr[lags])])
         lag = self._fold(corr, _refine(corr, peak))
         periodicity = float(_at(corr, lag))
-        periodic = (
-            periodicity >= cfg.min_periodicity
-            and float(np.mean(heard)) >= cfg.min_active_share
-            and self._bands_carrying(onsets, lag) >= cfg.min_bands_active
-        )
+        rejected, bands = None, None
+        if periodicity < cfg.min_periodicity:
+            rejected = LOW_PERIODICITY
+        elif float(np.mean(heard)) < cfg.min_active_share:
+            rejected = LOW_HEARD
+        else:
+            bands = self._bands_carrying(onsets, lag)
+            if bands < cfg.min_bands_active:
+                rejected = FEW_BANDS
         anchor = _comb(envelope, stamps, lag)
-        return _Estimate(lag * self._hop_s, anchor, periodicity, periodic, corr)
+        return _Estimate(
+            lag * self._hop_s, anchor, periodicity, rejected is None, corr, rejected, bands
+        )
 
     def _fold(self, corr: np.ndarray, lag: float) -> float:
         """Fold ``lag`` into the prior tempo range when its half or double lies there and is
@@ -518,31 +562,54 @@ class MusicDetector:
         return False
 
     def snapshot(self) -> dict[str, Any]:
-        """Counts, state, tempo, confidence and cost (ms per second of audio: min, median, p90,
-        last over the kept samples): numbers only, no audio (SPEC 12)."""
+        """Counts, the reasons estimates did not hold, state, tempo, confidence, cost (ms per
+        second of audio) and a summary of the last estimates: numbers only, no audio (SPEC 12)."""
         with self._lock:
             counts = dict(self._counts)
+            rejected = dict(self._rejected)
             costs = list(self._costs)
+            recent = list(self._recent)
         view = self._view
-        ordered = sorted(costs)
-        cost: dict[str, Any] = {"samples": len(costs), "min": None, "median": None}
-        cost |= {"p90": None, "last": None}
-        if costs:
-            cost |= {
-                "min": ordered[0],
-                "median": statistics.median(ordered),
-                "p90": quantile(ordered, P90),
-                "last": costs[-1],
-            }
         tempo = SECONDS_PER_MINUTE / view.period_s if view.playing and view.period_s else None
         return {
             "enabled": self._cfg.enabled,
             **counts,
+            "rejected": rejected,
             "playing": view.playing,
             "tempo_bpm": tempo,
             "confidence": view.confidence,
-            "cost_ms_per_audio_s": cost,
+            "cost_ms_per_audio_s": _spread(costs),
+            "recent": _recent_report(recent),
         }
+
+
+def _spread(values: list[float]) -> dict[str, Any]:
+    """Number of ``values`` and their min, median, p90 and last, all None with no values."""
+    if not values:
+        return {"samples": 0, "min": None, "median": None, "p90": None, "last": None}
+    ordered = sorted(values)
+    return {
+        "samples": len(values),
+        "min": ordered[0],
+        "median": statistics.median(ordered),
+        "p90": quantile(ordered, P90),
+        "last": values[-1],
+    }
+
+
+def _recent_report(recent: list[_Outcome]) -> dict[str, Any]:
+    """The last estimate intervals for the report: how many ended each way, and the spread of
+    the periodicity, the bands carrying the beat and the level (each over the intervals that
+    have it)."""
+    outcomes: dict[str, int] = {}
+    for item in recent:
+        outcomes[item.name] = outcomes.get(item.name, 0) + 1
+    return {
+        "outcomes": outcomes,
+        "periodicity": _spread([i.periodicity for i in recent if i.periodicity is not None]),
+        "bands_carrying": _spread([float(i.bands) for i in recent if i.bands is not None]),
+        "level_db": _spread([i.level_db for i in recent if i.level_db is not None]),
+    }
 
 
 def _hop_samples(cfg: MusicConfig, rate_hz: int) -> int:

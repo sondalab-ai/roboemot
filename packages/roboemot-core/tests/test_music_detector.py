@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from roboemot.config.schema import MusicConfig, RoboEmotConfig
 from roboemot.motion.beat import room_beat
 from roboemot.voice.music import (
+    RECENT_ESTIMATES,
     MusicDetector,
     _at,
     _autocorr,
@@ -281,6 +282,65 @@ def test_not_playing_has_no_tempo_or_phase():
     run(det, silence(3.0, RATE))
     state = det.state(3.0)
     assert not state.playing and state.tempo_bpm is None and state.beat_phase_s is None
+
+
+def test_the_report_counts_every_estimate_once():
+    det = detector()
+    run(det, drum_loop(120, 8.0, RATE))
+    run(det, fan_noise(8.0, RATE, seed=3), t0=8.0)
+    snap = det.snapshot()
+    rejected = snap["rejected"]
+    assert snap["estimates"] == snap["holds"] + sum(rejected.values()) - rejected["quiet"]
+
+
+@pytest.mark.parametrize(
+    ("signal", "reason"),
+    [
+        pytest.param(lambda: silence(8.0, RATE), "quiet", id="silence"),
+        pytest.param(lambda: fan_noise(20.0, RATE, seed=2), "low_periodicity", id="fan"),
+        pytest.param(lambda: low_thump(120, 20.0, RATE), "few_bands", id="one-band"),
+        pytest.param(lambda: drum_loop(120, 8.0, RATE), "first_periodic", id="drums"),
+    ],
+)
+def test_the_report_names_the_rule_that_failed(signal, reason):
+    det = detector()
+    run(det, signal())
+    snap = det.snapshot()
+    assert snap["rejected"][reason] >= 1
+    assert snap["recent"]["outcomes"][reason] == snap["rejected"][reason]
+
+
+def test_a_tempo_change_is_reported_as_unstable():
+    det = detector()
+    det._powers.append(1.0)
+    steps = iter([_estimate(det, 120), _estimate(det, 120), _estimate(det, 170)])
+    det._periodic = lambda: next(steps)
+    det._first_heard = lambda: 0.0
+    for second in range(3):
+        det._estimate(float(second))
+    snap = det.snapshot()
+    assert snap["recent"]["outcomes"] == {"first_periodic": 1, "hold": 1, "unstable_tempo": 1}
+    assert snap["rejected"]["unstable_tempo"] == 1 and snap["holds"] == 1
+
+
+def test_recent_describes_the_music_just_heard():
+    det = detector()
+    run(det, silence(5.0, RATE))
+    run(det, drum_loop(120, 12.0, RATE), t0=5.0)
+    recent = det.snapshot()["recent"]
+    assert recent["outcomes"]["hold"] >= 1
+    assert recent["periodicity"]["median"] >= MusicConfig().min_periodicity
+    assert recent["bands_carrying"]["p90"] >= MusicConfig().min_bands_active
+    assert recent["level_db"]["last"] > MusicConfig().min_level_db
+
+
+def test_recent_keeps_only_the_last_estimates():
+    det = detector()
+    run(det, silence(RECENT_ESTIMATES + 20.0, RATE))
+    snap = det.snapshot()
+    assert snap["recent"]["outcomes"] == {"quiet": RECENT_ESTIMATES}
+    assert snap["rejected"]["quiet"] > RECENT_ESTIMATES
+    assert snap["recent"]["periodicity"]["median"] is None
 
 
 def test_snapshot_has_no_audio():
