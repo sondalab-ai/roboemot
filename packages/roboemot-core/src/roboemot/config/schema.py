@@ -3689,6 +3689,13 @@ class MusicConfig(Strict):
         "Least normalised autocorrelation of the onset envelope at the tempo",
         ge=0, le=1,
     )  # fmt: skip
+    keep_periodicity: float = param(
+        0.3,
+        "While music plays, an estimate with at least this normalised autocorrelation keeps it "
+        "playing, unless someone is speaking; lower than min_periodicity, since a confirmed song "
+        "only needs to stay",
+        ge=0, le=1,
+    )  # fmt: skip
     min_band_periodicity: float = param(
         0.25,
         "Least normalised autocorrelation of one band's own onset envelope at the tempo for the "

@@ -4,6 +4,7 @@ a ticking clock), its back-dated interval history, release, gaps, blind hold and
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -341,6 +342,53 @@ def test_recent_keeps_only_the_last_estimates():
     assert snap["recent"]["outcomes"] == {"quiet": RECENT_ESTIMATES}
     assert snap["rejected"]["quiet"] > RECENT_ESTIMATES
     assert snap["recent"]["periodicity"]["median"] is None
+
+
+def _scripted(det, *periodicities):
+    """Run ``_estimate`` once per second with scripted non-periodic estimates."""
+    det._powers.append(1.0)
+    results = iter(periodicities)
+
+    def periodic():
+        value = next(results)
+        return _Estimate(0.5, 0.0, value, False, np.zeros(2), "low_periodicity")
+
+    det._periodic = periodic
+    for second, _ in enumerate(periodicities):
+        det._estimate(float(second))
+
+
+def _playing(det):
+    det._view = replace(det._view, playing=True, heard_until=0.0)
+
+
+def test_a_lower_periodicity_keeps_music_playing():
+    det = detector(keep_periodicity=0.3)
+    _playing(det)
+    _scripted(det, 0.35)
+    assert det._last_hold_s == 0.0 and det.snapshot()["keeps"] == 1
+    assert det.snapshot()["rejected"]["low_periodicity"] == 0
+
+
+def test_too_low_a_periodicity_does_not_keep_music_playing():
+    det = detector(keep_periodicity=0.3)
+    _playing(det)
+    _scripted(det, 0.2)
+    assert det.snapshot()["keeps"] == 0 and det._last_hold_s == -math.inf
+
+
+def test_speech_does_not_keep_music_playing():
+    det = detector(keep_periodicity=0.3)
+    det.speech_heard = lambda: True
+    _playing(det)
+    _scripted(det, 0.4)
+    assert det.snapshot()["keeps"] == 0 and det._last_hold_s == -math.inf
+
+
+def test_keep_does_not_start_music():
+    det = detector(keep_periodicity=0.3)
+    _scripted(det, 0.4, 0.4, 0.4)
+    assert det.snapshot()["keeps"] == 0 and not det.state(3.0).playing
 
 
 def test_snapshot_has_no_audio():
