@@ -5,6 +5,11 @@ request path ever reaches the file system. The allow-list is the first-party fil
 files listed in the vendored kit's ``VENDORED.json``; those are checked against their sha256 at
 start-up and served with ``Cache-Control: no-cache`` and a strong ETag (304 on a match), while
 every other response stays ``no-store``.
+
+Compression: every static file but an already compressed type (fonts) is gzipped once at
+start-up, a JSON body of at least ``JSON_GZIP_MIN_BYTES`` per response (``JSON_GZIP_LEVEL``,
+cheap); each is sent gzipped only when the request accepts it, with ``Vary: Accept-Encoding`` on
+both forms. First-party files keep ``no-store`` and no ETag in both forms (SPEC 12).
 """
 
 from __future__ import annotations
@@ -14,9 +19,12 @@ import io
 import json
 import logging
 import socket
+import socketserver
 import threading
 import time
+import zlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,6 +75,12 @@ VENDOR_TYPES = {
     ".txt": "text/plain; charset=utf-8",
 }
 VENDOR_CACHE_CONTROL = "no-cache"
+COMPRESSED_TYPES = frozenset({".woff2"})  # already compressed: gzip only costs time
+GZIP_WBITS = 31  # zlib's gzip container (16 + the 15-bit window): no file name, mtime 0
+STATIC_GZIP_LEVEL = 9  # once at start-up: the smallest body is worth the time
+JSON_GZIP_LEVEL = 1  # per response on the request thread: fast, most of the gain on JSON
+JSON_GZIP_MIN_BYTES = 1024  # below this the gzip header and the CPU outweigh the saving
+GZIP_ETAG_SUFFIX = "-gz"
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -91,7 +105,59 @@ LOOPBACK_INTERFACE = "127.0.0.1"
 BUSY_REPLY = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n"
 
 
-Static = tuple[bytes, str, str | None]  # body, content type, strong ETag (vendored files only)
+@dataclass(frozen=True)
+class Static:
+    """A file served from memory: body, content type and, for vendored files, the strong ETag
+    and the gzip form (``None`` for a type compressed already) with its own ETag."""
+
+    body: bytes
+    ctype: str
+    etag: str | None = None
+    packed: bytes | None = None
+    packed_etag: str | None = None
+
+
+def gzipped(body: bytes, level: int) -> bytes:
+    """``body`` in a gzip container with no name and mtime 0, so equal input gives equal bytes.
+    ``zlib.compress`` drops the GIL while it compresses, so other threads keep running."""
+    return zlib.compress(body, level, wbits=GZIP_WBITS)
+
+
+def accepts_gzip(header: str | None) -> bool:
+    """Whether an ``Accept-Encoding`` value allows gzip: ``gzip`` (or, when it is not named,
+    ``*``) with a q-value above 0. No header, or a q-value that cannot be read, means no."""
+    if not header:
+        return False
+    found: dict[str, float] = {}
+    for item in header.split(","):
+        name, _, params = item.partition(";")
+        q = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip().lower() == "q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = 0.0
+        found.setdefault(name.strip().lower(), q)
+    return found.get("gzip", found.get("*", 0.0)) > 0
+
+
+def packed_form(body: bytes) -> bytes | None:
+    """The gzip form of a static file, made once at start-up at ``STATIC_GZIP_LEVEL``; ``None``
+    when it would not be smaller (then the file is only ever sent as it is)."""
+    packed = gzipped(body, STATIC_GZIP_LEVEL)
+    return packed if len(packed) < len(body) else None
+
+
+def load_first_party() -> dict[str, Static]:
+    """The first-party files of ``STATIC_FILES``, keyed by URL path, with their gzip form. No
+    ETag: SPEC 12 keeps them ``no-store``, so they are never revalidated, only compressed."""
+    out: dict[str, Static] = {}
+    for route, (name, ctype) in STATIC_FILES.items():
+        body = (STATIC_DIR / name).read_bytes()
+        out[route] = Static(body, ctype, packed=packed_form(body))
+    return out
 
 
 def load_vendor() -> dict[str, Static]:
@@ -113,7 +179,9 @@ def load_vendor() -> dict[str, Static]:
         body = path.read_bytes()
         if hashlib.sha256(body).hexdigest() != digest:
             raise RuntimeError(f"vendored file {name} does not match VENDORED.json")
-        out[VENDOR_ROUTE + name] = (body, ctype, f'"{digest}"')
+        packed = None if path.suffix in COMPRESSED_TYPES else packed_form(body)
+        packed_etag = f'"{digest}{GZIP_ETAG_SUFFIX}"' if packed is not None else None
+        out[VENDOR_ROUTE + name] = Static(body, ctype, f'"{digest}"', packed, packed_etag)
     return out
 
 
@@ -160,6 +228,14 @@ class _Httpd(ThreadingHTTPServer):
     api: WebApi
     statics: dict[str, Static]
     slots: threading.BoundedSemaphore
+
+    def server_bind(self) -> None:
+        """``TCPServer.server_bind`` plus the two names ``HTTPServer`` sets, without its
+        ``socket.getfqdn``: a reverse lookup of ``0.0.0.0`` can block start-up for seconds and
+        nothing here reads ``server_name``. The port is the bound one (``webui.port`` may be 0)."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name, self.server_port = str(host), int(port)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         """Serve on a new thread, or refuse with 503 when ``max_connections`` are in use."""
@@ -245,11 +321,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         if self.command in ("GET", "HEAD") and path in self.server.statics:
-            body, ctype, etag = self.server.statics[path]
-            if etag is not None and etag_matches(self.headers.get("If-None-Match"), etag):
-                self._send(HTTPStatus.NOT_MODIFIED, b"", ctype, etag=etag)
-            else:
-                self._send(HTTPStatus.OK, body, ctype, etag=etag)
+            self._send_static(self.server.statics[path])
             return
         if self.command in ("GET", "HEAD") and not path.startswith("/api/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -268,6 +340,20 @@ class _Handler(BaseHTTPRequestHandler):
         if sent and resp.after is not None:
             self.wfile.flush()
             resp.after()
+
+    def _send_static(self, item: Static) -> None:
+        """A file from memory: its gzip form when it has one and the request accepts gzip, 304
+        when ``If-None-Match`` names the ETag of the form this request would get (a file
+        without an ETag, first-party, is always sent whole and ``no-store``)."""
+        vary = item.packed is not None
+        if vary and accepts_gzip(self.headers.get("Accept-Encoding")):
+            body, etag, encoding = item.packed or b"", item.packed_etag, "gzip"
+        else:
+            body, etag, encoding = item.body, item.etag, None
+        if etag is not None and etag_matches(self.headers.get("If-None-Match"), etag):
+            self._send(HTTPStatus.NOT_MODIFIED, b"", item.ctype, etag=etag, vary=vary)
+        else:
+            self._send(HTTPStatus.OK, body, item.ctype, etag=etag, encoding=encoding, vary=vary)
 
     def _read_body(self, limit: int) -> bytes | None:
         """The body, or None after an error response; the size is checked before reading."""
@@ -293,13 +379,22 @@ class _Handler(BaseHTTPRequestHandler):
                 resp.status, resp.data, resp.content_type or "application/octet-stream", resp
             )
             return True
-        try:
-            payload = json.dumps(resp.data, allow_nan=False).encode()
-        except (TypeError, ValueError):
-            log.error("web ui response is not JSON-serialisable")
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
-            return False
-        self._send(resp.status, payload, "application/json; charset=utf-8", resp)
+        payload = resp.body
+        if payload is None:
+            try:
+                payload = json.dumps(resp.data, allow_nan=False).encode()
+            except (TypeError, ValueError):
+                log.error("web ui response is not JSON-serialisable")
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
+                return False
+        ctype = "application/json; charset=utf-8"
+        if len(payload) < JSON_GZIP_MIN_BYTES:
+            self._send(resp.status, payload, ctype, resp)
+        elif accepts_gzip(self.headers.get("Accept-Encoding")):
+            packed = gzipped(payload, JSON_GZIP_LEVEL)
+            self._send(resp.status, packed, ctype, resp, encoding="gzip", vary=True)
+        else:
+            self._send(resp.status, payload, ctype, resp, vary=True)
         return True
 
     def _send_json(self, status: HTTPStatus, data: Any) -> None:
@@ -312,12 +407,18 @@ class _Handler(BaseHTTPRequestHandler):
         ctype: str,
         resp: Response | None = None,
         etag: str | None = None,
+        encoding: str | None = None,
+        vary: bool = False,
     ) -> None:
         self.deadline.arm()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         if status != HTTPStatus.NOT_MODIFIED:
             self.send_header("Content-Length", str(len(body)))
+        if encoding is not None:
+            self.send_header("Content-Encoding", encoding)
+        if vary:
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header(
             "Content-Security-Policy", CSP.format(ancestors=self.server.api.web.frame_ancestors)
         )
@@ -442,9 +543,6 @@ def make_server(
     httpd = _Httpd((bind, web.port), _Handler)
     httpd.slots = threading.BoundedSemaphore(web.max_connections)  # restart field
     httpd.api = api
-    httpd.statics = {
-        route: ((STATIC_DIR / name).read_bytes(), ctype, None)
-        for route, (name, ctype) in STATIC_FILES.items()
-    }
+    httpd.statics = load_first_party()
     httpd.statics.update(load_vendor())
     return Server(httpd, pins)

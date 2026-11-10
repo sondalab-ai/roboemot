@@ -250,6 +250,43 @@ class Response:
     after: Callable[[], None] | None = None
     # Set with ``bytes`` data (a JPEG): the body is sent as is with this media type.
     content_type: str | None = None
+    # Objects inside ``data`` that already passed ``holds_vector`` (shared, never changed after
+    # the check): the guard skips them by identity instead of scanning them again.
+    vetted: tuple[Any, ...] = ()
+    # ``data`` already serialised (exactly ``json.dumps(data, allow_nan=False)``): sent as is.
+    body: bytes | None = None
+
+
+@dataclass(frozen=True)
+class StringsPage:
+    """GET /api/strings for one language and consent mode: the data (never changed) and its
+    JSON."""
+
+    lang: str
+    pseudonyms: bool
+    data: dict[str, Any]
+    body: bytes
+
+
+@dataclass(frozen=True)
+class SettingsPage:
+    """The core rows of GET /api/settings for one port result (``rest``) and language: the
+    localized copy (passed ``holds_vector``, never changed) and its JSON."""
+
+    rest: list[FieldDescriptor]
+    lang: str
+    fields: list[Any]
+    encoded: bytes
+
+    def body(self, robot: Any) -> bytes | None:
+        """The whole response as ``json.dumps`` would write it, with the robot block of this
+        request serialised now; ``None`` when that block does not serialise (the server then
+        answers its usual error)."""
+        try:
+            block = json.dumps(robot, allow_nan=False).encode()
+        except (TypeError, ValueError):
+            return None
+        return b'{"fields": ' + self.encoded + b', "robot": ' + block + b', "pin_required": true}'
 
 
 def live_cursor(query: str) -> tuple[int, str]:
@@ -282,13 +319,16 @@ class ApiError(Exception):
         self.field = field
 
 
-def holds_vector(value: Any) -> bool:
-    """True if ``value`` contains a list of ``VECTOR_GUARD_LEN`` or more numbers."""
+def holds_vector(value: Any, vetted: tuple[Any, ...] = ()) -> bool:
+    """True if ``value`` contains a list of ``VECTOR_GUARD_LEN`` or more numbers. An object in
+    ``vetted`` (matched by identity) was checked before and is not scanned again."""
+    if any(value is done for done in vetted):
+        return False
     if isinstance(value, dict):
-        return any(holds_vector(x) for x in value.values())
+        return any(holds_vector(x, vetted) for x in value.values())
     if isinstance(value, list | tuple):
         numbers = sum(isinstance(x, int | float) and not isinstance(x, bool) for x in value)
-        return numbers >= VECTOR_GUARD_LEN or any(holds_vector(x) for x in value)
+        return numbers >= VECTOR_GUARD_LEN or any(holds_vector(x, vetted) for x in value)
     return False
 
 
@@ -340,6 +380,8 @@ class WebApi:
         self.sessions = Sessions(lambda: self.web)
         self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
+        self._settings_page: SettingsPage | None = None
+        self._strings_page: StringsPage | None = None
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -370,7 +412,7 @@ class WebApi:
         except Exception as exc:
             log.error("web ui handler failed: %s", type(exc).__name__)
             resp = Response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
-        if holds_vector(resp.data):
+        if holds_vector(resp.data, resp.vetted):
             log.error("web ui response blocked: it held a long list of numbers")
             return Response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "vector_leak"})
         return resp
@@ -526,15 +568,19 @@ class WebApi:
         return language_for(self.config.conversation.language)
 
     def _strings(self, req: Request) -> Response:
-        lang = self._language()
-        strings = dict(STRINGS[lang])
-        cloud = (
-            "consent_cloud_pseudonyms"
-            if self.config.privacy.pseudonyms_to_cloud
-            else ("consent_cloud_names")
-        )
-        strings["consent_cloud"] = strings[cloud]
-        return Response(HTTPStatus.OK, {"language": lang, "strings": strings})
+        """The page strings in the page language. The body depends only on the language and
+        ``privacy.pseudonyms_to_cloud`` (which consent text is shown), so it is built and
+        serialised once per pair of them; the table itself is a constant."""
+        lang, pseudonyms = self._language(), self.config.privacy.pseudonyms_to_cloud
+        page = self._strings_page
+        if page is None or page.lang != lang or page.pseudonyms != pseudonyms:
+            strings = dict(STRINGS[lang])
+            cloud = "consent_cloud_pseudonyms" if pseudonyms else "consent_cloud_names"
+            strings["consent_cloud"] = strings[cloud]
+            data = {"language": lang, "strings": strings}
+            page = StringsPage(lang, pseudonyms, data, json.dumps(data, allow_nan=False).encode())
+            self._strings_page = page
+        return Response(HTTPStatus.OK, page.data, body=page.body)
 
     def _session(self, req: Request) -> Response:
         session = self.sessions.get(
@@ -873,14 +919,37 @@ class WebApi:
         rows it claims, which are then absent from ``fields``); ``pin_required``: the note that
         every write re-enters the PIN."""
         port = self._settings_port()
-        fields, robot = port.robot_split(port.fields())
+        rest, robot = port.robot_split(port.fields())
         lang = self._language()
         if robot is not None:
             prefix = f"{PATH_ROOT}.{robot['id']}."
             own = frozenset(f["path"] for f in robot["fields"] if f["path"].startswith(prefix))
             robot = {**robot, "fields": localize(robot["fields"], lang, own)}
-        fields = localize(fields, lang)
-        return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
+        page = self._localized(rest, lang)
+        if page is None:  # not kept: sent unvetted, so the guard scans (and blocks) it
+            data = {"fields": list(localize(rest, lang)), "robot": robot, "pin_required": True}
+            return Response(HTTPStatus.OK, data)
+        data = {"fields": page.fields, "robot": robot, "pin_required": True}
+        return Response(HTTPStatus.OK, data, vetted=(page.fields,), body=page.body(robot))
+
+    def _localized(self, rest: list[FieldDescriptor], lang: str) -> SettingsPage | None:
+        """``rest`` localized, reused while the port hands back the same list (held, ``is``) for
+        the same language. Only a copy that passed ``holds_vector`` and serialises is kept (the
+        response guard may then skip it); otherwise ``None``. The robot block, built per
+        request, is scanned and serialised every time."""
+        page = self._settings_page
+        if page is not None and page.rest is rest and page.lang == lang:
+            return page
+        fields = list(localize(rest, lang))
+        if holds_vector(fields):
+            return None
+        try:
+            encoded = json.dumps(fields, allow_nan=False).encode()
+        except (TypeError, ValueError):
+            return None
+        page = SettingsPage(rest, lang, fields, encoded)
+        self._settings_page = page
+        return page
 
     def _settings_reveal(self, req: Request) -> Response:
         """The private fields (privacy, location) with their real values. Admin only: the

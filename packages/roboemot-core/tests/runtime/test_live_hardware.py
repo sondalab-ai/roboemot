@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from types import SimpleNamespace
 
 import psutil
 import pytest
+from roboemot.diagnostics import system
+from roboemot.runtime import live_hardware
 from roboemot.runtime.live_hardware import HardwareReader, busy_percent, throttle_state
 
 
@@ -134,3 +137,30 @@ def test_one_failed_reading_leaves_the_others(machine, monkeypatch, tmp_path):
 def test_swap_is_none_on_a_system_without_swap(machine, monkeypatch, tmp_path):
     monkeypatch.setattr(psutil, "swap_memory", lambda: SimpleNamespace(total=0, percent=0.0))
     assert reader(tmp_path)()["memory"]["swap_percent"] is None
+
+
+@pytest.mark.parametrize("found", ["/usr/bin/vcgencmd", None])
+def test_vcgencmd_is_looked_up_once_for_every_refresh(machine, tmp_path, monkeypatch, found):
+    lookups, runs = [], []
+
+    def which(cmd):
+        lookups.append(cmd)
+        return found
+
+    def run(cmd, **kw):
+        runs.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="throttled=0x50005\n")
+
+    monkeypatch.setattr(live_hardware.shutil, "which", which)
+    monkeypatch.setattr(
+        live_hardware, "read_throttling", lambda cmd: system.read_throttling(cmd, run)
+    )
+    (tmp_path / "wireless").write_text(WIRELESS)
+    read = HardwareReader(proc_wireless=tmp_path / "wireless")
+    blocks = [read()["throttling"] for _ in range(3)]
+    assert lookups == ["vcgencmd"], "one PATH scan, also when it found nothing"
+    if found:
+        assert runs == [[found, "get_throttled"]] * 3
+        assert blocks[-1]["now"] == ["throttled", "under_voltage"]
+    else:
+        assert runs == [] and blocks == [None] * 3

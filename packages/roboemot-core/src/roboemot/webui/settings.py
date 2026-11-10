@@ -43,6 +43,7 @@ from roboemot.config.catalogue import (
     ENTRY_KINDS,
     FieldDescriptor,
     build_catalogue,
+    hidden_private,
     without_choices,
     write_only,
 )
@@ -122,6 +123,35 @@ LANGUAGE_DICTS = frozenset(
 REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
 APP_FILE = "app"
 NO_KEY_REF = "none"  # the api_key of a route without a key
+
+
+@dataclass(frozen=True)
+class _Built:
+    """One catalogue build with private values shown, for the effective config ``cfg``."""
+
+    cfg: RoboEmotConfig
+    rows: list[FieldDescriptor]
+
+
+@dataclass(frozen=True)
+class _View:
+    """The rows of ``base`` with the language choice ``offered``: shown and with private values
+    hidden."""
+
+    base: list[FieldDescriptor]
+    offered: list[str]
+    revealed: list[FieldDescriptor]
+    hidden: list[FieldDescriptor]
+
+
+@dataclass(frozen=True)
+class _Split:
+    """``robot_split`` of ``fields`` under the plugin's raw ``claims``."""
+
+    fields: list[FieldDescriptor]
+    claims: tuple[Any, ...]
+    rest: list[FieldDescriptor]
+    mine: list[FieldDescriptor]
 
 
 @dataclass(frozen=True)
@@ -380,12 +410,17 @@ class SettingsEditor:
         # route name -> key bound from the web (``none`` or ``${secret:name}``), SPEC 8 Secrets
         self._keys: dict[str, str] = {}
         self._lock = threading.Lock()
+        # catalogue caches, each swapped whole (one reference assignment), never edited
+        self._base: _Built | None = None
+        self._view: _View | None = None
+        self._split: _Split | None = None
 
     # ------------------------------------------------------------------ reading
 
     def fields(self) -> list[FieldDescriptor]:
         """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
-        (privacy, location) are hidden."""
+        (privacy, location) are hidden. The list and its rows are shared between callers until
+        the configuration changes: read them, never change them."""
         return self._catalogue()
 
     def robot_split(
@@ -394,14 +429,13 @@ class SettingsEditor:
         """Split a ``fields()`` result into the core rows and the robot block. The plugin's
         read-only rows come first, then the rows of the config paths it claims (same descriptors
         as before, still written by path); core rows lose the claimed ones. With no plugin, or a
-        failing one, the rows are returned whole and the block is ``None``."""
+        failing one, the rows are returned whole and the block is ``None``. The plugin is asked
+        on every call; the split itself is reused while ``fields`` and the claims are the same."""
         built = build_section(self._plugin, self.stack, self.manifest)
         if built is None:
             return fields, None
         section, robot_id = built
-        claims = vet_claims(section.claims, fields)
-        mine = [f for f in fields if claimed(f["path"], claims)]
-        rest = [f for f in fields if not claimed(f["path"], claims)]
+        rest, mine = self._split_rows(fields, tuple(section.claims))
         block: RobotBlock = {
             "id": robot_id,
             "title": section.title,
@@ -410,6 +444,21 @@ class SettingsEditor:
             "fields": [*section.fields, *mine],
         }
         return rest, block
+
+    def _split_rows(
+        self, fields: list[FieldDescriptor], raw: tuple[Any, ...]
+    ) -> tuple[list[FieldDescriptor], list[FieldDescriptor]]:
+        """``(rest, claimed rows)`` of ``fields`` under the plugin's claims ``raw``. The same
+        ``fields`` object (held, compared with ``is``) and equal claims give the same lists, so
+        the page's localized copy can be cached on them; anything else splits again."""
+        split = self._split
+        if split is not None and split.fields is fields and split.claims == raw:
+            return split.rest, split.mine
+        claims = vet_claims(raw, fields)
+        mine = [f for f in fields if claimed(f["path"], claims)]
+        rest = [f for f in fields if not claimed(f["path"], claims)]
+        self._split = _Split(fields, raw, rest, mine)
+        return rest, mine
 
     def restart_hook(self) -> Callable[[], None] | None:
         """The robot plugin's restart, or ``None`` when it has none or cannot restart now."""
@@ -806,19 +855,42 @@ class SettingsEditor:
     def _rows(self) -> dict[str, FieldDescriptor]:
         return {row["path"]: row for row in self._catalogue(reveal_private=True)}
 
-    def _catalogue(self, **kwargs: Any) -> list[FieldDescriptor]:
+    def _catalogue(self, reveal_private: bool = False) -> list[FieldDescriptor]:
         """The field catalogue with ``conversation.language`` as a choice: the languages whose voice
         models are installed (``languages.installed_languages``) plus the current value, so any
-        other value is refused by the enum cleaner, on every write path."""
-        rows = build_catalogue(self.stack, _writable, **kwargs)
+        other value is refused by the enum cleaner, on every write path.
+
+        Shared and read-only: the same list is returned until the effective configuration or the
+        offered languages change (``_built``, ``_view``); callers copy before they change a row."""
         current = self.stack.effective()
         offered = sorted({*self._installed(current), current.conversation.language})
-        return [
-            cast(FieldDescriptor, {**row, "kind": "enum", "choices": offered})
-            if row["path"] == LANGUAGE_PATH
-            else row
-            for row in rows
-        ]
+        base = self._built(current)
+        view = self._view
+        if view is None or view.base is not base or view.offered != offered:
+            revealed = [
+                cast(FieldDescriptor, {**row, "kind": "enum", "choices": offered})
+                if row["path"] == LANGUAGE_PATH
+                else row
+                for row in base
+            ]
+            view = _View(base, offered, revealed, hidden_private(revealed))
+            self._view = view
+        return view.revealed if reveal_private else view.hidden
+
+    def _built(self, current: RoboEmotConfig) -> list[FieldDescriptor]:
+        """The catalogue rows with private values shown, built once per effective configuration.
+
+        ``ConfigStack.effective()`` hands out one object until a layer, the runtime store, the
+        channels or a runtime TTL changes, and every such change makes a new object, so its
+        identity (a strong reference is kept: an ``is`` test, never an ``id``) versions every
+        input of ``build_catalogue``. A build that raced a write is used but not kept."""
+        built = self._base
+        if built is not None and built.cfg is current:
+            return built.rows
+        rows = build_catalogue(self.stack, _writable, reveal_private=True)
+        if self.stack.effective() is current:
+            self._base = _Built(current, rows)
+        return rows
 
     def _apply(
         self,
