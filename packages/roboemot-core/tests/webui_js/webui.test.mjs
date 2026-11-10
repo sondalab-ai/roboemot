@@ -123,3 +123,19 @@ test("PIN: the login form clears the PIN field and sends it only in the request 
   assert.deepEqual(login.body, { pin: SECRET_PIN });
   assert.ok(!storageDump(page.window).includes(SECRET_PIN));
 });
+
+test("a network failure reads as the robot being out of reach, in the page language", async () => {
+  const page = await loadPage({
+    "GET /api/strings": { language: "it", strings: { err_unreachable: "Impossibile raggiungere il robot.", err_generic: "Qualcosa è andato storto." } },
+  });
+  const served = page.window.fetch;
+  page.window.fetch = async (path, init) => {
+    if (path === "/api/login") throw new TypeError("Failed to fetch");
+    return served(path, init);
+  };
+  const input = page.document.querySelector("#pin");
+  input.value = SECRET_PIN;
+  submit(page.window, input.closest("form"));
+  await settle();
+  assert.equal(page.document.querySelector("#notice").textContent, "Impossibile raggiungere il robot.");
+});

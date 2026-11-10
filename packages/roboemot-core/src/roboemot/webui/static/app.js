@@ -166,12 +166,18 @@ async function api(method, path, body, extra) {
   const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
-  const resp = await fetch(path, {
-    method,
-    headers,
-    credentials: "same-origin",
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method,
+      headers,
+      credentials: "same-origin",
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    // fetch rejects only when no response came back (network down, robot off, Wi-Fi lost).
+    throw new Error("unreachable");
+  }
   let data = {};
   try { data = await resp.json(); } catch (e) { data = {}; }
   if (!resp.ok) {
