@@ -198,6 +198,29 @@ def test_the_prebuilt_settings_body_is_the_json_of_its_data(tmp_path, stack, plu
         assert (resp.data["robot"] is None) is (plugin is None)
 
 
+def test_a_post_answer_is_gzipped_but_never_kept(tmp_path, stack):
+    srv, client = serve(tmp_path, SettingsEditor(stack), stack)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=5)
+        body = json.dumps({"pin": PIN}).encode()
+        headers = {
+            **GZIP,
+            "Cookie": client.cookie,
+            "X-CSRF-Token": client.csrf,
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{client.port}",
+        }
+        conn.request("POST", "/api/settings/reveal", body=body, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        assert resp.status == 200 and resp.headers["Content-Encoding"] == "gzip"
+        assert json.loads(gzip.decompress(data))["fields"]
+        assert srv._httpd.packed_json == {}
+    finally:
+        srv.stop()
+
+
 @pytest.mark.parametrize(
     ("header", "expected"),
     [

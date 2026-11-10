@@ -387,11 +387,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _packed_json(self, payload: bytes) -> bytes:
         """The gzip form of a JSON body. An identical body sent lately (the settings list, until
         the configuration changes) reuses its form: the key is the exact bytes, so a hit is what
-        a fresh compression would give. Bounded to ``GZIP_CACHE_ENTRIES`` bodies."""
+        a fresh compression would give. Bounded to ``GZIP_CACHE_ENTRIES`` bodies, and only GET
+        bodies are kept: a POST answer (the PIN-checked reveal) must not outlive its request."""
         cache = self.server.packed_json
         packed = cache.get(payload)
         if packed is None:
             packed = gzipped(payload, JSON_GZIP_LEVEL)
+            if self.command != "GET":
+                return packed
             with self.server.packed_lock:
                 cache[payload] = packed
                 while len(cache) > GZIP_CACHE_ENTRIES:
