@@ -30,6 +30,15 @@ const AUDIO = {
 const STRINGS = {
   live_reflex_last: "Last: {name}, {n} s ago",
   live_cpu_temp: "CPU temperature: {n} C",
+  live_cpu_load: "CPU load: {n} %",
+  live_cpu_freq_max: "CPU clock: {n} of {max} MHz",
+  live_memory: "Memory used: {n} %",
+  live_disk: "Disk: {free} GB free ({n} % used)",
+  live_wifi: "Wi-Fi: {n} dBm, link quality {q}",
+  live_process_mem: "RoboEmot memory: {n} MB, {threads} threads",
+  live_throttle: "Throttling",
+  live_throttle_active: "Now: {names}",
+  live_throttle_flag_under_voltage: "under-voltage",
   live_people: "People: {n}",
   live_elapsed: "Waiting for {n} s",
   live_bpm: "{n} BPM",
@@ -78,6 +87,38 @@ test("the Live tab sits next to the others and draws one card per group", async 
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
   }
   assert.equal(page.document.querySelector("#notice").hidden, true);
+});
+
+test("the system card shows the hardware readings", async (t) => {
+  const system = {
+    cpu_temp_c: 51.2,
+    cpu: { percent: 12.5, freq_mhz: 1500, freq_max_mhz: 1800 },
+    memory: { percent: 41.3, swap_percent: null },
+    throttling: { now: ["under_voltage"], since_boot: ["under_voltage"] },
+    disk: { free_gb: 8, percent: 62.5 },
+    wifi: { signal_dbm: -52, link_quality: 58 },
+    process: { cpu_percent: null, rss_mb: 150, threads: 21 },
+  };
+  const page = await livePage(t, { "GET /api/live/state": { ...STATE, system } });
+  await openLive(page);
+  const text = page.document.querySelector("#live-cards").textContent;
+  for (const expected of [
+    "CPU load: 12.5 %", "CPU clock: 1500 of 1800 MHz", "Memory used: 41.3 %",
+    "Disk: 8 GB free (62.5 % used)", "Wi-Fi: -52 dBm, link quality 58",
+    "RoboEmot memory: 150 MB, 21 threads", "Now: under-voltage",
+  ]) {
+    assert.ok(text.includes(expected), expected);
+  }
+  assert.ok(!text.includes("live_swap") && !text.includes("live_process_cpu"), "a null reading draws no line");
+});
+
+test("the system card draws no hardware line where the OS reports none", async (t) => {
+  const page = await livePage(t, { "GET /api/live/state": { ...STATE, system: { cpu_temp_c: 51.2, cpu: null, throttling: null, disk: null, wifi: null } } });
+  await openLive(page);
+  const text = page.document.querySelector("#live-cards").textContent;
+  for (const hidden of ["CPU load", "Throttling", "Disk", "Wi-Fi", "RoboEmot memory"]) {
+    assert.ok(!text.includes(hidden), hidden);
+  }
 });
 
 test("the modes card shows a warning while microphone audio may leave the robot", async (t) => {

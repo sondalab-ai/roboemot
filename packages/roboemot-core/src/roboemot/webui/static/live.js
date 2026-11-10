@@ -210,10 +210,54 @@ function liveBeatCard(d) {
   return node;
 }
 
+function liveSystemLine(key, values) {
+  return values.n == null ? [] : [el("p", {}, t(key, values))];
+}
+
+function liveThrottling(state) {
+  if (state == null) return [];
+  const now = state.now.length > 0;
+  const shown = now ? state.now : state.since_boot;
+  if (shown.length === 0) return [liveRow(t("live_throttle"), badge(t("live_throttle_ok"), "success"))];
+  const names = shown.map((n) => word("live_throttle_flag_", n)).join(", ");
+  return [liveRow(t("live_throttle"), badge(t(now ? "live_throttle_active" : "live_throttle_past", { names }), now ? "danger" : "warning"))];
+}
+
+function liveSystemCpu(cpu) {
+  const c = cpu == null ? {} : cpu;
+  return [
+    liveSystemLine("live_cpu_load", { n: c.percent }),
+    c.freq_max_mhz == null
+      ? liveSystemLine("live_cpu_freq", { n: c.freq_mhz })
+      : liveSystemLine("live_cpu_freq_max", { n: c.freq_mhz, max: c.freq_max_mhz }),
+  ];
+}
+
+function liveSystemHost(s) {
+  const memory = s.memory == null ? {} : s.memory;
+  const disk = s.disk == null ? {} : s.disk;
+  const wifi = s.wifi == null ? {} : s.wifi;
+  return [
+    liveSystemLine("live_memory", { n: memory.percent }),
+    liveSystemLine("live_swap", { n: memory.swap_percent }),
+    liveSystemLine("live_disk", { n: disk.percent, free: disk.free_gb }),
+    liveSystemLine("live_wifi", { n: wifi.signal_dbm, q: wifi.link_quality }),
+  ];
+}
+
+function liveSystemProcess(process) {
+  const p = process == null ? {} : process;
+  return [
+    liveSystemLine("live_process_cpu", { n: p.cpu_percent }),
+    liveSystemLine("live_process_mem", { n: p.rss_mb, threads: p.threads }),
+  ];
+}
+
 function liveSystemCard(d) {
-  const temp = d.system.cpu_temp_c;
-  return card(t("tab_live"), t("live_system"), el("p", {},
-    temp === null ? t("live_cpu_temp_none") : t("live_cpu_temp", { n: temp })));
+  const s = d.system;
+  const temp = s.cpu_temp_c === null ? t("live_cpu_temp_none") : t("live_cpu_temp", { n: s.cpu_temp_c });
+  return card(t("tab_live"), t("live_system"), el("p", {}, temp),
+    liveSystemCpu(s.cpu), liveThrottling(s.throttling), liveSystemHost(s), liveSystemProcess(s.process));
 }
 
 function liveDisabledView(box) {

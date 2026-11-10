@@ -5627,7 +5627,7 @@ class LiveConfig(Strict):
     enabled: bool = param(
         False,
         "Serve the Live tab's inner-state panel (mood, modes, conversation phase, who is in "
-        "view by display name, last reflex, motion state, CPU temperature); off by default "
+        "view by display name, last reflex, motion state, hardware readings); off by default "
         "because it shows who the robot sees",
         opt_in=True,
     )
@@ -5643,7 +5643,7 @@ class LiveConfig(Strict):
     )
     system_cache_s: float = param(
         5.0,
-        "How long the Live tab reuses one CPU temperature reading",
+        "How long the Live tab reuses one set of hardware readings",
         unit="s",
         ge=1,
         le=300,
