@@ -37,8 +37,19 @@ function when(value, timeOnly) {
   return timeOnly ? d.toLocaleTimeString(state.lang) : d.toLocaleString(state.lang);
 }
 
-// Shown when the page cannot load its strings: the only text the page holds itself.
-const UNREACHABLE = { en: "Cannot reach the robot.", it: "Impossibile raggiungere il robot." };
+// The only text the page holds itself, for when it cannot load its strings: the same keys and
+// texts as webui/strings.py (tests/test_webui_page.py checks that they match).
+const PAGE_HELD = {
+  en: { err_unreachable: "Cannot reach the robot.", notice_dismiss: "Dismiss" },
+  it: { err_unreachable: "Impossibile raggiungere il robot.", notice_dismiss: "Chiudi" },
+};
+
+// `key` from the loaded strings, else from PAGE_HELD in the page (or browser) language.
+function held(key) {
+  if (state.strings[key]) return state.strings[key];
+  const lang = state.lang || String(navigator.language || "").slice(0, 2);
+  return (PAGE_HELD[lang] || PAGE_HELD.en)[key];
+}
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -152,12 +163,42 @@ function table(head, rows) {
     el("tbody", {}, rows)));
 }
 
+// A success toast leaves on its own after this long; an error stays until it is cleared, replaced or
+// dismissed. The kit gives no duration: this leaves time to read a two-line message twice.
+const NOTICE_SUCCESS_MS = 8000;
+const toastState = { error: null, timer: null };
+const SVG_NS = "http://www.w3.org/2000/svg";
+const TOAST_ICONS = { success: "M3.5 8.5l3 3 6-7", danger: "M8 3.5v5M8 12v0.5", close: "M4 4l8 8M12 4l-8 8" };
+
+// A 16-unit stroked glyph from TOAST_ICONS, hidden from assistive technology.
+function toastIcon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  const path = document.createElementNS(SVG_NS, "path");
+  for (const [k, v] of [["viewBox", "0 0 16 16"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(k, v);
+  for (const [k, v] of [["d", TOAST_ICONS[name]], ["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "2"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) path.setAttribute(k, v);
+  svg.append(path);
+  return svg;
+}
+
+// One toast at a time in the kit's toast stack (#notice, always in the page): a success in its
+// polite region, an error in its alert region; "" clears. An error equal to the last one reported
+// is not shown or announced again, even after a dismiss: a poll that keeps failing speaks once.
 function notice(message, isError) {
-  const n = document.getElementById("notice");
-  n.setAttribute("aria-live", isError ? "assertive" : "polite");
-  n.hidden = !message;
-  n.className = message ? "sl-callout sl-callout--" + (isError ? "danger" : "success") : "";
-  n.replaceChildren(...(message ? [el("div", { class: "sl-callout__body" }, message)] : []));
+  if (isError && message && message === toastState.error) return;
+  clearTimeout(toastState.timer);
+  toastState.timer = null;
+  toastState.error = isError && message ? message : null;
+  for (const region of document.querySelectorAll("#notice .sl-toast-stack__live")) region.replaceChildren();
+  if (!message) return;
+  const tone = isError ? "danger" : "success";
+  const toast = el("div", { class: "sl-toast sl-toast--" + tone },
+    el("span", { class: "sl-toast__mark", "aria-hidden": "true" }, toastIcon(tone)),
+    el("div", { class: "sl-toast__content" }, el("p", { class: "sl-toast__title" }, message)));
+  const dismiss = () => { clearTimeout(toastState.timer); toast.remove(); };
+  toast.append(el("button", { type: "button", class: "sl-icon-btn sl-toast__dismiss", "aria-label": held("notice_dismiss"), onclick: dismiss },
+    toastIcon("close")));
+  document.getElementById(isError ? "notice-alert" : "notice-polite").append(toast);
+  if (!isError) toastState.timer = setTimeout(dismiss, NOTICE_SUCCESS_MS);
 }
 
 // ---------------------------------------------------------------- api
@@ -1061,6 +1102,5 @@ const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
 
 boot().catch(() => {
-  const lang = state.lang || String(navigator.language || "").slice(0, 2);
-  notice(state.strings.err_unreachable || UNREACHABLE[lang] || UNREACHABLE.en, true);
+  notice(held("err_unreachable"), true);
 });

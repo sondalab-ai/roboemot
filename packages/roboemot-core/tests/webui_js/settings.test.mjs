@@ -1039,7 +1039,7 @@ test("save: a change the robot's parts did not take is announced as an error (R3
   await answerPin(page);
   const notice = page.document.querySelector("#notice");
   assert.ok(notice.textContent.includes("settings_not_applied"));
-  assert.ok(notice.className.includes("sl-callout--danger"), notice.className);
+  assert.ok(notice.querySelector("#notice-alert .sl-toast--danger"), "shown as an error");
 });
 
 // ---------------------------------------------------------------- reference choices and the null filter (SPEC 11A)

@@ -323,7 +323,7 @@ test("live_disabled removes the audio cards and the poll comes back when it is s
   page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
   assert.equal(page.document.querySelector("#live-levels"), null);
-  assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
+  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
   const retry = timers.filter((x) => x.ms === 5000).at(-1);
   assert.ok(retry, "retry armed at the slow delay");
   enabled = true;

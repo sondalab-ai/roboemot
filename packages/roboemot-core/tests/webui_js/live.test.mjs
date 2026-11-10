@@ -86,7 +86,7 @@ test("the Live tab sits next to the others and draws one card per group", async 
   for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2"]) {
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
   }
-  assert.equal(page.document.querySelector("#notice").hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "");
 });
 
 test("the system card shows the hardware readings", async (t) => {
@@ -330,7 +330,7 @@ test("live_disabled shows how to turn it on and keeps retrying at the slow delay
   await openLive(page);
   assert.equal(polls(page), 1);
   assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
-  assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
+  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
   const retries = timers.filter((x) => x.ms === 5000);
   assert.ok(retries.length >= 1, "retry armed at the slow delay");
   enabled = true;
@@ -364,7 +364,7 @@ test("a failed poll shows the error and retries", async (t) => {
     "GET /api/live/state": () => (n++ === 0 ? reply(500, { error: "generic" }) : STATE),
   });
   await openLive(page);
-  assert.equal(page.document.querySelector("#notice").hidden, false);
+  assert.notEqual(page.document.querySelector("#notice").textContent, "");
   assert.equal(polls(page), 1);
 });
 
@@ -541,7 +541,7 @@ test("a malformed or partial beat block renders the empty state and keeps the ca
     assert.equal(page.document.querySelector("#live-cards").children.length, 9);
     assert.ok(!node.querySelector("#live-pulse").classList.contains("live-pulse--on"));
     assert.ok(node.textContent.includes("live_none"));
-    assert.equal(page.document.querySelector("#notice").hidden, true);
+    assert.equal(page.document.querySelector("#notice").textContent, "");
   }
 });
 
