@@ -40,8 +40,8 @@ function when(value, timeOnly) {
 // The only text the page holds itself, for when it cannot load its strings: the same keys and
 // texts as webui/strings.py (tests/test_webui_page.py checks that they match).
 const PAGE_HELD = {
-  en: { err_unreachable: "Cannot reach the robot.", notice_dismiss: "Dismiss" },
-  it: { err_unreachable: "Impossibile raggiungere il robot.", notice_dismiss: "Chiudi" },
+  en: { err_unreachable: "Cannot reach the robot.", notice_dismiss: "Dismiss", retry: "Try again" },
+  it: { err_unreachable: "Impossibile raggiungere il robot.", notice_dismiss: "Chiudi", retry: "Riprova" },
 };
 
 // `key` from the loaded strings, else from PAGE_HELD in the page (or browser) language.
@@ -1020,11 +1020,27 @@ const TABS = {
   debug: debugView,
 };
 
+// While a tab waits for its first answer: #view is busy and a muted status line says so.
+function viewLoading(on) {
+  const line = document.getElementById("view-loading");
+  if (line.hidden === !on) return;
+  line.textContent = on ? t("loading") : "";
+  line.hidden = !on;
+  const view = document.getElementById("view");
+  if (on) view.setAttribute("aria-busy", "true");
+  else view.removeAttribute("aria-busy");
+}
+
+// The tab's view starts on an empty #view. A view that draws before its first await shows no
+// loading line; the others show it until they put something in #view (the observer below) or
+// settle, unless a later view took #view meanwhile.
 function showTab(name) {
   stopPolling();
   newView();
   state.tab = name;
-  document.getElementById("view").setAttribute("aria-labelledby", "tab-" + name);
+  const view = document.getElementById("view");
+  view.setAttribute("aria-labelledby", "tab-" + name);
+  view.replaceChildren();
   notice("");
   for (const b of document.querySelectorAll("#tabs button")) {
     const on = b.dataset.tab === name;
@@ -1033,7 +1049,10 @@ function showTab(name) {
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
-  guardedView(TABS[name]);
+  const done = guardedView(TABS[name]);
+  const current = viewToken();
+  viewLoading(!view.hasChildNodes());
+  done.then(() => { if (current()) viewLoading(false); });
 }
 
 function tabKeys(ev) {
@@ -1106,7 +1125,22 @@ async function boot() {
 // that builds it. Mutation callbacks run before the next paint: a head never shows the wrong one.
 const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
+new MutationObserver(() => { if (viewRoot.hasChildNodes()) viewLoading(false); }).observe(viewRoot, { childList: true });
 
-boot().catch(() => {
+// Loads the page; a failure says the robot is out of reach and offers to try again.
+function start() {
+  boot().catch(bootFailed);
+}
+
+// The strings may be missing here: the text comes from PAGE_HELD.
+function bootFailed() {
   notice(held("err_unreachable"), true);
-});
+  const view = document.getElementById("view");
+  view.replaceChildren(el("div", { class: "row" }, button(held("retry"), "primary", () => {
+    view.replaceChildren();
+    notice("");
+    start();
+  }, { attrs: { id: "boot-retry" } })));
+}
+
+start();
