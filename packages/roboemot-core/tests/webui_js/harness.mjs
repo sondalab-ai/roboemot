@@ -22,10 +22,12 @@ export function reply(status, body, headers = {}) {
 /**
  * Boots the page. `routes` maps "METHOD /path" to a body, a `reply(...)`, or a function of the
  * parsed request body. Returns the window, the recorded calls, and `run(src)` to evaluate in the page.
+ * `opts.url` is the page address (a fragment such as "#live"); `opts.before(window)` runs before
+ * the page scripts (to stub a browser API jsdom lacks).
  */
-export async function loadPage(routes = {}) {
+export async function loadPage(routes = {}, opts = {}) {
   const html = read("index.html").replace(/<script[\s\S]*?<\/script>/g, "");
-  const dom = new JSDOM(html, { url: "http://localhost/", runScripts: "outside-only", pretendToBeVisual: true });
+  const dom = new JSDOM(html, { url: opts.url || "http://localhost/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
   windows.add(window);
   const calls = [];
@@ -48,6 +50,7 @@ export async function loadPage(routes = {}) {
   window.URL.revokeObjectURL = (u) => { urls.revoked.push(u); };
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   if (!window.HTMLDialogElement.prototype.showModal) polyfillDialog(window);
+  if (opts.before) opts.before(window);
   const ctx = dom.getInternalVMContext();
   const run = (src) => new vm.Script(src).runInContext(ctx);
   run(read("theme.js"));

@@ -403,6 +403,8 @@ function loginView() {
         state.csrf = data.csrf;
         notice("");
         await boot();
+        const tab = selectedTab(); // the login form is gone: the focus starts on the open tab
+        if (tab) tab.focus();
       });
     },
   }, field("pin", t("pin"), pin), el("div", { class: "row" }, submitButton(t("login"))));
@@ -1065,13 +1067,18 @@ function showTab(name) {
   view.setAttribute("aria-labelledby", "tab-" + name);
   view.replaceChildren();
   notice("");
-  for (const b of document.querySelectorAll("#tabs button")) {
+  for (const b of tabButtons()) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));
-    b.tabIndex = on ? 0 : -1;
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
+  const tab = selectedTab();
+  tabRove(tab);
+  // On a narrow screen the strip scrolls sideways: the open tab stays in sight.
+  if (tab && tab.scrollIntoView) tab.scrollIntoView({ inline: "nearest", block: "nearest" });
+  history.replaceState(null, "", "#" + name);
+  document.title = t("tab_" + name) + " · " + t("title");
   const done = guardedView(TABS[name]);
   const current = viewToken();
   viewLoading(!view.hasChildNodes());
@@ -1079,15 +1086,48 @@ function showTab(name) {
   return done;
 }
 
-function tabKeys(ev) {
-  const names = Object.keys(TABS);
-  const step = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
-  if (!step) return;
-  ev.preventDefault();
-  const next = names[(names.indexOf(state.tab) + step + names.length) % names.length];
-  showTab(next);
-  document.querySelector('#tabs button[data-tab="' + next + '"]').focus();
+const DEFAULT_TAB = "enroll";
+const tabButtons = () => [...document.querySelectorAll("#tabs [role=tab]")];
+const selectedTab = () => document.querySelector('#tabs [aria-selected="true"]');
+
+// The tab a fragment names ("#live"), or null for one that names none.
+function tabOf(hash) {
+  const name = String(hash || "").replace(/^#/, "");
+  return Object.hasOwn(TABS, name) ? name : null;
 }
+
+// Roving tabindex: `target` is the one tab the Tab key reaches.
+function tabRove(target) {
+  for (const b of tabButtons()) b.tabIndex = b === target ? 0 : -1;
+}
+
+// Manual activation (WAI-ARIA tabs pattern): arrows, Home and End move the focus only, so moving
+// across Live does not start its polls on the robot. A click opens the focused tab; Enter and
+// Space click it, as on any button.
+function tabKeys(ev) {
+  const tabs = tabButtons();
+  const at = tabs.indexOf(document.activeElement);
+  const from = at >= 0 ? at : tabs.indexOf(selectedTab());
+  const to = { ArrowRight: from + 1, ArrowLeft: from - 1, Home: 0, End: tabs.length - 1 }[ev.key];
+  if (to === undefined) return;
+  ev.preventDefault();
+  const next = tabs[(to + tabs.length) % tabs.length];
+  tabRove(next);
+  next.focus();
+}
+
+// Focus that leaves the strip puts its tab stop back on the open tab, where Tab enters it again.
+function tabLeave(ev) {
+  if (!ev.currentTarget.contains(ev.relatedTarget)) tabRove(selectedTab());
+}
+document.getElementById("tabs").addEventListener("focusout", tabLeave);
+
+// A bookmark or a fragment typed by hand opens its tab; nothing while logged out.
+window.addEventListener("hashchange", () => {
+  const name = tabOf(location.hash);
+  if (state.csrf === null || document.getElementById("tabs").hidden || !name || name === state.tab) return;
+  showTab(name);
+});
 
 function themeControl() {
   const box = document.getElementById("theme");
@@ -1107,6 +1147,9 @@ function shell() {
   const tabs = document.getElementById("tabs");
   tabs.hidden = false;
   tabs.onkeydown = tabKeys;
+  tabs.setAttribute("aria-label", t("tabs_label"));
+  const asked = location.hash.replace(/^#/, "");
+  if (asked) state.tab = tabOf(asked) || DEFAULT_TAB;
   tabs.replaceChildren(...Object.keys(TABS).map((name) =>
     el("button", { type: "button", role: "tab", id: "tab-" + name, "aria-controls": "view", class: "sl-tabs__tab", "data-tab": name, onclick: () => showTab(name) }, t("tab_" + name))));
   const out = document.getElementById("logout");
