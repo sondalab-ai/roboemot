@@ -148,6 +148,14 @@ test("a failed poll marks the emotion cards as old until the next good one", asy
   assert.equal(note.hidden, true);
 });
 
+test("a first poll that keeps failing announces once, with no card drawn yet", async (t) => {
+  const p = await emotionsPage(t, { routes: { "GET /api/emotions/state": () => { throw new TypeError("Failed to fetch"); } } });
+  const first = p.document.querySelector("#notice .sl-toast");
+  assert.ok(first, "the failure is reported");
+  for (let i = 0; i < 4; i++) await p.run("emoPoll(document.getElementById('emo-cards'), emoState.serial)");
+  assert.equal(p.document.querySelector("#notice .sl-toast"), first, "the same toast: not announced again");
+});
+
 test("a poll with equal data keeps the emotion cards; a change replaces only its card", async (t) => {
   const p = await emotionsPage(t, { state: { ...STATE, poll_ms: 15 } });
   const grid = p.document.querySelector("#emo-state");

@@ -181,10 +181,10 @@ function toastIcon(name) {
 }
 
 // One toast at a time in the kit's toast stack (#notice, always in the page): a success in its
-// polite region, an error in its alert region; "" clears. An error equal to the last one reported
-// is not shown or announced again, even after a dismiss: a poll that keeps failing speaks once.
+// polite region, an error in its alert region; "" clears. It always shows what it is given (an
+// error equal to the last one is a new toast, announced again): a poll that keeps failing speaks
+// once because it calls this only when it starts failing (pollFailed, live.js).
 function notice(message, isError) {
-  if (isError && message && message === toastState.error) return;
   clearTimeout(toastState.timer);
   toastState.timer = null;
   toastState.error = isError && message ? message : null;

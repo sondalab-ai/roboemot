@@ -632,6 +632,61 @@ test("a recovering poll leaves a newer message from something else", async (t) =
   assert.equal(page.document.querySelector("#notice").textContent, "Saved.");
 });
 
+// Counts the toasts put in the alert region: each one is an announcement.
+function alerts(page) {
+  const seen = { n: 0 };
+  new page.window.MutationObserver((list) => {
+    for (const m of list) seen.n += [...m.addedNodes].filter((n) => n.classList && n.classList.contains("sl-toast")).length;
+  }).observe(page.document.getElementById("notice-alert"), { childList: true });
+  return seen;
+}
+
+const UNREACHABLE = { "GET /api/strings": { language: "en", strings: { ...STRINGS, err_unreachable: "Cannot reach the robot." } } };
+
+test("a poll that fails five times announces its failure once", async (t) => {
+  const page = await livePage(t, { ...UNREACHABLE, "GET /api/live/state": () => { throw new TypeError("Failed to fetch"); } });
+  const seen = alerts(page);
+  await openLive(page);
+  for (let i = 0; i < 4; i++) await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(page.calls.filter((c) => c.path === "/api/live/state").length, 5);
+  assert.equal(seen.n, 1, "one announcement for one failure");
+  assert.equal(page.document.querySelector("#notice").textContent, "Cannot reach the robot.");
+});
+
+test("two polls failing with the same text: one announcement, and the toast stays until both recover", async (t) => {
+  let stateDown = true;
+  let audioDown = true;
+  const page = await livePage(t, {
+    ...UNREACHABLE,
+    "GET /api/live/state": () => { if (stateDown) throw new TypeError("Failed to fetch"); return STATE; },
+    "GET /api/live/audio": () => { if (audioDown) throw new TypeError("Failed to fetch"); return AUDIO; },
+  });
+  const seen = alerts(page);
+  await openLive(page);
+  assert.equal(seen.n, 1, "the second poll does not announce the same text again");
+  audioDown = false;
+  await page.run("liveAudioPoll(document.getElementById('live-audio'), liveState.serial)");
+  assert.equal(page.document.querySelector("#notice").textContent, "Cannot reach the robot.", "the state poll still fails");
+  await page.run("liveAudioPoll(document.getElementById('live-audio'), liveState.serial)");
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(seen.n, 1);
+  stateDown = false;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(page.document.querySelector("#notice").textContent, "", "both recovered: the toast goes");
+});
+
+test("a poll that fails again after a recovery announces again", async (t) => {
+  let down = true;
+  const page = await livePage(t, { ...UNREACHABLE, "GET /api/live/state": () => { if (down) throw new TypeError("Failed to fetch"); return STATE; } });
+  const seen = alerts(page);
+  await openLive(page);
+  down = false;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  down = true;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(seen.n, 2);
+});
+
 test("el() styles through the CSSOM, which isEqualNode compares as the style attribute", async (t) => {
   const page = await livePage(t);
   assert.equal(page.run('el("span", { style: { "--a": "1s" } }).getAttribute("style")'), "--a: 1s;");
