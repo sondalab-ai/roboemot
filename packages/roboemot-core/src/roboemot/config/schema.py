@@ -2514,6 +2514,13 @@ class VisionConfig(Strict):
         "spinning pools take cycles from each other and from audio",
         restart=True,
     )
+    object_spinning: bool = param(
+        False,
+        "Let the object detector's (NanoDet-Plus-m) ONNX Runtime threads spin-wait between "
+        "operators. Off: it runs beside the face detector and the appearance embedder, and on "
+        "four cores spinning pools take cycles from each other and from audio",
+        restart=True,
+    )
     appearance_threads: int = param(
         2,
         "CPU threads of the appearance embedder (DINOv2-S), apart from vision.threads: it runs "

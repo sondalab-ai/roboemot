@@ -154,9 +154,28 @@ class FakeSession:
 
 def detector(monkeypatch, output, classes=("cat", "cup"), **kw):
     session = FakeSession(output, **kw)
-    monkeypatch.setattr(onnx, "_session", lambda path, threads: session)
+    monkeypatch.setattr(onnx, "_session", lambda path, threads, spinning=True: session)
     det = onnx.NanoDetDetector(Path("m.onnx"), LABELS, list(classes), 0.4, 0.6, 2)
     return det, session
+
+
+@pytest.mark.parametrize("spinning", [False, True])
+def test_the_object_detector_session_spins_only_when_configured(monkeypatch, spinning):
+    seen = []
+
+    def session(path, threads, spin=True):
+        seen.append(spin)
+        return FakeSession(raw_output())
+
+    monkeypatch.setattr(onnx, "_session", session)
+    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: Path("m.onnx"))
+    cfg = RoboEmotConfig().vision.model_copy(update={"object_spinning": spinning})
+    onnx.load_object_detector(Path("models"), cfg)
+    assert seen == [spinning]
+
+
+def test_the_object_detector_does_not_spin_by_default():
+    assert RoboEmotConfig().vision.object_spinning is False
 
 
 def test_detect_scales_boxes_to_the_original_image_and_names_the_class(monkeypatch):
