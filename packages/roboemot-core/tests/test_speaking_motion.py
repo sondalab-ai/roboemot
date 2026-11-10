@@ -162,7 +162,6 @@ EXPECTED_CLIPPED = {
     ("lively", "accent", 0.0),
     ("natural", "accent", 1.0),
     ("lively", "accent", 1.0),
-    ("lively", "question_tilt", 1.0),
 }
 
 

@@ -31,7 +31,9 @@ pose_groups:                      # the SDK addresses poses, not servos
 constraints:
   - {type: yaw_delta, a: head.yaw, b: body_yaw, max_deg: 65}
 dynamics:               # velocity and acceleration caps, measured in M0; required before release
-  head:     {max_vel_dps: null, max_acc_dps2: null, max_lin_vel_mps: null, max_lin_acc_mps2: null}
+  # Head rotations: below what the robot followed in a sine sweep (2026-11-10, set_target at
+  # 50 Hz, 188 to 226 deg/s and 2369 to 2842 deg/s2 at 91 to 101 %). Translations are not measured.
+  head:     {max_vel_dps: 180, max_acc_dps2: 2000, max_lin_vel_mps: null, max_lin_acc_mps2: null}
   body_yaw: {max_vel_dps: null, max_acc_dps2: null}
   antennas: {max_vel_dps: null, max_acc_dps2: null}
 sensors:

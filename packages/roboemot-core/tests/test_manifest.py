@@ -21,7 +21,7 @@ DESK = MANIFESTS / "desk-head-v1.yaml"
 
 
 def test_reachy_manifest_rejected_until_dynamics_measured():
-    with pytest.raises(ManifestError, match="not measured"):
+    with pytest.raises(ManifestError, match="required for translations"):
         load_manifest(REACHY)
 
 
@@ -39,7 +39,8 @@ def test_reachy_manifest_dev_mode_dofs_and_units():
         "antenna_left",
     }
     pitch = m.dofs["head.pitch"]
-    assert pitch.min == pytest.approx(math.radians(-40)) and not pitch.measured
+    assert pitch.min == pytest.approx(math.radians(-40)) and pitch.measured
+    assert not m.dofs["body_yaw"].measured and not m.dofs["antenna_right"].measured
     assert m.dofs["head.z"].max == pytest.approx(0.015) and m.dofs["head.z"].kind == "translation"
     assert m.dofs["antenna_right"].home == pytest.approx(math.radians(-10))
     assert m.constraints[0].max_deg == 65

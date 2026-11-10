@@ -85,7 +85,7 @@ def test_angles_are_shown_in_degrees_translations_in_mm(split):
 def test_unmeasured_dynamics_are_null_not_zero(split):
     _, _, robot = split
     by = {f["path"]: f for f in robot["fields"]}
-    row = by[f"{BASE}.dynamics.head.max_vel_dps"]
+    row = by[f"{BASE}.dynamics.body_yaw.max_vel_dps"]
     assert row["value"] is None and row["nullable"] is True and row["unit"] == "deg/s"
     assert f"{BASE}.dynamics.body_yaw.max_lin_vel_mps" not in by
 

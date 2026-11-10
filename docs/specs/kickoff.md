@@ -348,7 +348,7 @@ expressive_channels:
   body:  {type: pose_groups, groups: [head, body_yaw, antennas]}
 motor_modes: {active: enabled, limp: disabled, teach: gravity_compensation}
 dynamics:               # velocity and acceleration caps, measured in M0; required before release (section 12)
-  head:     {max_vel_dps: null, max_acc_dps2: null}
+  head:     {max_vel_dps: 180, max_acc_dps2: 2000}   # rotations, sine sweep of 2026-11-10; translations stay null
   body_yaw: {max_vel_dps: null, max_acc_dps2: null}
   antennas: {max_vel_dps: null, max_acc_dps2: null}
 retargeting:            # mirror module (section 9)
