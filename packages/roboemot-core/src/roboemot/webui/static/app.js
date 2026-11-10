@@ -267,7 +267,8 @@ async function guarded(fn) {
 
 // `guarded` for a call that draws a view. The view takes #view before its first await, so the token
 // read right after the call starts is its own; an error of a view that was dropped since (a tab
-// switch, a later view, logout) is not shown on the tab the user is on now.
+// switch, a later view, logout) is not shown on the tab the user is on now. A view that failed
+// before it drew anything also says so in #view, where the user looks, besides the toast.
 async function guardedView(view) {
   let current = null;
   try {
@@ -278,7 +279,19 @@ async function guardedView(view) {
     if (current && !current()) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     notice(explain(err), true);
+    viewFailed(explain(err));
   }
+}
+
+// An empty #view after a failed load: a kit card with the error and a retry of the tab. A view
+// that drew content keeps it (its polls handle their own failures).
+function viewFailed(text) {
+  const view = document.getElementById("view");
+  if (view.hasChildNodes()) return;
+  const box = card(null, t("tab_" + state.tab), el("p", {}, text),
+    el("div", { class: "row" }, button(held("retry"), "primary", () => showTab(state.tab))));
+  box.id = "view-failed";
+  view.append(box);
 }
 
 function stopPolling() {
