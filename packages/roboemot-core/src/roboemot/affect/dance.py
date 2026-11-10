@@ -8,6 +8,12 @@ Roles, bound to channels by the manifest's ``dance_motion_map`` (core names no j
 - ``accent``: a flick on an accent stamp (a blirp's event), at most one per
   ``accent_min_interval_s``, peaking on the stamp.
 
+Room music plays the manifest's ``moves`` instead of ``bob`` and ``sway`` (``dance.moves_enabled``):
+each channel of a move is a cosine of its size, cycles per beat and phase, on the place of one move
+per beat, whose half lasts at least ``move_min_half_s``. A move lasts ``move_bars`` bars and blends
+into the next over ``move_blend_beats``. Each size is reduced to what the channel's speed and
+acceleration caps allow at that rate, so the wave keeps its shape instead of being clipped.
+
 A move half never lasts less than ``min_half_s``: a tempo too fast for a full bob moves on every
 second, then every fourth beat. The whole layer reads the beat ``lead_ms`` ahead.
 
@@ -55,6 +61,7 @@ from ..config.schema import (
     SECONDS_PER_MINUTE,
     DanceConfig,
     DanceMotionMap,
+    DanceMove,
     ExpressionEntry,
 )
 from ..manifest import Dof
@@ -71,6 +78,8 @@ MS_PER_S = 1000.0
 GAIN_EPSILON = 1e-9  # a fade gain below this is zero (float rounding of the per-tick steps)
 FOLD_FACTORS = (1, 2, 4)  # one move per this many beats: full, half and quarter time
 MOVE_CYCLE = 2  # a place is kept modulo two moves: the sway's two sides (the bob's repeat in it)
+MOVE_ROLE = "move"  # the place of the room music moves
+TAU = 2 * math.pi
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,7 @@ class _Settings:
     sway: dict[str, int]
     accent: _Shape | None
     ceilings: dict[str, float]  # per channel: the cap of the summed offset, radians
+    moves: tuple[dict[str, DanceMove], ...] = ()  # the room music moves this robot can play
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,10 @@ class _State:
     level: float | None = None  # beat strength x speaking gain, ramped; None: not read yet
     moves: dict[str, _Move] = field(default_factory=dict)  # by role
     started: bool = False
+    beats: float = 0.0  # beats played of the current room music move
+    move: int = 0
+    previous_move: int | None = None
+    blend: float = 1.0  # share of the way into the current move, 1: no blend
     bob: float = 0.0  # share of the role's degrees before the fade, for the Live tab
     sway: float = 0.0
 
@@ -257,7 +271,15 @@ class DanceRenderer:
         bob, sway = self._signs(dance_map.bob), self._signs(dance_map.sway)
         accent = self._shape(dance_map.accent) if dance_map.accent is not None else None
         accent_names = accent.prim.keyframes[0].values if accent is not None else {}
-        degrees: dict[str, float] = {}
+        moves = tuple(
+            filtered
+            for move in dance_map.moves.values()
+            if (filtered := {n: c for n, c in move.items() if n in self.dofs})
+        )
+        degrees: dict[str, float] = {
+            name: max(abs(m[name].deg) for m in moves if name in m)
+            for name in {n for m in moves for n in m}
+        }
         for deg, names in (
             (cfg.bob_deg, bob),
             (cfg.sway_deg, sway),
@@ -266,7 +288,7 @@ class DanceRenderer:
             for name in names:
                 degrees[name] = max(degrees.get(name, 0.0), deg)
         ceilings = {name: math.radians(deg) * max_amplitude for name, deg in degrees.items()}
-        self._b = _Settings(cfg, max_amplitude, beats_per_bar, bob, sway, accent, ceilings)
+        self._b = _Settings(cfg, max_amplitude, beats_per_bar, bob, sway, accent, ceilings, moves)
 
     @property
     def cfg(self) -> DanceConfig:
@@ -440,6 +462,8 @@ class DanceRenderer:
         """The ``bob`` and ``sway`` offsets at lead time ``t`` before the fade."""
         if beat is None:
             return {}
+        if beat.source == "room" and b.cfg.moves_enabled and b.moves:
+            return self._render_moves(t, beat, b, dt)
         k, cfg, s = self.scale(self._level(t, beat, b, dt), b), b.cfg, self._s
         share = min(1.0, k)
         raw: dict[str, float] = {}
@@ -453,17 +477,72 @@ class DanceRenderer:
         s.sway = share if b.sway and "sway" in s.moves and cfg.sway_deg > 0 else 0.0
         return raw
 
+    def _render_moves(self, t: float, beat: Beat, b: _Settings, dt: float) -> dict[str, float]:
+        """The offsets of the room music move at lead time ``t``, before the fade."""
+        cfg, s = b.cfg, self._s
+        k = self.scale(self._level(t, beat, b, dt), b)
+        place = self._place(MOVE_ROLE, 1, t, dt, beat, cfg, cfg.move_min_half_s)
+        s.bob = s.sway = 0.0
+        if place is None:
+            return {}
+        s.bob = s.sway = min(1.0, k)
+        self._advance_move(beat, b, dt)
+        move_s = s.moves[MOVE_ROLE].factor * beat.period_s
+        raw = self._move_offsets(b.moves[s.move], place, move_s, k)
+        if s.blend >= 1.0 or s.previous_move is None:
+            return raw
+        old = self._move_offsets(b.moves[s.previous_move], place, move_s, k)
+        w = min_jerk(s.blend)
+        return {n: raw.get(n, 0.0) * w + old.get(n, 0.0) * (1 - w) for n in raw.keys() | old.keys()}
+
+    def _advance_move(self, beat: Beat, b: _Settings, dt: float) -> None:
+        """Count the beats and start the next move after ``move_bars`` bars. A reload may have
+        shortened the list, so the indices are folded back into it."""
+        s, cfg = self._s, b.cfg
+        count = len(b.moves)
+        s.move %= count
+        if s.previous_move is not None:
+            s.previous_move %= count
+        s.beats += dt / beat.period_s
+        bars = cfg.move_bars * b.beats_per_bar
+        if s.beats >= bars:
+            s.beats -= bars
+            s.previous_move, s.move, s.blend = s.move, (s.move + 1) % count, 0.0
+        blend_s = cfg.move_blend_beats * beat.period_s
+        s.blend = min(1.0, s.blend + dt / blend_s) if blend_s > 0 else 1.0
+
+    def _move_offsets(
+        self, move: Mapping[str, DanceMove], place: float, move_s: float, k: float
+    ) -> dict[str, float]:
+        """Each channel's wave at ``place``: its size scaled by ``k``, then reduced to what the
+        channel's caps allow at this rate. ``move_s``: seconds per move."""
+        out: dict[str, float] = {}
+        for name, wave in move.items():
+            dof, w = self.dofs[name], TAU * wave.cycles / move_s
+            size = min(math.radians(abs(wave.deg)) * k, dof.max_vel / w, dof.max_acc / (w * w))
+            out[name] = math.copysign(size, wave.deg) * math.cos(
+                TAU * (wave.cycles * place + wave.phase)
+            )
+        return out
+
     def _place(
-        self, role: str, span: int, t: float, dt: float, beat: Beat, cfg: DanceConfig
+        self,
+        role: str,
+        span: int,
+        t: float,
+        dt: float,
+        beat: Beat,
+        cfg: DanceConfig,
+        min_half_s: float | None = None,
     ) -> float | None:
         """The role's place at lead time ``t``, in moves of ``span`` beats times its fold, or
         None while it rests. It starts on the grid and then advances by ``dt``; the error to the
-        nearest beat is taken back at a limited rate, in a move whose halves stay ``min_half_s``."""
+        nearest beat is taken back at a limited rate, in a move whose halves stay ``min_half_s``
+        (``dance.min_half_s`` unless the caller gives its own)."""
         s = self._s
+        half = cfg.min_half_s if min_half_s is None else min_half_s
         move = s.moves.get(role)
-        factor = fold(
-            span * beat.period_s, cfg.min_half_s, move.factor if move else None, cfg.fold_margin
-        )
+        factor = fold(span * beat.period_s, half, move.factor if move else None, cfg.fold_margin)
         if factor is None:
             s.moves.pop(role, None)
             return None
@@ -475,7 +554,7 @@ class DanceRenderer:
         limit = cfg.phase_correction_beats_per_s * dt
         error = max(-limit, min(limit, math.remainder(grid - move.position * beats, 1.0)))
         advance = dt / (beats * beat.period_s) + error / beats
-        fastest = dt / (2 * cfg.min_half_s)
+        fastest = dt / (2 * half)
         move.position = (move.position + max(0.0, min(fastest, advance))) % MOVE_CYCLE
         move.factor = factor
         return move.position
