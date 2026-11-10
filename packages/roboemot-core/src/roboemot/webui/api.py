@@ -253,6 +253,29 @@ class Response:
     # Objects inside ``data`` that already passed ``holds_vector`` (shared, never changed after
     # the check): the guard skips them by identity instead of scanning them again.
     vetted: tuple[Any, ...] = ()
+    # ``data`` already serialised (exactly ``json.dumps(data, allow_nan=False)``): sent as is.
+    body: bytes | None = None
+
+
+@dataclass(frozen=True)
+class SettingsPage:
+    """The core rows of GET /api/settings for one port result (``rest``) and language: the
+    localized copy (passed ``holds_vector``, never changed) and its JSON."""
+
+    rest: list[FieldDescriptor]
+    lang: str
+    fields: list[Any]
+    encoded: bytes
+
+    def body(self, robot: Any) -> bytes | None:
+        """The whole response as ``json.dumps`` would write it, with the robot block of this
+        request serialised now; ``None`` when that block does not serialise (the server then
+        answers its usual error)."""
+        try:
+            block = json.dumps(robot, allow_nan=False).encode()
+        except (TypeError, ValueError):
+            return None
+        return b'{"fields": ' + self.encoded + b', "robot": ' + block + b', "pin_required": true}'
 
 
 def live_cursor(query: str) -> tuple[int, str]:
@@ -346,8 +369,7 @@ class WebApi:
         self.sessions = Sessions(lambda: self.web)
         self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
-        # GET /api/settings: (core rows, language, their localized copy that passed the guard)
-        self._settings_page: tuple[list[FieldDescriptor], str, list[Any]] | None = None
+        self._settings_page: SettingsPage | None = None
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -887,25 +909,31 @@ class WebApi:
             prefix = f"{PATH_ROOT}.{robot['id']}."
             own = frozenset(f["path"] for f in robot["fields"] if f["path"].startswith(prefix))
             robot = {**robot, "fields": localize(robot["fields"], lang, own)}
-        fields, vetted = self._localized(rest, lang)
-        data = {"fields": fields, "robot": robot, "pin_required": True}
-        return Response(HTTPStatus.OK, data, vetted=vetted)
+        page = self._localized(rest, lang)
+        if page is None:  # not kept: sent unvetted, so the guard scans (and blocks) it
+            data = {"fields": list(localize(rest, lang)), "robot": robot, "pin_required": True}
+            return Response(HTTPStatus.OK, data)
+        data = {"fields": page.fields, "robot": robot, "pin_required": True}
+        return Response(HTTPStatus.OK, data, vetted=(page.fields,), body=page.body(robot))
 
-    def _localized(
-        self, rest: list[FieldDescriptor], lang: str
-    ) -> tuple[list[Any], tuple[Any, ...]]:
-        """``rest`` localized and the objects the response guard may skip. The copy is reused
-        while the port hands back the same list (held, ``is``) for the same language, and only a
-        copy that passed ``holds_vector`` is kept and skipped; a failing one is returned unvetted,
-        so the guard blocks it. The robot block, built per request, is scanned every time."""
+    def _localized(self, rest: list[FieldDescriptor], lang: str) -> SettingsPage | None:
+        """``rest`` localized, reused while the port hands back the same list (held, ``is``) for
+        the same language. Only a copy that passed ``holds_vector`` and serialises is kept (the
+        response guard may then skip it); otherwise ``None``. The robot block, built per
+        request, is scanned and serialised every time."""
         page = self._settings_page
-        if page is not None and page[0] is rest and page[1] == lang:
-            return page[2], (page[2],)
+        if page is not None and page.rest is rest and page.lang == lang:
+            return page
         fields = list(localize(rest, lang))
         if holds_vector(fields):
-            return fields, ()
-        self._settings_page = (rest, lang, fields)
-        return fields, (fields,)
+            return None
+        try:
+            encoded = json.dumps(fields, allow_nan=False).encode()
+        except (TypeError, ValueError):
+            return None
+        page = SettingsPage(rest, lang, fields, encoded)
+        self._settings_page = page
+        return page
 
     def _settings_reveal(self, req: Request) -> Response:
         """The private fields (privacy, location) with their real values. Admin only: the
