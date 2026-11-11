@@ -464,7 +464,7 @@ function settingTags(row, editable) {
 function restartBadge() {
   const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
   const name = rowName(t("settings_restart_badge"), t("settings_restart_goto")); // the badge's text first
-  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": name, title: t("settings_restart_goto") }, badge) : badge;
+  return canRestart() ? el("a", { href: "#settings-restart", class: "restart-link", onclick: focusRestart, "aria-label": name, title: t("settings_restart_goto") }, badge) : badge;
 }
 
 const canRestart = () => {

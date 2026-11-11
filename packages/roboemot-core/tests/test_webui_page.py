@@ -160,10 +160,15 @@ def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes()
     assert coarse, "one coarse-pointer block"
     body = coarse.group(1)
     for control in (".sl-btn", ".sl-segmented__item", ".sl-tabs__tab", ".sl-chip", ".sl-disclosure",
-                    ".sl-icon-btn", ".sl-check", ".sl-switch"):  # fmt: skip
+                    ".sl-icon-btn", ".sl-check", ".sl-switch", ".sl-field__input",
+                    ".restart-link"):  # fmt: skip
         assert control in body, control
     assert "min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));" in body  # 2rem + 0.75rem
     assert re.search(r"\.row \{ gap: var\(--sl-space-3\); \}", body)
+    assert re.search(r"\.entry \{ gap: var\(--sl-space-3\); \}", body)  # Remove next to its field
+    # an inline link takes no min-block-size: the restart badge link is an inline box on touch only
+    assert re.search(r"\.restart-link \{ display: inline-flex; align-items: center; \}", body)
+    assert "px" not in body, "kit spacing only, no bare px"
     assert "min-block-size" not in css.replace(body, ""), "no size change outside the coarse block"
 
 

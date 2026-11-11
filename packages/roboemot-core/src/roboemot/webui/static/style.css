@@ -97,11 +97,15 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 #live-video-banner { margin-bottom: var(--sl-space-4); }
 /* Touch screens: the kit's controls are 32px (small buttons 24px) and most row actions are small,
    with a destructive one beside a safe one. A coarse pointer gets 44px targets (WCAG 2.5.5,
-   2.75rem from kit spacing) and a wider gap between neighbours; a fine pointer keeps the kit's sizes. */
+   2.75rem from kit spacing) and a wider gap between neighbours; a fine pointer keeps the kit's sizes.
+   Text fields and selects (.sl-field__input) grow too; the restart badge link is inline, which takes
+   no minimum height, so it becomes an inline flex box here only. */
 @media (pointer: coarse) {
-  :is(.sl-btn, .sl-segmented__item, .sl-tabs__tab, .sl-chip, .sl-disclosure, .sl-icon-btn, .sl-check, .sl-switch, .sl-nav__item) {
+  :is(.sl-btn, .sl-segmented__item, .sl-tabs__tab, .sl-chip, .sl-disclosure, .sl-icon-btn, .sl-check, .sl-switch, .sl-nav__item, .sl-field__input, .restart-link) {
     min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));
   }
   .sl-icon-btn { min-inline-size: calc(var(--sl-space-6) + var(--sl-space-3)); }
+  .restart-link { display: inline-flex; align-items: center; }
   .row { gap: var(--sl-space-3); }
+  .entry { gap: var(--sl-space-3); }
 }
