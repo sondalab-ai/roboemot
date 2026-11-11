@@ -805,10 +805,9 @@ async function catalogueView() {
         r.status === "pending" && r.has_appearance ?
           button(t("catalogue_activate"), "plain", () => confirmBy(r, null), named(t("catalogue_activate"), r.display_name)) : [],
         data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
-          .map((e) => {
-            const text = t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop();
-            return button(text, "plain", () => confirmBy(r, e.entry_id), named(text, r.display_name));
-          }))))));
+          // its visible text names the record already: that text is its whole name
+          .map((e) => button(t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop(),
+            "plain", () => confirmBy(r, e.entry_id), { small: true })))))));
   const live = data.live.length === 0 ? empty(t("catalogue_live"), t("catalogue_live_none")) :
     el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + word("category_", e.category) + " #" + e.entry_id.split("-").pop() +
       (e.identified ? " ✓" : ""))));

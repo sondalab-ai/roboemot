@@ -91,7 +91,7 @@ test("registry: Purge names the quarantined key", async () => {
   for (const b of purge) labelInName(b, b.closest("li").dataset.row);
 });
 
-test("catalogue: Activate and every Confirm name their record", async () => {
+test("catalogue: Activate names its record; Confirm, whose text names it already, keeps its text as its name", async () => {
   const page = await loadPage({
     ...BASE,
     "GET /api/strings": { language: "en", strings: { ...STRINGS, catalogue_activate: "Activate from photo", catalogue_confirm: "This is {name}" } },
@@ -110,11 +110,11 @@ test("catalogue: Activate and every Confirm name their record", async () => {
     const shown = row.cells[0].textContent;
     const buttons = [...row.querySelectorAll("button")];
     assert.equal(buttons.length, 2);
-    for (const b of buttons) {
-      labelInName(b, shown);
-      assert.ok(b.hasAttribute("aria-label"), named(b).name);
-    }
+    for (const b of buttons) labelInName(b, shown);
     assert.equal(named(buttons[0]).name, "Activate from photo: " + shown);
+    const [, confirm] = buttons;
+    assert.equal(confirm.getAttribute("aria-label"), null, "no aria-label that repeats the name");
+    assert.equal(named(confirm).name, `This is ${shown} ← cup #7`);
   }
 });
 
