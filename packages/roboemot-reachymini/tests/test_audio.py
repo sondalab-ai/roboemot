@@ -707,3 +707,218 @@ def test_audio_lost_in_a_stall_restarts_the_stamps_instead_of_reading_live_audio
     assert max(stamp - end for end, stamp in reflex) <= MAX_GAP_S
     late = [(c.stamp, float(c.samples[0])) for c, got in heard[-20:]]
     assert [st for st, _ in late] == pytest.approx([e for _, e in late], abs=1 / 50 + 1e-6)
+
+
+# ------------------------------------------------------------- capture paused in sleep (SPEC 12A)
+
+
+class SleepyMedia:
+    """A fake ``mini.media`` for the capture pause: a recording microphone hands a fresh chunk
+    on every read; stopped, it hands nothing and counts the reads it gets anyway. Each chunk
+    holds its own sequence number, so stale audio is recognisable."""
+
+    def __init__(self, start_errors=0):
+        self.audio = object()
+        self.recording = False
+        self.started = self.stopped = self.reads = self.reads_stopped = 0
+        self.start_errors = start_errors
+        self.seq = 0
+        self.lock = threading.Lock()
+
+    def start_recording(self):
+        with self.lock:
+            self.started += 1
+            if self.start_errors:
+                self.start_errors -= 1
+                raise OSError("/dev/snd/secret")
+            self.recording = True
+
+    def stop_recording(self):
+        with self.lock:
+            self.stopped += 1
+            self.recording = False
+
+    def get_audio_sample(self):
+        with self.lock:
+            self.reads += 1
+            if not self.recording:
+                self.reads_stopped += 1
+                return None
+            self.seq += 1
+            return np.full(CHUNK, float(self.seq), np.float32)
+
+    def get_input_audio_samplerate(self):
+        return 16000
+
+    def get_input_channels(self):
+        return 1
+
+
+def sleepy_hub(start_errors=0, voice=True, sink=None):
+    m = SleepyMedia(start_errors)
+    return ReachyAudio(SimpleNamespace(media=m), sink, 100, voice=voice), m
+
+
+def drain(audio):
+    out = []
+    while (c := audio.read()) is not None:
+        out.append(c)
+    return out
+
+
+def test_the_hub_offers_the_core_capture_pause():
+    from roboemot.robot_platform import AudioHub, CapturePause
+
+    audio, _ = sleepy_hub()
+    assert isinstance(audio, AudioHub) and isinstance(audio, CapturePause)
+
+
+def test_pause_stops_the_capture_and_the_thread_idles_without_reading_the_sdk():
+    audio, m = sleepy_hub()
+    audio.start()
+    try:
+        assert wait_for(lambda: m.seq > 3)
+        audio.pause_capture()
+        assert audio.capture_paused
+        assert wait_for(lambda: m.stopped == 1)
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert "asleep" in audio.snapshot()["reason"]
+        reads = m.reads
+        time.sleep(0.2)  # 20 poll periods at 100 Hz
+        assert m.reads == reads and m.reads_stopped == 0
+        audio.pause_capture()  # idempotent
+        time.sleep(0.05)
+        assert m.stopped == 1
+    finally:
+        audio.stop()
+
+
+def test_resume_restarts_the_capture_with_an_empty_queue_and_a_gap():
+    audio, m = sleepy_hub()
+    audio.start()
+    try:
+        assert wait_for(lambda: m.seq > 3)
+        audio.pause_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert audio.snapshot()["voice"]["queued_s"] > 0  # audio from before the sleep
+        last_before = m.seq
+        audio.resume_capture()
+        assert not audio.capture_paused
+        assert wait_for(lambda: m.started == 2)
+        assert wait_for(lambda: audio.snapshot()["state"] == "running")
+        heard = drain(audio)
+        assert heard and all(float(c.samples[-1]) > last_before for c in heard)  # nothing stale
+        assert heard[0].gap is True and not any(c.gap for c in heard[1:])
+        audio.resume_capture()  # idempotent
+        time.sleep(0.05)
+        assert m.started == 2
+    finally:
+        audio.stop()
+
+
+def test_the_stamp_chain_ends_with_the_capture():
+    audio, m = sleepy_hub()
+    audio.start()
+    try:
+        assert wait_for(lambda: m.seq > 3)
+        audio.pause_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert audio._last_end is None  # the first chunk after resume has no previous chunk
+    finally:
+        audio.stop()
+
+
+def test_a_failed_restart_is_logged_once_by_type_and_tried_again(caplog):
+    audio, m = sleepy_hub()
+    audio.start()
+    try:
+        assert wait_for(lambda: m.seq > 0)
+        audio.pause_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        m.start_errors = 3
+        with caplog.at_level(logging.DEBUG):
+            audio.resume_capture()
+            assert wait_for(lambda: audio.snapshot()["state"] == "running")
+        assert m.started == 1 + 4  # three failures, then the capture runs
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings == ["audio: start_recording failed: OSError"]
+        assert "secret" not in caplog.text
+    finally:
+        audio.stop()
+
+
+def test_a_failing_restart_reports_unavailable_with_the_reason():
+    audio, m = sleepy_hub()
+    audio.start()
+    try:
+        audio.pause_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        m.start_errors = 10**6
+        audio.resume_capture()
+        assert wait_for(lambda: m.started > 3)
+        snap = audio.snapshot()
+        assert snap["state"] == "unavailable"
+        assert snap["reason"] == "start_recording failed: OSError"
+        audio.pause_capture()  # asleep again while the restart keeps failing
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert m.stopped == 1
+    finally:
+        audio.stop()
+    assert audio.snapshot()["state"] == "off"
+
+
+def test_shutdown_while_paused_stops_cleanly_and_a_late_resume_starts_nothing():
+    audio, m = sleepy_hub()
+    audio.start()
+    audio.pause_capture()
+    assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+    t0 = time.monotonic()
+    audio.stop()
+    assert time.monotonic() - t0 < 1.0 and audio._thread is None
+    assert audio.snapshot()["state"] == "off"
+    audio.resume_capture()
+    time.sleep(0.05)
+    assert m.started == 1 and audio.snapshot()["state"] == "off"
+
+
+def test_pause_and_resume_on_a_hub_that_never_started_touch_nothing():
+    audio, m = sleepy_hub()
+    audio.pause_capture()
+    audio.resume_capture()
+    audio.pause_capture()
+    assert m.started == m.stopped == m.reads == 0
+    assert audio.snapshot()["state"] == "off"
+    audio.resume_capture()
+    audio.stop()
+    assert m.started == 0
+
+
+def test_a_hub_started_while_paused_stops_its_capture_until_resumed():
+    audio, m = sleepy_hub()
+    audio.pause_capture()
+    audio.start()
+    try:
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert m.stopped == 1
+        audio.resume_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "running")
+    finally:
+        audio.stop()
+
+
+def test_the_reflex_gets_only_fresh_sound_after_resume():
+    got = []
+    audio, m = sleepy_hub(voice=False, sink=lambda rms, stamp: got.append(rms))
+    audio.start()
+    try:
+        assert wait_for(lambda: len(got) > 2)
+        audio.pause_capture()
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        before = m.seq
+        n = len(got)
+        audio.resume_capture()
+        assert wait_for(lambda: len(got) > n)
+        assert all(rms > before for rms in got[n:])
+        assert audio.snapshot()["voice"] is None
+    finally:
+        audio.stop()

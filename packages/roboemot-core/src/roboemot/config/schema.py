@@ -5661,9 +5661,10 @@ class RuntimeConfig(Strict):
     pause_when_asleep: bool = param(
         True,
         "While the platform holds the motors off (the robot is asleep), pause the camera "
-        "perception, the idle light reading, the microphone listener and the behaviour tick, so "
-        "the robot idles cool and quiet; all of it resumes when the motors are on again "
-        "(SPEC 12A). Off keeps everything running while asleep",
+        "perception, the idle light reading, the microphone listener and the behaviour tick, and "
+        "stop the microphone capture when nothing needs the sound, so the robot idles cool and "
+        "quiet; all of it resumes when the motors are on again (SPEC 12A). Off keeps everything "
+        "running while asleep",
     )
 
 

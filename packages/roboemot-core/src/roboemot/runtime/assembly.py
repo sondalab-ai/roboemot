@@ -64,7 +64,7 @@ from roboemot.world.autoenroll import open_autoenroll, purge_stored
 from .host import RuntimeHost
 from .levels import AudioLevels
 from .reports import register_overrides
-from .sleep import SleepGate
+from .sleep import SleepGate, mic_needed_asleep
 from .ticks import dance_calm, in_conversation
 
 log = logging.getLogger(__name__)
@@ -539,5 +539,7 @@ def assemble(
             scan,
             lambda: stack.effective().runtime.pause_when_asleep,
             lambda: host.realtime_route,
+            audio=audio if reflex_audio or listener is not None else None,  # as startup starts it
+            mic_needed=lambda: mic_needed_asleep(stack.effective()),
         ),
     )

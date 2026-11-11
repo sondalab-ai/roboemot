@@ -195,7 +195,8 @@ def test_the_tab_strings_exist_in_both_languages_for_every_value_the_state_can_h
     needed = [f"live_phase_{p}" for p in (IDLE, LISTENING, THINKING, SPEAKING)]
     needed += [f"live_motion_{s}" for s in ("writing", "external", "held", "motors_off")]
     needed += [f"live_circ_{s}" for s in ("awake", "drowsy", "resting")]
-    needed += [f"live_part_{p}" for p in ("app_tick", "vision", "light_reader", "listener")]
+    parts = ("app_tick", "vision", "light_reader", "listener", "microphone")
+    needed += [f"live_part_{p}" for p in parts]
     needed += ["err_live_disabled", "err_live_unavailable", "tab_live"]
     for lang in (EN, IT):
         assert [k for k in needed if not lang.get(k)] == []

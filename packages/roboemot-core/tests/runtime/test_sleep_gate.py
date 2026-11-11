@@ -52,10 +52,28 @@ class Part:
         self.log.append(f"clear {source}")
 
 
+class Mic:
+    """An audio hub with the optional capture pause (``CapturePause``)."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log, self.capture_paused = log, False
+
+    def pause_capture(self) -> None:
+        self.capture_paused = True
+        self.log.append("pause microphone")
+
+    def resume_capture(self) -> None:
+        self.capture_paused = False
+        self.log.append("resume microphone")
+
+
 class Rig:
-    def __init__(self, speaking: bool = True, listener: bool = True) -> None:
+    def __init__(
+        self, speaking: bool = True, listener: bool = True, mic: bool = True, hub: object = None
+    ) -> None:
         self.log: list[str] = []
         self.enabled = True
+        self.mic_needed = False
         self.loop = Part("loop", self.log)
         self.loop.motors_off, self.loop.link = False, SimpleNamespace(online=True)
         self.bus = Bus()
@@ -65,6 +83,7 @@ class Rig:
         self.vision = Part("vision", self.log)
         self.light = Part("light", self.log)
         self.listener = Part("listener", self.log) if listener else None
+        self.mic = Mic(self.log) if mic else None
         conv = Part("conv", self.log) if speaking else None
         host = SimpleNamespace(conversation=conv, speech_output=conv)
         self.gate = SleepGate(
@@ -77,6 +96,8 @@ class Rig:
             Part("gaze", self.log),
             Part("scan", self.log),
             lambda: self.enabled,
+            audio=hub if hub is not None else self.mic,
+            mic_needed=lambda: self.mic_needed,
         )
 
     def sleep(self, now: float, asleep: bool = True) -> bool:
@@ -104,11 +125,13 @@ def test_asleep_publishes_once_and_pauses_everything_then_wake_resumes():
         "vision": True,
         "light_reader": True,
         "listener": True,
+        "microphone": True,
     }
     assert r.sleep(4.0, asleep=False) is False
     assert r.events == ["robot.asleep", "robot.awake"]
     assert {"resume vision", "resume light", "resume listener"} <= set(r.log)
     assert not r.vision.paused and not r.light.paused and not r.listener.paused
+    assert not r.mic.capture_paused
 
 
 def test_paused_parts_names_what_is_paused_and_never_reads_the_config():
@@ -116,9 +139,12 @@ def test_paused_parts_names_what_is_paused_and_never_reads_the_config():
     r.gate._enabled = lambda: (_ for _ in ()).throw(AssertionError("config read"))
     assert r.gate.paused_parts() == []
     r.gate.paused = True
-    r.vision.paused = r.light.paused = r.listener.paused = True
-    assert r.gate.paused_parts() == ["app_tick", "vision", "light_reader", "listener"]
-    r.gate._listener = None
+    r.gate._mic_needed = r.gate._enabled
+    r.vision.paused = r.light.paused = r.listener.paused = r.mic.capture_paused = True
+    assert r.gate.paused_parts() == [
+        "app_tick", "vision", "light_reader", "listener", "microphone",
+    ]  # fmt: skip
+    r.gate._listener = r.gate._audio = None
     r.vision.paused = False
     assert r.gate.paused_parts() == ["app_tick", "light_reader"]
 
@@ -150,6 +176,64 @@ def test_a_runtime_without_voice_or_vision_still_gates():
     paused = r.gate.snapshot(2.0)["paused"]
     assert paused["vision"] == "absent" and paused["listener"] == "absent"
     assert r.sleep(2.0, asleep=False) is False
+
+
+def test_the_microphone_pauses_after_the_listener_and_resumes_before_it():
+    r = Rig()
+    r.sleep(1.0)
+    assert r.log.index("pause listener") < r.log.index("pause microphone")
+    assert r.log[-1] == "pause microphone"  # after the speech stop too (the SDK shares a pipeline)
+    r.sleep(2.0, asleep=False)
+    assert r.log.index("resume microphone") < r.log.index("resume listener")
+
+
+def test_a_reload_that_lifts_the_pause_while_asleep_resumes_the_microphone_at_once():
+    r = Rig()
+    r.sleep(1.0)
+    assert r.mic.capture_paused and r.gate.snapshot(1.5)["paused"]["microphone"] is True
+    r.enabled = False
+    r.gate.tick(2.0)
+    assert not r.mic.capture_paused and r.log.count("resume microphone") == 1
+    assert r.log.index("resume microphone") < r.log.index("resume listener")
+    r.gate.tick(3.0)
+    assert r.log.count("resume microphone") == 1
+
+
+def test_a_needed_microphone_keeps_capturing_and_is_re_decided_on_every_tick():
+    r = Rig()
+    r.mic_needed = True
+    r.sleep(1.0)
+    assert r.listener.paused and not r.mic.capture_paused
+    assert "pause microphone" not in r.log and "microphone" not in r.gate.paused_parts()
+    r.mic_needed = False  # a reload: no consumer is left
+    r.gate.tick(2.0)
+    assert r.mic.capture_paused and r.log.count("pause microphone") == 1
+    r.mic_needed = True
+    r.gate.tick(3.0)
+    assert not r.mic.capture_paused and r.listener.paused
+
+
+def test_a_hub_without_the_capture_pause_is_left_alone_and_reported_absent():
+    hub = SimpleNamespace(start=lambda: None, stop=lambda: None)  # no pause_capture
+    r = Rig(mic=False, hub=hub)
+    assert r.sleep(1.0) is True
+    assert "pause microphone" not in r.log
+    assert r.gate.snapshot(2.0)["paused"]["microphone"] == "absent"
+    assert "microphone" not in r.gate.paused_parts()
+    assert r.sleep(2.0, asleep=False) is False
+
+
+def test_a_failing_capture_pause_is_logged_and_the_rest_still_runs(caplog):
+    r = Rig()
+
+    def boom() -> None:
+        raise OSError("alsa")
+
+    r.mic.pause_capture = boom
+    with caplog.at_level("WARNING"):
+        assert r.sleep(1.0) is True
+    assert "sleep: microphone: OSError" in caplog.text and "alsa" not in caplog.text
+    assert r.listener.paused
 
 
 class SleepyDriver(MockPoseDriver):
