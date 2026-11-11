@@ -168,8 +168,9 @@ def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes()
 
 
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
-    for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
-        text = (STATIC / name).read_text()
+    for path in _first_party_js():
+        name = path.name
+        text = path.read_text()
         for banned in (
             'setAttribute("style"',
             "innerHTML",
@@ -190,13 +191,30 @@ def test_no_native_confirm_prompt_or_page_level_pin_field_is_left():
     assert "ask({" in js
 
 
+def _first_party_js() -> list[Path]:
+    # every script the page serves itself; the vendored kit lives in a subfolder
+    return sorted(STATIC.glob("*.js"))
+
+
 def _page_js() -> str:
-    return "".join((STATIC / n).read_text() for n in ("app.js", "settings.js", "live.js"))
+    return "".join(p.read_text() for p in _first_party_js())
+
+
+def test_the_key_scan_reads_every_first_party_script():
+    names = {p.name for p in _first_party_js()}
+    assert {"app.js", "settings.js", "live.js", "emotions.js"} <= names
+    assert not any("vendor" in p.parts for p in _first_party_js())
 
 
 def _keys_used_by_app() -> set[str]:
     js = _page_js()
-    return set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    used = set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    # t(flag ? "key_a" : "key_b"): both keys of a choice
+    choices = re.findall(
+        r"""\btn?\(\s*[\w.!]+(?:\s*[=!<>]+\s*[\w."]+)?\s*\?\s*"([a-z0-9_]+)"\s*:\s*"([a-z0-9_]+)"\s*[,)]""",
+        js,
+    )
+    return used | {k for pair in choices for k in pair}
 
 
 def test_every_string_key_the_page_reads_exists_in_both_languages():
@@ -236,8 +254,7 @@ def test_every_restart_effect_core_accepts_has_text_in_both_languages():
 def test_every_singular_form_has_its_plural_key_and_is_read_through_tn():
     # tn(key, n) picks key + "_one" when n is 1: a `_one` key without its base key, or one whose
     # base key the page reads with t() (never picking the singular), is a dead string
-    names = ("app.js", "settings.js", "live.js", "emotions.js")
-    js = "".join((STATIC / n).read_text() for n in names)
+    js = _page_js()
     counted = set(re.findall(r"""\btn\(\s*"([a-z0-9_]+)"\s*,""", js))
     for lang in (EN, IT):
         singular = {k[: -len("_one")] for k in lang if k.endswith("_one")}
