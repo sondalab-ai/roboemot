@@ -20,6 +20,7 @@ import contextlib
 import datetime as dt
 import json
 import logging
+import platform
 import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -96,6 +97,20 @@ class Offline(NoRouteAvailable):
 # A timeout may be a slow model on a fine network: it triggers a reachability check instead.
 SLOW = (TimeoutError, APITimeoutError)
 UNREACHABLE = (APIConnectionError, OSError)  # checked after SLOW (both contain timeouts)
+_platform_probed = False
+
+
+async def _probe_platform_once() -> None:
+    """Run the openai SDK's platform probe once per process, off the loop and before a route's
+    first-token clock starts. The SDK calls ``platform.platform()`` on every client's first
+    request; CPython caches the answer, but its first call spawns ``uname -p`` and ``file``
+    (0.56 s on a loaded laptop, 2026-11-11), which the clock would count as route latency.
+    A warm-up never fails a request: the SDK guards its own call the same way."""
+    global _platform_probed
+    if not _platform_probed:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(platform.platform)
+        _platform_probed = True
 
 
 # Non-standard delta fields some servers stream before the answer. Never requested or yielded:
@@ -396,6 +411,7 @@ class Router:
         prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         try:
             create = client.chat.completions.create  # untimed: the first access imports lazily
+            await _probe_platform_once()  # untimed too: the SDK's first request spawns processes
             started = loop.time()
             deadline = started + route.first_token_timeout_s
             # asyncio.timeout, not wait_for: a barge-in's cancel is never swallowed on 3.11
