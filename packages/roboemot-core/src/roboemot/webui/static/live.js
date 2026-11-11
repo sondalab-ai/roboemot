@@ -257,7 +257,7 @@ function liveSystemProcess(process) {
   const p = process == null ? {} : process;
   return [
     liveSystemLine("live_process_cpu", { n: p.cpu_percent }),
-    liveSystemLine("live_process_mem", { n: p.rss_mb, threads: p.threads }),
+    p.rss_mb == null ? [] : [el("p", {}, tn("live_process_mem", p.threads, { n: numAsSent(p.threads), mb: numAsSent(p.rss_mb) }))],
   ];
 }
 

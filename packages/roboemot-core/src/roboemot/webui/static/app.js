@@ -732,7 +732,9 @@ async function toBase64(file) {
 
 function importReport(report) {
   const created = report.items.filter((i) => i.created).length;
-  const parts = [el("p", {}, t("catalogue_report", { created: created, existing: report.items.length - created }))];
+  const parts = [el("p", {}, t("catalogue_report", {
+    created: tn("catalogue_created", created), existing: tn("catalogue_known", report.items.length - created),
+  }))];
   if (report.photo !== "none") parts.push(el("p", { class: "hint" }, t("photo_" + report.photo)));
   if (report.truncated) parts.push(el("p", { class: "hint" }, t("catalogue_truncated")));
   if (report.conflicts.length) {
@@ -805,7 +807,7 @@ async function catalogueView() {
     title: t("catalogue_clear"), message: t("catalogue_clear_confirm"), pin: true, danger: true, confirm: t("catalogue_clear"),
     run: async ({ pin }) => {
       const out = await api("POST", "/api/catalogue/candidates/clear", { confirm: true, pin: pin });
-      notice(t("catalogue_cleared", { n: out.cleared }));
+      notice(tn("catalogue_cleared", out.cleared));
     },
   });
   const clearTombstones = () => ask({
@@ -813,7 +815,7 @@ async function catalogueView() {
     confirm: t("tombstones_clear", { n: data.tombstones }),
     run: async ({ pin }) => {
       const out = await api("POST", "/api/catalogue/tombstones/clear", { confirm: true, pin: pin });
-      notice(t("tombstones_cleared", { n: out.cleared }));
+      notice(tn("tombstones_cleared", out.cleared));
     },
   });
   view.append(
