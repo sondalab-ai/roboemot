@@ -69,6 +69,17 @@ test("the tab sits after Live and shows the state in words", async (t) => {
   assert.ok(rows[1].includes("the conversation → no label"), rows[1]);
 });
 
+test("the bars say their value as the card shows it, not the percentage they are drawn at", async (t) => {
+  const p = await emotionsPage(t, { state: { ...STATE, affect: { ...STATE.affect, valence: 0, arousal: -0.5 } } });
+  const said = (label) => p.document.querySelector(`[role=progressbar][aria-label="${label}"]`).getAttribute("aria-valuetext");
+  const bar = p.document.querySelector('[role=progressbar][aria-label="live_valence"]');
+  assert.equal(bar.getAttribute("aria-valuenow"), "50", "0.00 is drawn at the middle");
+  assert.equal(said("live_valence"), "0.00");
+  assert.equal(said("live_arousal"), "-0.50");
+  assert.equal(said("live_intensity"), "0.30");
+  assert.equal(said("emo_sleepiness"), "0.60");
+});
+
 test("a poll is marked as activity only after input", async (t) => {
   const p = await emotionsPage(t);
   await p.run("emoPoll(document.getElementById('emo-cards'), emoState.serial)");

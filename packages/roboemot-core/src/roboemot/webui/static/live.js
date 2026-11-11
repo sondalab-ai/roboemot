@@ -65,7 +65,7 @@ function liveRow(label, ...value) {
 }
 
 function liveNumber(value) {
-  return value.toFixed(2);
+  return num(value, 2);
 }
 
 function liveMoodCard(d) {
@@ -96,7 +96,7 @@ function liveConversationCard(d) {
   const parts = [el("p", {}, badge(state.strings["live_phase_" + c.phase] || c.phase, tone))];
   if (c.elapsed_s !== null) {
     parts.push(liveRow(t("live_route"), c.route === null ? t("live_route_pending") : c.route));
-    parts.push(el("p", { class: "hint" }, t("live_elapsed", { n: c.elapsed_s.toFixed(1) })));
+    parts.push(el("p", { class: "hint" }, t("live_elapsed", { n: num(c.elapsed_s, 1) })));
   }
   return card(t("tab_live"), t("live_conversation"), parts);
 }
@@ -124,14 +124,14 @@ function liveAttentionCard(d) {
     parts.push(el("ul", {}, a.faces.map((f) =>
       el("li", {}, f.name === null ? t("live_unknown") : f.name, f.target ? [" ", badge(t("live_gaze"), "info")] : []))));
   }
-  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, t("live_more", { n: a.count - a.faces.length })));
+  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, tn("live_more", a.count - a.faces.length)));
   return card(t("tab_live"), t("live_attention"), parts);
 }
 
 function liveReflexesCard(d) {
   const last = d.reflexes.last;
   return card(t("tab_live"), t("live_reflexes"), el("p", {},
-    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
+    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: num(last.age_s, 1) }) : t("live_reflex_none")));
 }
 
 function liveMotionCard(d) {
@@ -192,7 +192,7 @@ function liveBeatMusic(music, beat) {
 
 // An age as the page shows it: seconds up to a minute, then whole minutes, then whole hours.
 function liveAccentAgo(seconds) {
-  if (seconds < LIVE_SECONDS_PER_MINUTE) return t("live_dance_accent_ago", { n: seconds.toFixed(1) });
+  if (seconds < LIVE_SECONDS_PER_MINUTE) return t("live_dance_accent_ago", { n: num(seconds, 1) });
   if (seconds < LIVE_SECONDS_PER_HOUR) return t("live_dance_accent_ago_min", { n: Math.floor(seconds / LIVE_SECONDS_PER_MINUTE) });
   return t("live_dance_accent_ago_h", { n: Math.floor(seconds / LIVE_SECONDS_PER_HOUR) });
 }
@@ -315,7 +315,7 @@ function liveActivityBox() {
 function liveValue(v) {
   if (v === null || v === undefined) return t("live_none");
   if (typeof v === "boolean") return t(v ? "live_yes" : "live_no");
-  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : num(v, 1);
   return word("live_code_", v);
 }
 
@@ -713,9 +713,11 @@ function liveSetMeter(meter, level) {
   const ok = level.state === "ok" && level.db !== null;
   const span = -LIVE_METER_FLOOR_DB;
   const pct = ok ? Math.round(Math.min(Math.max((level.db - LIVE_METER_FLOOR_DB) / span, 0), 1) * LIVE_PERCENT) : 0;
+  const text = ok ? t("live_db", { n: num(level.db, 1) }) : t("live_level_" + level.state);
   meter.bar.setAttribute("aria-valuenow", pct);
+  meter.bar.setAttribute("aria-valuetext", text); // the level in dBFS, or its state: not a percentage
   meter.bar.style.setProperty("--sl-progress", pct + "%");
-  meter.text.textContent = ok ? t("live_db", { n: level.db.toFixed(1) }) : t("live_level_" + level.state);
+  meter.text.textContent = text;
 }
 
 function liveAudioBuild(box) {
@@ -789,7 +791,7 @@ function liveAudioRender(box, data) {
   liveSetMeter(ui.mic, data.levels.mic);
   liveSetMeter(ui.out, data.levels.out);
   ui.floor.hidden = data.levels.floor_db === null;
-  ui.floor.textContent = data.levels.floor_db === null ? "" : t("live_floor", { n: data.levels.floor_db.toFixed(1) });
+  ui.floor.textContent = data.levels.floor_db === null ? "" : t("live_floor", { n: num(data.levels.floor_db, 1) });
   liveRenderTranscript(ui, data.transcript);
 }
 

@@ -861,7 +861,7 @@ test("restart: the badge of a restart field links to the button; without the act
   const link = row(page, "voice.flag").querySelector(".sl-badge--warning").closest("a");
   assert.ok(link, "badge is a link");
   assert.equal(link.getAttribute("href"), "#settings-restart");
-  assert.equal(link.getAttribute("aria-label"), "settings_restart_goto");
+  assert.equal(link.getAttribute("aria-label"), "named_action", "the badge's text, then where it goes (names.test.mjs)");
   assert.equal(link.getAttribute("title"), "settings_restart_goto");
   let focused = null;
   const btn = page.document.querySelector("#settings-restart");

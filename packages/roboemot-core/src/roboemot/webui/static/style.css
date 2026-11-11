@@ -1,7 +1,8 @@
 /* Layout only. Colour, type and controls come from the vendored Sondalab kit (data-sl-product="roboemot").
    The one colour here is the product accent, per theme (kit agent/accent-registry.json, roboemot);
-   high contrast keeps the kit's own. */
-[data-sl-theme="light"] { --sl-accent-default: #f726b4; --sl-focus-ring: #f726b4; }
+   high contrast keeps the kit's own. The light theme takes the kit's focus ring, derived from this
+   accent (themes/light.css): the accent itself is 2.87:1 on the light canvas, under WCAG 1.4.11's 3:1. */
+[data-sl-theme="light"] { --sl-accent-default: #f726b4; }
 [data-sl-theme="dark"] { --sl-accent-default: #ff48c4; --sl-focus-ring: #ff48c4; }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -13,6 +14,11 @@ html { scroll-padding-top: calc(var(--app-header-h, 0px) + var(--sl-space-3)); }
 .sl-header :is(button, a, input, select) { scroll-margin-top: calc(-1 * (var(--app-header-h, 0px) + var(--sl-space-3))); }
 /* `hidden` always wins: an author `display` (.stack, .row, ...) would otherwise show a hidden element. */
 [hidden] { display: none !important; }
+/* Text for assistive technology only (the kit has no such class): the hidden header of an action column. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 body {
   margin: 0;
   background: var(--slc-canvas);
@@ -34,13 +40,15 @@ body {
 #tabs .sl-tabs__tab { margin-bottom: 0; }
 /* Forced colours paint no box-shadow: the line comes back as the border (the tabs no longer reach into it). */
 @media (forced-colors: active) { #tabs { border-bottom: 1px solid var(--slc-border); } }
-main, #view, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
+main, #view, .view-grid, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sl-space-4); }
 main { padding-block: var(--sl-space-4); }
 .stack { gap: var(--sl-space-3); }
 .sl-toast svg { width: var(--sl-space-4); height: var(--sl-space-4); }
 .row { display: flex; gap: var(--sl-space-2); flex-wrap: wrap; align-items: center; }
 ul.row { list-style: none; padding: 0; margin: 0; }
-.table-scroll { overflow-x: auto; }
+/* positioned: the hidden header of an action column (.sr-only, absolute) stays inside the scroller,
+   not at its static place past the viewport, where it widened the page (8px at 360px, Chrome). */
+.table-scroll { overflow-x: auto; position: relative; }
 .sl-field__control { display: block; max-width: 28rem; }
 .sl-field__input { max-width: 100%; }
 .sl-card__title { margin: 0 0 var(--sl-space-2); }
@@ -87,3 +95,13 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 #live-audio { margin-top: var(--sl-space-4); }
 .live-video { display: block; width: 100%; height: auto; border-radius: var(--sl-radius-2, 0.5rem); }
 #live-video-banner { margin-bottom: var(--sl-space-4); }
+/* Touch screens: the kit's controls are 32px (small buttons 24px) and most row actions are small,
+   with a destructive one beside a safe one. A coarse pointer gets 44px targets (WCAG 2.5.5,
+   2.75rem from kit spacing) and a wider gap between neighbours; a fine pointer keeps the kit's sizes. */
+@media (pointer: coarse) {
+  :is(.sl-btn, .sl-segmented__item, .sl-tabs__tab, .sl-chip, .sl-disclosure, .sl-icon-btn, .sl-check, .sl-switch, .sl-nav__item) {
+    min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));
+  }
+  .sl-icon-btn { min-inline-size: calc(var(--sl-space-6) + var(--sl-space-3)); }
+  .row { gap: var(--sl-space-3); }
+}

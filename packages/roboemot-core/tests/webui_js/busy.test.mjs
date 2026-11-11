@@ -153,3 +153,24 @@ test("consent: a second submit sends nothing while the enrollment completes", as
   assert.equal(submit.disabled, false);
   page.run("stopPolling()");
 });
+
+test("route form: a second submit before the PIN dialog opens asks for the PIN once", async () => {
+  const page = await routesPage();
+  const name = page.document.querySelector("#route-new-name");
+  const form = name.closest("form");
+  const submit = form.querySelector("button[type=submit]");
+  name.value = "lan";
+  page.document.querySelector("#route-new-url").value = "http://10.0.0.2:8080/v1";
+  page.document.querySelector("#route-new-model").value = "m";
+  submit.click();
+  form.dispatchEvent(new page.window.Event("submit", { cancelable: true }));
+  submit.click();
+  await settle();
+  assert.equal(page.document.querySelectorAll("dialog").length, 1, "one PIN dialog");
+  assert.equal(submit.disabled, true, "busy while the dialog is open");
+  page.document.querySelector("dialog").close();
+  await settle();
+  await settle();
+  assert.equal(page.document.querySelectorAll("dialog").length, 0);
+  assert.equal(submit.disabled, false, "a cancelled dialog gives the button back");
+});

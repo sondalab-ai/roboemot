@@ -16,12 +16,14 @@ const EMO_PERCENT = 100;
 const emoState = { serial: 0, controls: null, grid: null }; // grid: the state cards of the open view
 
 function emoNumber(value) {
-  return value.toFixed(2);
+  return num(value, 2);
 }
 
-// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number.
+// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number; the bar
+// says the number too, not the percentage it is drawn at.
 function emoAxis(label, value) {
-  return [liveRow(label, emoNumber(value)), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT)];
+  const text = emoNumber(value);
+  return [liveRow(label, text), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT, text)];
 }
 
 function emoAffectCard(a) {
@@ -30,7 +32,7 @@ function emoAffectCard(a) {
     emoAxis(t("live_valence"), a.valence),
     emoAxis(t("live_arousal"), a.arousal),
     liveRow(t("live_intensity"), emoNumber(a.intensity)),
-    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT),
+    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT, emoNumber(a.intensity)),
     el("p", { class: "hint" }, t("emo_baseline", { v: emoNumber(a.baseline_valence), a: emoNumber(a.baseline_arousal) })));
 }
 
@@ -56,7 +58,7 @@ function emoCircadianCard(c) {
   if (c === null) return card(t("tab_emotions"), t("emo_circadian"), el("p", { class: "hint" }, t("live_circ_off")));
   const parts = [el("p", {}, badge(word("live_circ_", c.state), "info"))];
   if (c.sleepiness !== null) {
-    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT));
+    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT, emoNumber(c.sleepiness)));
   }
   parts.push(liveRow(t("emo_circ_amplitude"), emoNumber(c.amplitude)));
   return card(t("tab_emotions"), t("emo_circadian"), parts);
@@ -64,7 +66,7 @@ function emoCircadianCard(c) {
 
 function emoExpressionCard(e) {
   const body = e.last_label === null ? el("p", { class: "hint" }, t("emo_expression_none"))
-    : el("p", {}, t("emo_expression_line", { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude), n: e.started }));
+    : el("p", {}, tn("emo_expression_line", e.started, { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude) }));
   return card(t("tab_emotions"), t("emo_expression"), body);
 }
 
@@ -76,14 +78,14 @@ function emoName(name) {
 function emoMovedRow(m) {
   const source = m.rule === null ? t("emo_llm") : t("emo_rule", { n: m.rule });
   return el("li", { class: "emo-moved" },
-    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: m.age_s.toFixed(1) })), " ",
+    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: num(m.age_s, 1) })), " ",
     m.rule === null ? [] : [el("code", { class: "sl-code" }, m.event), " "], source, " → ",
     m.label === null ? t("emo_no_label") : word("affect_label_", m.label), ": ",
     t("emo_delta", { dv: emoSigned(m.dv), da: emoSigned(m.da) }));
 }
 
 function emoSigned(value) {
-  return (value > 0 ? "+" : "") + emoNumber(value);
+  return num(value, 2, true);
 }
 
 function emoMovedCard(moved) {

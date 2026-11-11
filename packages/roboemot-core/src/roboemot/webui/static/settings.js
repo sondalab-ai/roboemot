@@ -459,7 +459,8 @@ function settingTags(row, editable) {
 // refreshSettings, so a row with unsaved edits is not rebuilt when that availability flips.
 function restartBadge() {
   const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
-  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge;
+  const name = rowName(t("settings_restart_badge"), t("settings_restart_goto")); // the badge's text first
+  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": name, title: t("settings_restart_goto") }, badge) : badge;
 }
 
 const canRestart = () => {
@@ -560,7 +561,8 @@ function settingLeaf(node) {
   const title = ctl && ctl.labelFor
     ? el("label", { class: "sl-field__label", for: ctl.labelFor }, name)
     : el("span", { class: "sl-field__label" }, ctl && ctl.ownsLabel ? [] : name);
-  const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
+  const head = el("div", { class: "row" }, title, settingTags(row, editable));
+  const parts = [head];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
   if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
@@ -582,7 +584,26 @@ function settingLeaf(node) {
     }
     parts.push(failure, settingActions(node, ctl, failure));
   }
-  return el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  const leaf = el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  if (ctl) editedMarker(leaf, head, ctl);
+  return leaf;
+}
+
+// Marks a leaf whose control holds an unsaved edit (each field has its own Save): a kit tag in its
+// tag row and data-dirty on the row, both gone when the value is back to the stored one; a save
+// rebuilds the row. Nothing is announced. The control's first reading is the stored value, so a
+// value it cannot read (a choice no longer offered) is no edit until it is changed. Chips and rows
+// change on click and Enter, not only on input.
+function editedMarker(leaf, head, ctl) {
+  const stored = JSON.stringify(ctl.read());
+  const tag = el("span", { class: "sl-tag", "data-edited": "1" }, t("settings_edited"));
+  const check = () => {
+    const dirty = JSON.stringify(ctl.read()) !== stored;
+    leaf.toggleAttribute("data-dirty", dirty);
+    if (dirty && !tag.isConnected) head.append(tag);
+    if (!dirty) tag.remove();
+  };
+  for (const kind of ["input", "change", "click", "keydown"]) leaf.addEventListener(kind, check);
 }
 
 // The ids that describe a leaf's control: its description, then what the control adds (the limits line).
@@ -638,9 +659,10 @@ function settingActions(node, ctl, failure) {
     writeNotice(result, "settings_reset_done");
     await settingsReload(row.path);
   };
-  const actions = [button(t("settings_save"), "primary", () => guarded(save), { small: true })];
+  const named = (label) => ({ small: true, attrs: { "aria-label": rowName(label, row.path) } });
+  const actions = [button(t("settings_save"), "primary", () => guarded(save), named(t("settings_save")))];
   if (row.source === "runtime") {
-    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), { small: true }));
+    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), named(t("settings_reset_layer"))));
   }
   return el("div", { class: "row" }, actions);
 }
@@ -695,7 +717,7 @@ function entryBlock(node, key) {
       revealedSettings = new Map();
       writeNotice(result, "settings_entry_removed");
       await settingsReload(null);
-    }), { small: true })
+    }), { small: true, attrs: { "aria-label": rowName(t("settings_remove_entry"), path) } })
     : [];
   return el("div", { class: "entry-block stack", "data-entry": path }, el("div", { class: "row" }, el("h4", { class: "setting-entry" }, toggle), remove), body);
 }
@@ -872,12 +894,13 @@ function refreshGroup(g) {
 function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
   const status = document.getElementById("settings-count");
-  if (status) status.textContent = t("settings_matches", { n: total });
+  if (status) status.textContent = tn("settings_matches", total);
   const actions = document.getElementById("settings-robot-actions");
   if (actions) actions.replaceChildren(restartButton());
   for (const tag of document.querySelectorAll("[data-restart-tag]")) tag.replaceChildren(restartBadge());
   const hint = document.getElementById("settings-restart-hint");
   if (hint) hint.textContent = t(settingsState.restartPending ? "settings_restart_pending" : "settings_restart_hint");
+  focusBack();
 }
 
 function settingsGroup(section) {

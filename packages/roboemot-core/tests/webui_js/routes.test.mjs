@@ -366,6 +366,8 @@ test("route form: an http host that is not this machine adds the unencrypted war
   await settle();
   assert.match(page.document.querySelector("dialog").textContent, /CLEAR/);
   page.document.querySelector("dialog").close();
+  await settle(); // the form is busy until the cancelled save has redrawn the view
+  await settle();
   fill("http://localhost:8080/v1");
   await settle();
   assert.doesNotMatch(page.document.querySelector("dialog").textContent, /CLEAR/);
