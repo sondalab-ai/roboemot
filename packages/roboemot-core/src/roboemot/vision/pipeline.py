@@ -35,10 +35,11 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    short tracks; a rebirth near a track that ended within ``rebirth_window_s`` keeps that
    track's age and last embedding, never its identity or votes, ``_new_entity``), with a
    burst of votes only while an active record of its kind could match it (again when such
-   records change); then at ``rates.appearance_hz`` for a recognised track, and for an unknown
-   one only when its detector box changed size or shape, after a missed object run, or after
-   ``entity_reembed_floor_s``. During a shown-object episode (``governor.active("objects")``,
-   SPEC 5A) only the shown track, the confirmed track nearest
+   records change); then only when its detector box changed size or shape, after a missed
+   object run, or after ``entity_reembed_recognised_s`` (recognised) or
+   ``entity_reembed_floor_s`` (unknown), never faster than ``rates.appearance_hz``. During a
+   shown-object episode (``governor.active("objects")``, SPEC 5A) only the shown track, the
+   confirmed track nearest
    the attention target's bearing (``governor.focus``; the frame centre without one,
    ``_shown_track``), may embed, and only the votes that can recognise it: the gaze follows it
    without a freeze per run, and the others wait for the episode's end. The look-down crop
@@ -1471,10 +1472,11 @@ class VisionPipeline:
         continues, ``_new_entity``), else ``young``; it
         gets a burst of votes only while an active record of its kind could match it (again
         after a re-embed of an unknown track, or when such records change). During an episode
-        the shown track runs only those votes; anything else is ``episode``. After that a
-        recognised track keeps ``rates.appearance_hz``; an unknown one is embedded again only
-        when its box changed size or shape, when it was out of sight for an object run, or after
-        ``entity_reembed_floor_s``.
+        the shown track runs only those votes; anything else is ``episode``. After that a track
+        is embedded again when it was out of sight for an object run or its box changed size or
+        shape, else after ``entity_reembed_recognised_s`` when it is recognised (owner decision
+        2026-11-11) or ``entity_reembed_floor_s`` when it is unknown; never sooner than
+        ``rates.appearance_hz`` allows.
         """
         cfg = self.cfg
         if not c.wants(key):
@@ -1493,12 +1495,13 @@ class VisionPipeline:
             return False, EPISODE
         if gap < self.governor.period("appearance"):
             return False, SPACING
-        if state.owner_id is not None:
-            return True, RECOGNISED
         if state.reacquired:
             return True, REACQUIRED
         if state.box is not None and self._box_changed(state.box, self._measured(track)):
             return True, CHANGED
+        if state.owner_id is not None:
+            due = gap >= cfg.entity_reembed_recognised_s - EPSILON_S
+            return (True, RECOGNISED) if due else (False, SETTLED)
         if gap >= cfg.entity_reembed_floor_s - EPSILON_S:
             return True, FLOOR
         return False, SETTLED
