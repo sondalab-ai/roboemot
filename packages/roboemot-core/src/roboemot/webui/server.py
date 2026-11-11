@@ -3,13 +3,14 @@
 Standard library only. Static files come from a fixed allow-list read at start-up, so no
 request path ever reaches the file system. The allow-list is the first-party files plus the
 files listed in the vendored kit's ``VENDORED.json``; those are checked against their sha256 at
-start-up and served with ``Cache-Control: no-cache`` and a strong ETag (304 on a match), while
-every other response stays ``no-store``.
+start-up. Every static file is served with ``Cache-Control: no-cache`` and a strong ETag (the sha256
+of the file, per form; 304 on a match), so a browser always revalidates and an upgrade is seen at
+the next load. Every other response, the API included, stays ``no-store``.
 
 Compression: every static file but an already compressed type (fonts) is gzipped once at
 start-up, a JSON body of at least ``JSON_GZIP_MIN_BYTES`` per response (``JSON_GZIP_LEVEL``,
 cheap); each is sent gzipped only when the request accepts it, with ``Vary: Accept-Encoding`` on
-both forms. First-party files keep ``no-store`` and no ETag in both forms (SPEC 12).
+both forms (SPEC 12).
 """
 
 from __future__ import annotations
@@ -74,7 +75,7 @@ VENDOR_TYPES = {
     ".woff2": "font/woff2",
     ".txt": "text/plain; charset=utf-8",
 }
-VENDOR_CACHE_CONTROL = "no-cache"
+STATIC_CACHE_CONTROL = "no-cache"  # cached, but revalidated on every use (SPEC 12)
 COMPRESSED_TYPES = frozenset({".woff2"})  # already compressed: gzip only costs time
 GZIP_WBITS = 31  # zlib's gzip container (16 + the 15-bit window): no file name, mtime 0
 STATIC_GZIP_LEVEL = 9  # once at start-up: the smallest body is worth the time
@@ -107,12 +108,12 @@ BUSY_REPLY = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-Af
 
 @dataclass(frozen=True)
 class Static:
-    """A file served from memory: body, content type and, for vendored files, the strong ETag
-    and the gzip form (``None`` for a type compressed already) with its own ETag."""
+    """A file served from memory: body, content type, its strong ETag and the gzip form (``None``
+    for a type compressed already, or when gzip would not be smaller) with its own ETag."""
 
     body: bytes
     ctype: str
-    etag: str | None = None
+    etag: str
     packed: bytes | None = None
     packed_etag: str | None = None
 
@@ -150,13 +151,22 @@ def packed_form(body: bytes) -> bytes | None:
     return packed if len(packed) < len(body) else None
 
 
+def static_item(body: bytes, ctype: str, digest: str, packed: bytes | None) -> Static:
+    """A ``Static`` whose ETag is ``digest`` (the sha256 of ``body``) and whose gzip form, made
+    deterministically from ``body``, has the same digest with ``GZIP_ETAG_SUFFIX``."""
+    packed_etag = f'"{digest}{GZIP_ETAG_SUFFIX}"' if packed is not None else None
+    return Static(body, ctype, f'"{digest}"', packed, packed_etag)
+
+
 def load_first_party() -> dict[str, Static]:
-    """The first-party files of ``STATIC_FILES``, keyed by URL path, with their gzip form. No
-    ETag: SPEC 12 keeps them ``no-store``, so they are never revalidated, only compressed."""
+    """The first-party files of ``STATIC_FILES``, keyed by URL path, read once at start-up with
+    their gzip form and an ETag from their sha256 (SPEC 12): a changed file gets a new tag at
+    the next start, so a browser holding the old one gets the new file."""
     out: dict[str, Static] = {}
     for route, (name, ctype) in STATIC_FILES.items():
         body = (STATIC_DIR / name).read_bytes()
-        out[route] = Static(body, ctype, packed=packed_form(body))
+        digest = hashlib.sha256(body).hexdigest()
+        out[route] = static_item(body, ctype, digest, packed_form(body))
     return out
 
 
@@ -180,8 +190,7 @@ def load_vendor() -> dict[str, Static]:
         if hashlib.sha256(body).hexdigest() != digest:
             raise RuntimeError(f"vendored file {name} does not match VENDORED.json")
         packed = None if path.suffix in COMPRESSED_TYPES else packed_form(body)
-        packed_etag = f'"{digest}{GZIP_ETAG_SUFFIX}"' if packed is not None else None
-        out[VENDOR_ROUTE + name] = Static(body, ctype, f'"{digest}"', packed, packed_etag)
+        out[VENDOR_ROUTE + name] = static_item(body, ctype, digest, packed)
     return out
 
 
@@ -343,8 +352,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_static(self, item: Static) -> None:
         """A file from memory: its gzip form when it has one and the request accepts gzip, 304
-        when ``If-None-Match`` names the ETag of the form this request would get (a file
-        without an ETag, first-party, is always sent whole and ``no-store``)."""
+        when ``If-None-Match`` names the ETag of the form this request would get."""
         vary = item.packed is not None
         if vary and accepts_gzip(self.headers.get("Accept-Encoding")):
             body, etag, encoding = item.packed or b"", item.packed_etag, "gzip"
@@ -427,7 +435,7 @@ class _Handler(BaseHTTPRequestHandler):
                 continue
             self.send_header(name, value)
         if etag is not None:
-            self.send_header("Cache-Control", VENDOR_CACHE_CONTROL)
+            self.send_header("Cache-Control", STATIC_CACHE_CONTROL)
             self.send_header("ETag", etag)
         if resp is not None:
             for name, value in resp.headers.items():
