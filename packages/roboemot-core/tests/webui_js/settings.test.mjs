@@ -498,6 +498,7 @@ test("entries: the add form is built from the entry descriptors and posts key, v
   assert.ok(!adder.textContent.includes("secret_token"), "secret fields are not offered");
   const name = adder.querySelector('input[type="text"]');
   name.value = "angry";
+  assert.equal(button(adder, "settings_add_entry").getAttribute("aria-label"), "named_action", "names the container (names.test.mjs)");
   button(adder, "settings_add_entry").click();
   await settle();
   assert.equal(adder.querySelector(".sl-field__error").textContent, "err_value_type", "required number left empty");
@@ -642,6 +643,7 @@ test("search is debounced, needs two characters to open groups, and caps what it
   assert.equal(body(page, "core-bulk").querySelectorAll(".setting").length, 50);
   const all = button(body(page, "core-bulk"), "All 60");
   assert.ok(all);
+  assert.equal(all.getAttribute("aria-label"), "named_action", "names the group (names.test.mjs)");
   all.click();
   assert.equal(body(page, "core-bulk").querySelectorAll(".setting").length, 60);
 

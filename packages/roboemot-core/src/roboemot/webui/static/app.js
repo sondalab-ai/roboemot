@@ -657,7 +657,7 @@ async function registryView() {
   view.append(card(t("tab_registry"), t("registry_title"), body));
   view.append(card(t("tab_registry"), t("quarantined_title"),
     quarantined.keys.length === 0 ? empty(t("quarantined_title"), t("quarantined_none")) :
-      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
+      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true, attrs: { "aria-label": rowName(t("purge"), k) } }))))));
 }
 
 async function purgeKey(key) {
@@ -772,6 +772,7 @@ async function catalogueView() {
     await catalogueView();
   });
   const pending = data.records.filter((r) => r.status === "pending");
+  const named = (action, name) => ({ small: true, attrs: { "aria-label": rowName(action, name) } });
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
     [t("display_name"), t("table_kind_origin"), null],
@@ -780,10 +781,12 @@ async function catalogueView() {
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
       el("td", { class: "actions" }, el("div", { class: "row" },
         r.status === "pending" && r.has_appearance ?
-          button(t("catalogue_activate"), "plain", () => confirmBy(r, null), { small: true }) : [],
+          button(t("catalogue_activate"), "plain", () => confirmBy(r, null), named(t("catalogue_activate"), r.display_name)) : [],
         data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
-          .map((e) => button(t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop(),
-            "plain", () => confirmBy(r, e.entry_id), { small: true })))))));
+          .map((e) => {
+            const text = t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop();
+            return button(text, "plain", () => confirmBy(r, e.entry_id), named(text, r.display_name));
+          }))))));
   const live = data.live.length === 0 ? empty(t("catalogue_live"), t("catalogue_live_none")) :
     el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + word("category_", e.category) + " #" + e.entry_id.split("-").pop() +
       (e.identified ? " ✓" : ""))));
@@ -1087,9 +1090,9 @@ async function routesView() {
     const run = button(t("route_check"), "plain", () => whileBusy(run, () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    })), { attrs: { disabled: r.running } });
+    })), { attrs: { disabled: r.running, "aria-label": rowName(t("route_check"), r.name) } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
-    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
+    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; }, { attrs: { "aria-label": rowName(t("route_edit"), r.name) } });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
       const done = await ask({
         title: t("route_remove_title", { name: r.name }), message: t("route_remove_message"), pin: true, danger: true,
@@ -1097,7 +1100,7 @@ async function routesView() {
         run: async ({ pin }) => { await api("POST", "/api/routes/remove", { name: r.name, pin }); },
       });
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
-    }));
+    }), { attrs: { "aria-label": rowName(t("route_remove"), r.name) } });
     const routeCard = busy(card(t("tab_routes"), r.name,
       el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :

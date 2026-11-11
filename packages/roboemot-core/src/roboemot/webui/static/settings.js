@@ -259,7 +259,8 @@ function textControl(desc, id) {
 function rowsControl(desc, id, opts, make, blank, initial, canRemove) {
   const list = el("div", { class: "stack" });
   const rows = [];
-  const add = button(t("settings_add"), "plain", () => { addRow(blank(), true); firstControl(rows[rows.length - 1].box).focus(); }, { small: true });
+  const add = button(t("settings_add"), "plain", () => { addRow(blank(), true); firstControl(rows[rows.length - 1].box).focus(); },
+    { small: true, attrs: { "aria-label": rowName(t("settings_add"), opts.label) } });
   const label = () => rows.forEach((r, n) => r.relabel(n + 1));
   const addRow = (value, fresh) => {
     const control = make(value, id + "-" + settingsState.serial++);
@@ -270,7 +271,7 @@ function rowsControl(desc, id, opts, make, blank, initial, canRemove) {
     }, { small: true });
     remove.disabled = !(fresh || canRemove);
     const box = el("div", { class: "entry" }, control.node, remove);
-    const entry = { control, box, relabel: (n) => remove.setAttribute("aria-label", t("settings_remove_n", { n })) };
+    const entry = { control, box, relabel: (n) => remove.setAttribute("aria-label", rowName(t("settings_remove_n", { n }), opts.label)) };
     rows.push(entry);
     list.append(box);
     label();
@@ -344,12 +345,12 @@ function chipsControl(desc, id, opts) {
   };
   if (desc.kind === "enum_list") {
     entry = el("select", { class: "sl-field__input", id, "aria-label": t("settings_new_item") });
-    adder = button(t("settings_add"), "plain", take, { small: true });
+    adder = button(t("settings_add"), "plain", take, { small: true, attrs: { "aria-label": rowName(t("settings_add"), opts.label) } });
     fill();
   } else {
     entry = el("input", { type: "text", class: "sl-field__input", id, "aria-label": t("settings_new_item") });
     entry.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); take(); } });
-    adder = button(t("settings_add"), "plain", take, { small: true });
+    adder = button(t("settings_add"), "plain", take, { small: true, attrs: { "aria-label": rowName(t("settings_add"), opts.label) } });
   }
   const adding = el("div", { class: "entry" }, desc.kind === "enum_list"
     ? el("span", { class: FIELD_FX }, el("span", { class: "sl-select" }, entry)) : fieldControl(entry), adder);
@@ -760,7 +761,8 @@ function addEntryForm(node) {
       ctl.labelFor ? el("label", { class: "sl-field__label", for: ctl.labelFor }, el("code", { class: "sl-code" }, desc.path))
         : el("span", { class: "sl-field__label" }, ctl.ownsLabel ? [] : el("code", { class: "sl-code" }, desc.path)),
       ctl.node)),
-    failure, el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit, { small: true })));
+    failure, el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit,
+      { small: true, attrs: { "aria-label": rowName(t("settings_add_entry"), row.path) } })));
 }
 
 function settingContainer(node) {
@@ -884,7 +886,8 @@ function refreshGroup(g) {
   if (g.shown !== key) {
     g.shown = key;
     const more = capped
-      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); }, { small: true }))]
+      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
+        { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
       : [];
     g.body.replaceChildren(...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
   }
@@ -911,7 +914,7 @@ function settingsGroup(section) {
   const toggle = el("button", { type: "button", class: "sl-disclosure", id, "aria-expanded": "false", "aria-controls": id + "-body" },
     el("code", { class: "sl-code" }, section.title), count);
   const navItem = el("button", { type: "button", class: "sl-nav__item", "data-group": section.id }, section.title, navCount);
-  const g = { id: section.id, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
+  const g = { id: section.id, title: section.title, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
     section: el("section", { class: "sl-card settings-group" }, el("h3", { class: "setting-group" }, toggle), body) };
   toggle.addEventListener("click", () => {
     const on = toggle.getAttribute("aria-expanded") !== "true";

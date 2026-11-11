@@ -78,6 +78,86 @@ test("secrets: Remove names the secret; a secret in use says why it cannot go, i
   assert.equal(hiddenHeads(page.document.querySelector("table")).at(-1), "Actions");
 });
 
+test("registry: Purge names the quarantined key", async () => {
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, purge: "Purge" } },
+    "GET /api/registry": { records: [] },
+    "GET /api/registry/quarantined": { keys: ["k1", "k2"] },
+  });
+  await page.run("registryView()");
+  const purge = [...page.document.querySelectorAll("li[data-row] button")];
+  assert.deepEqual(purge.map((b) => named(b).name), ["Purge: k1", "Purge: k2"]);
+  for (const b of purge) labelInName(b, b.closest("li").dataset.row);
+});
+
+test("catalogue: Activate and every Confirm name their record", async () => {
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, catalogue_activate: "Activate from photo", catalogue_confirm: "This is {name}" } },
+    "GET /api/catalogue": {
+      records: [
+        { id: "c1", kind: "object", display_name: "Lamp", status: "pending", origin: "xmp", has_appearance: true, category: null },
+        { id: "c2", kind: "object", display_name: "Mug", status: "pending", origin: "xmp", has_appearance: true, category: null },
+      ],
+      live: [{ kind: "object", category: "cup", entry_id: "e-7", identified: false }],
+      limits: { max_xmp_bytes: 1e6, max_image_bytes: 1e6, max_items: 10 }, tombstones: 0,
+    },
+  });
+  await page.run("catalogueView()");
+  for (const id of ["c1", "c2"]) {
+    const row = page.document.querySelector(`tr[data-row="${id}"]`);
+    const shown = row.cells[0].textContent;
+    const buttons = [...row.querySelectorAll("button")];
+    assert.equal(buttons.length, 2);
+    for (const b of buttons) {
+      labelInName(b, shown);
+      assert.ok(b.hasAttribute("aria-label"), named(b).name);
+    }
+    assert.equal(named(buttons[0]).name, "Activate from photo: " + shown);
+  }
+});
+
+test("routes: Check, Edit and Remove name their route", async () => {
+  const route = (name) => ({ name, model: "m", endpoint: "h", base_url: "http://h", locality: "cloud", kind: "chat", key: "none",
+    secret: null, removable: true, running: false, last_check: null });
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, route_check: "Check", route_edit: "Edit", route_remove: "Remove" } },
+    "GET /api/routes": { routes: [route("cloud"), route("local")], name_max_chars: 32 },
+    "GET /api/secrets": { secrets: [], max_name_chars: 32, max_value_chars: 64 },
+  });
+  await page.run("routesView()");
+  for (const name of ["cloud", "local"]) {
+    const row = page.document.querySelector(`[data-row="${name}"] .row`);
+    const names = [...row.querySelectorAll(":scope > button")].map((b) => named(b).name);
+    assert.deepEqual(names, [`Check: ${name}`, `Edit: ${name}`, `Remove: ${name}`]);
+  }
+});
+
+test("settings: Add and Remove of a list name the setting", async () => {
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, settings_add: "Add entry", settings_remove: "Remove", settings_remove_n: "Remove row {n}" } },
+    "GET /api/settings": { pin_required: true, fields: [
+      d("voice.tags", "string_list", { value: ["x"] }),
+      d("voice.pairs", "tuple_list", { value: [[1, 2]], length: 2, item_kind: "number" }),
+    ] },
+  });
+  await page.run("settingsView()");
+  page.document.querySelector("#grp-core-voice").click();
+  await settle();
+  const buttons = (path) => [...page.document.querySelectorAll(`[data-path="${path}"] button:not(.sl-chip)`)]
+    .filter((b) => !b.closest(".row:last-child") || b.textContent !== "settings_save");
+  const add = (path) => buttons(path).find((b) => b.textContent === "Add entry");
+  for (const path of ["voice.tags", "voice.pairs"]) {
+    labelInName(add(path), path.split(".").pop());
+  }
+  const remove = buttons("voice.pairs").find((b) => b.textContent === "Remove");
+  assert.ok(named(remove).name.startsWith("Remove row 1"), named(remove).name);
+  labelInName(remove, "pairs");
+});
+
 // Every header cell of a table has text: visible on a data column, hidden on the action column.
 const headTexts = (table) => [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
 
