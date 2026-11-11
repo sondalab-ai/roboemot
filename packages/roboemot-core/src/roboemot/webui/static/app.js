@@ -1112,8 +1112,13 @@ async function routesView() {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
     })), { attrs: { disabled: r.running, "aria-label": rowName(t("route_check"), r.name) } });
-    const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
-    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; }, { attrs: { "aria-label": rowName(t("route_edit"), r.name) } });
+    const editId = "route-" + r.name + "-edit";
+    const edit = el("div", { id: editId, hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
+    // a disclosure: aria-expanded follows the form's `hidden`
+    const toggle = button(t("route_edit"), "plain", () => {
+      edit.hidden = !edit.hidden;
+      toggle.setAttribute("aria-expanded", String(!edit.hidden));
+    }, { attrs: { "aria-label": rowName(t("route_edit"), r.name), "aria-expanded": "false", "aria-controls": editId } });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
       const done = await ask({
         title: t("route_remove_title", { name: r.name }), message: t("route_remove_message"), pin: true, danger: true,
