@@ -239,3 +239,13 @@ later decision needs no new measure.
       `music.enabled` is off (the YAMNet load takes 0.04 s), background load of the vision models (all
       five load in 1.45 s), a gate before Silero VAD (the listener is 11.5% of one core in steady state,
       Silero about 8% at 2.4 ms per call).
+
+## Open questions (owner: parked)
+
+- [ ] An app start wakes a sleeping robot (seen on the robot 2026-11-11). The motion loop calls
+      `set_mode("active")` in `MotionLoop.start`, which enables the motors, so a reinstall, a restart
+      from the web UI or a restart after a crash ends a platform sleep that the owner started. SPEC 4A
+      says that in app mode RoboEmot never calls the daemon's wake or sleep. Decide: stay asleep when
+      the platform holds the motors off at start, or keep the wake as intended. Related: the daemon's
+      `POST /api/move/play/wake_up` alone does not enable the motors after a REST `goto_sleep`.
+
