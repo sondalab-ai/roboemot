@@ -6,7 +6,10 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
 1. Faces are detected, filtered by ``face_min_px`` and tracked (stable ``track_id``). Tracks
    unmatched for the larger of ``tracker.lost_s`` and ``face_lost_periods`` detection periods
    at the governor's rate (capture time) expire before association, so a face that comes back
-   after a long gap is a new track with no inherited identity.
+   after a long gap is a new track with no inherited identity. After
+   ``rates.detection_idle_after_s`` of capture time with no face track the detection stage runs
+   at ``rates.detection_idle_hz`` (governor ``set_idle``); a face run that leaves a track
+   restores ``detection_hz`` for the next frame (``_note_faces``, SPEC 5, 13).
 2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart
    (divided by the conversation scale only, so a thinking or speaking robot spends less on
    bursts; the circadian and load scales slow bursts only through the detection rate),
@@ -191,6 +194,7 @@ from .types import (
 log = logging.getLogger(__name__)
 
 PERSON = "person"
+DETECTION_STAGE = "detection"  # the governor's face stage (vision.rates.detection_*)
 S_PER_MIN = 60.0
 FACE_REPORT_MAX = 8  # live face tracks listed in the debug report's ``faces``
 REPORT_DIGITS = 1  # decimals of the angles and pixel sizes in ``faces``
@@ -419,6 +423,7 @@ class VisionPipeline:
         self._created_stamps: deque[float] = deque()
         self._lifetimes_s: deque[float] = deque(maxlen=cfg.report_window)
         self._face_lost_held = 0.0
+        self._no_face_since: float | None = None
         self._object_low_detections = 0
         self._object_low_continued = 0
         self.timer = timer or StageTimer(TIMING_WINDOW_MAX_S)
@@ -451,6 +456,7 @@ class VisionPipeline:
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
+        self._note_faces(stamp)
         self._apply_embeds()
         if self.governor.scale <= 0:
             self.follower.stop(PAUSED)
@@ -531,6 +537,8 @@ class VisionPipeline:
         self.object_tracker.reset(ids)
         self._lost_held = 0.0
         self._face_lost_held = 0.0
+        with self._report_lock:
+            self._no_face_since = None
         self.governor.reset()
         self.object_gate.reset()
         self.object_crop.reset()
@@ -646,6 +654,8 @@ class VisionPipeline:
                 **self.track_stats.snapshot(),  # report lock, then observer lock: one report
             }
             entity_embeds = {"runs": dict(self._embed_runs), "skips": dict(self._embed_skips)}
+            since = self._no_face_since
+            no_face = None if since is None or last is None else last - since
             objects = {
                 "low_score_detections": self._object_low_detections,
                 "low_score_continued": self._object_low_continued,
@@ -656,6 +666,7 @@ class VisionPipeline:
             "rate_scale": self.governor.scale,
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
+            "detection_idle": {"idle": self.governor.idle(DETECTION_STAGE), "no_face_s": no_face},
             "object_gate": self.object_gate.snapshot(),
             "object_input": self.object_crop.snapshot(),
             "scene_motion": self.scene_motion.snapshot(),
@@ -759,6 +770,21 @@ class VisionPipeline:
         for track_id in self.object_tracker.expire(stamp):
             self._drop_entity(track_id)
 
+    def _note_faces(self, stamp: float) -> None:
+        """Idle face rate (SPEC 5, 13): the governor's detection stage goes idle once
+        ``rates.detection_idle_after_s`` of capture time passed with no face track, tentative
+        or confirmed, and leaves it as soon as the tracker holds one. Called after expiry and
+        after each face run, so one detection that starts a track restores the full rate for the
+        next frame. Capture stamps only, so a replay is deterministic."""
+        with self._report_lock:
+            if self.face_tracker.live:
+                self._no_face_since = None
+            elif self._no_face_since is None:
+                self._no_face_since = stamp
+            since = self._no_face_since
+        idle = since is not None and stamp - since >= self.cfg.rates.detection_idle_after_s
+        self.governor.set_idle(DETECTION_STAGE, idle)
+
     def _drop_face(self, track_id: int) -> None:
         state = self._faces.pop(track_id, None)
         self.matcher.release(track_id)
@@ -859,6 +885,7 @@ class VisionPipeline:
             self.track_stats.below_min_px(len(found) - len(dets))
         self.track_stats.pose = head_pose(frame.joint_state, self.frame_spec)
         result = self.face_tracker.update(dets, frame.stamp)
+        self._note_faces(frame.stamp)
         self._face_lost_held = self._face_lost_s()
         self._visible = result.visible
         width, height = frame.image.shape[1], frame.image.shape[0]

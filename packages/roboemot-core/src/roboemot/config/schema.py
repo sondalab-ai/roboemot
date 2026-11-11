@@ -2028,6 +2028,23 @@ class AttentionConfig(Strict):
 
 class VisionRates(Strict):
     detection_hz: float = param(8.0, "Face detection rate (cm4: 5 to 10)", unit="Hz", ge=0.1, le=60)
+    detection_idle_hz: float = param(
+        4.0,
+        "Face detection rate while no face is in view, after detection_idle_after_s without a "
+        "face track; a detection that finds a face goes back to detection_hz at once. Scaled "
+        "like every rate; a value at or above detection_hz has no effect (one rate)",
+        unit="Hz",
+        ge=0.1,
+        le=60,
+    )
+    detection_idle_after_s: float = param(
+        10.0,
+        "Capture time with no face track (confirmed or tentative) before face detection drops "
+        "to detection_idle_hz",
+        unit="s",
+        ge=0,
+        le=600,
+    )
     embedding_hz: float = param(
         0.5, "Face embedding rate per track after the new-track burst", unit="Hz", ge=0.05, le=30
     )
