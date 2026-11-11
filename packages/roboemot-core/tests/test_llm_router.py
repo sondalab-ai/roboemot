@@ -38,6 +38,30 @@ def chunk(content=None, tool_calls=None, usage=None):
     return c
 
 
+class StoppedClock:
+    """A loop clock (``loop.time``) that moves only when a fake says time passed (``advance``).
+    The router's first-token deadline then reads fake time, never the machine's: a fake that
+    answers at once always makes it, a slow one always misses it, whatever the load."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def stop_loop_clock(monkeypatch) -> StoppedClock:
+    """Every event loop's ``time`` reads one :class:`StoppedClock` for the test (also the loop
+    ``asyncio.run`` builds); a fake moves it with ``asyncio.get_running_loop().time.advance``.
+    The clock is no descriptor, so ``loop.time`` is the clock itself."""
+    clock = StoppedClock()
+    monkeypatch.setattr(asyncio.BaseEventLoop, "time", clock)
+    return clock
+
+
 class Server:
     """Fake OpenAI-compatible servers keyed by host."""
 
@@ -152,6 +176,32 @@ async def test_first_token_timeout_excludes_openai_lazy_imports(monkeypatch):
     r = router(Server(), [route("lan", "lan.local")])
     evs = await collect(r)
     assert isinstance(evs[-1], Done) and r.failures == []
+
+
+async def test_first_token_timeout_excludes_the_sdk_platform_probe(monkeypatch):
+    """Regression: the SDK's first request calls ``platform.platform()``, whose first call per
+    process spawns ``uname -p`` and ``file`` (0.56 s under load, 2026-11-11); it is not a slow
+    first token. The fake is slow on its first call only, as CPython caches the answer; it
+    advances a stopped loop clock instead of sleeping, so the verdict does not depend on load."""
+    import platform
+
+    from roboemot.llm import router as router_module
+
+    real, calls = platform.platform, []
+    clock = stop_loop_clock(monkeypatch)
+
+    def slow_once(*args, **kwargs):
+        if not calls:
+            clock.advance(0.4)  # longer than the route's 0.3 s first-token timeout
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(platform, "platform", slow_once)
+    monkeypatch.setattr(router_module, "_platform_probed", False)
+    r = router(Server(), [route("lan", "lan.local")])
+    evs = await collect(r)
+    assert isinstance(evs[-1], Done) and r.failures == []
+    assert len(calls) >= 2  # the probe and the SDK both asked: the slow call was the probe's
 
 
 async def test_a_failing_client_setup_closes_the_client_and_falls_back(monkeypatch):
