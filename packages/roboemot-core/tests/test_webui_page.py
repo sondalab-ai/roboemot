@@ -172,6 +172,14 @@ def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes()
     assert "min-block-size" not in css.replace(body, ""), "no size change outside the coarse block"
 
 
+def test_a_setting_name_wraps_instead_of_widening_the_page():
+    # jsdom has no layout: measured in Chrome (0px page scroll at 360 and 390px, groups open)
+    css = (STATIC / "style.css").read_text()
+    assert re.search(
+        r"(?m)^\.setting :is\(\.sl-code, \.sl-switch__label\) \{ overflow-wrap: anywhere; \}", css
+    )
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for path in _first_party_js():
         name = path.name

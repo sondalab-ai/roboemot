@@ -74,6 +74,9 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 .setting-group, .setting-entry { margin: 0; font: inherit; }
 .setting { padding-block: var(--sl-space-2); }
 .setting-value { margin: 0; overflow-wrap: anywhere; }
+/* A setting's name is a long dotted path with no space: it wraps anywhere instead of widening the
+   page (39px at 360px with every group open, Chrome). */
+.setting :is(.sl-code, .sl-switch__label) { overflow-wrap: anywhere; }
 .setting-json { margin: 0; }
 .nested { padding-inline-start: var(--sl-space-4); border-inline-start: 1px solid var(--slc-border-subtle); }
 .sl-slider { flex: 1 1 8rem; min-width: 6rem; }
