@@ -95,3 +95,13 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 #live-audio { margin-top: var(--sl-space-4); }
 .live-video { display: block; width: 100%; height: auto; border-radius: var(--sl-radius-2, 0.5rem); }
 #live-video-banner { margin-bottom: var(--sl-space-4); }
+/* Touch screens: the kit's controls are 32px (small buttons 24px) and most row actions are small,
+   with a destructive one beside a safe one. A coarse pointer gets 44px targets (WCAG 2.5.5,
+   2.75rem from kit spacing) and a wider gap between neighbours; a fine pointer keeps the kit's sizes. */
+@media (pointer: coarse) {
+  :is(.sl-btn, .sl-segmented__item, .sl-tabs__tab, .sl-chip, .sl-disclosure, .sl-icon-btn, .sl-check, .sl-switch, .sl-nav__item) {
+    min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));
+  }
+  .sl-icon-btn { min-inline-size: calc(var(--sl-space-6) + var(--sl-space-3)); }
+  .row { gap: var(--sl-space-3); }
+}

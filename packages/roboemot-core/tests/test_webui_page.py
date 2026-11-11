@@ -153,6 +153,20 @@ def test_the_tab_strip_does_not_overflow_downwards():
     assert re.search(r"(?m)^#tabs \.sl-tabs__tab \{ margin-bottom: 0; \}", css)
 
 
+def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes():
+    # jsdom has no layout or media queries: measured in Chrome with touch emulation, checked here
+    css = (STATIC / "style.css").read_text()
+    coarse = re.search(r"@media \(pointer: coarse\) \{(.*?)\n\}", css, re.S)
+    assert coarse, "one coarse-pointer block"
+    body = coarse.group(1)
+    for control in (".sl-btn", ".sl-segmented__item", ".sl-tabs__tab", ".sl-chip", ".sl-disclosure",
+                    ".sl-icon-btn", ".sl-check", ".sl-switch"):  # fmt: skip
+        assert control in body, control
+    assert "min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));" in body  # 2rem + 0.75rem
+    assert re.search(r"\.row \{ gap: var\(--sl-space-3\); \}", body)
+    assert "min-block-size" not in css.replace(body, ""), "no size change outside the coarse block"
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
     for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()
