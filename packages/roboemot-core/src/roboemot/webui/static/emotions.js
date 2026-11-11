@@ -40,7 +40,7 @@ function emoAffectCard(a) {
 function emoParams(params) {
   return el("ul", { class: "sl-list" }, Object.entries(params).map(([k, v]) => el("li", {},
     el("code", { class: "sl-code" }, k), " ",
-    typeof v === "boolean" ? t(v ? "live_yes" : "live_no") : (typeof v === "string" ? el("code", { class: "sl-code" }, v) : String(v)))));
+    typeof v === "boolean" ? t(v ? "live_yes" : "live_no") : (typeof v === "string" ? el("code", { class: "sl-code" }, v) : numAsSent(v)))));
 }
 
 function emoRegisterCard(d) {

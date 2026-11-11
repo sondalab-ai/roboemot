@@ -216,8 +216,10 @@ function liveBeatCard(d) {
   return node;
 }
 
+// One hardware line, its numbers in the page language as the server rounded them; none without `n`.
 function liveSystemLine(key, values) {
-  return values.n == null ? [] : [el("p", {}, t(key, values))];
+  if (values.n == null) return [];
+  return [el("p", {}, t(key, Object.fromEntries(Object.entries(values).map(([k, v]) => [k, numAsSent(v)]))))];
 }
 
 function liveThrottling(state) {
@@ -261,7 +263,7 @@ function liveSystemProcess(process) {
 
 function liveSystemCard(d) {
   const s = d.system;
-  const temp = s.cpu_temp_c === null ? t("live_cpu_temp_none") : t("live_cpu_temp", { n: s.cpu_temp_c });
+  const temp = s.cpu_temp_c === null ? t("live_cpu_temp_none") : t("live_cpu_temp", { n: numAsSent(s.cpu_temp_c) });
   return card(t("tab_live"), t("live_system"), el("p", {}, temp),
     liveSystemCpu(s.cpu), liveThrottling(s.throttling), liveSystemHost(s), liveSystemProcess(s.process));
 }
@@ -315,7 +317,7 @@ function liveActivityBox() {
 function liveValue(v) {
   if (v === null || v === undefined) return t("live_none");
   if (typeof v === "boolean") return t(v ? "live_yes" : "live_no");
-  if (typeof v === "number") return Number.isInteger(v) ? String(v) : num(v, 1);
+  if (typeof v === "number") return num(v, Number.isInteger(v) ? 0 : 1);
   return word("live_code_", v);
 }
 

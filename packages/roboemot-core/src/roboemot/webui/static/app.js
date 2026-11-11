@@ -45,17 +45,28 @@ function when(value, timeOnly) {
 }
 
 // A number in the page language with exactly `digits` decimals ("0,62" on an Italian page, where
-// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. One
+// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. No
+// thousands separator: "1500 MHz" as before, where "1.500" would read as one and a half. One
 // formatter per language, digit count and sign rule, kept: the Live tab formats every second.
 const numberFormats = new Map();
 function num(value, digits, signed) {
   const key = state.lang + "|" + digits + "|" + Boolean(signed);
   if (!numberFormats.has(key)) {
     numberFormats.set(key, new Intl.NumberFormat(state.lang, {
-      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto",
+      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto", useGrouping: false,
     }));
   }
   return numberFormats.get(key).format(value);
+}
+
+// A number the server sent, in the page language with the decimals String(value) shows ("51,2" on
+// an Italian page where String wrote "51.2", "8" stays "8"): the server rounds, the page does not.
+// Anything that is not a finite number (null, a text) comes out as String writes it, as before.
+function numAsSent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return String(value);
+  const text = String(value);
+  const dot = text.indexOf(".");
+  return /e/i.test(text) ? text : num(value, dot < 0 ? 0 : text.length - dot - 1);
 }
 
 // The only text the page holds itself, for when it cannot load its strings: the same keys and
