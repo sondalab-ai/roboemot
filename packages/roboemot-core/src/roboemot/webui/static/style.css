@@ -46,7 +46,9 @@ main { padding-block: var(--sl-space-4); }
 .sl-toast svg { width: var(--sl-space-4); height: var(--sl-space-4); }
 .row { display: flex; gap: var(--sl-space-2); flex-wrap: wrap; align-items: center; }
 ul.row { list-style: none; padding: 0; margin: 0; }
-.table-scroll { overflow-x: auto; }
+/* positioned: the hidden header of an action column (.sr-only, absolute) stays inside the scroller,
+   not at its static place past the viewport, where it widened the page (8px at 360px, Chrome). */
+.table-scroll { overflow-x: auto; position: relative; }
 .sl-field__control { display: block; max-width: 28rem; }
 .sl-field__input { max-width: 100%; }
 .sl-card__title { margin: 0 0 var(--sl-space-2); }
