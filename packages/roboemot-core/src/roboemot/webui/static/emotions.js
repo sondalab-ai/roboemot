@@ -66,7 +66,7 @@ function emoCircadianCard(c) {
 
 function emoExpressionCard(e) {
   const body = e.last_label === null ? el("p", { class: "hint" }, t("emo_expression_none"))
-    : el("p", {}, t("emo_expression_line", { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude), n: e.started }));
+    : el("p", {}, tn("emo_expression_line", e.started, { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude) }));
   return card(t("tab_emotions"), t("emo_expression"), body);
 }
 

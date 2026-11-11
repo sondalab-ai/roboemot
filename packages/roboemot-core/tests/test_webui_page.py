@@ -196,7 +196,7 @@ def _page_js() -> str:
 
 def _keys_used_by_app() -> set[str]:
     js = _page_js()
-    return set(re.findall(r"""\bt\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    return set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
 
 
 def test_every_string_key_the_page_reads_exists_in_both_languages():
@@ -231,6 +231,18 @@ def test_every_restart_effect_core_accepts_has_text_in_both_languages():
     assert {k for k in EN if k.startswith("settings_restart_effect_")} == {
         "settings_restart_effect_" + e for e in RESTART_EFFECTS
     }
+
+
+def test_every_singular_form_has_its_plural_key_and_is_read_through_tn():
+    # tn(key, n) picks key + "_one" when n is 1: a `_one` key without its base key, or one whose
+    # base key the page reads with t() (never picking the singular), is a dead string
+    names = ("app.js", "settings.js", "live.js", "emotions.js")
+    js = "".join((STATIC / n).read_text() for n in names)
+    counted = set(re.findall(r"""\btn\(\s*"([a-z0-9_]+)"\s*,""", js))
+    for lang in (EN, IT):
+        singular = {k[: -len("_one")] for k in lang if k.endswith("_one")}
+        assert singular and singular <= set(lang)
+        assert singular <= counted, sorted(singular - counted)
 
 
 def test_tabs_are_the_strings_that_exist():

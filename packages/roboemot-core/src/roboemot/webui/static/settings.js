@@ -894,7 +894,7 @@ function refreshGroup(g) {
 function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
   const status = document.getElementById("settings-count");
-  if (status) status.textContent = t("settings_matches", { n: total });
+  if (status) status.textContent = tn("settings_matches", total);
   const actions = document.getElementById("settings-robot-actions");
   if (actions) actions.replaceChildren(restartButton());
   for (const tag of document.querySelectorAll("[data-restart-tag]")) tag.replaceChildren(restartBadge());

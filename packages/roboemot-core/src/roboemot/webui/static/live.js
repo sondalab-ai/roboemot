@@ -124,7 +124,7 @@ function liveAttentionCard(d) {
     parts.push(el("ul", {}, a.faces.map((f) =>
       el("li", {}, f.name === null ? t("live_unknown") : f.name, f.target ? [" ", badge(t("live_gaze"), "info")] : []))));
   }
-  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, t("live_more", { n: a.count - a.faces.length })));
+  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, tn("live_more", a.count - a.faces.length)));
   return card(t("tab_live"), t("live_attention"), parts);
 }
 

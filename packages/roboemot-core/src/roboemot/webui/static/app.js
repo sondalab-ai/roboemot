@@ -24,6 +24,13 @@ const t = (key, vars) => {
   return text;
 };
 
+// `key` for the count `n`, which fills {n}: `key_one` when n is 1 and the page has it. English and
+// Italian both have exactly two forms, one and other; a key with no `_one` reads well for any n.
+function tn(key, n, vars) {
+  const one = key + "_one";
+  return t(n === 1 && Object.prototype.hasOwnProperty.call(state.strings, one) ? one : key, Object.assign({ n }, vars));
+}
+
 // A server code in the page language: the string `prefix + code` (spaces and dashes as "_") when
 // the page has one, else the code as it is (a name the owner chose, such as a custom label).
 function word(prefix, code) {
@@ -1033,7 +1040,7 @@ function checkReason(c) {
   const parts = [t("check_reason_" + c.code, p)];
   if (p.why) parts.push(t("check_why_" + p.why, { detail: p.detail || "" }));
   if (p.withheld) parts.push(t("check_withheld"));
-  if (p.reasoned) parts.push(t("check_reasoned", { n: p.reasoned }));
+  if (p.reasoned) parts.push(tn("check_reasoned", p.reasoned));
   return parts.join("; ");
 }
 
