@@ -206,15 +206,20 @@ def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None)
     (SPEC 7, Rendering). ``at`` is where ``base`` sits in the tree when that differs from ``path``
     (a runtime override merged into a section).
     """
-    out = copy.deepcopy(base)
-    where = path if at is None else at
+    return _merge_into(copy.deepcopy(base), over, path, path if at is None else at)
+
+
+def _merge_into(out: dict, over: dict, path: str, where: str) -> dict:
+    """:func:`deep_merge` on ``out``, a private copy of the base that is edited in place: a
+    nested section is merged into the copy already made, never copied again at each level.
+    Every value taken from ``over`` is copied, so the result shares nothing with either input."""
     if is_form_entry(where):
         out = switch_form(out, over)
     for key, value in over.items():
         p = f"{path}.{key}" if path else key
         sub = f"{where}.{key}" if where else key
         if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value, p, at=sub)
+            out[key] = _merge_into(out[key], value, p, sub)
         elif (
             sub in KEYED_LISTS
             and key != REPLACED_BY_LAYER
@@ -494,21 +499,35 @@ def field_meta(dotted: str) -> dict[str, Any]:
     inherited: dict[str, Any] = {}
     i = 0
     while i < len(parts):
-        fields = getattr(model, "model_fields", None)
-        if not fields or parts[i] not in fields:
+        if parts[i] not in _field_names(model):
             return {}
-        info = fields[parts[i]]
-        extra = info.json_schema_extra
-        meta = {**inherited, **(extra if isinstance(extra, dict) else {})}
+        extra, keyed, model = _field_step(model, parts[i])
+        meta = {**inherited, **extra}
         inherited = {k: v for k, v in meta.items() if k in INHERITED_META and v}
-        annotation = strip_optional(info.annotation)
-        i += 1
-        if get_origin(annotation) in (dict, list):
-            i += 1  # skip the key or index
-        model = _inner_model(annotation)
+        i += 2 if keyed else 1  # a dict or list field: skip the key or index
         if model is None:
             return meta if i >= len(parts) else {}
     return meta
+
+
+@functools.cache
+def _field_names(model: type[BaseModel]) -> frozenset[str]:
+    """The field names of a schema model (memoized per model class: the schema is fixed)."""
+    return frozenset(model.model_fields)
+
+
+@functools.cache
+def _field_step(model: type[BaseModel], name: str) -> tuple[dict[str, Any], bool, Any]:
+    """One step of :func:`field_meta` for an existing field ``name`` of ``model``: its own
+    metadata (read-only: callers merge it into a new dict), whether it is a dict or list field
+    (one path element for the key or index follows) and the model inside it (``None`` for a leaf).
+    Memoized per schema field: the callers check ``name in _field_names(model)`` first, so a key,
+    an index or an unknown name never reaches the memo and it is bounded by the schema."""
+    info = model.model_fields[name]
+    extra = info.json_schema_extra
+    annotation = strip_optional(info.annotation)
+    keyed = get_origin(annotation) in (dict, list)
+    return (extra if isinstance(extra, dict) else {}), keyed, _inner_model(annotation)
 
 
 def strip_optional(annotation: Any) -> Any:
@@ -857,11 +876,18 @@ def check_manifest_voice_pitch(voice: dict) -> None:
         )
 
 
-def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
-    """Leaves where ``candidate`` is less safe than ``approved`` (SPEC 11A, Guardrails)."""
-    base = guarded_leaves(approved)
+def violations(
+    approved: RoboEmotConfig,
+    candidate: RoboEmotConfig,
+    approved_leaves: dict[str, tuple[Any, dict[str, Any]]] | None = None,
+) -> list[Violation]:
+    """Leaves where ``candidate`` is less safe than ``approved`` (SPEC 11A, Guardrails).
+    ``approved_leaves`` is ``guarded_leaves(approved)`` when the caller has it already (one
+    commit checks two candidates against the same approved configuration)."""
+    base = guarded_leaves(approved) if approved_leaves is None else approved_leaves
+    cand = guarded_leaves(candidate)
     found = []
-    for path, (value, meta) in guarded_leaves(candidate).items():
+    for path, (value, meta) in cand.items():
         direction = meta.get("conservative")
         if path.startswith(NEW_RULE_REFUSED) and path not in base:
             # A reflex rule (new or renamed) that the approved config does not have is a new motion
@@ -889,7 +915,6 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
-    cand = guarded_leaves(candidate)
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
@@ -1185,6 +1210,8 @@ class ConfigStack:
     def merged_tree(self, person: dict | None = None, *, include_runtime: bool = True) -> dict:
         with self._lock:
             # Start from the schema defaults so keyed lists (appraisal.rules) merge with them.
+            # The dump is a fresh tree owned here, so each layer merges into it in place (no
+            # copy of the whole tree per layer); values taken from a layer are still copied.
             tree: dict = RoboEmotConfig().model_dump(mode="python")
             person = self._sanitize_person(person) if person else {}
             for layer in (
@@ -1195,7 +1222,7 @@ class ConfigStack:
                 self.derived,
                 person,
             ):
-                tree = deep_merge(tree, layer)
+                tree = _merge_into(tree, layer, "", "")
             if include_runtime:
                 now = self.clock()
                 for key, rv in self._runtime.items():  # in write order: the latest write wins
@@ -1636,12 +1663,15 @@ class ConfigStack:
             if rv.expires_at is None or rv.expires_at > now
             for path, value in rv.approved.items()
         ]
-        base_found = violations(self._approved, base) if base is not None else []
+        approved = guarded_leaves(self._approved)
+        base_found = violations(self._approved, base, approved) if base is not None else []
         base_paths = {v.path for v in base_found}
         rt_found = [
             v
             for v in (
-                violations(self._approved, cfg) if cfg is not None and cfg is not base else []
+                violations(self._approved, cfg, approved)
+                if cfg is not None and cfg is not base
+                else []
             )
             if v.path not in base_paths and (v.path, v.candidate) not in live_approved
         ]
