@@ -237,7 +237,7 @@
  "Event to impulse rules (SPEC 7, Affect state)": "Regole da evento a impulso (SPEC 7, Affect state)",
  "Extra DNS names accepted in the Host header, besides IP addresses, localhost and *.local (DNS-rebinding guard)": "Nomi DNS aggiuntivi accettati nell'header Host, oltre a indirizzi IP, localhost e *.local (protezione da DNS rebinding)",
  "Face detection rate (cm4: 5 to 10)": "Frequenza di rilevamento volti (cm4: da 5 a 10)",
- "Face detector input height": "Altezza di input del rilevatore di volti",
+ "Face detector input height. With the width it sets the scale of the picture; rows and columns the picture leaves empty are not run (a 16:9 camera runs at 320x192)": "Altezza di input del rilevatore di volti. Con la larghezza fissa la scala dell'immagine; le righe e le colonne che l'immagine lascia vuote non vengono elaborate (una telecamera 16:9 lavora a 320x192)",
  "Face detector input width (SPEC 13: 320x240)": "Larghezza di input del rilevatore di volti (SPEC 13: 320x240)",
  "Face embedding rate per track after the new-track burst": "Frequenza degli embedding di volto per traccia dopo la raffica iniziale della nuova traccia",
  "Face embeddings collected per enrollment session; between identity.enroll_min_embeddings and identity.max_embeddings_per_person": "Embedding di volto raccolti per sessione di registrazione; tra identity.enroll_min_embeddings e identity.max_embeddings_per_person",

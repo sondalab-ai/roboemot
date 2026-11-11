@@ -2392,7 +2392,13 @@ class VisionConfig(Strict):
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
     )
     detector_height_px: int = param(
-        240, "Face detector input height", unit="px", ge=64, le=1280, restart=True
+        240,
+        "Face detector input height. With the width it sets the scale of the picture; rows and "
+        "columns the picture leaves empty are not run (a 16:9 camera runs at 320x192)",
+        unit="px",
+        ge=64,
+        le=1280,
+        restart=True,
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
