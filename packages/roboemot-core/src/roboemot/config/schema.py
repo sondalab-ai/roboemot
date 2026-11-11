@@ -2032,7 +2032,7 @@ class VisionRates(Strict):
         4.0,
         "Face detection rate while no face is in view, after detection_idle_after_s without a "
         "face track; a detection that finds a face goes back to detection_hz at once. Scaled "
-        "like every rate; must not exceed detection_hz, and equal to it keeps one rate",
+        "like every rate; a value at or above detection_hz has no effect (one rate)",
         unit="Hz",
         ge=0.1,
         le=60,
@@ -2129,16 +2129,6 @@ class VisionRates(Strict):
                     f"vision.rates.{name} ({getattr(self, name)} Hz) must not exceed "
                     f"vision.rates.objects_max_hz ({self.objects_max_hz} Hz)"
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _idle_below_detection(self) -> VisionRates:
-        """The idle face rate only ever lowers detection (SPEC 5, 13)."""
-        if self.detection_idle_hz > self.detection_hz:
-            raise ValueError(
-                f"vision.rates.detection_idle_hz ({self.detection_idle_hz} Hz) must not exceed "
-                f"vision.rates.detection_hz ({self.detection_hz} Hz); set both to lower the rate"
-            )
         return self
 
 

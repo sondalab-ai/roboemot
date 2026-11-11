@@ -64,12 +64,28 @@ def test_defaults():
     assert IDLE <= FULL
 
 
-def test_idle_rate_above_the_detection_rate_is_rejected():
-    with pytest.raises(ValidationError, match="detection_idle_hz"):
-        RoboEmotConfig(vision={"rates": {"detection_hz": 3.0}})
-    with pytest.raises(ValidationError, match="detection_idle_hz"):
-        RoboEmotConfig(vision={"rates": {"detection_idle_hz": FULL + 1}})
-    RoboEmotConfig(vision={"rates": {"detection_hz": 3.0, "detection_idle_hz": 3.0}})
+def test_an_idle_rate_above_the_detection_rate_has_no_effect():
+    """An old config with detection_hz below the idle default still loads (no validator): the
+    idle rate only ever lowers the rate."""
+    low = RoboEmotConfig(vision={"rates": {"detection_hz": 3.0}}).vision.rates
+    assert low.detection_idle_hz == IDLE > low.detection_hz
+    g = RateGovernor(low)
+    assert g.period("detection") == pytest.approx(1 / 3.0)
+    g.set_idle("detection", True)
+    assert g.idle("detection")
+    assert g.period("detection") == pytest.approx(1 / 3.0)
+    g.set_scale(CIRCADIAN, 0.5)
+    assert g.period("detection") == pytest.approx(1 / 1.5)
+
+
+def test_detection_below_the_idle_default_runs_at_its_own_rate_in_both_states(tmp_path):
+    low = 2.5  # below the idle default; 0.4 s is a whole number of camera frames
+    pipe = idle_rig(tmp_path, vision=vision_with(detection_hz=low))
+    stream(pipe, 0.0, AFTER + 20)
+    det = pipe.face_detector
+    assert pipe.governor.idle("detection")
+    assert runs_between(det, 0, AFTER) == pytest.approx(low * AFTER, abs=1)
+    assert runs_between(det, AFTER + 10, AFTER + 20) == pytest.approx(low * 10, abs=1)
 
 
 def test_idle_after_range():

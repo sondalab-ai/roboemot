@@ -343,16 +343,12 @@ def test_hot_reload_reaches_the_pipeline_trackers_governor_and_enrollment():
     p = open_perception(CFG, Bus(), Source(), load_stages=fake_stages)
     new = RoboEmotConfig.model_validate(
         {
-            "vision": {
-                "rates": {"detection_hz": 3, "detection_idle_hz": 2},
-                "tracker": {"lost_s": 7},
-            },
+            "vision": {"rates": {"detection_hz": 3}, "tracker": {"lost_s": 7}},
             "enrollment": {"min_gap_s": 2},
         }
     )
     p.apply_config(new)
     assert p.pipeline.governor.rates.detection_hz == 3
-    assert p.pipeline.governor.rates.detection_idle_hz == 2
     v = new.vision  # objects: the object gate's floor plus object_lost_periods periods
     gated = v.object_gate.max_interval_s + v.object_lost_periods / v.rates.objects_hz
     assert p.pipeline.face_tracker.cfg.lost_s == 7

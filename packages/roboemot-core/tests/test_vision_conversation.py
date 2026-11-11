@@ -235,7 +235,7 @@ def test_conversation_scale_floor():
         RoboEmotConfig(vision={"rates": {"conversation_scale": FLOOR - 0.01}})
     RoboEmotConfig(vision={"rates": {"conversation_scale": FLOOR}})
     # Low detection rates are no longer rejected: the face tracker lifetime follows them.
-    RoboEmotConfig(vision={"rates": {"detection_hz": 1.0, "detection_idle_hz": 1.0}})
+    RoboEmotConfig(vision={"rates": {"detection_hz": 1.0}})
 
 
 def test_face_tracks_survive_a_detector_slower_than_lost_s(tmp_path):

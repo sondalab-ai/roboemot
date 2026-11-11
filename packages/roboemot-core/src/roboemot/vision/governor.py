@@ -16,11 +16,13 @@ passes the target's base-frame bearing (``focus``) so the pipeline knows which t
 The object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
 ``objects_active_hz`` above it, and every scale is at most 1.
 
-A stage with an ``<stage>_idle_hz`` field may be made idle (``set_idle``): it then runs at that
-rate instead of ``<stage>_hz``, under the same scales. The pipeline does this for ``detection``
-once ``vision.rates.detection_idle_after_s`` of capture time passed with no face track, and
-clears it on the first face track (SPEC 5, 13, owner decision 2026-11-11). An active rate wins
-over an idle one. The config rejects ``detection_idle_hz`` above ``detection_hz``.
+A stage with an ``<stage>_idle_hz`` field may be made idle (``set_idle``): it then runs at the
+lower of that rate and ``<stage>_hz``, under the same scales, so an idle rate can only lower
+it. The pipeline does this for ``detection`` once ``vision.rates.detection_idle_after_s`` of
+capture time passed with no face track, and clears it on the first face track (SPEC 5, 13,
+owner decision 2026-11-11). An active rate wins over an idle one. A ``detection_idle_hz`` at
+or above ``detection_hz`` has no effect, so an old config with a low ``detection_hz`` keeps
+loading and keeps its rate.
 """
 
 from __future__ import annotations
@@ -74,9 +76,9 @@ class RateGovernor:
                 self._focus.pop(stage, None)
 
     def set_idle(self, stage: str, on: bool) -> None:
-        """Run ``stage`` at its ``<stage>_idle_hz`` rate (on) or its usual rate (off); a stage
-        without that field ignores it. The caller decides from capture stamps, so a replay
-        stays deterministic."""
+        """Run ``stage`` at its ``<stage>_idle_hz`` rate, never above ``<stage>_hz`` (on), or its
+        usual rate (off); a stage without that field ignores it. The caller decides from capture
+        stamps, so a replay stays deterministic."""
         with self._lock:
             if on:
                 self._idle.add(stage)
@@ -129,15 +131,15 @@ class RateGovernor:
 
         ``stage`` names a field of ``vision.rates`` without its ``_hz`` suffix, for example
         ``detection`` or ``embedding``. The pipeline also uses it for per-track schedules. An
-        active stage uses ``<stage>_active_hz``, an idle one ``<stage>_idle_hz``.
+        active stage uses ``<stage>_active_hz``, an idle one the lower of ``<stage>_idle_hz``
+        and ``<stage>_hz``.
         """
         if self.active(stage):
-            field = f"{stage}_active_hz"
+            base = getattr(self.rates, f"{stage}_active_hz")
         elif self.idle(stage):
-            field = f"{stage}_idle_hz"
+            base = min(getattr(self.rates, f"{stage}_idle_hz"), getattr(self.rates, f"{stage}_hz"))
         else:
-            field = f"{stage}_hz"
-        base = getattr(self.rates, field)
+            base = getattr(self.rates, f"{stage}_hz")
         rate = base * self.scale
         return math.inf if rate <= 0 else 1.0 / rate
 
