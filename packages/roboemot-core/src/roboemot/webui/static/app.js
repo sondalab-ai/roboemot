@@ -903,6 +903,8 @@ function secretsCard(data, reload) {
 
 const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
 const ROUTE_KINDS = ["chat", "realtime"]; // chosen when a route is added; shown read-only after
+const ROUTE_PROTOCOLS = ["openai_realtime", "gemini_live"]; // likewise; a realtime route's wire
+const ROUTE_PROTOCOL_DEFAULT = "openai_realtime";
 const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
 
 // One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
@@ -918,6 +920,18 @@ function routeForm(route, secrets, nameMax, save) {
   const kind = route ? null : el("select", { id: id("kind"), class: "sl-field__input" },
     ROUTE_KINDS.map((k) => el("option", { value: k }, t("route_kind_" + k))));
   if (kind) kind.value = "chat";
+  const protocol = route ? null : el("select", { id: id("protocol"), class: "sl-field__input" },
+    ROUTE_PROTOCOLS.map((p) => el("option", { value: p }, t("route_protocol_" + p))));
+  if (protocol) protocol.value = ROUTE_PROTOCOL_DEFAULT;
+  const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", value: route ? route.voice || "" : "" });
+  // protocol and voice apply to a realtime route only: shown for that kind alone
+  const isRealtime = () => (route ? route.kind : kind.value) === "realtime";
+  const realtimeOnly = [
+    protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : null,
+    field(id("voice"), t("route_voice"), voice, t("route_voice_hint")),
+  ].filter(Boolean);
+  const showRealtime = () => { for (const f of realtimeOnly) f.hidden = !isRealtime(); };
+  if (kind) kind.addEventListener("change", showRealtime);
   const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
   const names = secrets.filter((s) => s.set).map((s) => s.name);
   const keys = [["", t("route_key_none")]];
@@ -931,9 +945,11 @@ function routeForm(route, secrets, nameMax, save) {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
+      const rt = isRealtime();
       whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
-        locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
+        locality: locality.value, key: key.value, voice: rt ? voice.value.trim() : (route ? route.voice || "" : ""),
+        ...(kind ? { kind: kind.value } : {}), ...(protocol && rt ? { protocol: protocol.value } : {}),
       })));
     },
   },
@@ -942,8 +958,10 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("model"), t("route_model"), model),
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
   kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
+  realtimeOnly,
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, send));
+  showRealtime();
   return form;
 }
 
@@ -991,6 +1009,8 @@ async function saveRoute(route, v) {
   if (!route) {
     steps.push([v.name, (pin) => mapAck(() => api("POST", "/api/routes/add", {
       name: v.name, base_url: v.base_url, model: v.model, locality: v.locality, kind: v.kind || "chat",
+      ...(v.protocol && v.protocol !== ROUTE_PROTOCOL_DEFAULT ? { protocol: v.protocol } : {}),
+      ...(v.voice ? { voice: v.voice } : {}),
       secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
     }))]);
@@ -1007,11 +1027,13 @@ async function saveRoute(route, v) {
     if (keyChanged && keyed) steps.push([t("route_key"), bindKey(v.key)]);
     if (v.locality !== route.locality && !toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
     if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
+    if (v.voice !== (route.voice || "")) steps.push([t("route_voice"), set("voice", v.voice)]);
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
   const realtime = (route ? route.kind : v.kind) === "realtime";
-  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const direct = (route ? route.protocol : v.protocol) === "gemini_live"; // direct mode only: no provider hosts
+  const extraHosts = realtime && !direct ? (state.realtimeKeyHosts || []) : [];
   const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
     (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
@@ -1128,7 +1150,8 @@ async function routesView() {
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }), { attrs: { "aria-label": rowName(t("route_remove"), r.name) } });
     const routeCard = busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat")) +
+        (r.protocol && r.protocol !== ROUTE_PROTOCOL_DEFAULT ? ", " + t("route_protocol_" + r.protocol) : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);

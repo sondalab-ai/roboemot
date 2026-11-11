@@ -150,3 +150,92 @@ The CLI does not see the settings saved from the web UI. Prefer the web UI check
 | "The realtime extra (websockets) is not installed." | Run the installer again. |
 
 While the route is down, the local pipeline answers (Vosk and Piper, when installed).
+
+## Gemini Live (Google): a second provider
+
+**Not usable yet.** This section documents the configuration of the `gemini_live` protocol (SPEC 8,
+Gemini Live wire). The robot cannot speak it before the slices S2 to S4 of the Gemini Live epic
+land (the codec, the client and the route check). Until then a Gemini route loads but does not
+connect, and the local pipeline answers.
+
+Gemini Live is a separate route beside `pollen`. Pollen's route stays as it is; you switch
+between the two with `voice.realtime_route.route` and a restart.
+
+### Privacy and terms
+
+Read this before you add the route.
+
+- On the free tier, Google may use the content you send (audio, transcripts, instructions) to
+  improve its products, and people may review it.
+- The Gemini API terms require users aged 18 or over, and forbid apps that are likely to be used by
+  people under 18. A robot at home can hear children.
+- The owner accepted both risks on 2026-11-11 (SPEC 12). `privacy.realtime_audio` still decides
+  whether any audio leaves the robot.
+
+### 1. Create a key and store it
+
+Create an API key in Google AI Studio (<https://aistudio.google.com/apikey>). Store it on the
+robot as `gemini_key`:
+
+```bash
+/venvs/apps_venv/bin/roboemot secrets set gemini_key   # reads the value from the prompt or stdin
+```
+
+Never pass the key as an argument: it would stay in the shell history. The web UI **API keys**
+card works too. The robot sends the key only in the `x-goog-api-key` header, never in the URL.
+
+### 2. Add the `gemini` route
+
+**Routes** tab, **Add a route** card:
+
+| Field | Value |
+| --- | --- |
+| Name | `gemini` |
+| Kind | Realtime speech (`realtime`) |
+| Realtime protocol | Gemini Live (`gemini_live`) |
+| Base URL | `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` |
+| Key | `gemini_key` |
+| Model | `gemini-3.8-live` |
+| Voice | one of `Kore`, `Aoede`, `Leda`, `Puck`, `Charon` |
+
+The same route in `app.yaml`:
+
+```yaml
+llm_routes:
+  - name: gemini
+    kind: realtime
+    protocol: gemini_live
+    base_url: wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
+    model: gemini-3.8-live
+    api_key: ${secret:gemini_key}
+    locality: cloud
+    voice: Kore
+    connect_timeout_s: 15
+```
+
+- `voice`: the route's own voice. It wins over `voice.realtime_route.voice`, which Pollen's
+  route keeps using. The five voices above were tried in Italian on 2026-11-11 and all sounded
+  fine. Google's documentation gives no gender for them.
+- `connect_timeout_s`: the route's own connect budget. Some first connects took 10.6 s until
+  Gemini confirmed the session, more than the shared 5 s. The web UI form has no field for it: set
+  it in `app.yaml`, or search `llm_routes` in the **Settings** tab.
+- The base URL has no query: the web UI refuses one.
+
+### 3. Switch to Gemini
+
+A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot` (the default);
+the configuration refuses anything else, one edit at a time. In the **Settings** tab, edit in this
+order:
+
+1. `voice.realtime_route.mode`: `direct` (first: Pollen's route accepts it, a Gemini route
+   refuses `platform`).
+2. `voice.realtime_route.route`: `gemini`.
+3. `voice.realtime_route.enabled`: true, if it is not already on.
+4. Restart RoboEmot (section 5, Restart RoboEmot).
+
+With `voice.realtime_route.input: audio` the utterances' audio goes to Google, and that needs the
+opt-in `privacy.realtime_audio` (section 4). With `input: text` only the local transcript goes.
+
+To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
+
+Or edit `voice.realtime_route` in `app.yaml` (all fields at once) and restart.

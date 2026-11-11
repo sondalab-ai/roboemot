@@ -80,7 +80,14 @@ from typing import Any, Protocol
 
 from .. import shutdown
 from ..bus import Bus
-from ..config.schema import TONE_EVENT_PREFIX, RegisterParams, RoboEmotConfig, StateEffects
+from ..config.schema import (
+    TONE_EVENT_PREFIX,
+    RegisterParams,
+    RoboEmotConfig,
+    StateEffects,
+    active_realtime_route,
+    realtime_connect_timeout_s,
+)
 from ..config.stack import ConfigStack
 from ..diag import EventSink, exception_code, no_events
 from ..llm.hub import RouterHub
@@ -1207,14 +1214,16 @@ class ConversationWorker:
         skip rule and the conversation state, the replay after a reconnect, the mood; the
         skills, the skip and tone tools), since the server answers with them on its own. The
         skills, their choices and the conversation state are kept on the stream's ``job``
-        (``shown``) for its server turn. Whatever fails here, or a loop busy past
-        ``connect_timeout_s``, the opening goes with parts 1 to 4 and the session's tools as
-        they are (counted ``stream_session_fallbacks``): a stream never stops on it."""
+        (``shown``) for its server turn. Whatever fails here, or a loop busy past the
+        active route's ``connect_timeout_s`` (else the shared one), the opening goes with parts
+        1 to 4 and the session's tools as they are (counted ``stream_session_fallbacks``): a
+        stream never stops on it."""
         loop = self._loop
         try:
             if loop is None:
                 raise RuntimeError("no loop")
-            wait = self.stack.effective().voice.realtime_route.connect_timeout_s
+            cfg = self.stack.effective()
+            wait = realtime_connect_timeout_s(active_realtime_route(cfg), cfg.voice.realtime_route)
             future = asyncio.run_coroutine_threadsafe(self._stream_session_on_loop(job), loop)
             try:
                 return future.result(wait)

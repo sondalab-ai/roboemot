@@ -78,7 +78,7 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind", "protocol", "voice"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
@@ -1104,10 +1104,11 @@ class WebApi:
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
-        ``locality``, ``kind`` (``chat`` or ``realtime``), ``secret`` (a name in the secret
-        store; omitted or null for no key), ``ack_endpoint`` (required with a key: the endpoint
-        the server names in
-        ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
+        ``locality``, ``kind`` (``chat`` or ``realtime``), ``protocol`` (``openai_realtime`` or
+        ``gemini_live``), ``voice`` (a realtime route's server voice), ``secret`` (a name in the
+        secret store; omitted or null for no key), ``ack_endpoint`` (required with a key: the
+        endpoint the server names in ``endpoint_ack_required``) and ``pin``. A key typed into any
+        field is refused."""
         port = self._settings_port()
         body = self._json_body(req)
         v.only_keys(body, ROUTE_FIELDS | {"secret", "ack_endpoint", "pin"})
