@@ -277,6 +277,7 @@ async function guardedView(view) {
     const pending = view();
     current = viewToken();
     await pending;
+    if (current()) focusBack();
   } catch (err) {
     if (current && !current()) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
@@ -318,6 +319,61 @@ function stopPolling() {
   state.timer = null;
   liveStopAudio(true);
   liveStopVideo(true);
+}
+
+// ---------------------------------------------------------------- focus after a dialog
+
+// The control that opened the last dialog, described so that its equal can be found once the
+// caller's reload has drawn the view again: the row it sat in (`data-row`, `data-path`,
+// `data-entry`), its accessible name and the title of its card.
+const focusReturn = { spot: null };
+const FOCUSABLE = "button, input, select, textarea, a[href]";
+
+// What `node` is, in terms that survive a redraw; null for a node outside #view.
+function focusSpot(node) {
+  if (!node || !document.getElementById("view").contains(node)) return null;
+  const row = node.closest("[data-row], [data-path], [data-entry]");
+  const attr = row ? ["data-row", "data-path", "data-entry"].find((a) => row.hasAttribute(a)) : null;
+  const box = node.closest(".sl-card");
+  const head = box && box.querySelector(".sl-card__title, h3");
+  return {
+    node, attr, key: attr ? row.getAttribute(attr) : null, tag: node.tagName,
+    name: node.getAttribute("aria-label") || node.textContent.trim(),
+    card: head ? head.textContent.trim() : null,
+  };
+}
+
+const focusUsable = (node) => !node.disabled && !node.closest("[hidden]");
+
+// The control equal to `spot` in the redrawn view (same row, tag and name), else the heading of
+// the card that held it: its own control (a group toggle), or the heading itself, focusable with
+// tabindex -1 only until it loses the focus.
+function focusTarget(spot) {
+  const view = document.getElementById("view");
+  const row = spot.attr ? [...view.querySelectorAll("[" + spot.attr + "]")].find((n) => n.getAttribute(spot.attr) === spot.key) : null;
+  const same = row && [...row.querySelectorAll(FOCUSABLE)].find((n) =>
+    n.tagName === spot.tag && (n.getAttribute("aria-label") || n.textContent.trim()) === spot.name && focusUsable(n));
+  if (same) return same;
+  const head = spot.card && [...view.querySelectorAll(".sl-card")].map((c) => c.querySelector(".sl-card__title, h3"))
+    .find((h) => h && h.textContent.trim() === spot.card && !h.closest("[hidden]"));
+  if (!head) return null;
+  const inner = head.querySelector(FOCUSABLE);
+  if (inner && focusUsable(inner)) return inner;
+  head.setAttribute("tabindex", "-1");
+  head.addEventListener("blur", () => head.removeAttribute("tabindex"), { once: true });
+  return head;
+}
+
+// Called once a view has drawn again: when the control that opened the last dialog left the page
+// with the redraw (the focus fell to <body>), the focus goes to its equal. Used once.
+function focusBack() {
+  const spot = focusReturn.spot;
+  focusReturn.spot = null;
+  if (!spot || spot.node.isConnected) return;
+  const focus = document.activeElement;
+  if (focus && focus !== document.body) return;
+  const target = focusTarget(spot);
+  if (target) target.focus();
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -388,8 +444,10 @@ function ask(opts) {
       dialog.remove();
       (inflight || Promise.resolve()).catch(() => {}).then(() => resolve(done));
     });
+    focusReturn.spot = focusSpot(document.activeElement);
     document.body.append(dialog);
     dialog.showModal();
+    (value || pin || cancel).focus(); // the first field, else Cancel: the safe choice of a confirm
   });
 }
 
@@ -556,7 +614,7 @@ async function registryView() {
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
     [t("display_name"), "", t("last_seen"), ""],
-    rows.map((r) => el("tr", {},
+    rows.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
         badge(state.strings["status_" + r.status] || r.status, STATUS_TONE[r.status] || "info")),
@@ -565,7 +623,7 @@ async function registryView() {
   view.append(card(t("tab_registry"), t("registry_title"), body));
   view.append(card(t("tab_registry"), t("quarantined_title"),
     quarantined.keys.length === 0 ? empty(t("quarantined_title"), t("quarantined_none")) :
-      el("ul", {}, quarantined.keys.map((k) => el("li", {}, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
+      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
 }
 
 async function purgeKey(key) {
@@ -683,7 +741,7 @@ async function catalogueView() {
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
     [t("display_name"), "", ""],
-    data.records.map((r) => el("tr", {},
+    data.records.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
       el("td", { class: "actions" }, el("div", { class: "row" },
@@ -767,7 +825,7 @@ function secretsCard(data, reload) {
     });
     if (done) { notice(t("secret_removed", { name: s.name })); await reload(); }
   });
-  const rows = data.secrets.map((s) => el("tr", {},
+  const rows = data.secrets.map((s) => el("tr", { "data-row": s.name },
     el("td", {}, s.name),
     el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
     el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
@@ -1000,11 +1058,13 @@ async function routesView() {
       });
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }));
-    return busy(card(t("tab_routes"), r.name,
+    const routeCard = busy(card(t("tab_routes"), r.name,
       el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
+    routeCard.dataset.row = r.name;
+    return routeCard;
   });
   const addCard = card(t("tab_routes"), t("route_add_title"), el("p", { class: "hint" }, t("route_add_intro")),
     routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v)));
@@ -1030,6 +1090,7 @@ async function routesView() {
   view.append(staleNote("routes-stale", ["routes-cards"]), grid);
   if (before) pollRecovered(before);
   pollGood(grid);
+  focusBack();
   if (data.routes.some((r) => r.running)) {
     clearTimeout(state.timer);
     state.timer = setTimeout(refreshRoutes, ROUTES_POLL_MS);
@@ -1121,6 +1182,7 @@ function showTab(name) {
   view.replaceChildren();
   notice("");
   pollForget();
+  focusReturn.spot = null;
   for (const b of tabButtons()) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));

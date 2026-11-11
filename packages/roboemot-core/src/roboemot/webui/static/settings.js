@@ -878,6 +878,7 @@ function refreshSettings() {
   for (const tag of document.querySelectorAll("[data-restart-tag]")) tag.replaceChildren(restartBadge());
   const hint = document.getElementById("settings-restart-hint");
   if (hint) hint.textContent = t(settingsState.restartPending ? "settings_restart_pending" : "settings_restart_hint");
+  focusBack();
 }
 
 function settingsGroup(section) {
