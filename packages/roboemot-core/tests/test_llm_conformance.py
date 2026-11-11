@@ -23,7 +23,7 @@ from roboemot.llm.conformance import (
     check_route,
     italian_ratio,
 )
-from test_llm_router import chunk, sse
+from test_llm_router import StoppedClock, chunk, sse, stop_loop_clock
 
 SECRET_KEY = "sk-secret-do-not-leak"
 ITALIAN = ["Ciao, ", "oggi c'è ", "il sole ", "e il cielo è bello."]
@@ -42,10 +42,29 @@ CALL = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def stopped_clock(monkeypatch):
+    """The router's first-token deadline reads a clock that only the fakes move: a fake that
+    answers at once never misses it on a loaded machine, a slow one always does."""
+    return stop_loop_clock(monkeypatch)
+
+
+async def server_takes(seconds: float) -> None:
+    """The fake server takes ``seconds``: a stopped loop clock moves on by that much (a deadline
+    that passed fires at the yield); on the real clock (other modules' fakes, e.g. the web UI's
+    request deadline) it sleeps."""
+    clock = asyncio.get_running_loop().time
+    if isinstance(clock, StoppedClock):
+        clock.advance(seconds)
+        await asyncio.sleep(0)
+    else:
+        await asyncio.sleep(seconds)
+
+
 def reply(chunks: list[dict], delay: float = 0.0):
     async def make() -> httpx.Response:
         if delay:
-            await asyncio.sleep(delay)
+            await server_takes(delay)
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=sse(chunks)
         )
@@ -483,6 +502,7 @@ async def test_reasoning_past_the_first_token_timeout_fails_latency_with_a_hint(
     async def slow() -> httpx.Response:
         async def body():
             yield sse([thought("w" * 12)])[: -len(b"data: [DONE]\n\n")]
+            await server_takes(0.4)  # past the route's 0.3 s first-token timeout, no content
             await gate.wait()
             yield b"data: [DONE]\n\n"
 

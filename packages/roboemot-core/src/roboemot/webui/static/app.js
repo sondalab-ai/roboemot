@@ -45,17 +45,28 @@ function when(value, timeOnly) {
 }
 
 // A number in the page language with exactly `digits` decimals ("0,62" on an Italian page, where
-// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. One
+// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. No
+// thousands separator: "1500 MHz" as before, where "1.500" would read as one and a half. One
 // formatter per language, digit count and sign rule, kept: the Live tab formats every second.
 const numberFormats = new Map();
 function num(value, digits, signed) {
   const key = state.lang + "|" + digits + "|" + Boolean(signed);
   if (!numberFormats.has(key)) {
     numberFormats.set(key, new Intl.NumberFormat(state.lang, {
-      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto",
+      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto", useGrouping: false,
     }));
   }
   return numberFormats.get(key).format(value);
+}
+
+// A number the server sent, in the page language with the decimals String(value) shows ("51,2" on
+// an Italian page where String wrote "51.2", "8" stays "8"): the server rounds, the page does not.
+// Anything that is not a finite number (null, a text) comes out as String writes it, as before.
+function numAsSent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return String(value);
+  const text = String(value);
+  const dot = text.indexOf(".");
+  return /e/i.test(text) ? text : num(value, dot < 0 ? 0 : text.length - dot - 1);
 }
 
 // The only text the page holds itself, for when it cannot load its strings: the same keys and
@@ -302,7 +313,8 @@ async function guarded(fn) {
 // `guarded` for a call that draws a view. The view takes #view before its first await, so the token
 // read right after the call starts is its own; an error of a view that was dropped since (a tab
 // switch, a later view, logout) is not shown on the tab the user is on now. A view that failed
-// before it drew anything also says so in #view, where the user looks, besides the toast.
+// before it drew anything says so in #view, where the user looks, and the alert region announces
+// that text once without a toast that would repeat it; a view that drew keeps it and gets the toast.
 async function guardedView(view) {
   let current = null;
   try {
@@ -313,20 +325,28 @@ async function guardedView(view) {
   } catch (err) {
     if (current && !current()) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    notice(explain(err), true);
-    viewFailed(explain(err));
+    if (viewFailed(explain(err))) noticeSpoken(explain(err));
+    else notice(explain(err), true);
   }
 }
 
+// The error `message` for assistive technology only: the alert region announces it once and
+// nothing shows (the failed-view card already does). Clears any toast; "" from notice() clears it.
+function noticeSpoken(message) {
+  notice("");
+  document.getElementById("notice-alert").append(el("p", { class: "sr-only" }, message));
+}
+
 // An empty #view after a failed load: a kit card with the error and a retry of the tab. A view
-// that drew content keeps it (its polls handle their own failures).
+// that drew content keeps it (its polls handle their own failures). True when it drew the card.
 function viewFailed(text) {
   const view = document.getElementById("view");
-  if (view.hasChildNodes()) return;
+  if (view.hasChildNodes()) return false;
   const box = card(null, t("tab_" + state.tab), el("p", {}, text),
     el("div", { class: "row" }, button(held("retry"), "primary", () => showTab(state.tab))));
   box.id = "view-failed";
   view.append(box);
+  return true;
 }
 
 // Runs `call` with `control` disabled and busy (aria-busy) and gives it back in a `finally`, so a
@@ -647,7 +667,7 @@ async function registryView() {
   const rows = list.records;
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
-    [t("display_name"), "", t("last_seen"), null],
+    [t("display_name"), t("table_kind_status"), t("last_seen"), null],
     rows.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
@@ -657,7 +677,7 @@ async function registryView() {
   view.append(card(t("tab_registry"), t("registry_title"), body));
   view.append(card(t("tab_registry"), t("quarantined_title"),
     quarantined.keys.length === 0 ? empty(t("quarantined_title"), t("quarantined_none")) :
-      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
+      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true, attrs: { "aria-label": rowName(t("purge"), k) } }))))));
 }
 
 async function purgeKey(key) {
@@ -721,7 +741,9 @@ async function toBase64(file) {
 
 function importReport(report) {
   const created = report.items.filter((i) => i.created).length;
-  const parts = [el("p", {}, t("catalogue_report", { created: created, existing: report.items.length - created }))];
+  const parts = [el("p", {}, t("catalogue_report", {
+    created: tn("catalogue_created", created), existing: tn("catalogue_known", report.items.length - created),
+  }))];
   if (report.photo !== "none") parts.push(el("p", { class: "hint" }, t("photo_" + report.photo)));
   if (report.truncated) parts.push(el("p", { class: "hint" }, t("catalogue_truncated")));
   if (report.conflicts.length) {
@@ -772,16 +794,18 @@ async function catalogueView() {
     await catalogueView();
   });
   const pending = data.records.filter((r) => r.status === "pending");
+  const named = (action, name) => ({ small: true, attrs: { "aria-label": rowName(action, name) } });
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
-    [t("display_name"), "", null],
+    [t("display_name"), t("table_kind_origin"), null],
     data.records.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
       el("td", { class: "actions" }, el("div", { class: "row" },
         r.status === "pending" && r.has_appearance ?
-          button(t("catalogue_activate"), "plain", () => confirmBy(r, null), { small: true }) : [],
+          button(t("catalogue_activate"), "plain", () => confirmBy(r, null), named(t("catalogue_activate"), r.display_name)) : [],
         data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
+          // its visible text names the record already: that text is its whole name
           .map((e) => button(t("catalogue_confirm", { name: r.display_name }) + " ← " + word("category_", e.category) + " #" + e.entry_id.split("-").pop(),
             "plain", () => confirmBy(r, e.entry_id), { small: true })))))));
   const live = data.live.length === 0 ? empty(t("catalogue_live"), t("catalogue_live_none")) :
@@ -791,7 +815,7 @@ async function catalogueView() {
     title: t("catalogue_clear"), message: t("catalogue_clear_confirm"), pin: true, danger: true, confirm: t("catalogue_clear"),
     run: async ({ pin }) => {
       const out = await api("POST", "/api/catalogue/candidates/clear", { confirm: true, pin: pin });
-      notice(t("catalogue_cleared", { n: out.cleared }));
+      notice(tn("catalogue_cleared", out.cleared));
     },
   });
   const clearTombstones = () => ask({
@@ -799,7 +823,7 @@ async function catalogueView() {
     confirm: t("tombstones_clear", { n: data.tombstones }),
     run: async ({ pin }) => {
       const out = await api("POST", "/api/catalogue/tombstones/clear", { confirm: true, pin: pin });
-      notice(t("tombstones_cleared", { n: out.cleared }));
+      notice(tn("tombstones_cleared", out.cleared));
     },
   });
   view.append(
@@ -871,7 +895,7 @@ function secretsCard(data, reload) {
       }), hintId ? el("p", { class: "hint", id: hintId }, t("secret_in_use_hint")) : [])));
   });
   return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
-    rows.length ? table([t("secret_name"), "", "", null], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    rows.length ? table([t("secret_name"), t("table_secret_status"), t("table_secret_used_by"), null], rows) : el("p", { class: "hint" }, t("secrets_none")),
     form);
 }
 
@@ -1087,9 +1111,14 @@ async function routesView() {
     const run = button(t("route_check"), "plain", () => whileBusy(run, () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    })), { attrs: { disabled: r.running } });
-    const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
-    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
+    })), { attrs: { disabled: r.running, "aria-label": rowName(t("route_check"), r.name) } });
+    const editId = "route-" + r.name + "-edit";
+    const edit = el("div", { id: editId, hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
+    // a disclosure: aria-expanded follows the form's `hidden`
+    const toggle = button(t("route_edit"), "plain", () => {
+      edit.hidden = !edit.hidden;
+      toggle.setAttribute("aria-expanded", String(!edit.hidden));
+    }, { attrs: { "aria-label": rowName(t("route_edit"), r.name), "aria-expanded": "false", "aria-controls": editId } });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
       const done = await ask({
         title: t("route_remove_title", { name: r.name }), message: t("route_remove_message"), pin: true, danger: true,
@@ -1097,7 +1126,7 @@ async function routesView() {
         run: async ({ pin }) => { await api("POST", "/api/routes/remove", { name: r.name, pin }); },
       });
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
-    }));
+    }), { attrs: { "aria-label": rowName(t("route_remove"), r.name) } });
     const routeCard = busy(card(t("tab_routes"), r.name,
       el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :

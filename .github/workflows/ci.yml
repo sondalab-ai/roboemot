@@ -30,7 +30,8 @@ jobs:
 
   # The extras the installer puts on the robot (voice and vision: OpenCV, ONNX Runtime, Vosk), with
   # the whole default suite: the tests that need them skip in the job above, which stays the
-  # "extras absent" check. Real-model tests stay opt-in (`-m models`, deselected by default).
+  # "extras absent" check. Real-model tests stay opt-in (`-m models`, deselected by default): the
+  # jobs `models` (voice) and `models-vision` run them.
   python-vision:
     runs-on: ubuntu-24.04
     steps:
@@ -46,8 +47,8 @@ jobs:
 
   # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
   # deselected by default), including `test_m3_exit.py` with its latency budgets. The vision models
-  # are not fetched (0.13 GB); their `-m models` tests skip here. Runs on PRs too: about 1.5 min with a
-  # warm cache, under 2 min cold. The nightly run keeps the cache warm.
+  # have their own job below (`models-vision`). Runs on PRs too: about 1.5 min with a warm cache,
+  # under 2 min cold. The nightly run keeps the cache warm.
   models:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -96,6 +97,58 @@ jobs:
           name: m3-exit-report
           path: m3-exit-report.json
           if-no-files-found: ignore
+
+  # SPEC 14: the vision tests that load the real models (`-m models`: YuNet, SFace, DINOv2-S,
+  # NanoDet-Plus-m, VitTrack; 0.13 GB) and the two pinned COCO sample images. No job ran them
+  # before 2026-11-11, and a test of the object detector failed unnoticed for 90 commits. A model
+  # or an image that is missing makes its tests skip, so the last step fails when one was skipped
+  # for that reason: a skip here must never look like a pass. The nightly run keeps the cache warm.
+  models-vision:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ROBOEMOT_DATA_DIR: ${{ github.workspace }}/.ci-data
+      # test_catalogue_photos.py looks for DINOv2-S here first (its fixtures move the data folder).
+      ROBOEMOT_BENCH_MODELS: ${{ github.workspace }}/.ci-data/models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "packages/roboemot-core[dev,vision]" -e "packages/roboemot-reachymini[dev]"
+      # The vision models folder and the sample images, keyed on the OS, the registry that pins the
+      # model hashes and the script that names the images. Saved even when a later step fails.
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-data/models
+            ~/.cache/roboemot-bench
+          key: vision-models-${{ runner.os }}-${{ hashFiles('packages/roboemot-core/src/roboemot/vision/models.yaml', 'scripts/bench/fetch.py') }}
+      - run: roboemot models fetch yunet sface dinov2-small nanodet-plus-m-320 vittrack
+      # The two COCO images, and the detector's source config: the label test compares the pinned
+      # class list with it, and reads it from the models folder.
+      - run: |
+          python scripts/bench/fetch.py coco-samples nanodet-plus
+          cp ~/.cache/roboemot-bench/models/nanodet_plus/nanodet-plus-m_320.yml .ci-data/models/nanodet_plus/
+      - if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-data/models
+            ~/.cache/roboemot-bench
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - shell: bash  # with pipefail: the pipe to tee must not hide a failed test
+        run: >
+          pytest -m models -rs
+          packages/roboemot-core/tests/test_vision_models.py
+          packages/roboemot-core/tests/test_vision_objects.py
+          packages/roboemot-core/tests/test_vision_object_track.py
+          packages/roboemot-core/tests/test_catalogue_photos.py
+          | tee models-vision.log
+      - name: no test skipped for a missing model or image
+        run: |
+          ! grep -E "SKIPPED.*(missing|not in the model cache)" models-vision.log
 
   # Web UI behaviour tests (node:test + jsdom, dev-only, versions pinned by the lockfile); they load
   # the served page script unmodified. The vendored kit is not touched.

@@ -1,13 +1,15 @@
 """Compression and validators of the web UI server (SPEC 12).
 
 Static text files and large JSON bodies are sent gzipped only to a request that accepts gzip,
-with ``Vary: Accept-Encoding`` on both forms; first-party files keep ``no-store`` and no ETag in
-both forms. Every security header is present on gzipped and 304 responses alike.
+with ``Vary: Accept-Encoding`` on both forms. Static files (first-party and vendored) carry a
+strong ETag per form and ``no-cache``; every other response stays ``no-store`` without one. Every
+security header is present on gzipped and 304 responses alike.
 """
 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import http.client
 import json
 from types import SimpleNamespace
@@ -138,13 +140,18 @@ def test_a_range_request_gets_the_whole_file(served):
 FIRST_PARTY = {"/": "index.html", "/static/app.js": "app.js", "/static/style.css": "style.css"}
 
 
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 @pytest.mark.parametrize(("path", "name"), FIRST_PARTY.items())
-def test_a_first_party_file_is_gzipped_when_accepted_and_stays_no_store(served, path, name):
-    resp = served.request("GET", path, headers={**GZIP, "If-None-Match": "*"})
+def test_a_first_party_file_is_gzipped_when_accepted_with_an_etag_and_no_cache(served, path, name):
+    resp = served.request("GET", path, headers=GZIP)
     assert resp.status == 200 and resp.headers["Content-Encoding"] == "gzip"
     assert gzip.decompress(resp.body) == (STATIC / name).read_bytes()
     assert int(resp.headers["Content-Length"]) == len(resp.body)
-    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
+    assert resp.headers["ETag"] == f'"{digest((STATIC / name).read_bytes())}-gz"'
+    assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.headers["Vary"] == "Accept-Encoding"
     secure(resp)
 
@@ -152,25 +159,82 @@ def test_a_first_party_file_is_gzipped_when_accepted_and_stays_no_store(served, 
 @pytest.mark.parametrize("header", [None, "identity", "gzip;q=0"])
 @pytest.mark.parametrize(("path", "name"), FIRST_PARTY.items())
 def test_a_first_party_file_without_gzip_is_sent_as_it_is(served, path, name, header):
-    headers = {"If-None-Match": "*"} | ({} if header is None else {"Accept-Encoding": header})
-    resp = bare(served, "GET", path, headers)
+    resp = bare(served, "GET", path, {} if header is None else {"Accept-Encoding": header})
     assert resp.status == 200 and "Content-Encoding" not in resp.headers
     assert resp.body == (STATIC / name).read_bytes()
-    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
+    assert resp.headers["ETag"] == f'"{digest(resp.body)}"'
+    assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.headers["Vary"] == "Accept-Encoding"
     secure(resp)
 
 
 @pytest.mark.parametrize("gz", [True, False])
-def test_head_of_a_first_party_file_has_the_length_of_its_form(served, gz):
+@pytest.mark.parametrize("path", FIRST_PARTY)
+def test_a_matching_first_party_etag_gets_304_with_no_body(served, path, gz):
+    headers = GZIP if gz else {"Accept-Encoding": "identity"}
+    etag = served.request("GET", path, headers=headers).headers["ETag"]
+    resp = served.request("GET", path, headers={**headers, "If-None-Match": etag})
+    assert resp.status == 304 and resp.body == b""
+    assert "Content-Length" not in resp.headers and "Content-Encoding" not in resp.headers
+    assert resp.headers["ETag"] == etag and resp.headers["Vary"] == "Accept-Encoding"
+    assert resp.headers["Cache-Control"] == "no-cache"
+    secure(resp)
+
+
+def test_the_first_party_etag_of_the_other_form_gets_the_file(served):
+    plain = served.request("GET", "/static/app.js").headers["ETag"]
+    resp = served.request("GET", "/static/app.js", headers={**GZIP, "If-None-Match": plain})
+    assert resp.status == 200 and resp.headers["Content-Encoding"] == "gzip"
+    assert resp.headers["ETag"] != plain
+
+
+def test_a_changed_first_party_file_gets_a_new_etag_and_the_old_one_gets_the_file(
+    tmp_path, stack, monkeypatch
+):
+    copy = tmp_path / "static"
+    copy.mkdir()
+    for name, _ in server_module.STATIC_FILES.values():
+        (copy / name).write_bytes((STATIC / name).read_bytes())
+    monkeypatch.setattr(server_module, "STATIC_DIR", copy)
+    forms = [GZIP, {"Accept-Encoding": "identity"}]
+    srv, client = serve(tmp_path, SettingsEditor(stack), stack)
+    old = [client.request("GET", "/static/app.js", headers=h).headers["ETag"] for h in forms]
+    srv.stop()
+    (copy / "app.js").write_bytes((STATIC / "app.js").read_bytes() + b"\n// upgraded\n")
+    srv, client = serve(tmp_path, SettingsEditor(stack), stack)
+    try:
+        for headers, etag in zip(forms, old, strict=True):
+            resp = client.request(
+                "GET", "/static/app.js", headers={**headers, "If-None-Match": etag}
+            )
+            assert resp.status == 200 and resp.headers["ETag"] != etag
+            assert resp.body
+    finally:
+        srv.stop()
+
+
+@pytest.mark.parametrize("gz", [True, False])
+def test_head_of_a_first_party_file_has_the_length_and_etag_of_its_form(served, gz):
     headers = GZIP if gz else {"Accept-Encoding": "identity"}
     full = served.request("GET", "/static/app.js", headers=headers)
     resp = served.request("HEAD", "/static/app.js", headers=headers)
     assert resp.status == 200 and resp.body == b""
     assert int(resp.headers["Content-Length"]) == len(full.body)
     assert ("Content-Encoding" in resp.headers) is gz
-    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
+    assert resp.headers["ETag"] == full.headers["ETag"]
+    assert resp.headers["Cache-Control"] == "no-cache"
     secure(resp)
+    again = served.request(
+        "HEAD", "/static/app.js", headers={**headers, "If-None-Match": full.headers["ETag"]}
+    )
+    assert again.status == 304 and again.body == b""
+
+
+@pytest.mark.parametrize("path", ["/api/settings", "/api/session", "/api/strings", "/nope.js"])
+def test_api_and_unknown_paths_stay_no_store_without_an_etag(served, path):
+    resp = bare(served, "GET", path, {**GZIP, "If-None-Match": "*"})
+    assert resp.status != 304
+    assert resp.headers["Cache-Control"] == "no-store" and "ETag" not in resp.headers
 
 
 # ------------------------------------------------------------------ JSON

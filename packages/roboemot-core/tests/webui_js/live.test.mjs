@@ -35,7 +35,7 @@ const STRINGS = {
   live_memory: "Memory used: {n} %",
   live_disk: "Disk: {free} GB free ({n} % used)",
   live_wifi: "Wi-Fi: {n} dBm, link quality {q}",
-  live_process_mem: "RoboEmot memory: {n} MB, {threads} threads",
+  live_process_mem: "RoboEmot memory: {mb} MB, {n} threads",
   live_throttle: "Throttling",
   live_throttle_active: "Now: {names}",
   live_throttle_flag_under_voltage: "under-voltage",
@@ -66,6 +66,16 @@ async function livePage(t, extra = {}) {
 }
 
 const polls = (page) => page.calls.filter((c) => c.path === "/api/live/state").length;
+// Waits for the page's own poll timer to have asked `n` times, however slow the machine is: the
+// stubbed fetch has no timers, so each poll is drawn in the timer turn that asked it.
+const POLLS_GIVE_UP_MS = 5000; // a page that stopped polling fails here instead of hanging
+const pollsReach = async (page, n) => {
+  const end = Date.now() + POLLS_GIVE_UP_MS;
+  while (polls(page) < n) {
+    assert.ok(Date.now() < end, `${polls(page)} of ${n} polls`);
+    await sleep(1);
+  }
+};
 const openLive = async (page) => {
   page.document.querySelector('#tabs button[data-tab="live"]').click();
   await settle();
@@ -700,11 +710,10 @@ test("a poll with equal data keeps every card node; a changed value replaces onl
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
   const first = [...grid.children];
-  await sleep(POLL_MS * 4);
-  assert.ok(polls(page) >= 3);
+  await pollsReach(page, 3); // two more polls with equal data
   assert.ok([...grid.children].every((node, i) => node === first[i]), "same nodes after equal polls");
   valence = 0.5;
-  await sleep(POLL_MS * 4);
+  await pollsReach(page, polls(page) + 1); // one poll asked after the change
   const now = [...grid.children];
   assert.equal(now.length, 9);
   assert.notEqual(now[0], first[0], "the mood card is new");

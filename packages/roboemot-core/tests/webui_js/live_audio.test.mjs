@@ -270,7 +270,10 @@ test("a new epoch (cleared, restarted or switched off and on) starts the list ov
 });
 
 test("the Clear button posts and empties the list", async (t) => {
-  const page = await livePage(t, undefined, { "POST /api/live/transcript/clear": { ok: true } });
+  // No audio poll after the first: this fake still has the turns after the POST, so a 15 ms poll
+  // landing between the click and the check (a loaded machine) would draw them again.
+  const audio = { ...AUDIO, audio_poll_ms: 60_000 };
+  const page = await livePage(t, audio, { "POST /api/live/transcript/clear": { ok: true } });
   await openLive(page);
   const button = page.document.querySelector("#live-transcript-clear");
   assert.ok(button && button.textContent === "Clear");

@@ -9,6 +9,14 @@ import pytest
 import yaml
 from roboemot import cli
 from test_llm_conformance import ENGLISH, Fake, reply, text_chunks
+from test_llm_router import stop_loop_clock
+
+
+@pytest.fixture(autouse=True)
+def stopped_clock(monkeypatch):
+    """The loop ``cli.main`` runs reads a clock that only the fakes move, so a scheduler stall
+    on a loaded machine never reads as a slow first token (the fakes answer at once)."""
+    return stop_loop_clock(monkeypatch)
 
 
 @pytest.fixture

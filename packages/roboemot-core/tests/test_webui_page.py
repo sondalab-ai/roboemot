@@ -160,16 +160,30 @@ def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes()
     assert coarse, "one coarse-pointer block"
     body = coarse.group(1)
     for control in (".sl-btn", ".sl-segmented__item", ".sl-tabs__tab", ".sl-chip", ".sl-disclosure",
-                    ".sl-icon-btn", ".sl-check", ".sl-switch"):  # fmt: skip
+                    ".sl-icon-btn", ".sl-check", ".sl-switch", ".sl-field__input",
+                    ".restart-link"):  # fmt: skip
         assert control in body, control
     assert "min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));" in body  # 2rem + 0.75rem
     assert re.search(r"\.row \{ gap: var\(--sl-space-3\); \}", body)
+    assert re.search(r"\.entry \{ gap: var\(--sl-space-3\); \}", body)  # Remove next to its field
+    # an inline link takes no min-block-size: the restart badge link is an inline box on touch only
+    assert re.search(r"\.restart-link \{ display: inline-flex; align-items: center; \}", body)
+    assert "px" not in body, "kit spacing only, no bare px"
     assert "min-block-size" not in css.replace(body, ""), "no size change outside the coarse block"
 
 
+def test_a_setting_name_wraps_instead_of_widening_the_page():
+    # jsdom has no layout: measured in Chrome (0px page scroll at 360 and 390px, groups open)
+    css = (STATIC / "style.css").read_text()
+    assert re.search(
+        r"(?m)^\.setting :is\(\.sl-code, \.sl-switch__label\) \{ overflow-wrap: anywhere; \}", css
+    )
+
+
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
-    for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
-        text = (STATIC / name).read_text()
+    for path in _first_party_js():
+        name = path.name
+        text = path.read_text()
         for banned in (
             'setAttribute("style"',
             "innerHTML",
@@ -190,13 +204,30 @@ def test_no_native_confirm_prompt_or_page_level_pin_field_is_left():
     assert "ask({" in js
 
 
+def _first_party_js() -> list[Path]:
+    # every script the page serves itself; the vendored kit lives in a subfolder
+    return sorted(STATIC.glob("*.js"))
+
+
 def _page_js() -> str:
-    return "".join((STATIC / n).read_text() for n in ("app.js", "settings.js", "live.js"))
+    return "".join(p.read_text() for p in _first_party_js())
+
+
+def test_the_key_scan_reads_every_first_party_script():
+    names = {p.name for p in _first_party_js()}
+    assert {"app.js", "settings.js", "live.js", "emotions.js"} <= names
+    assert not any("vendor" in p.parts for p in _first_party_js())
 
 
 def _keys_used_by_app() -> set[str]:
     js = _page_js()
-    return set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    used = set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    # t(flag ? "key_a" : "key_b"): both keys of a choice
+    choices = re.findall(
+        r"""\btn?\(\s*[\w.!]+(?:\s*[=!<>]+\s*[\w."]+)?\s*\?\s*"([a-z0-9_]+)"\s*:\s*"([a-z0-9_]+)"\s*[,)]""",
+        js,
+    )
+    return used | {k for pair in choices for k in pair}
 
 
 def test_every_string_key_the_page_reads_exists_in_both_languages():
@@ -236,8 +267,7 @@ def test_every_restart_effect_core_accepts_has_text_in_both_languages():
 def test_every_singular_form_has_its_plural_key_and_is_read_through_tn():
     # tn(key, n) picks key + "_one" when n is 1: a `_one` key without its base key, or one whose
     # base key the page reads with t() (never picking the singular), is a dead string
-    names = ("app.js", "settings.js", "live.js", "emotions.js")
-    js = "".join((STATIC / n).read_text() for n in names)
+    js = _page_js()
     counted = set(re.findall(r"""\btn\(\s*"([a-z0-9_]+)"\s*,""", js))
     for lang in (EN, IT):
         singular = {k[: -len("_one")] for k in lang if k.endswith("_one")}
