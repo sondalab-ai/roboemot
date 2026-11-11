@@ -2028,6 +2028,23 @@ class AttentionConfig(Strict):
 
 class VisionRates(Strict):
     detection_hz: float = param(8.0, "Face detection rate (cm4: 5 to 10)", unit="Hz", ge=0.1, le=60)
+    detection_idle_hz: float = param(
+        4.0,
+        "Face detection rate while no face is in view, after detection_idle_after_s without a "
+        "face track; a detection that finds a face goes back to detection_hz at once. Scaled "
+        "like every rate; must not exceed detection_hz, and equal to it keeps one rate",
+        unit="Hz",
+        ge=0.1,
+        le=60,
+    )
+    detection_idle_after_s: float = param(
+        10.0,
+        "Capture time with no face track (confirmed or tentative) before face detection drops "
+        "to detection_idle_hz",
+        unit="s",
+        ge=0,
+        le=600,
+    )
     embedding_hz: float = param(
         0.5, "Face embedding rate per track after the new-track burst", unit="Hz", ge=0.05, le=30
     )
@@ -2112,6 +2129,16 @@ class VisionRates(Strict):
                     f"vision.rates.{name} ({getattr(self, name)} Hz) must not exceed "
                     f"vision.rates.objects_max_hz ({self.objects_max_hz} Hz)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _idle_below_detection(self) -> VisionRates:
+        """The idle face rate only ever lowers detection (SPEC 5, 13)."""
+        if self.detection_idle_hz > self.detection_hz:
+            raise ValueError(
+                f"vision.rates.detection_idle_hz ({self.detection_idle_hz} Hz) must not exceed "
+                f"vision.rates.detection_hz ({self.detection_hz} Hz); set both to lower the rate"
+            )
         return self
 
 
