@@ -262,6 +262,11 @@ class Tracker:
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
 
+    @property
+    def live(self) -> int:
+        """How many tracks are alive now, tentative ones included (not yet expired)."""
+        return len(self._tracks)
+
     def holds(
         self, stamp: float, labels: Collection[str], min_move_px: float, hold_s: float
     ) -> frozenset[str]:

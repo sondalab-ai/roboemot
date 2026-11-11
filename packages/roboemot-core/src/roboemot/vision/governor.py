@@ -15,6 +15,12 @@ while a shown object is its target (SPEC 5A, Joint attention), so the gaze can f
 passes the target's base-frame bearing (``focus``) so the pipeline knows which track is shown.
 The object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
 ``objects_active_hz`` above it, and every scale is at most 1.
+
+A stage with an ``<stage>_idle_hz`` field may be made idle (``set_idle``): it then runs at that
+rate instead of ``<stage>_hz``, under the same scales. The pipeline does this for ``detection``
+once ``vision.rates.detection_idle_after_s`` of capture time passed with no face track, and
+clears it on the first face track (SPEC 5, 13, owner decision 2026-11-11). An active rate wins
+over an idle one. The config rejects ``detection_idle_hz`` above ``detection_hz``.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ class RateGovernor:
         self._scales: dict[str, float] = {}
         self._last: dict[str, float] = {}
         self._active: set[str] = set()
+        self._idle: set[str] = set()
         self._focus: dict[str, tuple[float, float]] = {}
         self.dropped: dict[str, int] = {}
 
@@ -65,6 +72,21 @@ class RateGovernor:
                 self._focus[stage] = focus
             else:
                 self._focus.pop(stage, None)
+
+    def set_idle(self, stage: str, on: bool) -> None:
+        """Run ``stage`` at its ``<stage>_idle_hz`` rate (on) or its usual rate (off); a stage
+        without that field ignores it. The caller decides from capture stamps, so a replay
+        stays deterministic."""
+        with self._lock:
+            if on:
+                self._idle.add(stage)
+            else:
+                self._idle.discard(stage)
+
+    def idle(self, stage: str) -> bool:
+        """Whether ``stage`` is idle and has an idle rate (``period`` lets an active rate win)."""
+        with self._lock:
+            return stage in self._idle and hasattr(self.rates, f"{stage}_idle_hz")
 
     def focus(self, stage: str) -> tuple[float, float] | None:
         """The base-frame bearing the active ``stage`` follows (``set_active``), or None."""
@@ -107,9 +129,15 @@ class RateGovernor:
 
         ``stage`` names a field of ``vision.rates`` without its ``_hz`` suffix, for example
         ``detection`` or ``embedding``. The pipeline also uses it for per-track schedules. An
-        active stage uses ``<stage>_active_hz``.
+        active stage uses ``<stage>_active_hz``, an idle one ``<stage>_idle_hz``.
         """
-        base = getattr(self.rates, f"{stage}_active_hz" if self.active(stage) else f"{stage}_hz")
+        if self.active(stage):
+            field = f"{stage}_active_hz"
+        elif self.idle(stage):
+            field = f"{stage}_idle_hz"
+        else:
+            field = f"{stage}_hz"
+        base = getattr(self.rates, field)
         rate = base * self.scale
         return math.inf if rate <= 0 else 1.0 / rate
 
@@ -132,7 +160,9 @@ class RateGovernor:
             return False
 
     def reset(self) -> None:
-        """Forget when each stage last ran (new session or replay start)."""
+        """Forget when each stage last ran and which stages were idle (new session or replay
+        start)."""
         with self._lock:
             self._last.clear()
+            self._idle.clear()
             self.dropped.clear()

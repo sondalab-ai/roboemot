@@ -106,7 +106,9 @@ def test_conversation_scale_multiplies_the_other_scales_and_is_reported(tmp_path
 
 
 def test_detection_rate_drops_while_thinking_and_comes_back_when_idle(tmp_path):
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [])
+    rates = CFG.vision.rates.model_copy(update={"detection_idle_hz": CFG.vision.rates.detection_hz})
+    one_rate = CFG.vision.model_copy(update={"rates": rates})  # 30 s of an empty room: no idle rate
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], vision=one_rate)
     frames = 80
     for i in range(frames):
         pipe.process(Frame(image(i), i * DT))
@@ -233,7 +235,7 @@ def test_conversation_scale_floor():
         RoboEmotConfig(vision={"rates": {"conversation_scale": FLOOR - 0.01}})
     RoboEmotConfig(vision={"rates": {"conversation_scale": FLOOR}})
     # Low detection rates are no longer rejected: the face tracker lifetime follows them.
-    RoboEmotConfig(vision={"rates": {"detection_hz": 1.0}})
+    RoboEmotConfig(vision={"rates": {"detection_hz": 1.0, "detection_idle_hz": 1.0}})
 
 
 def test_face_tracks_survive_a_detector_slower_than_lost_s(tmp_path):
