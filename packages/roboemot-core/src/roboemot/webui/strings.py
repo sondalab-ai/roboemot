@@ -489,7 +489,8 @@ EN: dict[str, str] = {
     "route_protocol_gemini_live": "Gemini Live",
     "route_protocol_hint": (
         "Only for a realtime speech route. Gemini Live connects to the address as written "
-        "(wss://), needs direct mode and robot turns, and cannot be changed later from here."
+        "(wss://) and needs direct mode and robot turns. Changing it later means changing the "
+        "address with it, so it needs the configuration file."
     ),
     "route_voice": "Voice",
     "route_voice_hint": (
@@ -1498,8 +1499,8 @@ IT: dict[str, str] = {
     "route_protocol_gemini_live": "Gemini Live",
     "route_protocol_hint": (
         "Solo per un modello voce in tempo reale. Gemini Live si collega all'indirizzo così com'è "
-        "(wss://), richiede la modalità diretta e i turni decisi dal robot, e da qui non si può "
-        "cambiare dopo."
+        "(wss://) e richiede la modalità diretta e i turni decisi dal robot. Cambiarlo dopo "
+        "significa cambiare anche l'indirizzo, quindi richiede il file di configurazione."
     ),
     "route_voice": "Voce",
     "route_voice_hint": (

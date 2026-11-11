@@ -223,10 +223,19 @@ llm_routes:
 
 ### 3. Switch to Gemini
 
-A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot`; the
-configuration refuses anything else.
+A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot` (the default);
+the configuration refuses anything else, one edit at a time. In the **Settings** tab, edit in this
+order:
 
-1. Set `voice.realtime_route.route`: `gemini` and `voice.realtime_route.mode`: `direct`.
-2. Restart RoboEmot (step 5 above).
+1. `voice.realtime_route.mode`: `direct` (first: Pollen's route accepts it, a Gemini route
+   refuses `platform`).
+2. `voice.realtime_route.route`: `gemini`.
+3. `voice.realtime_route.enabled`: true, if it is not already on.
+4. Restart RoboEmot (section 5, Restart RoboEmot).
 
-To go back, set `route: pollen` and `mode: platform`, then restart.
+With `voice.realtime_route.input: audio` the utterances' audio goes to Google, and that needs the
+opt-in `privacy.realtime_audio` (section 4). With `input: text` only the local transcript goes.
+
+To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
+
+Or edit `voice.realtime_route` in `app.yaml` (all fields at once) and restart.

@@ -161,7 +161,8 @@ def check_realtime_route(
     :class:`RouteKindUnsupported`, :class:`RouteKeyUnavailable` and
     :class:`RouteBudgetExhausted` before anything is sent. ``deadline_s`` defaults to
     ``llm_check.deadline_s`` and bounds the waits after the connect; the connect is bounded
-    by the client's own ``connect_timeout_s + send_timeout_s``, and its close by about three
+    by the client's own ``connect_timeout_s`` (the route's, else the shared one) plus
+    ``send_timeout_s``, and its close by about three
     ``send_timeout_s`` after that. ``config`` returns the committed configuration: the
     privacy gates (pseudonyms, the platform identifier) are read from it at each use, as the
     route reads them (``cfg`` when omitted). ``mode`` is the provider's (direct when it is a

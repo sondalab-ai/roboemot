@@ -6,6 +6,7 @@ none of them behaves and serializes as before."""
 from __future__ import annotations
 
 import pytest
+import test_secret_store as guard
 import test_webui_route_api as route_api
 from realtime_helpers import route as rt_route
 from realtime_helpers import settings as rt_settings
@@ -14,14 +15,19 @@ from roboemot.config.schema import (
     LLMRoute,
     RealtimeRouteConfig,
     RoboEmotConfig,
+    active_realtime_route,
     realtime_connect_timeout_s,
     realtime_voice,
 )
+from roboemot.config.stack import secret_violations
 from roboemot.health.network import NetworkMonitor
 from roboemot.realtime import route as rt_mod
+from roboemot.realtime.input import RealtimeInput, reopen_limit_s
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.realtime.session import DirectSession
 from roboemot.webui import descriptions
+from roboemot.webui.settings import SettingsEditor
+from roboemot.webui.validation import ValidationError
 from test_webui_route_api import stack, store, web  # noqa: F401  (fixtures)
 
 GEMINI_URL = (
@@ -246,3 +252,126 @@ def test_the_new_descriptions_have_an_italian_text():
     table = descriptions.table("it")
     for name in NEW_FIELDS:
         assert LLMRoute.model_fields[name].description in table
+
+
+# ------------------------------------------------------------------- fix round 1
+
+
+@pytest.mark.parametrize("tail", ["?alt=sse", "?", "#frag"])
+def test_a_gemini_url_takes_no_query_or_fragment_at_load(tail):
+    with pytest.raises(ValueError, match="takes no query, fragment or user info"):
+        LLMRoute(**{**GEMINI, "base_url": GEMINI_URL + tail})
+
+
+def test_a_gemini_url_takes_no_user_info_at_load():
+    url = GEMINI_URL.replace("wss://", "wss://user:pw@")
+    with pytest.raises(ValueError, match="takes no query, fragment or user info"):
+        LLMRoute(**{**GEMINI, "base_url": url})
+
+
+def test_the_shared_and_route_connect_timeout_ranges_match():
+    shared = RealtimeRouteConfig.model_json_schema()["properties"]["connect_timeout_s"]
+    own = LLMRoute.model_json_schema()["properties"]["connect_timeout_s"]["anyOf"][0]
+    assert (own["minimum"], own["maximum"]) == (shared["minimum"], shared["maximum"])
+
+
+def keyed(**kw: object) -> RoboEmotConfig:
+    return RoboEmotConfig.model_validate(
+        {"llm_routes": [{**guard.SECRET_ROUTE, "kind": "realtime", **kw}]}
+    )
+
+
+def test_a_protocol_change_alone_on_a_keyed_route_needs_the_admin():
+    """The schema ties gemini_live to a wss URL, so this builds the candidate past it: the
+    secret rule must still catch a protocol that changes alone."""
+    approved = keyed()
+    route = approved.llm_routes[0].model_copy(update={"protocol": "gemini_live"})
+    candidate = approved.model_copy(update={"llm_routes": [route]})
+    (violation,) = secret_violations(approved, candidate)
+    assert violation.check == "secret" and violation.path == "llm_routes.cloud.api_key"
+    assert secret_violations(approved, approved) == []
+
+
+def test_an_existing_approval_reads_as_before():
+    """The trusted string of an openai_realtime route carries no protocol: approvals made
+    before the field existed still match."""
+    approved = keyed()
+    route = approved.llm_routes[0].model_copy(update={"base_url": "https://evil.example/v1"})
+    (violation,) = secret_violations(approved, approved.model_copy(update={"llm_routes": [route]}))
+    assert violation.approved == f"{guard.SECRET_ROUTE['base_url']} ${{secret:cloud_key}} realtime"
+
+
+def test_the_key_confirmation_of_a_gemini_route_names_no_provider_hosts(stack):  # noqa: F811
+    editor = SettingsEditor(
+        stack, known_secrets=lambda: ["cloud_key"], realtime_key_hosts=lambda: [".rt.example.net"]
+    )
+    with pytest.raises(ValidationError) as exc:
+        editor.add_route({**GEMINI, "locality": "cloud"}, "cloud_key", None)
+    assert exc.value.code == "endpoint_ack_required"
+    assert exc.value.extra == {"endpoint": "wss://generativelanguage.googleapis.com"}
+
+
+def test_session_update_without_a_route_voice_is_unchanged():
+    """Golden: the update an openai_realtime route without a voice of its own sends, as it was
+    before the route fields existed."""
+    cfg = config(POLLEN, voice="Serena")
+    golden = {
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "instructions": "x",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": None},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "silence_duration_ms": 600,
+                        "create_response": False,
+                        "interrupt_response": False,
+                    },
+                },
+                "output": {"format": {"type": "audio/pcm", "rate": None}, "voice": "Serena"},
+            },
+        },
+    }
+    for update in (
+        rt_mod.session_update(cfg, "x", route=cfg.llm_routes[0]),
+        rt_mod.session_update(cfg, "x"),
+    ):
+        update.pop("event_id", None)
+        assert update == golden
+
+
+def test_the_reopen_and_stream_session_waits_follow_the_active_route():
+    cfg = config({**POLLEN, "connect_timeout_s": 15}, connect_timeout_s=5)
+    assert active_realtime_route(cfg) is cfg.llm_routes[0]
+    assert reopen_limit_s(cfg) == 15
+    assert reopen_limit_s(config(POLLEN, connect_timeout_s=5)) == 5
+
+
+def test_an_opening_waits_for_the_reconnect_past_the_shared_timeout():
+    """A route with connect_timeout_s 15 and the shared 5: the opening after this input's reset
+    keeps waiting until the reconnect lands at 10 s (a fake clock; nothing sleeps)."""
+    cfg = config({**POLLEN, "connect_timeout_s": 15}, connect_timeout_s=5)
+    now = [0.0]
+    counts: list[str] = []
+
+    class Route:  # the reconnect lands at 10 s
+        connected = property(lambda _self: now[0] >= 10.0)
+        opening = staticmethod(lambda: True)
+        count = staticmethod(counts.append)
+
+    route = Route()
+
+    class Job:
+        def wait(self, timeout_s: float) -> bool:
+            now[0] += timeout_s
+            return False
+
+    inp = RealtimeInput(route)
+    inp._clock = lambda: now[0]
+    inp._stream_reopening = True
+    inp._await_reopen(Job(), reopen_limit_s(cfg))
+    assert counts == ["audio_reopen_wait"]
+    assert 10.0 <= now[0] < 15.0  # past the shared 5 s, ended by the reconnect

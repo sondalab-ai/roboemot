@@ -253,8 +253,9 @@ class RouteChecker:
 
 def _set_fields(route: LLMRoute) -> dict[str, Any]:
     """The realtime fields ``protocol`` and ``voice`` of a route row, only where the route sets
-    them: a row of a route that sets neither stays as it was. The page reads a missing one as
-    the default (``openai_realtime``, no voice of its own)."""
+    them: a row of a route that sets neither stays as it was, and an explicit default also
+    stays out. The page reads a missing one as the default (``openai_realtime``, no voice of
+    its own)."""
     return route.model_dump(include={"protocol", "voice"}, exclude_defaults=True)
 
 

@@ -45,7 +45,8 @@ section number in commit messages that implement or change behaviour.
   (Realtime speech route; `protocol: openai_realtime`, the default) or Gemini Live
   (`protocol: gemini_live`, SPEC 8 Gemini Live wire: key in `x-goog-api-key`, robot turns and
   direct mode only). Its one exception to `tool_choice="auto"` is `tool_choice: "none"` on the
-  request after the tool-round cap, which forbids no tool, so it is not forced tool choice.
+  request after the tool-round cap, which forbids no tool, so it is not forced tool choice
+  (dropped on `gemini_live`, which has no equivalent).
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Robot hierarchy (SPEC 4A, 11, 12A):** robot-specific behaviour only through a core protocol plus a

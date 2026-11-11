@@ -924,6 +924,14 @@ function routeForm(route, secrets, nameMax, save) {
     ROUTE_PROTOCOLS.map((p) => el("option", { value: p }, t("route_protocol_" + p))));
   if (protocol) protocol.value = ROUTE_PROTOCOL_DEFAULT;
   const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", value: route ? route.voice || "" : "" });
+  // protocol and voice apply to a realtime route only: shown for that kind alone
+  const isRealtime = () => (route ? route.kind : kind.value) === "realtime";
+  const realtimeOnly = [
+    protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : null,
+    field(id("voice"), t("route_voice"), voice, t("route_voice_hint")),
+  ].filter(Boolean);
+  const showRealtime = () => { for (const f of realtimeOnly) f.hidden = !isRealtime(); };
+  if (kind) kind.addEventListener("change", showRealtime);
   const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
   const names = secrets.filter((s) => s.set).map((s) => s.name);
   const keys = [["", t("route_key_none")]];
@@ -937,10 +945,11 @@ function routeForm(route, secrets, nameMax, save) {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
+      const rt = isRealtime();
       whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
-        locality: locality.value, key: key.value, voice: voice.value.trim(),
-        ...(kind ? { kind: kind.value } : {}), ...(protocol ? { protocol: protocol.value } : {}),
+        locality: locality.value, key: key.value, voice: rt ? voice.value.trim() : (route ? route.voice || "" : ""),
+        ...(kind ? { kind: kind.value } : {}), ...(protocol && rt ? { protocol: protocol.value } : {}),
       })));
     },
   },
@@ -949,10 +958,10 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("model"), t("route_model"), model),
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
   kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
-  protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : [],
-  field(id("voice"), t("route_voice"), voice, t("route_voice_hint")),
+  realtimeOnly,
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, send));
+  showRealtime();
   return form;
 }
 
@@ -1023,7 +1032,8 @@ async function saveRoute(route, v) {
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
   const realtime = (route ? route.kind : v.kind) === "realtime";
-  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const direct = (route ? route.protocol : v.protocol) === "gemini_live"; // direct mode only: no provider hosts
+  const extraHosts = realtime && !direct ? (state.realtimeKeyHosts || []) : [];
   const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
     (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);

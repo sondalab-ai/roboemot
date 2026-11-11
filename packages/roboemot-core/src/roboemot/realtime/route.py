@@ -583,7 +583,8 @@ class RealtimeRoute:
 
     def ready(self, cfg: RoboEmotConfig | None = None, *, closes: int | None = None) -> bool:
         """Whether a turn can be answered through the route, connecting if needed (blocking up
-        to ``connect_timeout_s``: never call it on an event loop). A blocked route, one closed
+        to the route's ``connect_timeout_s``, else the shared one: never call it on an event
+        loop). A blocked route, one closed
         since this call began (or since ``closes``, the close count a reset saw), or one whose
         last connect failed and whose retry is not due, is not ready. A session the newest
         configuration would not open is closed, not used."""
