@@ -561,7 +561,8 @@ function settingLeaf(node) {
   const title = ctl && ctl.labelFor
     ? el("label", { class: "sl-field__label", for: ctl.labelFor }, name)
     : el("span", { class: "sl-field__label" }, ctl && ctl.ownsLabel ? [] : name);
-  const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
+  const head = el("div", { class: "row" }, title, settingTags(row, editable));
+  const parts = [head];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
   if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
@@ -583,7 +584,26 @@ function settingLeaf(node) {
     }
     parts.push(failure, settingActions(node, ctl, failure));
   }
-  return el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  const leaf = el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  if (ctl) editedMarker(leaf, head, ctl);
+  return leaf;
+}
+
+// Marks a leaf whose control holds an unsaved edit (each field has its own Save): a kit tag in its
+// tag row and data-dirty on the row, both gone when the value is back to the stored one; a save
+// rebuilds the row. Nothing is announced. The control's first reading is the stored value, so a
+// value it cannot read (a choice no longer offered) is no edit until it is changed. Chips and rows
+// change on click and Enter, not only on input.
+function editedMarker(leaf, head, ctl) {
+  const stored = JSON.stringify(ctl.read());
+  const tag = el("span", { class: "sl-tag", "data-edited": "1" }, t("settings_edited"));
+  const check = () => {
+    const dirty = JSON.stringify(ctl.read()) !== stored;
+    leaf.toggleAttribute("data-dirty", dirty);
+    if (dirty && !tag.isConnected) head.append(tag);
+    if (!dirty) tag.remove();
+  };
+  for (const kind of ["input", "change", "click", "keydown"]) leaf.addEventListener(kind, check);
 }
 
 // The ids that describe a leaf's control: its description, then what the control adds (the limits line).
