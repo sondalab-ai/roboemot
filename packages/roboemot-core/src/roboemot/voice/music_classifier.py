@@ -81,7 +81,9 @@ class MusicClassifier:
         self._backend = backend
         self._reason = reason
         self._timer = timer
-        self._window = np.zeros(0, dtype=np.float32)
+        self._ring = np.zeros(WINDOW_SAMPLES, dtype=np.float32)
+        self._head = 0  # where the next sample goes in the ring
+        self._filled = 0  # contiguous samples in the ring, at most WINDOW_SAMPLES
         self._expected = math.nan  # the stamp the next contiguous chunk starts at
         self._last_run_s = -math.inf
         self._runs = self._holes = self._errors = 0
@@ -102,21 +104,41 @@ class MusicClassifier:
         audio = np.asarray(samples, dtype=np.float32)
         chunk_s = audio.size / self._rate
         if abs(start - self._expected) > chunk_s:
-            self._window = np.zeros(0, dtype=np.float32)
+            self._filled = 0
             self._holes += 1
         self._expected = start + chunk_s
-        self._window = np.concatenate([self._window, audio])[-WINDOW_SAMPLES:]
-        if self._window.size == WINDOW_SAMPLES and start - self._last_run_s >= self._interval_s:
+        self._append(audio)
+        if self._filled == WINDOW_SAMPLES and start - self._last_run_s >= self._interval_s:
             self._last_run_s = start
-            return self._score(self._backend)
+            return self._score(self._backend, self._window())
         return None
 
-    def _score(self, backend: ClassifierBackend) -> tuple[float, float] | None:
+    def _append(self, audio: np.ndarray) -> None:
+        """Write a chunk into the ring, keeping only its last WINDOW_SAMPLES. The model runs
+        once per interval while chunks arrive every few ms, so copying into a fixed buffer
+        replaces a new window allocation per chunk."""
+        n = audio.size
+        if n >= WINDOW_SAMPLES:
+            self._ring[:] = audio[-WINDOW_SAMPLES:]
+            self._head = 0
+        else:
+            first = min(n, WINDOW_SAMPLES - self._head)
+            self._ring[self._head : self._head + first] = audio[:first]
+            self._ring[: n - first] = audio[first:]
+            self._head = (self._head + n) % WINDOW_SAMPLES
+        self._filled = min(WINDOW_SAMPLES, self._filled + n)
+
+    def _window(self) -> np.ndarray:
+        """The ring as one contiguous array, oldest sample first: a new array, so the backend
+        may keep it, built only when a run is due."""
+        return np.concatenate((self._ring[self._head :], self._ring[: self._head]))
+
+    def _score(self, backend: ClassifierBackend, window: np.ndarray) -> tuple[float, float] | None:
         """Run the model on the window; keep the scores and the CPU time for the report and
         return (music, speech), or None when the model raised."""
         t0 = self._timer()
         try:
-            music, speech = backend.scores(self._window)
+            music, speech = backend.scores(window)
         except Exception as exc:
             self._errors += 1
             self._failing = True

@@ -9,9 +9,12 @@ robot's SBC idles only a few degrees below the threshold where its fan starts, s
 50 Hz thread), publishes ``robot.asleep`` and
 ``robot.awake`` on the bus (the pattern of ``link.robot.lost`` and ``.restored``) and, with
 ``runtime.pause_when_asleep``, pauses those parts and resumes them on wake. Pausing keeps every
-thread alive and idle: nothing is stopped, restarted or leaked, and models stay loaded. Kept
-running: the motion loop's motors probe (the wake-up check), the web UI, diagnostics and the
-network and robot link supervision.
+thread alive and idle: nothing is leaked and models stay loaded. The one thing stopped is the
+microphone capture, when the hub can (``CapturePause``) and :func:`mic_needed_asleep` says nothing
+needs the sound (owner decision 2026-11-11: on the reference robot the capture kept about a third
+of a core busy in sleep). It resumes on wake before the listener. Kept running: the motion loop's
+motors probe (the wake-up check), the web UI, diagnostics and the network and robot link
+supervision.
 """
 
 from __future__ import annotations
@@ -22,14 +25,40 @@ from typing import Any
 
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.bus import Bus
+from roboemot.config.schema import RoboEmotConfig
+from roboemot.robot_platform import CapturePause
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 log = logging.getLogger(__name__)
 
 
+def mic_needed_asleep(cfg: RoboEmotConfig) -> bool:
+    """Whether a configured consumer needs the microphone while the platform sleeps (SPEC 12A).
+
+    True exactly when the pause does not apply (``runtime.pause_when_asleep`` off): the listener
+    then keeps running asleep, with every voice profile and wake-word policy. With the pause on,
+    no consumer counts:
+
+    * the voice listener (local speech, the wake word, the cloud voice's realtime route): paused
+      with the rest, and the realtime session is closed;
+    * the reflex sink (a loud sound: startle, the day nap's ``sound.loud`` wake): the behaviour
+      tick is paused and the motors are off, so a reflex moves nothing; the nap clock restarts
+      on ``robot.awake``;
+    * the levels (Live tab meter, debug report): the meter says ``paused`` while asleep;
+    * the wake word: it cannot wake a sleeping platform, since RoboEmot never calls the
+      daemon's wake-up in app mode (SPEC 4A), whatever ``voice.wake_word_policy`` says.
+
+    A later feature that wakes the platform by sound (a wake word policy, a sound reflex) must
+    add its condition here, with its rows in ``tests/runtime/test_mic_needed_asleep.py``."""
+    return not cfg.runtime.pause_when_asleep
+
+
 class SleepGate:
     """Tracks the asleep state and applies or lifts the pause. ``enabled`` is
-    ``runtime.pause_when_asleep`` read live, so a reload can opt out while asleep."""
+    ``runtime.pause_when_asleep`` read live, so a reload can opt out while asleep. ``audio`` is
+    the microphone hub: its capture is paused while the pause applies and ``mic_needed`` (the
+    live :func:`mic_needed_asleep`) is false, decided again on every tick. A hub without
+    ``CapturePause`` is left alone."""
 
     def __init__(
         self,
@@ -43,19 +72,26 @@ class SleepGate:
         scan: Any,
         enabled: Callable[[], bool],
         realtime: Callable[[], Any] = lambda: None,
+        *,
+        audio: Any = None,
+        mic_needed: Callable[[], bool] = lambda: True,
     ) -> None:
         self._host, self._bus, self._loop = host, bus, loop
         self._realtime = realtime  # the realtime speech route, when there is one
         self._perception, self._light, self._listener = perception, light_reader, listener
         self._gaze, self._scan, self._enabled = gaze, scan, enabled
+        self._audio = audio if isinstance(audio, CapturePause) else None
+        self._mic_needed = mic_needed
         self.asleep = False
         self.paused = False  # the pause is applied (asleep, and the config asks for it)
+        self.mic_paused = False  # this gate paused the microphone capture
         self.changes = 0  # asleep/awake transitions seen
         self.since: float | None = None
 
     def tick(self, now: float) -> bool:
         """One app-tick step: publish a change of the asleep state, then apply or lift the pause.
-        Returns whether the heavy work is paused (the caller then skips its own)."""
+        The microphone resumes before the listener and pauses after it (and after the speech
+        stop). Returns whether the heavy work is paused (the caller then skips its own)."""
         asleep = bool(self._loop.motors_off and self._loop.link.online)
         if asleep != self.asleep:
             self.asleep, self.since = asleep, now
@@ -63,20 +99,33 @@ class SleepGate:
             log.info("robot %s", "asleep" if asleep else "awake")
             self._bus.publish("robot.asleep" if asleep else "robot.awake", None, now)
         want = asleep and self._enabled()
+        mic = want and self._audio is not None and not self._mic_needed()
+        if self.mic_paused and not mic:
+            self._set_mic(False)
         if want != self.paused:
             self.paused = want
             (self._pause if want else self._resume)()
+        if mic and not self.mic_paused:
+            self._set_mic(True)
         return self.paused
+
+    def _set_mic(self, pause: bool) -> None:
+        """Pause or resume the microphone capture; a failure is logged and the flag still
+        moves (the hub retries a failed restart itself)."""
+        self.mic_paused = pause
+        audio = self._audio
+        self._each("microphone", audio.pause_capture if pause else audio.resume_capture)
 
     def paused_parts(self) -> list[str]:
         """Names of the parts paused right now (``app_tick``, ``vision``, ``light_reader``,
-        ``listener``); reads flags only, never the configuration."""
+        ``listener``, ``microphone``); reads flags only, never the configuration."""
         service = self._perception.service
         flags = {
             "app_tick": self.paused,
             "vision": service.paused if service is not None else False,
             "light_reader": self._light.paused,
             "listener": self._listener.paused if self._listener is not None else False,
+            "microphone": self._audio.capture_paused if self._audio is not None else False,
         }
         return [name for name, on in flags.items() if on]
 
@@ -93,6 +142,7 @@ class SleepGate:
                 "vision": service.paused if service is not None else "absent",
                 "light_reader": self._light.paused,
                 "listener": self._listener.paused if self._listener is not None else "absent",
+                "microphone": (self._audio.capture_paused if self._audio is not None else "absent"),
             },
         }
 

@@ -531,3 +531,20 @@ def test_server_limits_follow_the_config_or_need_a_restart(tmp_path):
         assert closed and time.monotonic() - start < 3
     finally:
         srv.stop()
+
+
+@pytest.mark.parametrize("robot_hosted", [True, False])
+def test_the_server_binds_without_a_reverse_dns_lookup(tmp_path, monkeypatch, robot_hosted):
+    """``HTTPServer.server_bind`` calls ``socket.getfqdn``: on ``0.0.0.0`` that took 5 s."""
+
+    def refuse(*args):
+        raise AssertionError("socket.getfqdn called while binding")
+
+    monkeypatch.setattr(socket, "getfqdn", refuse)
+    cfg = RoboEmotConfig(webui={"port": 0})
+    srv = make_server(FakeService(), Diagnostics(), cfg, tmp_path, robot_hosted=robot_hosted)
+    try:
+        httpd = srv._httpd
+        assert httpd.server_name == srv.host and httpd.server_port == srv.port != 0
+    finally:
+        srv.stop()

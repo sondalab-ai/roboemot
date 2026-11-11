@@ -42,6 +42,24 @@ class LoopClock:
     phase_s: float = field(default_factory=time.monotonic)
 
 
+@dataclass
+class TickPacer:
+    """Paces the tick to its period (``1 / motion.app_tick_hz``), work included: the rest after a
+    tick is what is left of the period, so the rate is the configured one (a full period of rest
+    after the work gave 18.5 Hz for 20). A tick that overruns its period starts the next one at
+    once and the pace starts again from there: lost ticks are never run in a burst."""
+
+    next_s: float
+
+    def rest_s(self, now: float, period_s: float) -> float:
+        """Seconds to rest at ``now`` (the work is done) before the next tick starts."""
+        self.next_s += period_s
+        if self.next_s <= now:
+            self.next_s = now
+            return 0.0
+        return self.next_s - now
+
+
 def run_loop(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -69,6 +87,7 @@ def _tick_until_stopped(
     stop_event: threading.Event,
 ) -> None:
     fx_for, fx = None, None
+    pacer = TickPacer(time.monotonic())
     while not stop_event.is_set():
         now = time.monotonic()
         if host.transcript is not None:
@@ -84,7 +103,8 @@ def _tick_until_stopped(
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
-            stop_event.wait(1.0 / stack.effective().motion.app_tick_hz)
+            period_s = 1.0 / stack.effective().motion.app_tick_hz
+            stop_event.wait(pacer.rest_s(time.monotonic(), period_s))
             continue
         p.circ.tick(now)  # before the affect tick: its events and baseline apply to it
         state = p.runner.tick(now)
@@ -174,6 +194,7 @@ def _tick_until_stopped(
             state_fx.idle_motion_scale,
             clock.phase_s,
             dof=pitch_dof,
+            effects=fx,
         )
         if p.circ.motion is not None:
             p.circ.motion.set_register(
@@ -195,4 +216,4 @@ def _tick_until_stopped(
             p.loop.feed(cmd)
         for cmd in p.dance.commands(now):  # after the speaking motion: it yields its channels
             p.loop.feed(cmd)
-        stop_event.wait(1.0 / live.motion.app_tick_hz)
+        stop_event.wait(pacer.rest_s(time.monotonic(), 1.0 / live.motion.app_tick_hz))

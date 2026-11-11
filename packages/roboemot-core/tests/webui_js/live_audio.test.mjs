@@ -97,6 +97,7 @@ test("the levels card shows both meters with their dBFS and the noise floor", as
   const bars = [...card.querySelectorAll('[role="progressbar"]')];
   assert.equal(bars.length, 2);
   assert.ok(bars[0].getAttribute("aria-valuenow") > bars[1].getAttribute("aria-valuenow"), "louder is fuller");
+  assert.deepEqual(bars.map((b) => b.getAttribute("aria-valuetext")), ["-23.4 dBFS", "-40.0 dBFS"], "the level, not a percentage");
 });
 
 test("paused, no data and unavailable levels show words, not numbers", async (t) => {
@@ -109,6 +110,8 @@ test("paused, no data and unavailable levels show words, not numbers", async (t)
   for (const bar of page.document.querySelectorAll("#live-levels [role=progressbar]")) {
     assert.equal(bar.getAttribute("aria-valuenow"), "0");
   }
+  const said = [...page.document.querySelectorAll("#live-levels [role=progressbar]")].map((b) => b.getAttribute("aria-valuetext"));
+  assert.deepEqual(said, ["paused", "not available"], "the bar says the state, not 0 %");
 });
 
 test("the transcript lists turns oldest first, newest last, with who said it", async (t) => {
@@ -199,17 +202,45 @@ test("the poll sends the epoch it has, and a page back in view starts over from 
   assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=0"), "asked from the start");
 });
 
-test("a new turn scrolls the log to the bottom", async (t) => {
-  const ring = ringOf([turn(1, "user", "one")]);
+// jsdom lays nothing out: the log is 100 px tall and each row 100 px.
+function sized(box) {
+  Object.defineProperty(box, "clientHeight", { configurable: true, value: 100 });
+  Object.defineProperty(box, "scrollHeight", { configurable: true, get: () => box.children.length * 100 });
+}
+
+test("a new turn scrolls the log to the bottom when it was at the bottom", async (t) => {
+  const ring = ringOf([turn(1, "user", "one"), turn(2, "robot", "two")]);
   const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
   await openLive(page);
   const box = page.document.querySelector("#live-transcript");
-  Object.defineProperty(box, "scrollHeight", { configurable: true, value: 500 });
-  box.scrollTop = 0;
-  ring.all.push(turn(2, "robot", "two"));
-  ring.rev = 2;
+  sized(box);
+  box.scrollTop = 100;
+  ring.all.push(turn(3, "user", "three"));
+  ring.rev = 3;
   await sleep(WAIT_MS);
-  assert.equal(box.scrollTop, 500);
+  assert.equal(box.scrollTop, 300);
+});
+
+test("a new turn leaves the log where it is when the reader scrolled up", async (t) => {
+  const ring = ringOf([turn(1, "user", "one"), turn(2, "robot", "two"), turn(3, "user", "three")]);
+  const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
+  await openLive(page);
+  const box = page.document.querySelector("#live-transcript");
+  sized(box);
+  box.scrollTop = 0;
+  ring.all.push(turn(4, "robot", "four"));
+  ring.rev = 4;
+  await sleep(WAIT_MS);
+  assert.equal(turns(page).length, 4);
+  assert.equal(box.scrollTop, 0);
+});
+
+test("the log has an accessible name", async (t) => {
+  const page = await livePage(t, undefined, {
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_transcript: "Conversation" } },
+  });
+  await openLive(page);
+  assert.equal(page.document.querySelector("#live-transcript").getAttribute("aria-label"), "Conversation");
 });
 
 test("turns the server dropped (min_seq) and an over-long list leave the page too", async (t) => {
@@ -313,23 +344,23 @@ test("the state poll's own timer does not stop the audio poll", async (t) => {
   assert.ok(stateCalls >= 5 && audioCalls(page).length >= 8, `${stateCalls} state, ${audioCalls(page).length} audio`);
 });
 
-test("live_disabled removes the audio cards and the poll comes back when it is switched on", async (t) => {
+test("live_disabled removes the audio cards and stops; back in view the poll asks again", async (t) => {
   let enabled = false;
   const page = await livePage(t, undefined, {
     "GET /api/live/audio": () => (enabled ? AUDIO : reply(404, { error: "live_disabled" })),
   });
-  const timers = [];
-  const real = page.window.setTimeout.bind(page.window);
-  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
   assert.equal(page.document.querySelector("#live-levels"), null);
-  assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
-  const retry = timers.filter((x) => x.ms === 5000).at(-1);
-  assert.ok(retry, "retry armed at the slow delay");
+  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
+  assert.equal(page.run("liveState.audioTimer"), null, "no retry");
+  await sleep(WAIT_MS);
+  assert.equal(audioCalls(page).length, 1);
   enabled = true;
-  retry.fn();
+  visibility(page, "hidden");
+  visibility(page, "visible");
   await settle();
   assert.ok(page.document.querySelector("#live-levels"));
+  visibility(page, "hidden");
 });
 
 test("an expired session on the audio poll goes to the login", async (t) => {

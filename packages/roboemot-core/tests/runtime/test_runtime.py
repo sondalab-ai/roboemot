@@ -187,3 +187,43 @@ def test_breathing_goes_on_while_alone_and_the_nap_hears_only_a_conversation(mon
         stop.set()
         thread.join(timeout=30)
     assert not thread.is_alive()
+
+
+def test_a_persona_reload_reaches_the_idle_breathing_on_the_next_tick(monkeypatch):
+    """SPEC 11A: the main loop hands its cached persona effects to the idle command; after a
+    persona change every idle tick carries the effects of the persona it was fed with."""
+    from roboemot.persona import effects as persona_effects
+    from roboemot.runtime import loop as loop_module
+
+    real, fed = loop_module.feed_idle, []
+
+    def spy(loop, cfg, *args, effects=None, **kw):
+        fed.append((cfg.persona, effects))
+        return real(loop, cfg, *args, effects=effects, **kw)
+
+    monkeypatch.setattr(loop_module, "feed_idle", spy)
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    session = platform.bind(object())
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=lambda: Runtime(stack, manifest, platform, session, host=DaytimeHost()).run(stop),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert wait_for(lambda: len(fed) > 2)
+        energy = 0.1 if stack.effective().persona.traits.energy > 0.5 else 0.9
+        stack.set("persona.traits.energy", energy)
+        assert wait_for(lambda: fed[-1][0].traits.energy == energy)
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert all(fx is not None and fx == persona_effects(persona) for persona, fx in fed)
+    assert len({fx for _, fx in fed}) == 2  # the change reached the idle command

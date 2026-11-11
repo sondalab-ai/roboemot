@@ -141,6 +141,18 @@ class _OnsetTrack:
     open_peak: float | None = None
 
 
+def _motion_gate(cfg: ReflexConfig) -> tuple[float, float, float]:
+    """The own-noise gate in the units the motion tick compares: speed limit (rad/s), pose
+    resolution (rad) and least span of a measured pair (s). Converted once per config, not on
+    every 50 Hz tick; one tuple, so the lock-free tick never mixes an old and a new value."""
+    gate = cfg.motion_gate
+    return (
+        math.radians(gate.speed_dps),
+        math.radians(cfg.motion_eps_deg),
+        gate.measured_min_span_ms / MS_PER_S,
+    )
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return min(max(v, lo), hi)
 
@@ -204,6 +216,8 @@ class ReflexEngine:
         self.cfg = cfg
         self.margin_rad = margin_rad
         self._rules: list[ReflexRule] = list(cfg.rules)
+        self._angles = [n for n, d in dofs.items() if d.kind == "angle"]
+        self._own_motion = _motion_gate(cfg)
 
     # ---- configuration
 
@@ -216,6 +230,7 @@ class ReflexEngine:
         """
         with self._lock:
             self.cfg, self.margin_rad, self._rules = cfg, margin_rad, list(cfg.rules)
+            self._own_motion = _motion_gate(cfg)
             names = {r.name for r in self._rules if r.trigger == "loud_onset"}
             for name in set(self._onset) - names:
                 del self._onset[name]
@@ -501,15 +516,15 @@ class ReflexEngine:
         last: Mapping[str, float],
         span: float,
         limit: float,
-        angles: list[str],
+        eps: float,
+        min_span: float,
     ) -> bool:
         """Whether a fresh pair of measured poses ``span`` seconds apart shows a dof turning
         faster than ``limit`` (rad/s). Robust to jitter: the span counts as at least
         ``motion_gate.measured_min_span_ms`` (two readings a few ms apart are not a fast move),
         and a change under ``motion_eps_deg`` (pose resolution) is not a move at all."""
-        span = max(span, self.cfg.motion_gate.measured_min_span_ms / MS_PER_S)
-        eps = math.radians(self.cfg.motion_eps_deg)
-        for n in angles:
+        span = max(span, min_span)
+        for n in self._angles:
             if n in prev and n in last:
                 delta = abs(last[n] - prev[n])
                 if delta > eps and delta > limit * span:
@@ -529,22 +544,20 @@ class ReflexEngine:
                     self._vad_seen = max(self._vad_seen, now)
                 if own:
                     self._own_voice = max(self._own_voice, now)
-        gate = self.cfg.motion_gate
-        limit = math.radians(gate.speed_dps)
+        limit, eps, min_span = self._own_motion
         sample = self.motion_sample() if self.motion_sample is not None else None
         velocities = sample.velocities if sample is not None else core.limiter.vel
-        angles = [n for n, d in self.dofs.items() if d.kind == "angle"]
         fast = (sample is not None and sample.external) or any(
-            abs(velocities.get(n, 0.0)) > limit for n in angles
+            abs(velocities.get(n, 0.0)) > limit for n in self._angles
         )
         pair = sample.measured if sample is not None else None
         if pair is not None and pair[0] is not None and pair[1] is not None:
             t0, prev, t1, last = pair
             if t1 != self._measured_t and t1 > t0:  # judge each measured pair once
                 self._measured_t = t1
-                fast = fast or self._measured_fast(prev, last, t1 - t0, limit, angles)
+                fast = fast or self._measured_fast(prev, last, t1 - t0, limit, eps, min_span)
         if fast:
-            self._quiet_until(now + gate.tail_ms / MS_PER_S)
+            self._quiet_until(now + self.cfg.motion_gate.tail_ms / MS_PER_S)
 
     def _collect(self, now: float) -> tuple[list[_Pending], ReflexConfig]:
         """Drain the inbox (dropping stale triggers) and add the close-face edges."""

@@ -977,6 +977,13 @@ class LightConfig(Strict):
         ge=0.5,
         le=600,
     )
+    sample_row_step: int = param(
+        4,
+        "Light is measured on every this-many-th row of the frame, all columns kept (the noise "
+        "compares horizontal neighbours): 1 reads every row, 4 costs about a quarter",
+        ge=1,
+        le=16,
+    )
     history_h: float = param(
         24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
     )
@@ -2021,13 +2028,30 @@ class AttentionConfig(Strict):
 
 class VisionRates(Strict):
     detection_hz: float = param(8.0, "Face detection rate (cm4: 5 to 10)", unit="Hz", ge=0.1, le=60)
+    detection_idle_hz: float = param(
+        4.0,
+        "Face detection rate while no face is in view, after detection_idle_after_s without a "
+        "face track; a detection that finds a face goes back to detection_hz at once. Scaled "
+        "like every rate; a value at or above detection_hz has no effect (one rate)",
+        unit="Hz",
+        ge=0.1,
+        le=60,
+    )
+    detection_idle_after_s: float = param(
+        10.0,
+        "Capture time with no face track (confirmed or tentative) before face detection drops "
+        "to detection_idle_hz",
+        unit="s",
+        ge=0,
+        le=600,
+    )
     embedding_hz: float = param(
         0.5, "Face embedding rate per track after the new-track burst", unit="Hz", ge=0.05, le=30
     )
     appearance_hz: float = param(
         0.5,
-        "Appearance embedding rate of a recognised animal or object track, and the shortest "
-        "gap between two embeddings of any track after the new-track burst",
+        "Highest appearance embedding rate (DINOv2-S) of an animal or object track after the "
+        "new-track burst: the shortest gap between two of its embeddings",
         unit="Hz",
         ge=0.05,
         le=30,
@@ -2385,7 +2409,13 @@ class VisionConfig(Strict):
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
     )
     detector_height_px: int = param(
-        240, "Face detector input height", unit="px", ge=64, le=1280, restart=True
+        240,
+        "Face detector input height. With the width it sets the scale of the picture; rows and "
+        "columns the picture leaves empty are not run (a 16:9 camera runs at 320x192)",
+        unit="px",
+        ge=64,
+        le=1280,
+        restart=True,
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
@@ -2470,8 +2500,18 @@ class VisionConfig(Strict):
     entity_reembed_floor_s: float = param(
         60.0,
         "An unknown animal or object track whose box keeps its size and shape is embedded "
-        "again (DINOv2-S) only after this much capture time; recognised tracks keep "
-        "rates.appearance_hz",
+        "again (DINOv2-S) only after this much capture time; recognised tracks wait "
+        "entity_reembed_recognised_s",
+        unit="s",
+        ge=2,
+        le=3600,
+    )
+    entity_reembed_recognised_s: float = param(
+        10.0,
+        "A recognised animal or object track whose box keeps its size and shape is embedded "
+        "again (DINOv2-S, about 1.2 s of CPU on the CM4) only after this much capture time; "
+        "a size or shape change or a missed object run makes it due at once; 2 gives about "
+        "the old rates.appearance_hz rate",
         unit="s",
         ge=2,
         le=3600,
@@ -2512,6 +2552,13 @@ class VisionConfig(Strict):
         "Let the appearance embedder's (DINOv2-S) ONNX Runtime threads spin-wait between "
         "operators. Off: it runs beside the face and object detectors, and on four cores two "
         "spinning pools take cycles from each other and from audio",
+        restart=True,
+    )
+    object_spinning: bool = param(
+        False,
+        "Let the object detector's (NanoDet-Plus-m) ONNX Runtime threads spin-wait between "
+        "operators. Off: it runs beside the face detector and the appearance embedder, and on "
+        "four cores spinning pools take cycles from each other and from audio",
         restart=True,
     )
     appearance_threads: int = param(
@@ -5614,9 +5661,10 @@ class RuntimeConfig(Strict):
     pause_when_asleep: bool = param(
         True,
         "While the platform holds the motors off (the robot is asleep), pause the camera "
-        "perception, the idle light reading, the microphone listener and the behaviour tick, so "
-        "the robot idles cool and quiet; all of it resumes when the motors are on again "
-        "(SPEC 12A). Off keeps everything running while asleep",
+        "perception, the idle light reading, the microphone listener and the behaviour tick, and "
+        "stop the microphone capture when nothing needs the sound, so the robot idles cool and "
+        "quiet; all of it resumes when the motors are on again (SPEC 12A). Off keeps everything "
+        "running while asleep",
     )
 
 

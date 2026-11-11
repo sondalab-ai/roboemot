@@ -1132,6 +1132,28 @@ def test_a_reload_keeps_the_stats_but_a_new_watch_level_or_a_removed_rule_resets
     assert onset(rig)["below_threshold"]["count"] == 0
 
 
+def test_the_own_motion_gate_is_converted_once_per_config_and_follows_a_reload():
+    """The values the motion tick compares equal the per-tick conversion they replace."""
+
+    def per_tick(engine: ReflexEngine) -> tuple[float, float, float]:
+        gate = engine.cfg.motion_gate
+        return (
+            math.radians(gate.speed_dps),
+            math.radians(engine.cfg.motion_eps_deg),
+            gate.measured_min_span_ms / 1000,
+        )
+
+    rig = Rig(ReflexConfig())
+    angles = [n for n, d in rig.manifest.dofs.items() if d.kind == "angle"]
+    assert rig.engine._own_motion == per_tick(rig.engine) and rig.engine._angles == angles
+    gate = {"speed_dps": 33.0, "measured_min_span_ms": 45.0}
+    rig.engine.apply_config(cfg_with(motion_gate=gate, motion_eps_deg=1.5), math.radians(3))
+    assert rig.engine._own_motion == per_tick(rig.engine) == (
+        math.radians(33.0), math.radians(1.5), 0.045
+    )  # fmt: skip
+    assert rig.engine._angles == angles
+
+
 def test_the_watch_level_never_sits_above_a_rules_own_threshold():
     rig = Rig(cfg_with(rule(threshold=1.5), onset_watch_ratio=4.0))
     rig.settle_audio()

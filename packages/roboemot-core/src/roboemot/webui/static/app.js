@@ -24,6 +24,13 @@ const t = (key, vars) => {
   return text;
 };
 
+// `key` for the count `n`, which fills {n}: `key_one` when n is 1 and the page has it. English and
+// Italian both have exactly two forms, one and other; a key with no `_one` reads well for any n.
+function tn(key, n, vars) {
+  const one = key + "_one";
+  return t(n === 1 && Object.prototype.hasOwnProperty.call(state.strings, one) ? one : key, Object.assign({ n }, vars));
+}
+
 // A server code in the page language: the string `prefix + code` (spaces and dashes as "_") when
 // the page has one, else the code as it is (a name the owner chose, such as a custom label).
 function word(prefix, code) {
@@ -37,8 +44,33 @@ function when(value, timeOnly) {
   return timeOnly ? d.toLocaleTimeString(state.lang) : d.toLocaleString(state.lang);
 }
 
-// Shown when the page cannot load its strings: the only text the page holds itself.
-const UNREACHABLE = { en: "Cannot reach the robot.", it: "Impossibile raggiungere il robot." };
+// A number in the page language with exactly `digits` decimals ("0,62" on an Italian page, where
+// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. One
+// formatter per language, digit count and sign rule, kept: the Live tab formats every second.
+const numberFormats = new Map();
+function num(value, digits, signed) {
+  const key = state.lang + "|" + digits + "|" + Boolean(signed);
+  if (!numberFormats.has(key)) {
+    numberFormats.set(key, new Intl.NumberFormat(state.lang, {
+      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto",
+    }));
+  }
+  return numberFormats.get(key).format(value);
+}
+
+// The only text the page holds itself, for when it cannot load its strings: the same keys and
+// texts as webui/strings.py (tests/test_webui_page.py checks that they match).
+const PAGE_HELD = {
+  en: { err_unreachable: "Cannot reach the robot.", notice_dismiss: "Dismiss", retry: "Try again" },
+  it: { err_unreachable: "Impossibile raggiungere il robot.", notice_dismiss: "Chiudi", retry: "Riprova" },
+};
+
+// `key` from the loaded strings, else from PAGE_HELD in the page (or browser) language.
+function held(key) {
+  if (state.strings[key]) return state.strings[key];
+  const lang = state.lang || String(navigator.language || "").slice(0, 2);
+  return (PAGE_HELD[lang] || PAGE_HELD.en)[key];
+}
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -132,41 +164,103 @@ function badge(text, tone) {
   return el("span", { class: "sl-badge sl-badge--" + tone }, text);
 }
 
-function progress(label, value, max) {
+// A kit bar for `value` of `max`. `valueText` is what assistive technology says instead of a
+// percentage (aria-valuetext): the value as the page shows it, with its unit, where the bar maps a
+// value that is not a share (a signed axis, a level in dBFS, frames of a total).
+function progress(label, value, max, valueText) {
   const top = Math.max(max, 1);
   const shown = Math.min(value, top);
   return el("div", {
     class: "sl-progress", role: "progressbar", "aria-label": label,
-    "aria-valuemin": 0, "aria-valuemax": top, "aria-valuenow": shown,
+    "aria-valuemin": 0, "aria-valuemax": top, "aria-valuenow": shown, "aria-valuetext": valueText,
     style: { "--sl-progress": Math.round((shown / top) * 100) + "%" },
   }, el("span", { class: "sl-progress__bar" }));
+}
+
+// The accessible name of a control repeated on each row: its visible text first (WCAG 2.5.3,
+// label in name), then the row it acts on, so "Rename" on three rows is three different names.
+function rowName(action, name) {
+  return t("named_action", { action, name });
 }
 
 function empty(eyebrow, body) {
   return el("div", { class: "sl-empty" }, markedEyebrow("span", eyebrow), el("p", { class: "sl-empty__body" }, body));
 }
 
+// A kit table. A `null` head is an action column: its header is for assistive technology only.
 function table(head, rows) {
+  const th = (h) => el("th", {}, h === null ? el("span", { class: "sr-only" }, t("table_actions")) : h);
   return el("div", { class: "table-scroll" }, el("table", { class: "sl-table" },
-    el("thead", {}, el("tr", {}, head.map((h) => el("th", {}, h)))),
+    el("thead", {}, el("tr", {}, head.map(th))),
     el("tbody", {}, rows)));
 }
 
+// A success toast leaves on its own after this long; an error stays until it is cleared, replaced or
+// dismissed. The kit gives no duration: this leaves time to read a two-line message twice.
+const NOTICE_SUCCESS_MS = 8000;
+const toastState = { error: null, timer: null };
+const SVG_NS = "http://www.w3.org/2000/svg";
+const TOAST_ICONS = { success: "M3.5 8.5l3 3 6-7", danger: "M8 3.5v5M8 12v0.5", close: "M4 4l8 8M12 4l-8 8" };
+
+// A 16-unit stroked glyph from TOAST_ICONS, hidden from assistive technology.
+function toastIcon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  const path = document.createElementNS(SVG_NS, "path");
+  for (const [k, v] of [["viewBox", "0 0 16 16"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(k, v);
+  for (const [k, v] of [["d", TOAST_ICONS[name]], ["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "2"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) path.setAttribute(k, v);
+  svg.append(path);
+  return svg;
+}
+
+// One toast at a time in the kit's toast stack (#notice, always in the page): a success in its
+// polite region, an error in its alert region; "" clears. It always shows what it is given (an
+// error equal to the last one is a new toast, announced again): a poll that keeps failing speaks
+// once because it calls this only when it starts failing (pollFailed, live.js).
 function notice(message, isError) {
-  const n = document.getElementById("notice");
-  n.setAttribute("aria-live", isError ? "assertive" : "polite");
-  n.hidden = !message;
-  n.className = message ? "sl-callout sl-callout--" + (isError ? "danger" : "success") : "";
-  n.replaceChildren(...(message ? [el("div", { class: "sl-callout__body" }, message)] : []));
+  clearTimeout(toastState.timer);
+  toastState.timer = null;
+  toastState.error = isError && message ? message : null;
+  for (const region of document.querySelectorAll("#notice .sl-toast-stack__live")) region.replaceChildren();
+  if (!message) return;
+  const tone = isError ? "danger" : "success";
+  const toast = el("div", { class: "sl-toast sl-toast--" + tone },
+    el("span", { class: "sl-toast__mark", "aria-hidden": "true" }, toastIcon(tone)),
+    el("div", { class: "sl-toast__content" }, el("p", { class: "sl-toast__title" }, message)));
+  const dismiss = () => { clearTimeout(toastState.timer); toast.remove(); };
+  toast.append(el("button", { type: "button", class: "sl-icon-btn sl-toast__dismiss", "aria-label": held("notice_dismiss"), onclick: dismiss },
+    toastIcon("close")));
+  document.getElementById(isError ? "notice-alert" : "notice-polite").append(toast);
+  // A toast the user is pointing at or has focused waits: removing it would drop the focus.
+  const leave = () => {
+    if (toast.matches(":focus-within, :hover")) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
+    else dismiss();
+  };
+  if (!isError) toastState.timer = setTimeout(leave, NOTICE_SUCCESS_MS);
+}
+
+// Clears the error `message` if it is still the one reported last: a poll that recovers takes back
+// its own failure, never a newer message from something else.
+function noticeWithdraw(message) {
+  if (message && message === toastState.error) notice("");
 }
 
 // ---------------------------------------------------------------- api
+
+// `fetch`, with the one failure that has no response named as such: it rejects with the code
+// "unreachable" (network down, robot off, Wi-Fi lost), which `explain` words for the page.
+async function request(path, init) {
+  try {
+    return await fetch(path, init);
+  } catch (e) {
+    throw new Error("unreachable");
+  }
+}
 
 async function api(method, path, body, extra) {
   const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
-  const resp = await fetch(path, {
+  const resp = await request(path, {
     method,
     headers,
     credentials: "same-origin",
@@ -184,8 +278,10 @@ async function api(method, path, body, extra) {
   return data;
 }
 
+// An error in the page language: `err.text` when the caller worded it for its context, else the
+// string of its code, with the host, what was saved and the wait the server named.
 function explain(err) {
-  const known = state.strings["err_" + err.message];
+  const known = err.text || state.strings["err_" + err.message];
   let text = known || t("err_generic");
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   if (err.saved) text += " " + err.saved;
@@ -205,17 +301,48 @@ async function guarded(fn) {
 
 // `guarded` for a call that draws a view. The view takes #view before its first await, so the token
 // read right after the call starts is its own; an error of a view that was dropped since (a tab
-// switch, a later view, logout) is not shown on the tab the user is on now.
+// switch, a later view, logout) is not shown on the tab the user is on now. A view that failed
+// before it drew anything also says so in #view, where the user looks, besides the toast.
 async function guardedView(view) {
   let current = null;
   try {
     const pending = view();
     current = viewToken();
     await pending;
+    if (current()) focusBack();
   } catch (err) {
     if (current && !current()) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     notice(explain(err), true);
+    viewFailed(explain(err));
+  }
+}
+
+// An empty #view after a failed load: a kit card with the error and a retry of the tab. A view
+// that drew content keeps it (its polls handle their own failures).
+function viewFailed(text) {
+  const view = document.getElementById("view");
+  if (view.hasChildNodes()) return;
+  const box = card(null, t("tab_" + state.tab), el("p", {}, text),
+    el("div", { class: "row" }, button(held("retry"), "primary", () => showTab(state.tab))));
+  box.id = "view-failed";
+  view.append(box);
+}
+
+// Runs `call` with `control` disabled and busy (aria-busy) and gives it back in a `finally`, so a
+// second tap on slow Wi-Fi sends nothing; a control that is disabled already does not run it. The
+// focus, lost when the control was disabled, comes back to it while it is still in the page.
+async function whileBusy(control, call) {
+  if (control.disabled) return undefined;
+  control.disabled = true;
+  control.setAttribute("aria-busy", "true");
+  try {
+    return await call();
+  } finally {
+    control.disabled = false;
+    control.removeAttribute("aria-busy");
+    const focus = document.activeElement;
+    if (control.isConnected && (!focus || focus === document.body || focus === control)) control.focus();
   }
 }
 
@@ -224,6 +351,63 @@ function stopPolling() {
   state.timer = null;
   liveStopAudio(true);
   liveStopVideo(true);
+}
+
+// ---------------------------------------------------------------- focus after a dialog
+
+// The control that opened the last dialog, described so that its equal can be found once the
+// caller's reload has drawn the view again: the row it sat in (`data-row`, `data-path`,
+// `data-entry`), its names and the title of its card.
+const focusReturn = { spot: null };
+const FOCUSABLE = "button, input, select, textarea, a[href]";
+
+// What `node` is, in terms that survive a redraw; null for a node outside #view.
+function focusSpot(node) {
+  if (!node || !document.getElementById("view").contains(node)) return null;
+  const row = node.closest("[data-row], [data-path], [data-entry]");
+  const attr = row ? ["data-row", "data-path", "data-entry"].find((a) => row.hasAttribute(a)) : null;
+  const box = node.closest(".sl-card");
+  const head = box && box.querySelector(".sl-card__title, h3");
+  return {
+    node, attr, key: attr ? row.getAttribute(attr) : null, tag: node.tagName,
+    label: node.getAttribute("aria-label"), text: node.textContent.trim(),
+    card: head ? head.textContent.trim() : null,
+  };
+}
+
+const focusUsable = (node) => !node.disabled && !node.closest("[hidden]");
+
+// The control equal to `spot` in the redrawn view (same row and tag; the same accessible name, else
+// the same visible text: a rename changes the name "Rename: Mia", not the text "Rename"), else the
+// heading of the card that held it: its own control (a group toggle), or the heading itself,
+// focusable with tabindex -1 only until it loses the focus.
+function focusTarget(spot) {
+  const view = document.getElementById("view");
+  const row = spot.attr ? [...view.querySelectorAll("[" + spot.attr + "]")].find((n) => n.getAttribute(spot.attr) === spot.key) : null;
+  const usable = row ? [...row.querySelectorAll(FOCUSABLE)].filter((n) => n.tagName === spot.tag && focusUsable(n)) : [];
+  const same = (spot.label && usable.find((n) => n.getAttribute("aria-label") === spot.label)) ||
+    usable.find((n) => n.textContent.trim() === spot.text);
+  if (same) return same;
+  const head = spot.card && [...view.querySelectorAll(".sl-card")].map((c) => c.querySelector(".sl-card__title, h3"))
+    .find((h) => h && h.textContent.trim() === spot.card && !h.closest("[hidden]"));
+  if (!head) return null;
+  const inner = head.querySelector(FOCUSABLE);
+  if (inner && focusUsable(inner)) return inner;
+  head.setAttribute("tabindex", "-1");
+  head.addEventListener("blur", () => head.removeAttribute("tabindex"), { once: true });
+  return head;
+}
+
+// Called once a view has drawn again: when the control that opened the last dialog left the page
+// with the redraw (the focus fell to <body>), the focus goes to its equal. Used once.
+function focusBack() {
+  const spot = focusReturn.spot;
+  focusReturn.spot = null;
+  if (!spot || spot.node.isConnected) return;
+  const focus = document.activeElement;
+  if (focus && focus !== document.body) return;
+  const target = focusTarget(spot);
+  if (target) target.focus();
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -294,8 +478,10 @@ function ask(opts) {
       dialog.remove();
       (inflight || Promise.resolve()).catch(() => {}).then(() => resolve(done));
     });
+    focusReturn.spot = focusSpot(document.activeElement);
     document.body.append(dialog);
     dialog.showModal();
+    (value || pin || cancel).focus(); // the first field, else Cancel: the safe choice of a confirm
   });
 }
 
@@ -318,31 +504,36 @@ function loginView() {
     return;
   }
   const pin = textInput("pin", { type: "password", autocomplete: "off", inputmode: "numeric" });
+  const send = submitButton(t("login"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const data = await api("POST", "/api/login", { pin: pin.value });
         pin.value = "";
         state.csrf = data.csrf;
         notice("");
         await boot();
-      });
+        const tab = selectedTab(); // the login form is gone: the focus starts on the open tab
+        if (tab) tab.focus();
+      }));
     },
-  }, field("pin", t("pin"), pin), el("div", { class: "row" }, submitButton(t("login"))));
+  }, field("pin", t("pin"), pin), el("div", { class: "row" }, send));
   view.append(loginCard(form));
   pin.focus();
 }
 
 // ---------------------------------------------------------------- enrollment
 
+// The status poll runs while enrollment collects; a failed request is retried at the slow delay
+// (LIVE_RETRY_MS, live.js) with the cards on screen marked as old, as on the Live tab.
 function enrollmentView() {
   const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
-  const box = el("div", { class: "stack" });
-  view.append(box);
+  const box = el("div", { class: "stack", id: "enroll-cards" });
+  view.append(staleNote("enroll-stale", ["enroll-cards"]), box);
   const poll = async () => {
     if (!current()) return;
     stopPolling();
@@ -350,13 +541,16 @@ function enrollmentView() {
       const s = await api("GET", "/api/enrollment/status");
       if (!current()) return;
       await renderEnrollment(box, s, current);
-      if (current() && ["collecting", "ready"].includes(s.state)) {
+      if (!current()) return;
+      pollGood(box);
+      if (["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
     } catch (err) {
       if (!current()) return;
       if (err.status === 401) { await boot(); return; }
-      notice(explain(err), true);
+      pollFailed(box, explain(err));
+      state.timer = setTimeout(poll, LIVE_RETRY_MS);
     }
   };
   state.refresh = poll;
@@ -378,7 +572,7 @@ async function renderEnrollment(box, s, current) {
   }
   parts.push(
     el("p", {}, t("frames") + ": " + s.frames_collected + " / " + s.frames_needed),
-    progress(t("frames"), s.frames_collected, s.frames_needed),
+    progress(t("frames"), s.frames_collected, s.frames_needed, s.frames_collected + " / " + s.frames_needed),
   );
   if (s.hints.length) {
     parts.push(el("ul", {}, s.hints.map((h) => el("li", {}, state.strings["hint_" + h] || h))));
@@ -409,11 +603,12 @@ function consentForm(pendingPeople) {
   const link = el("select", { id: "pending_id", class: "sl-field__input" },
     el("option", { value: "" }, t("pending_none")),
     pendingPeople.map((r) => el("option", { value: r.id }, r.display_name)));
+  const send = submitButton(t("enroll_complete"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
           consent_who: who.value,
@@ -423,7 +618,7 @@ function consentForm(pendingPeople) {
         });
         notice(t("saved"));
         await state.refresh();
-      });
+      }));
     },
   },
   el("div", { class: "sl-callout sl-callout--info" },
@@ -433,7 +628,7 @@ function consentForm(pendingPeople) {
   field("consent_who", t("consent_who"), who),
   el("fieldset", { class: "stack" }, el("legend", { class: "sl-field__label" }, t("scope_title")), el("div", { class: "check-list" }, scopes)),
   check(t("agree"), agreed),
-  el("div", { class: "row" }, submitButton(t("enroll_complete"))));
+  el("div", { class: "row" }, send));
   return card(t("tab_enroll"), t("consent_title"), form);
 }
 
@@ -452,8 +647,8 @@ async function registryView() {
   const rows = list.records;
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
-    [t("display_name"), "", t("last_seen"), ""],
-    rows.map((r) => el("tr", {},
+    [t("display_name"), "", t("last_seen"), null],
+    rows.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
         badge(state.strings["status_" + r.status] || r.status, STATUS_TONE[r.status] || "info")),
@@ -462,7 +657,7 @@ async function registryView() {
   view.append(card(t("tab_registry"), t("registry_title"), body));
   view.append(card(t("tab_registry"), t("quarantined_title"),
     quarantined.keys.length === 0 ? empty(t("quarantined_title"), t("quarantined_none")) :
-      el("ul", {}, quarantined.keys.map((k) => el("li", {}, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
+      el("ul", {}, quarantined.keys.map((k) => el("li", { "data-row": k }, k + " ", button(t("purge"), "danger", () => purgeKey(k), { small: true }))))));
 }
 
 async function purgeKey(key) {
@@ -482,7 +677,7 @@ function rowActions(r, entities) {
       run: ({ value }) => api("POST", "/api/registry/" + r.id + "/rename", { display_name: value }),
     });
     if (done) await reload();
-  }, { small: true })];
+  }, { small: true, attrs: { "aria-label": rowName(t("rename"), r.display_name) } })];
   if (r.kind === "person") {
     buttons.push(button(t("forget"), "danger", async () => {
       const done = await ask({
@@ -490,7 +685,7 @@ function rowActions(r, entities) {
         run: ({ pin }) => api("POST", "/api/registry/" + r.id + "/forget", { confirm: true, pin: pin }),
       });
       if (done) await reload();
-    }, { small: true }));
+    }, { small: true, attrs: { "aria-label": rowName(t("forget"), r.display_name) } }));
   } else {
     for (const other of entities.filter((o) => o.id !== r.id)) {
       buttons.push(button(t("merge") + " " + other.display_name, "plain", async () => {
@@ -500,7 +695,7 @@ function rowActions(r, entities) {
           run: () => api("POST", "/api/registry/merge", { keep_id: other.id, drop_id: r.id }),
         });
         if (done) await reload();
-      }, { small: true }));
+      }, { small: true, attrs: { "aria-label": rowName(t("merge") + " " + other.display_name, r.display_name) } }));
     }
     buttons.push(button(t("delete"), "danger", async () => {
       const done = await ask({
@@ -508,7 +703,7 @@ function rowActions(r, entities) {
         run: () => api("POST", "/api/registry/" + r.id + "/delete", { confirm: true }),
       });
       if (done) await reload();
-    }, { small: true }));
+    }, { small: true, attrs: { "aria-label": rowName(t("delete"), r.display_name) } }));
   }
   return buttons;
 }
@@ -545,11 +740,12 @@ async function catalogueView() {
   const xmp = el("input", { type: "file", id: "xmp_file", class: "sl-field__input", accept: ".xmp,application/rdf+xml,text/xml" });
   const photo = el("input", { type: "file", id: "photo_file", class: "sl-field__input", accept: "image/jpeg,image/png" });
   const result = el("div", { id: "import_result", role: "status" });
+  const send = submitButton(t("catalogue_import"));
   const form = el("form", {
     class: "stack",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(async () => {
+      whileBusy(send, () => guarded(async () => {
         const file = xmp.files[0];
         if (!file) { notice(t("err_xmp_required"), true); return; }
         if (file.size > data.limits.max_xmp_bytes) { notice(t("err_xmp_too_large"), true); return; }
@@ -563,12 +759,12 @@ async function catalogueView() {
         await catalogueView();
         const shown = document.getElementById("import_result");
         if (shown) shown.replaceChildren(...importReport(report));
-      });
+      }));
     },
   },
   field("xmp_file", t("catalogue_xmp"), xmp),
   field("photo_file", t("catalogue_photo"), photo),
-  el("div", { class: "row" }, submitButton(t("catalogue_import"))));
+  el("div", { class: "row" }, send));
 
   const confirmBy = (record, entryId) => guarded(async () => {
     await api("POST", "/api/catalogue/" + record.id + "/confirm", entryId ? { entry_id: entryId } : {});
@@ -578,8 +774,8 @@ async function catalogueView() {
   const pending = data.records.filter((r) => r.status === "pending");
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
-    [t("display_name"), "", ""],
-    data.records.map((r) => el("tr", {},
+    [t("display_name"), "", null],
+    data.records.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
       el("td", { class: "actions" }, el("div", { class: "row" },
@@ -628,30 +824,33 @@ function secretsCard(data, reload) {
     maxlength: String(data.max_value_chars),
   });
   const pin = textInput("secret-pin", { type: "password", autocomplete: "off", inputmode: "numeric", required: true, maxlength: "64" });
+  const send = submitButton(t("secret_save"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
-      const body = { name: name.value.trim(), value: value.value, pin: pin.value };
-      value.value = "";
-      pin.value = "";
-      guarded(async () => {
-        try {
-          await api("POST", "/api/secrets/set", body);
-        } finally {
-          body.value = "";
-          body.pin = "";
-        }
-        name.value = "";
-        notice(t("secret_saved", { name: body.name }));
-        await reload();
+      whileBusy(send, () => {
+        const body = { name: name.value.trim(), value: value.value, pin: pin.value };
+        value.value = "";
+        pin.value = "";
+        return guarded(async () => {
+          try {
+            await api("POST", "/api/secrets/set", body);
+          } finally {
+            body.value = "";
+            body.pin = "";
+          }
+          name.value = "";
+          notice(t("secret_saved", { name: body.name }));
+          await reload();
+        });
       });
     },
   },
   field("secret-name", t("secret_name"), name, t("secret_name_hint")),
   field("secret-value", t("secret_value"), value, t("secret_value_hint")),
   field("secret-pin", t("pin"), pin),
-  el("div", { class: "row" }, submitButton(t("secret_save"))));
+  el("div", { class: "row" }, send));
   const remove = (s) => guarded(async () => {
     const done = await ask({
       title: t("secret_remove_title", { name: s.name }), message: t("secret_remove_message"),
@@ -660,13 +859,19 @@ function secretsCard(data, reload) {
     });
     if (done) { notice(t("secret_removed", { name: s.name })); await reload(); }
   });
-  const rows = data.secrets.map((s) => el("tr", {},
-    el("td", {}, s.name),
-    el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
-    el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
-    el("td", {}, button(t("secret_remove"), "danger", () => remove(s), { small: true, attrs: { disabled: s.used_by.length > 0, title: s.used_by.length ? t("secret_in_use_hint") : null } }))));
+  // A secret in use cannot be removed: the reason is a visible line in its row, linked to the button.
+  const rows = data.secrets.map((s, n) => {
+    const hintId = s.used_by.length ? "secret-in-use-" + n : null;
+    return el("tr", { "data-row": s.name },
+      el("td", {}, s.name),
+      el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
+      el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
+      el("td", {}, el("div", { class: "stack" }, button(t("secret_remove"), "danger", () => remove(s), {
+        small: true, attrs: { disabled: s.used_by.length > 0, "aria-label": rowName(t("secret_remove"), s.name), "aria-describedby": hintId },
+      }), hintId ? el("p", { class: "hint", id: hintId }, t("secret_in_use_hint")) : [])));
+  });
   return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
-    rows.length ? table([t("secret_name"), "", "", ""], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    rows.length ? table([t("secret_name"), "", "", null], rows) : el("p", { class: "hint" }, t("secrets_none")),
     form);
 }
 
@@ -697,14 +902,15 @@ function routeForm(route, secrets, nameMax, save) {
   for (const n of names) keys.push([n, n]);
   const key = el("select", { id: id("key"), class: "sl-field__input" }, keys.map(([v, label]) => el("option", { value: v }, label)));
   key.value = current;
+  const send = submitButton(t(route ? "route_save" : "route_add"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
-      guarded(() => save({
+      whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
         locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
-      }));
+      })));
     },
   },
   name ? field(id("name"), t("route_name"), name) : [],
@@ -713,7 +919,7 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
   kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
   field(id("key"), t("route_key"), key, t("route_key_hint")),
-  el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
+  el("div", { class: "row" }, send));
   return form;
 }
 
@@ -836,13 +1042,14 @@ function checkReason(c) {
   const parts = [t("check_reason_" + c.code, p)];
   if (p.why) parts.push(t("check_why_" + p.why, { detail: p.detail || "" }));
   if (p.withheld) parts.push(t("check_withheld"));
-  if (p.reasoned) parts.push(t("check_reasoned", { n: p.reasoned }));
+  if (p.reasoned) parts.push(tn("check_reasoned", p.reasoned));
   return parts.join("; ");
 }
 
 async function routesView() {
   const current = newView();
   const view = document.getElementById("view");
+  const before = document.getElementById("routes-cards"); // the cards a failed poll marked as old
   const data = await api("GET", "/api/routes");
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
@@ -877,10 +1084,10 @@ async function routesView() {
     if (r.running) box.append(el("p", { class: "hint" }, t("route_running")));
     else if (r.last_check) show(box, r.last_check);
     else box.append(el("p", { class: "hint" }, t("route_never")));
-    const run = button(t("route_check"), "plain", () => guarded(async () => {
+    const run = button(t("route_check"), "plain", () => whileBusy(run, () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    }), { attrs: { disabled: r.running } });
+    })), { attrs: { disabled: r.running } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
     const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
@@ -891,11 +1098,13 @@ async function routesView() {
       });
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }));
-    return busy(card(t("tab_routes"), r.name,
+    const routeCard = busy(card(t("tab_routes"), r.name,
       el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
+    routeCard.dataset.row = r.name;
+    return routeCard;
   });
   const addCard = card(t("tab_routes"), t("route_add_title"), el("p", { class: "hint" }, t("route_add_intro")),
     routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v)));
@@ -911,26 +1120,48 @@ async function routesView() {
     refusedBox.replaceChildren(!out.enabled ? el("p", { class: "hint" }, t("refused_off")) :
       (out.names.length ? el("ul", {}, out.names.map((n) => el("li", {}, n))) : el("p", { class: "hint" }, t("refused_none"))));
   };
-  view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
+  const grid = el("div", { class: "view-grid", id: "routes-cards" },
+    card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
     addCard,
     ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
+  view.append(staleNote("routes-stale", ["routes-cards"]), grid);
+  if (before) pollRecovered(before);
+  pollGood(grid);
+  focusBack();
   if (data.routes.some((r) => r.running)) {
     clearTimeout(state.timer);
-    state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
+    state.timer = setTimeout(refreshRoutes, ROUTES_POLL_MS);
   }
 }
 
-// The poll redraws the page; it waits while a form field has the focus so typing is not lost.
+// The poll redraws the page; it waits while a form field has the focus so typing is not lost. A
+// failed request keeps the cards, marks them as old and is retried at the slow delay (LIVE_RETRY_MS).
 async function refreshRoutes() {
+  if (state.tab !== "routes") return;
   const focus = document.activeElement;
   const typing = focus && document.getElementById("view").contains(focus) && ["INPUT", "SELECT", "TEXTAREA"].includes(focus.tagName);
-  if (!typing) { await routesView(); return; }
-  if (state.tab !== "routes") return;
+  let delay = ROUTES_POLL_MS;
+  if (!typing) {
+    const grid = document.getElementById("routes-cards");
+    let current = null;
+    try {
+      const pending = routesView();
+      current = viewToken();
+      await pending;
+      return;
+    } catch (err) {
+      if ((current && !current()) || state.tab !== "routes") return;
+      if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+      if (grid && grid.isConnected) pollFailed(grid, explain(err));
+      else notice(explain(err), true);
+      delay = LIVE_RETRY_MS;
+    }
+  }
   clearTimeout(state.timer);
-  state.timer = setTimeout(() => guardedView(refreshRoutes), ROUTES_POLL_MS);
+  state.timer = setTimeout(refreshRoutes, delay);
 }
 
 async function debugView() {
@@ -967,31 +1198,92 @@ const TABS = {
   debug: debugView,
 };
 
+// While a tab waits for its first answer: #view is busy (aria-busy, what assistive technology
+// reads) and a muted line says so on screen.
+function viewLoading(on) {
+  const line = document.getElementById("view-loading");
+  if (line.hidden === !on) return;
+  line.textContent = on ? t("loading") : "";
+  line.hidden = !on;
+  const view = document.getElementById("view");
+  if (on) view.setAttribute("aria-busy", "true");
+  else view.removeAttribute("aria-busy");
+}
+
+// The tab's view starts on an empty #view. A view that draws before its first await shows no
+// loading line; the others show it until they put something in #view (the observer below) or
+// settle, unless a later view took #view meanwhile. Resolves once the view settled.
 function showTab(name) {
   stopPolling();
   newView();
   state.tab = name;
-  document.getElementById("view").setAttribute("aria-labelledby", "tab-" + name);
+  const view = document.getElementById("view");
+  view.setAttribute("aria-labelledby", "tab-" + name);
+  view.replaceChildren();
   notice("");
-  for (const b of document.querySelectorAll("#tabs button")) {
+  pollForget();
+  focusReturn.spot = null;
+  for (const b of tabButtons()) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));
-    b.tabIndex = on ? 0 : -1;
     b.classList.toggle("sl-fx-aurora", on);
     b.classList.toggle("sl-fx-aurora--linear", on);
   }
-  guardedView(TABS[name]);
+  const tab = selectedTab();
+  tabRove(tab);
+  // On a narrow screen the strip scrolls sideways: the open tab stays in sight.
+  if (tab && tab.scrollIntoView) tab.scrollIntoView({ inline: "nearest", block: "nearest" });
+  history.replaceState(null, "", "#" + name);
+  document.title = t("tab_" + name) + " · " + t("title");
+  const done = guardedView(TABS[name]);
+  const current = viewToken();
+  viewLoading(!view.hasChildNodes());
+  done.then(() => { if (current()) viewLoading(false); });
+  return done;
 }
 
-function tabKeys(ev) {
-  const names = Object.keys(TABS);
-  const step = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
-  if (!step) return;
-  ev.preventDefault();
-  const next = names[(names.indexOf(state.tab) + step + names.length) % names.length];
-  showTab(next);
-  document.querySelector('#tabs button[data-tab="' + next + '"]').focus();
+const DEFAULT_TAB = "enroll";
+const tabButtons = () => [...document.querySelectorAll("#tabs [role=tab]")];
+const selectedTab = () => document.querySelector('#tabs [aria-selected="true"]');
+
+// The tab a fragment names ("#live"), or null for one that names none.
+function tabOf(hash) {
+  const name = String(hash || "").replace(/^#/, "");
+  return Object.hasOwn(TABS, name) ? name : null;
 }
+
+// Roving tabindex: `target` is the one tab the Tab key reaches.
+function tabRove(target) {
+  for (const b of tabButtons()) b.tabIndex = b === target ? 0 : -1;
+}
+
+// Manual activation (WAI-ARIA tabs pattern): arrows, Home and End move the focus only, so moving
+// across Live does not start its polls on the robot. A click opens the focused tab; Enter and
+// Space click it, as on any button.
+function tabKeys(ev) {
+  const tabs = tabButtons();
+  const at = tabs.indexOf(document.activeElement);
+  const from = at >= 0 ? at : tabs.indexOf(selectedTab());
+  const to = { ArrowRight: from + 1, ArrowLeft: from - 1, Home: 0, End: tabs.length - 1 }[ev.key];
+  if (to === undefined) return;
+  ev.preventDefault();
+  const next = tabs[(to + tabs.length) % tabs.length];
+  tabRove(next);
+  next.focus();
+}
+
+// Focus that leaves the strip puts its tab stop back on the open tab, where Tab enters it again.
+function tabLeave(ev) {
+  if (!ev.currentTarget.contains(ev.relatedTarget)) tabRove(selectedTab());
+}
+document.getElementById("tabs").addEventListener("focusout", tabLeave);
+
+// A bookmark or a fragment typed by hand opens its tab; nothing while logged out.
+window.addEventListener("hashchange", () => {
+  const name = tabOf(location.hash);
+  if (state.csrf === null || document.getElementById("tabs").hidden || !name || name === state.tab) return;
+  showTab(name);
+});
 
 function themeControl() {
   const box = document.getElementById("theme");
@@ -1011,6 +1303,9 @@ function shell() {
   const tabs = document.getElementById("tabs");
   tabs.hidden = false;
   tabs.onkeydown = tabKeys;
+  tabs.setAttribute("aria-label", t("tabs_label"));
+  const asked = location.hash.replace(/^#/, "");
+  if (asked) state.tab = tabOf(asked) || DEFAULT_TAB;
   tabs.replaceChildren(...Object.keys(TABS).map((name) =>
     el("button", { type: "button", role: "tab", id: "tab-" + name, "aria-controls": "view", class: "sl-tabs__tab", "data-tab": name, onclick: () => showTab(name) }, t("tab_" + name))));
   const out = document.getElementById("logout");
@@ -1023,20 +1318,33 @@ function shell() {
     await boot();
   });
   liveBannerStart();
-  showTab(state.tab);
+  return showTab(state.tab);
+}
+
+// Takes the page strings of GET /api/strings: the text, the `lang` of the document, the title and
+// the theme control, which is drawn outside the views.
+function applyStrings(strings) {
+  state.strings = strings.strings;
+  state.lang = strings.language;
+  document.documentElement.lang = strings.language;
+  document.title = t("title");
+  document.getElementById("title").textContent = t("title");
+  themeControl();
+}
+
+// The page language changed (a saved `conversation.language`): loads its strings and redraws the
+// shell on the current tab, so no text stays in the old language. Resolves once the tab has drawn.
+async function relanguage() {
+  applyStrings(await api("GET", "/api/strings"));
+  return shell();
 }
 
 async function boot() {
   stopPolling();
   liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
-  state.strings = strings.strings;
-  state.lang = strings.language;
   state.session = session;
-  document.documentElement.lang = strings.language;
-  document.title = t("title");
-  document.getElementById("title").textContent = t("title");
-  themeControl();
+  applyStrings(strings);
   if (session.authenticated) {
     state.csrf = session.csrf;
     shell();
@@ -1053,8 +1361,35 @@ async function boot() {
 // that builds it. Mutation callbacks run before the next paint: a head never shows the wrong one.
 const viewRoot = document.getElementById("view");
 new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
+new MutationObserver(() => { if (viewRoot.hasChildNodes()) viewLoading(false); }).observe(viewRoot, { childList: true });
 
-boot().catch(() => {
-  const lang = state.lang || String(navigator.language || "").slice(0, 2);
-  notice(state.strings.err_unreachable || UNREACHABLE[lang] || UNREACHABLE.en, true);
-});
+// The kit header is sticky and wraps on a narrow screen, so its height is measured, not assumed:
+// published as --app-header-h on the root, it keeps what the page scrolls to (scroll-padding-top)
+// and the sticky settings nav below the header (style.css). Without ResizeObserver, window
+// resizes stand in for the header's own.
+function headerWatch() {
+  const header = document.querySelector(".sl-header");
+  const publish = () => document.documentElement.style.setProperty("--app-header-h", Math.ceil(header.getBoundingClientRect().height) + "px");
+  publish();
+  if (typeof ResizeObserver === "function") new ResizeObserver(publish).observe(header);
+  else window.addEventListener("resize", publish);
+}
+headerWatch();
+
+// Loads the page; a failure says the robot is out of reach and offers to try again.
+function start() {
+  boot().catch(bootFailed);
+}
+
+// The strings may be missing here: the text comes from PAGE_HELD.
+function bootFailed() {
+  notice(held("err_unreachable"), true);
+  const view = document.getElementById("view");
+  view.replaceChildren(el("div", { class: "row" }, button(held("retry"), "primary", () => {
+    view.replaceChildren();
+    notice("");
+    start();
+  }, { attrs: { id: "boot-retry" } })));
+}
+
+start();

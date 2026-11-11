@@ -13,15 +13,17 @@
 
 const EMO_RETRY_MS = 5000;
 const EMO_PERCENT = 100;
-const emoState = { serial: 0, controls: null };
+const emoState = { serial: 0, controls: null, grid: null }; // grid: the state cards of the open view
 
 function emoNumber(value) {
-  return value.toFixed(2);
+  return num(value, 2);
 }
 
-// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number.
+// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number; the bar
+// says the number too, not the percentage it is drawn at.
 function emoAxis(label, value) {
-  return [liveRow(label, emoNumber(value)), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT)];
+  const text = emoNumber(value);
+  return [liveRow(label, text), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT, text)];
 }
 
 function emoAffectCard(a) {
@@ -30,7 +32,7 @@ function emoAffectCard(a) {
     emoAxis(t("live_valence"), a.valence),
     emoAxis(t("live_arousal"), a.arousal),
     liveRow(t("live_intensity"), emoNumber(a.intensity)),
-    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT),
+    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT, emoNumber(a.intensity)),
     el("p", { class: "hint" }, t("emo_baseline", { v: emoNumber(a.baseline_valence), a: emoNumber(a.baseline_arousal) })));
 }
 
@@ -56,7 +58,7 @@ function emoCircadianCard(c) {
   if (c === null) return card(t("tab_emotions"), t("emo_circadian"), el("p", { class: "hint" }, t("live_circ_off")));
   const parts = [el("p", {}, badge(word("live_circ_", c.state), "info"))];
   if (c.sleepiness !== null) {
-    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT));
+    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT, emoNumber(c.sleepiness)));
   }
   parts.push(liveRow(t("emo_circ_amplitude"), emoNumber(c.amplitude)));
   return card(t("tab_emotions"), t("emo_circadian"), parts);
@@ -64,7 +66,7 @@ function emoCircadianCard(c) {
 
 function emoExpressionCard(e) {
   const body = e.last_label === null ? el("p", { class: "hint" }, t("emo_expression_none"))
-    : el("p", {}, t("emo_expression_line", { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude), n: e.started }));
+    : el("p", {}, tn("emo_expression_line", e.started, { label: emoName(e.last_label), amp: emoNumber(e.last_amplitude) }));
   return card(t("tab_emotions"), t("emo_expression"), body);
 }
 
@@ -76,14 +78,14 @@ function emoName(name) {
 function emoMovedRow(m) {
   const source = m.rule === null ? t("emo_llm") : t("emo_rule", { n: m.rule });
   return el("li", { class: "emo-moved" },
-    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: m.age_s.toFixed(1) })), " ",
+    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: num(m.age_s, 1) })), " ",
     m.rule === null ? [] : [el("code", { class: "sl-code" }, m.event), " "], source, " → ",
     m.label === null ? t("emo_no_label") : word("affect_label_", m.label), ": ",
     t("emo_delta", { dv: emoSigned(m.dv), da: emoSigned(m.da) }));
 }
 
 function emoSigned(value) {
-  return (value > 0 ? "+" : "") + emoNumber(value);
+  return num(value, 2, true);
 }
 
 function emoMovedCard(moved) {
@@ -165,13 +167,13 @@ async function emoInject(index) {
 
 // ---------------------------------------------------------------- view and poll
 
-// The state cards are redrawn on each poll; the control card is updated in place (a redraw would
-// close an open list and drop the focus).
+// The state cards are rebuilt on each poll and only those that changed replace theirs (liveKeep);
+// the control card is updated in place (a redraw would close an open list and drop the focus).
 function emoRender(box, d) {
   const controls = emoControlsCard(d);
-  const cards = box.querySelector("#emo-state") || el("div", { class: "live-grid", id: "emo-state" });
-  cards.replaceChildren(emoAffectCard(d.affect), emoExpressionCard(d.expression), emoCircadianCard(d.circadian),
-    emoRegisterCard(d), emoMovedCard(d.moved));
+  const cards = emoState.grid;
+  liveKeep(cards, [emoAffectCard(d.affect), emoExpressionCard(d.expression), emoCircadianCard(d.circadian),
+    emoRegisterCard(d), emoMovedCard(d.moved)]);
   if (cards.parentNode !== box || controls.parentNode !== box) box.replaceChildren(cards, controls);
 }
 
@@ -188,24 +190,40 @@ async function emoPoll(box, serial) {
     const data = await api("GET", "/api/emotions/state", undefined, liveActivity());
     if (!emoActive(serial)) return;
     emoRender(box, data);
+    pollGood(emoState.grid);
     delay = data.poll_ms || EMO_RETRY_MS;
   } catch (err) {
     if (!emoActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
     if (err.message === "emotions_disabled") {
-      emoState.controls = null;
-      box.replaceChildren(card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
-    } else notice(explain(err), true);
+      // Off until the owner turns it on: no retry. Entering the tab or the page coming back into
+      // view asks again (emotionsView, the visibility handler below).
+      emoOff(box, card(t("tab_emotions"), t("emo_disabled_title"), el("p", {}, t("emo_disabled_body"))));
+      return;
+    }
+    if (err.message === "emotions_unavailable") emoOff(box, card(t("tab_emotions"), t("tab_emotions"), el("p", {}, explain(err))));
+    else pollFailed(emoState.grid, explain(err));
   }
   state.timer = setTimeout(() => emoPoll(box, serial), delay);
+}
+
+// A state the server named (off, unavailable) replaces the cards with `note`: nothing is stale,
+// and the controls are built again when the cards come back.
+function emoOff(box, note) {
+  emoState.controls = null;
+  pollReset(emoState.grid);
+  box.replaceChildren(note);
 }
 
 function emotionsView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   emoState.controls = null;
+  // Built before the first reply, so a first poll that fails has a grid to report for (pollFailed).
+  emoState.grid = el("div", { class: "live-grid", id: "emo-state" });
+  pollForget();
   const box = el("div", { class: "stack", id: "emo-cards" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("emo_intro")), box));
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("emo_intro")), staleNote("emo-stale", ["emo-state"]), box));
   return emoPoll(box, ++emoState.serial);
 }
 

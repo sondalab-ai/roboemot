@@ -13,6 +13,7 @@ const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
 const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
+const SETTING_LANGUAGE = "conversation.language"; // the page language (webui/api.py `_language`)
 
 const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
@@ -155,6 +156,30 @@ function readNumber(desc, input) {
   return { value: n };
 }
 
+const present = (v) => v !== null && v !== undefined;
+const SETTING_MAX_FRACTION_DIGITS = 10; // a limit such as 0.001 is written as it is, not rounded to 0
+
+// The limits of a numeric descriptor in words, in the page language, with its unit: "" when it has
+// none. The lower limit is the stricter of `gt` (exclusive) and `ge` (inclusive); `le` is the upper.
+function rangeText(desc) {
+  const exclusive = present(desc.gt) && !(present(desc.ge) && desc.ge > desc.gt);
+  const min = exclusive ? desc.gt : desc.ge;
+  const max = desc.le;
+  const key = present(min)
+    ? (present(max) ? (exclusive ? "settings_range_above_max" : "settings_range_between") : (exclusive ? "settings_range_above" : "settings_range_min"))
+    : (present(max) ? "settings_range_max" : null);
+  if (!key) return "";
+  const number = new Intl.NumberFormat(state.lang, { maximumFractionDigits: SETTING_MAX_FRACTION_DIGITS });
+  const text = t(key, { min: present(min) ? number.format(min) : "", max: present(max) ? number.format(max) : "" });
+  return desc.unit ? text + " " + t("settings_unit", { unit: desc.unit }) : text;
+}
+
+// The text of a range error for `desc`: with its limits when it has any, else the generic one.
+function rangeError(desc) {
+  const range = rangeText(desc);
+  return range ? t("settings_range_error", { range }) : t("err_value_range");
+}
+
 function numberControl(desc, id, opts) {
   const input = numberInput(desc, id, opts.label);
   const parts = [fieldControl(input)];
@@ -174,8 +199,19 @@ function numberControl(desc, id, opts) {
     });
     parts.unshift(slider);
   }
-  if (desc.unit && !opts.plain) parts.push(el("span", { class: "hint" }, desc.unit));
-  return { node: el("div", { class: "row" }, parts), labelFor: id, main: input, read: () => readNumber(desc, input) };
+  const range = opts.plain ? "" : rangeText(desc);
+  // The unit beside the field is for the eye; the limits line states it for assistive technology,
+  // and a field with a unit but no limits is described by the unit itself.
+  const unitId = desc.unit && !opts.plain ? id + "-unit" : null;
+  if (unitId) parts.push(el("span", { class: "hint", id: unitId }, desc.unit));
+  const row = el("div", { class: "row" }, parts);
+  const line = range ? el("p", { class: "hint setting-range", id: id + "-range" }, range) : null;
+  const describedBy = line ? [line.id] : (unitId ? [unitId] : []);
+  if (describedBy.length) input.setAttribute("aria-describedby", describedBy.join(" "));
+  return {
+    node: line ? el("div", { class: "stack" }, row, line) : row,
+    labelFor: id, main: input, describedBy, read: () => readNumber(desc, input),
+  };
 }
 
 function boolControl(desc, id, opts) {
@@ -423,7 +459,8 @@ function settingTags(row, editable) {
 // refreshSettings, so a row with unsaved edits is not rebuilt when that availability flips.
 function restartBadge() {
   const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
-  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge;
+  const name = rowName(t("settings_restart_badge"), t("settings_restart_goto")); // the badge's text first
+  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": name, title: t("settings_restart_goto") }, badge) : badge;
 }
 
 const canRestart = () => {
@@ -524,7 +561,8 @@ function settingLeaf(node) {
   const title = ctl && ctl.labelFor
     ? el("label", { class: "sl-field__label", for: ctl.labelFor }, name)
     : el("span", { class: "sl-field__label" }, ctl && ctl.ownsLabel ? [] : name);
-  const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
+  const head = el("div", { class: "row" }, title, settingTags(row, editable));
+  const parts = [head];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
   if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
@@ -539,28 +577,51 @@ function settingLeaf(node) {
   } else {
     parts.push(ctl.node);
     const first = ctl.main || firstControl(ctl.node);
-    if (first && row.description) first.setAttribute("aria-describedby", id + "-d");
+    const described = describedIds(row, ctl, id);
+    if (first && described.length) first.setAttribute("aria-describedby", described.join(" "));
     if (!row.secret && JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
       parts.push(el("p", { class: "hint" }, t("settings_default") + ": " + clip(formatValue(row.default))));
     }
     parts.push(failure, settingActions(node, ctl, failure));
   }
-  return el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  const leaf = el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
+  if (ctl) editedMarker(leaf, head, ctl);
+  return leaf;
+}
+
+// Marks a leaf whose control holds an unsaved edit (each field has its own Save): a kit tag in its
+// tag row and data-dirty on the row, both gone when the value is back to the stored one; a save
+// rebuilds the row. Nothing is announced. The control's first reading is the stored value, so a
+// value it cannot read (a choice no longer offered) is no edit until it is changed. Chips and rows
+// change on click and Enter, not only on input.
+function editedMarker(leaf, head, ctl) {
+  const stored = JSON.stringify(ctl.read());
+  const tag = el("span", { class: "sl-tag", "data-edited": "1" }, t("settings_edited"));
+  const check = () => {
+    const dirty = JSON.stringify(ctl.read()) !== stored;
+    leaf.toggleAttribute("data-dirty", dirty);
+    if (dirty && !tag.isConnected) head.append(tag);
+    if (!dirty) tag.remove();
+  };
+  for (const kind of ["input", "change", "click", "keydown"]) leaf.addEventListener(kind, check);
+}
+
+// The ids that describe a leaf's control: its description, then what the control adds (the limits line).
+function describedIds(row, ctl, id) {
+  return [row.description ? id + "-d" : null, ...(ctl.describedBy || [])].filter(Boolean);
 }
 
 function settingActions(node, ctl, failure) {
   const row = node.row;
-  const descId = row.description ? failure.id.replace(/-err$/, "-d") : null;
+  const described = describedIds(row, ctl, failure.id.replace(/-err$/, ""));
   const mark = (code) => {
     failure.hidden = !code;
-    failure.textContent = code ? t("err_" + code) : "";
+    failure.textContent = !code ? "" : (code === "value_range" ? rangeError(row) : t("err_" + code));
     const target = ctl.main || firstControl(ctl.node);
     if (!target) return;
-    if (code) { target.setAttribute("aria-invalid", "true"); target.setAttribute("aria-describedby", [descId, failure.id].filter(Boolean).join(" ")); }
-    else {
-      target.removeAttribute("aria-invalid");
-      if (descId) target.setAttribute("aria-describedby", descId); else target.removeAttribute("aria-describedby");
-    }
+    const ids = code ? [...described, failure.id] : described;
+    if (code) target.setAttribute("aria-invalid", "true"); else target.removeAttribute("aria-invalid");
+    if (ids.length) target.setAttribute("aria-describedby", ids.join(" ")); else target.removeAttribute("aria-describedby");
   };
   const save = async () => {
     const out = ctl.read();
@@ -575,6 +636,7 @@ function settingActions(node, ctl, failure) {
         return await api("POST", "/api/settings", { path: row.path, value: out.value, pin, ...(ack ? { ack_endpoint: ack } : {}) });
       } catch (err) {
         if (err.message === "endpoint_ack_required" && err.endpoint) ack = err.endpoint;
+        if (err.message === "value_range") err.text = rangeError(row); // the same words as the check above
         throw err;
       }
     });
@@ -582,6 +644,7 @@ function settingActions(node, ctl, failure) {
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: out.value });
     }
+    if (result.changed && row.path === SETTING_LANGUAGE) { await settingsRelanguage(result, "saved", row.path); return; }
     writeNotice(result, "saved");
     await settingsReload(result.changed ? row.path : null);
   };
@@ -592,12 +655,14 @@ function settingActions(node, ctl, failure) {
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: result.value });
     }
+    if (result.changed && row.path === SETTING_LANGUAGE) { await settingsRelanguage(result, "settings_reset_done", row.path); return; }
     writeNotice(result, "settings_reset_done");
     await settingsReload(row.path);
   };
-  const actions = [button(t("settings_save"), "primary", () => guarded(save), { small: true })];
+  const named = (label) => ({ small: true, attrs: { "aria-label": rowName(label, row.path) } });
+  const actions = [button(t("settings_save"), "primary", () => guarded(save), named(t("settings_save")))];
   if (row.source === "runtime") {
-    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), { small: true }));
+    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), named(t("settings_reset_layer"))));
   }
   return el("div", { class: "row" }, actions);
 }
@@ -652,7 +717,7 @@ function entryBlock(node, key) {
       revealedSettings = new Map();
       writeNotice(result, "settings_entry_removed");
       await settingsReload(null);
-    }), { small: true })
+    }), { small: true, attrs: { "aria-label": rowName(t("settings_remove_entry"), path) } })
     : [];
   return el("div", { class: "entry-block stack", "data-entry": path }, el("div", { class: "row" }, el("h4", { class: "setting-entry" }, toggle), remove), body);
 }
@@ -750,8 +815,23 @@ async function settingsReload(changedPath) {
   settingsState.data = data;
   settingsApplyModel(settingsState.data);
   refreshSettings();
-  if (!changedPath) return;
-  const shown = document.querySelector('[data-path="' + CSS.escape(changedPath) + '"]');
+  if (changedPath) settingsFocus(changedPath);
+}
+
+// After a write of the page language: the whole page is drawn again in it (the shell, the tab names,
+// this view; app.js `relanguage`), then the result is announced in the new language. The kept rows
+// carry text in the old language, so they are dropped; the filter and the open groups stay.
+async function settingsRelanguage(result, verbKey, path) {
+  settingsState.leaves = new Map();
+  await relanguage();
+  writeNotice(result, verbKey);
+  refreshSettings();
+  settingsFocus(path);
+}
+
+// Moves the focus to the first control of the row at `path` and marks its name as just saved.
+function settingsFocus(path) {
+  const shown = document.querySelector('[data-path="' + CSS.escape(path) + '"]');
   const focus = shown && shown.querySelector("input, select, textarea, button");
   if (focus) focus.focus();
   const name = shown && shown.querySelector(".sl-code");
@@ -814,12 +894,13 @@ function refreshGroup(g) {
 function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
   const status = document.getElementById("settings-count");
-  if (status) status.textContent = t("settings_matches", { n: total });
+  if (status) status.textContent = tn("settings_matches", total);
   const actions = document.getElementById("settings-robot-actions");
   if (actions) actions.replaceChildren(restartButton());
   for (const tag of document.querySelectorAll("[data-restart-tag]")) tag.replaceChildren(restartBadge());
   const hint = document.getElementById("settings-restart-hint");
   if (hint) hint.textContent = t(settingsState.restartPending ? "settings_restart_pending" : "settings_restart_hint");
+  focusBack();
 }
 
 function settingsGroup(section) {

@@ -307,6 +307,27 @@ def seal(row: FieldDescriptor, name: str, reveal_private: bool = False) -> None:
         row["writable"] = False
 
 
+def hidden_private(rows: list[FieldDescriptor]) -> list[FieldDescriptor]:
+    """``rows`` of a ``reveal_private`` build as a build without it gives them: a private leaf
+    (entry forms too) gets a copy with ``value`` and ``default`` redacted, as ``seal`` does; other
+    rows are shared. Lets one build serve both views; secrets are redacted in both already."""
+    out: list[FieldDescriptor] = []
+    for row in rows:
+        if row["entry"]:
+            row = cast(FieldDescriptor, {**row, "entry": hidden_private(row["entry"])})
+        if row["private"] and not row["secret"] and row["kind"] not in CONTAINERS:
+            row = cast(
+                FieldDescriptor,
+                {
+                    **row,
+                    "value": REDACTED if row["value"] is not None else None,
+                    "default": REDACTED if row["default"] is not None else None,
+                },
+            )
+        out.append(row)
+    return out
+
+
 def _scalar_kind(annotation: Any) -> str:
     kinds = {bool: "bool", float: "number", int: "int", str: "text"}
     return kinds.get(annotation, "json")
@@ -573,6 +594,7 @@ __all__ = [
     "classify",
     "write_only",
     "descriptor",
+    "hidden_private",
     "resolve_references",
     "seal",
     "without_choices",

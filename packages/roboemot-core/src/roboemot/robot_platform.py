@@ -44,7 +44,7 @@ class AudioHub(Protocol):
     listener (None on timeout); ``set_voice`` turns that queue off before ``start`` when no
     listener exists; ``snapshot`` is the debug-report state (counts and states, never samples);
     ``apply_config`` is the hot reload (SPEC 11A) of the hub's settings that are not restart
-    fields (a hub with none makes it a no-op).
+    fields (a hub with none makes it a no-op). A hub may also implement :class:`CapturePause`.
     """
 
     def start(self) -> None: ...
@@ -53,6 +53,22 @@ class AudioHub(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
     def read(self, timeout: float = 0.0) -> VoiceChunkLike | None: ...
     def apply_config(self, cfg: RoboEmotConfig) -> None: ...
+
+
+@runtime_checkable
+class CapturePause(Protocol):
+    """Optional on an :class:`AudioHub`: stop the microphone capture while the platform sleeps
+    and nothing needs the sound (SPEC 12A, Asleep). ``pause_capture`` stops it,
+    ``resume_capture`` restarts it with no audio from before the pause (queue emptied, the
+    next voice chunk marked ``gap``); both are idempotent, return at once, and are no-ops on a
+    hub that is not running, so a resume never starts a capture ``start`` did not. A hub
+    without them keeps capturing while asleep."""
+
+    def pause_capture(self) -> None: ...
+    def resume_capture(self) -> None: ...
+
+    @property
+    def capture_paused(self) -> bool: ...
 
 
 @runtime_checkable

@@ -121,19 +121,20 @@ class Arbiter:
 
     def step(self, now: float) -> dict[str, float]:
         cmds = self.active(now)
+        best, extra = _winners(cmds)
         out: dict[str, float] = {}
         goal: dict[str, float] = {}
         reflex = False
         for name, dof in self.dofs.items():
-            absolute = [c for c in cmds if not c.additive and name in c.targets]
-            if absolute:
-                best = min(absolute, key=lambda c: (c.priority, -c.stamp, c.source))
-                target, winner, prio = best.targets[name], best.source, best.priority
+            won = best.get(name)
+            if won is not None:
+                c = won[1]
+                target, winner, prio = c.targets[name], c.source, c.priority
             else:
                 target, winner, prio = dof.home, None, Priority.IDLE
             reflex = reflex or prio == Priority.REFLEX
             if prio >= Priority.COMMANDED:
-                target += sum(c.targets[name] for c in cmds if c.additive and name in c.targets)
+                target += sum(extra.get(name, ()))
             if prio != Priority.SAFETY:
                 target = min(max(target, dof.min), dof.max)
             goal[name] = target
@@ -155,6 +156,28 @@ class Arbiter:
         self.goal = goal
         self.reflex_active = reflex
         return out
+
+
+def _winners(
+    cmds: list[Command],
+) -> tuple[dict[str, tuple[tuple[Priority, float, str], Command]], dict[str, list[float]]]:
+    """Per dof, the winning absolute command with its sort key, and the additive values in
+    command order, from one pass over the commands. A later command replaces the winner only
+    with a strictly smaller key, as ``min`` does; the additive values stay in command order so
+    ``sum`` adds the same floats in the same order as one scan per dof did (bit-identical)."""
+    best: dict[str, tuple[tuple[Priority, float, str], Command]] = {}
+    extra: dict[str, list[float]] = {}
+    for c in cmds:
+        if c.additive:
+            for name, value in c.targets.items():
+                extra.setdefault(name, []).append(value)
+            continue
+        key = (c.priority, -c.stamp, c.source)
+        for name in c.targets:
+            won = best.get(name)
+            if won is None or key < won[0]:
+                best[name] = (key, c)
+    return best, extra
 
 
 @dataclass
@@ -213,6 +236,11 @@ class Limiter:
             vmax, amax = dof.max_vel * factor, dof.max_acc
             x, v = self.pos[name], self.vel[name]
             err = goal[name] - x
+            if err == 0.0 and v == 0.0 and vmax > 0.0 and amax * dt > 0.0:
+                # At rest on its goal the update below yields exactly x + 0.0 (a zero stopping
+                # distance has stopping speed 0, so v + dv is +0.0); skip the search.
+                self.pos[name] = x + 0.0
+                continue
             v_cap = min(vmax, stop_speed(abs(err), amax, dt))
             v_des = max(-v_cap, min(v_cap, err / dt))
             dv = max(-amax * dt, min(amax * dt, v_des - v))
@@ -234,8 +262,7 @@ class Limiter:
             else:
                 x = max(x, x0)
             self.pos[name] = x
-        for name in self.dofs:
-            self.vel[name] = (self.pos[name] - prev[name]) / dt
+            self.vel[name] = (x - x0) / dt
         return dict(self.pos)
 
 

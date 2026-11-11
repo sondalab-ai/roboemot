@@ -18,7 +18,8 @@
 //
 // Polling: the state timer is `state.timer` and the audio timer `liveState.audioTimer` (stopPolling
 // clears both, so leaving the tab, logging out and showTab stop them), only while the document is
-// visible. `liveState.serial` retires a request that was in flight when the
+// visible. A `live_disabled` reply stops its poll; entering the tab or the page coming back into
+// view starts both again. `liveState.serial` retires a request that was in flight when the
 // tab was left, hidden or reopened, so a late reply neither draws nor re-arms the timer.
 
 const LIVE_RETRY_MS = 5000;
@@ -27,7 +28,8 @@ const LIVE_METER_FLOOR_DB = -60;
 const LIVE_SECONDS_PER_MINUTE = 60;
 const LIVE_SECONDS_PER_HOUR = 3600;
 const LIVE_MS_PER_S = 1000;
-const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null, reply: { rttMs: 0, receivedMs: 0 } };
+const LIVE_SCROLL_SLACK_PX = 2; // sub-pixel rounding: a log this close to its end is at the bottom
+const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null, activity: null, resync: 0, reply: { rttMs: 0, receivedMs: 0 } };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
 const liveInput = { at: Date.now(), reported: 0 }; // reported 0: loading the page counts as input
@@ -63,7 +65,7 @@ function liveRow(label, ...value) {
 }
 
 function liveNumber(value) {
-  return value.toFixed(2);
+  return num(value, 2);
 }
 
 function liveMoodCard(d) {
@@ -94,7 +96,7 @@ function liveConversationCard(d) {
   const parts = [el("p", {}, badge(state.strings["live_phase_" + c.phase] || c.phase, tone))];
   if (c.elapsed_s !== null) {
     parts.push(liveRow(t("live_route"), c.route === null ? t("live_route_pending") : c.route));
-    parts.push(el("p", { class: "hint" }, t("live_elapsed", { n: c.elapsed_s.toFixed(1) })));
+    parts.push(el("p", { class: "hint" }, t("live_elapsed", { n: num(c.elapsed_s, 1) })));
   }
   return card(t("tab_live"), t("live_conversation"), parts);
 }
@@ -122,14 +124,14 @@ function liveAttentionCard(d) {
     parts.push(el("ul", {}, a.faces.map((f) =>
       el("li", {}, f.name === null ? t("live_unknown") : f.name, f.target ? [" ", badge(t("live_gaze"), "info")] : []))));
   }
-  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, t("live_more", { n: a.count - a.faces.length })));
+  if (a.count > a.faces.length) parts.push(el("p", { class: "hint" }, tn("live_more", a.count - a.faces.length)));
   return card(t("tab_live"), t("live_attention"), parts);
 }
 
 function liveReflexesCard(d) {
   const last = d.reflexes.last;
   return card(t("tab_live"), t("live_reflexes"), el("p", {},
-    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: last.age_s.toFixed(1) }) : t("live_reflex_none")));
+    last ? t("live_reflex_last", { name: word("live_reflex_name_", last.name), n: num(last.age_s, 1) }) : t("live_reflex_none")));
 }
 
 function liveMotionCard(d) {
@@ -154,14 +156,18 @@ function liveReplyAgeS() {
   return (rttMs / 2 + performance.now() - receivedMs) / LIVE_MS_PER_S;
 }
 
-// The circle that beats. Cards are rebuilt on each poll, so the new element starts its CSS animation
-// at the phase the server just reported: that is the resync, and the browser animates in between.
+// The circle that beats. A new element starts its CSS animation at the phase the server just
+// reported: that is the resync, and the browser animates in between. An equal delay does not mean
+// the running animation is in phase (the time since it started counts too), so a beating pulse
+// carries a new `data-resync` on every build: the beat card never equals the one on screen and
+// liveKeep replaces it. A still pulse has no animation and is kept like any other card.
 function liveBeatPulse(beat) {
   if (beat === null) return el("span", { class: "live-pulse", id: "live-pulse", "aria-hidden": "true" });
   const period = LIVE_SECONDS_PER_MINUTE / beat.tempo_bpm;
   const age = (beat.beat_age_s + liveReplyAgeS()) % period;
+  liveState.resync += 1;
   return el("span", {
-    class: "live-pulse live-pulse--on", id: "live-pulse", "aria-hidden": "true",
+    class: "live-pulse live-pulse--on", id: "live-pulse", "aria-hidden": "true", "data-resync": liveState.resync,
     style: {
       "--live-beat-period": period.toFixed(3) + "s",
       "--live-beat-delay": (-age).toFixed(3) + "s",
@@ -186,7 +192,7 @@ function liveBeatMusic(music, beat) {
 
 // An age as the page shows it: seconds up to a minute, then whole minutes, then whole hours.
 function liveAccentAgo(seconds) {
-  if (seconds < LIVE_SECONDS_PER_MINUTE) return t("live_dance_accent_ago", { n: seconds.toFixed(1) });
+  if (seconds < LIVE_SECONDS_PER_MINUTE) return t("live_dance_accent_ago", { n: num(seconds, 1) });
   if (seconds < LIVE_SECONDS_PER_HOUR) return t("live_dance_accent_ago_min", { n: Math.floor(seconds / LIVE_SECONDS_PER_MINUTE) });
   return t("live_dance_accent_ago_h", { n: Math.floor(seconds / LIVE_SECONDS_PER_HOUR) });
 }
@@ -261,13 +267,35 @@ function liveSystemCard(d) {
 }
 
 function liveDisabledView(box) {
-  liveActivityBox().replaceChildren();
+  liveRenderActivity(null);
   box.replaceChildren(card(t("tab_live"), t("live_disabled_title"), el("p", {}, t("live_disabled_body"))));
+}
+
+// A detached copy of each node liveKeep put on screen, as it was built: the on-screen node gains
+// classes and children from the page (eyebrow glyphs) and the effects runtime, so it is never
+// compared itself. A node it is equal to was built from the same data.
+const liveBuilt = new WeakMap();
+const liveInert = document.implementation.createHTMLDocument(""); // a copy here loads no image
+
+// Makes `fresh` the children of `box`, in order, keeping each child on screen whose build equals
+// the new one (isEqualNode: element names, attributes, the CSSOM style as its style attribute, and
+// text). Only the children that changed are replaced, in place; a node that is already the one on
+// screen (a card kept across polls, such as the video card) stays.
+function liveKeep(box, fresh) {
+  const pool = [...box.children];
+  const want = fresh.map((node) => {
+    const same = pool.findIndex((old) => old === node || (liveBuilt.has(old) && liveBuilt.get(old).isEqualNode(node)));
+    if (same >= 0) return pool.splice(same, 1)[0];
+    liveBuilt.set(node, liveInert.importNode(node, true));
+    return node;
+  });
+  want.forEach((node, i) => { if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null); });
+  while (box.children.length > want.length) box.lastElementChild.remove();
 }
 
 function liveRender(box, data) {
   liveRenderActivity(data.activity || null);
-  box.replaceChildren(...LIVE_CARDS.map((c) => c.render(data)));
+  liveKeep(box, LIVE_CARDS.map((c) => c.render(data)));
 }
 
 // ---------------------------------------------------------------- what's happening
@@ -287,7 +315,7 @@ function liveActivityBox() {
 function liveValue(v) {
   if (v === null || v === undefined) return t("live_none");
   if (typeof v === "boolean") return t(v ? "live_yes" : "live_no");
-  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : num(v, 1);
   return word("live_code_", v);
 }
 
@@ -339,20 +367,103 @@ function liveEventRow(ev) {
     el("span", { class: "sl-eyebrow" }, stamp), " ", liveEventText(ev), count);
 }
 
-function liveRenderActivity(a) {
-  const box = liveActivityBox();
-  if (a === null) { box.replaceChildren(); return; }
-  const status = el("p", { id: "live-status", role: "status" },
-    badge(liveWord("live_status_", a.status), LIVE_STATUS_TONE[a.status] || "info"));
-  const notes = a.notes.map((n) => el("p", { class: "hint live-note" },
-    t("live_note_" + n.code, { reason: liveValue(n.reason) })));
-  const feed = a.events.length
-    ? el("ul", { class: "sl-list live-events", id: "live-events" }, a.events.map(liveEventRow))
-    : el("p", { class: "hint", id: "live-events-empty" }, t("live_activity_empty"));
+// The activity card, built once per view: its status line is one live region that is always there
+// (a region inserted with its content is not announced), and its notes and events are kept.
+function liveActivityBuild(box) {
+  const status = el("p", { id: "live-status", role: "status", "aria-live": "polite" });
+  const notes = el("div", { class: "stack" });
+  const list = el("ul", { class: "sl-list live-events", id: "live-events" });
+  const none = el("p", { class: "hint", id: "live-events-empty" }, t("live_activity_empty"));
   box.replaceChildren(card(t("tab_live"), t("live_activity"),
     el("p", { class: "sl-eyebrow" }, t("live_activity_now")), status, notes,
-    el("p", { class: "sl-eyebrow" }, t("live_activity_recent")), feed,
+    el("p", { class: "sl-eyebrow" }, t("live_activity_recent")), list, none,
     el("p", { class: "hint" }, t("live_activity_note"))));
+  liveState.activity = { status, notes, list, none };
+}
+
+function liveRenderActivity(a) {
+  const box = liveActivityBox();
+  if (a === null) { box.replaceChildren(); liveState.activity = null; return; }
+  if (liveState.activity === null || !box.contains(liveState.activity.status)) liveActivityBuild(box);
+  const ui = liveState.activity;
+  if (ui.status.dataset.status !== a.status) {
+    ui.status.dataset.status = a.status;
+    ui.status.replaceChildren(badge(liveWord("live_status_", a.status), LIVE_STATUS_TONE[a.status] || "info"));
+  }
+  liveKeep(ui.notes, a.notes.map((n) => el("p", { class: "hint live-note" },
+    t("live_note_" + n.code, { reason: liveValue(n.reason) }))));
+  ui.notes.hidden = a.notes.length === 0;
+  liveKeep(ui.list, a.events.map(liveEventRow));
+  ui.list.hidden = a.events.length === 0;
+  ui.none.hidden = a.events.length > 0;
+}
+
+// ---------------------------------------------------------------- stale data
+
+// Per grid of polled cards: when its last good reply came.
+const pollMarks = new WeakMap();
+// The grids of the open view whose poll is failing, each with the error it reported. Polls of one
+// view can fail with the same text (the robot is out of reach): that toast is theirs together.
+const pollFailing = new Map();
+
+// A new polled view starts: the failures of the one before are not its own.
+function pollForget() {
+  pollFailing.clear();
+}
+
+// `grid` stops failing: its toast goes, unless another grid still fails with the same text.
+function pollRecovered(grid) {
+  const message = pollFailing.get(grid);
+  pollFailing.delete(grid);
+  if (message !== undefined && ![...pollFailing.values()].includes(message)) noticeWithdraw(message);
+}
+
+// The kit warning callout a polled view shows while its cards are old; `grids` are the ids of the
+// grids it speaks for. Hidden until one of them is stale.
+function staleNote(id, grids) {
+  const note = el("div", { class: "sl-callout sl-callout--warning", id, "data-stale-for": grids.join(" ") }, el("div", { class: "sl-callout__body" }));
+  note.hidden = true;
+  return note;
+}
+
+// Shows each stale note with the oldest last good update among its stale grids, or hides it.
+function staleNotesRefresh() {
+  for (const note of document.querySelectorAll("[data-stale-for]")) {
+    const since = note.dataset.staleFor.split(" ").map((id) => document.getElementById(id))
+      .filter((grid) => grid && grid.getAttribute("aria-busy") === "true")
+      .map((grid) => (pollMarks.get(grid) || {}).goodMs).filter(Number.isFinite);
+    note.hidden = since.length === 0;
+    const text = since.length ? t("stale_since", { at: when(Math.min(...since), true) }) : "";
+    if (note.firstChild.textContent !== text) note.firstChild.textContent = text;
+  }
+}
+
+// A good reply for `grid`: its cards are current again, and its own failure toast goes.
+function pollGood(grid) {
+  pollRecovered(grid);
+  pollMarks.set(grid, { goodMs: Date.now() });
+  grid.removeAttribute("aria-busy");
+  staleNotesRefresh();
+}
+
+// A failed poll for `grid`: the toast reports `message` when the grid starts failing (or fails in
+// a new way), not on every retry, and not when another grid already reported the same text. The
+// cards that stay on screen are marked as old.
+function pollFailed(grid, message) {
+  const was = pollFailing.get(grid);
+  const shared = [...pollFailing].some(([other, text]) => other !== grid && text === message);
+  pollFailing.set(grid, message);
+  if (was !== message && !shared) notice(message, true);
+  grid.setAttribute("aria-busy", "true");
+  staleNotesRefresh();
+}
+
+// The grid's cards were replaced by a state the server named (off, unavailable): nothing is stale.
+function pollReset(grid) {
+  pollRecovered(grid);
+  pollMarks.delete(grid);
+  grid.removeAttribute("aria-busy");
+  staleNotesRefresh();
 }
 
 // True while a request started for `serial` may still draw and re-arm the timer.
@@ -371,18 +482,26 @@ async function livePoll(box, serial) {
     if (!liveActive(serial)) return;
     const receivedMs = performance.now();
     liveState.reply = { rttMs: receivedMs - sentMs, receivedMs };
-    notice("");
     liveRender(box, data);
+    pollGood(box);
     delay = data.poll_ms || LIVE_RETRY_MS;
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled") liveDisabledView(box);
+    if (err.message === "live_disabled") {
+      // Off until the owner turns it on: no retry. Entering the tab or the page coming back into
+      // view asks again (liveView, liveResume).
+      liveDisabledView(box);
+      pollReset(box);
+      liveStopVideo(true);
+      return;
+    }
     else if (err.message === "live_unavailable") {
       liveActivityBox().replaceChildren();
       box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
+      pollReset(box);
     }
-    else notice(explain(err), true);
+    else pollFailed(box, explain(err));
   }
   state.timer = setTimeout(() => livePoll(box, serial), delay);
 }
@@ -502,7 +621,7 @@ async function liveVideoPoll(serial, chain) {
   if (Date.now() - liveInput.at > liveVideo.idleMs) { liveVideoIdleStop(); return; }
   let delay = liveVideo.pollMs;
   try {
-    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
+    const resp = await request("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
     if (!liveVideoLive(serial, chain)) return;
     if (resp.ok) {
       const blob = await resp.blob();
@@ -520,7 +639,7 @@ async function liveVideoPoll(serial, chain) {
   } catch (e) {
     if (!liveVideoLive(serial, chain)) return;
     liveRevokeVideo();
-    liveVideoText(t("err_generic"));
+    liveVideoText(e.message === "unreachable" ? explain(e) : t("err_generic"));
     delay = Math.max(delay, LIVE_RETRY_MS);
   }
   liveVideo.timer = setTimeout(() => liveVideoPoll(serial, chain), delay);
@@ -576,11 +695,12 @@ document.addEventListener("visibilitychange", () => {
 
 // ---------------------------------------------------------------- audio cards
 
-// `drop`: also forget the drawn rows (leaving the tab, logging out), so their text is not kept.
+// `drop`: also forget the drawn rows and the activity card (leaving the tab, logging out), so
+// their text is not kept.
 function liveStopAudio(drop) {
   clearTimeout(liveState.audioTimer);
   liveState.audioTimer = null;
-  if (drop) liveState.ui = null;
+  if (drop) { liveState.ui = null; liveState.activity = null; }
 }
 
 function liveMeter(label) {
@@ -593,9 +713,11 @@ function liveSetMeter(meter, level) {
   const ok = level.state === "ok" && level.db !== null;
   const span = -LIVE_METER_FLOOR_DB;
   const pct = ok ? Math.round(Math.min(Math.max((level.db - LIVE_METER_FLOOR_DB) / span, 0), 1) * LIVE_PERCENT) : 0;
+  const text = ok ? t("live_db", { n: num(level.db, 1) }) : t("live_level_" + level.state);
   meter.bar.setAttribute("aria-valuenow", pct);
+  meter.bar.setAttribute("aria-valuetext", text); // the level in dBFS, or its state: not a percentage
   meter.bar.style.setProperty("--sl-progress", pct + "%");
-  meter.text.textContent = ok ? t("live_db", { n: level.db.toFixed(1) }) : t("live_level_" + level.state);
+  meter.text.textContent = text;
 }
 
 function liveAudioBuild(box) {
@@ -604,7 +726,7 @@ function liveAudioBuild(box) {
   const floor = el("p", { class: "hint" });
   const levelsCard = card(t("tab_live"), t("live_levels"), mic.node, out.node, floor, el("p", { class: "hint" }, t("live_levels_note")));
   levelsCard.id = "live-levels";
-  const list = el("div", { class: "live-transcript", id: "live-transcript", role: "log", "aria-live": "polite", tabindex: "0" });
+  const list = el("div", { class: "live-transcript", id: "live-transcript", role: "log", "aria-live": "polite", "aria-label": t("live_transcript"), tabindex: "0" });
   const off = el("p", { class: "hint" }, t("live_transcript_off"));
   const none = el("p", { class: "hint" }, t("live_transcript_empty"));
   const clear = button(t("live_transcript_clear"), "plain", () => guarded(liveClearTranscript), { small: true, attrs: { id: "live-transcript-clear" } });
@@ -651,6 +773,8 @@ function liveRenderTranscript(ui, tr) {
     liveState.epoch = tr.epoch;
     return;
   }
+  const list = ui.list;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight <= LIVE_SCROLL_SLACK_PX;
   if (liveState.epoch !== tr.epoch) ui.list.replaceChildren();
   liveState.epoch = tr.epoch;
   for (const turn of tr.turns) liveUpsertTurn(ui.list, turn);
@@ -658,7 +782,7 @@ function liveRenderTranscript(ui, tr) {
   while (tr.max_turns > 0 && ui.list.children.length > tr.max_turns) ui.list.firstChild.remove();
   liveState.after = tr.rev;
   ui.none.hidden = ui.list.children.length > 0;
-  if (tr.turns.length) ui.list.scrollTop = ui.list.scrollHeight;
+  if (tr.turns.length && atBottom) list.scrollTop = list.scrollHeight; // a reader scrolled up stays put
 }
 
 function liveAudioRender(box, data) {
@@ -667,7 +791,7 @@ function liveAudioRender(box, data) {
   liveSetMeter(ui.mic, data.levels.mic);
   liveSetMeter(ui.out, data.levels.out);
   ui.floor.hidden = data.levels.floor_db === null;
-  ui.floor.textContent = data.levels.floor_db === null ? "" : t("live_floor", { n: data.levels.floor_db.toFixed(1) });
+  ui.floor.textContent = data.levels.floor_db === null ? "" : t("live_floor", { n: num(data.levels.floor_db, 1) });
   liveRenderTranscript(ui, data.transcript);
 }
 
@@ -686,12 +810,14 @@ async function liveAudioPoll(box, serial) {
     const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch, undefined, liveActivity());
     if (!liveActive(serial)) return;
     liveAudioRender(box, data);
+    pollGood(box);
     delay = data.audio_poll_ms || LIVE_RETRY_MS;
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled" || err.message === "live_unavailable") liveAudioReset(box);
-    else notice(explain(err), true);
+    if (err.message === "live_disabled" || err.message === "live_unavailable") { liveAudioReset(box); pollReset(box); }
+    if (err.message === "live_disabled") return; // as the state poll: asked again on the next visit
+    else pollFailed(box, explain(err));
   }
   liveState.audioTimer = setTimeout(() => liveAudioPoll(box, serial), delay);
 }
@@ -702,8 +828,10 @@ function liveView() {
   const box = el("div", { class: "live-grid", id: "live-cards" });
   const audio = el("div", { class: "live-grid", id: "live-audio" });
   const activity = el("div", { id: "live-activity" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), activity, box, audio));
+  const stale = staleNote("live-stale", ["live-cards", "live-audio"]);
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), stale, activity, box, audio));
   liveAudioReset(audio);
+  pollForget();
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
 }

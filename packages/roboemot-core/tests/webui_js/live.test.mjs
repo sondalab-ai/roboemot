@@ -86,7 +86,7 @@ test("the Live tab sits next to the others and draws one card per group", async 
   for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2"]) {
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
   }
-  assert.equal(page.document.querySelector("#notice").hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "");
 });
 
 test("the system card shows the hardware readings", async (t) => {
@@ -318,25 +318,57 @@ test("a re-opened tab runs one timer, not one per visit", async (t) => {
   assert.ok(rate <= 1.6, `about one request per interval, got ${rate}`);
 });
 
-test("live_disabled shows how to turn it on and keeps retrying at the slow delay", async (t) => {
+const audioPolls = (page) => page.calls.filter((c) => c.path.startsWith("/api/live/audio")).length;
+
+test("live_disabled shows how to turn it on and stops both polls", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": reply(404, { error: "live_disabled" }),
+    "GET /api/live/audio": reply(404, { error: "live_disabled" }),
+  });
+  const timers = [];
+  const real = page.window.setTimeout.bind(page.window);
+  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(fn, ms, ...rest); };
+  await openLive(page);
+  assert.equal(polls(page), 1);
+  assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
+  assert.equal(page.document.querySelector("#notice").textContent, "", "not an error banner");
+  assert.deepEqual(timers.filter((x) => x.ms === 5000 || x.ms === POLL_MS), [], "no retry armed");
+  assert.equal(page.run("state.timer"), null);
+  assert.equal(page.run("liveState.audioTimer"), null);
+  await sleep(WAIT_MS);
+  assert.equal(polls(page), 1);
+  assert.equal(audioPolls(page), 1);
+});
+
+test("a disabled Live tab asks again when it is entered again or the page comes back into view", async (t) => {
   let enabled = false;
   const page = await livePage(t, {
     "GET /api/live/state": () => (enabled ? STATE : reply(404, { error: "live_disabled" })),
     "GET /api/live/audio": () => (enabled ? AUDIO : reply(404, { error: "live_disabled" })),
   });
-  const timers = [];
-  const real = page.window.setTimeout.bind(page.window);
-  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
-  assert.equal(polls(page), 1);
-  assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
-  assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
-  const retries = timers.filter((x) => x.ms === 5000);
-  assert.ok(retries.length >= 1, "retry armed at the slow delay");
+  page.document.querySelector('#tabs button[data-tab="debug"]').click();
+  await openLive(page);
+  assert.equal(polls(page), 2, "entering the tab asks again");
+  assert.equal(audioPolls(page), 2);
   enabled = true;
-  retries.forEach((x) => x.fn());
+  visibility(page, "hidden");
+  visibility(page, "visible");
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "self-healed");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 9, "back in view: on again");
+  assert.ok(page.document.querySelector("#live-levels"), "the audio cards too");
+  visibility(page, "hidden");
+});
+
+test("live_unavailable and a network failure keep retrying at the slow delay", async (t) => {
+  for (const failure of [() => reply(503, { error: "live_unavailable" }), () => { throw new TypeError("Failed to fetch"); }]) {
+    const page = await livePage(t, { "GET /api/live/state": failure, "GET /api/live/audio": failure });
+    const timers = [];
+    const real = page.window.setTimeout.bind(page.window);
+    page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
+    await openLive(page);
+    assert.equal(timers.filter((x) => x.ms === 5000).length, 2, "both polls retry");
+  }
 });
 
 test("coming back into view keeps the last cards until the next reply", async (t) => {
@@ -364,7 +396,7 @@ test("a failed poll shows the error and retries", async (t) => {
     "GET /api/live/state": () => (n++ === 0 ? reply(500, { error: "generic" }) : STATE),
   });
   await openLive(page);
-  assert.equal(page.document.querySelector("#notice").hidden, false);
+  assert.notEqual(page.document.querySelector("#notice").textContent, "");
   assert.equal(polls(page), 1);
 });
 
@@ -541,7 +573,7 @@ test("a malformed or partial beat block renders the empty state and keeps the ca
     assert.equal(page.document.querySelector("#live-cards").children.length, 9);
     assert.ok(!node.querySelector("#live-pulse").classList.contains("live-pulse--on"));
     assert.ok(node.textContent.includes("live_none"));
-    assert.equal(page.document.querySelector("#notice").hidden, true);
+    assert.equal(page.document.querySelector("#notice").textContent, "");
   }
 });
 
@@ -553,4 +585,141 @@ test("a long accent age reads in minutes, then hours", async (t) => {
     await openLive(page);
     assert.ok(beatCard(page).textContent.includes(expected), expected);
   }
+});
+
+test("a failed poll marks the cards as old with the time of the last good update, once", async (t) => {
+  let down = false;
+  const page = await livePage(t, {
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, stale_since: "Last updated at {at}.", err_unreachable: "Cannot reach the robot." } },
+    "GET /api/live/state": () => { if (down) throw new TypeError("Failed to fetch"); return STATE; },
+  });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const note = page.document.querySelector("#live-stale");
+  assert.equal(grid.getAttribute("aria-busy"), null);
+  assert.equal(note.hidden, true);
+  const goodAt = page.run("when(pollMarks.get(document.getElementById('live-cards')).goodMs, true)");
+  down = true;
+  await sleep(POLL_MS * 3);
+  assert.equal(grid.getAttribute("aria-busy"), "true");
+  assert.equal(note.hidden, false);
+  assert.ok(note.classList.contains("sl-callout--warning"));
+  assert.equal(note.textContent, `Last updated at ${goodAt}.`);
+  assert.equal(page.document.querySelectorAll("#live-stale").length, 1, "one callout");
+  assert.equal(grid.children.length, 9, "the last values stay");
+  const toast = page.document.querySelector("#notice .sl-toast");
+  assert.equal(toast.textContent, "Cannot reach the robot.");
+  await sleep(POLL_MS * 3);
+  assert.equal(page.document.querySelector("#notice .sl-toast"), toast, "reported once");
+  down = false;
+  visibility(page, "hidden");
+  visibility(page, "visible"); // the retry waits 5 s: coming back into view polls at once
+  await sleep(POLL_MS * 2);
+  assert.equal(grid.getAttribute("aria-busy"), null);
+  assert.equal(note.hidden, true);
+  assert.equal(page.document.querySelector("#notice").textContent, "", "the poll takes back its own failure");
+});
+
+test("a recovering poll leaves a newer message from something else", async (t) => {
+  let down = true;
+  const page = await livePage(t, { "GET /api/live/state": () => (down ? reply(500, { error: "generic" }) : STATE) });
+  await openLive(page);
+  page.run('notice("Saved.")');
+  down = false;
+  visibility(page, "hidden");
+  visibility(page, "visible");
+  await sleep(POLL_MS * 2);
+  assert.equal(page.document.querySelector("#notice").textContent, "Saved.");
+});
+
+// Counts the toasts put in the alert region: each one is an announcement.
+function alerts(page) {
+  const seen = { n: 0 };
+  new page.window.MutationObserver((list) => {
+    for (const m of list) seen.n += [...m.addedNodes].filter((n) => n.classList && n.classList.contains("sl-toast")).length;
+  }).observe(page.document.getElementById("notice-alert"), { childList: true });
+  return seen;
+}
+
+const UNREACHABLE = { "GET /api/strings": { language: "en", strings: { ...STRINGS, err_unreachable: "Cannot reach the robot." } } };
+
+test("a poll that fails five times announces its failure once", async (t) => {
+  const page = await livePage(t, { ...UNREACHABLE, "GET /api/live/state": () => { throw new TypeError("Failed to fetch"); } });
+  const seen = alerts(page);
+  await openLive(page);
+  for (let i = 0; i < 4; i++) await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(page.calls.filter((c) => c.path === "/api/live/state").length, 5);
+  assert.equal(seen.n, 1, "one announcement for one failure");
+  assert.equal(page.document.querySelector("#notice").textContent, "Cannot reach the robot.");
+});
+
+test("two polls failing with the same text: one announcement, and the toast stays until both recover", async (t) => {
+  let stateDown = true;
+  let audioDown = true;
+  const page = await livePage(t, {
+    ...UNREACHABLE,
+    "GET /api/live/state": () => { if (stateDown) throw new TypeError("Failed to fetch"); return STATE; },
+    "GET /api/live/audio": () => { if (audioDown) throw new TypeError("Failed to fetch"); return AUDIO; },
+  });
+  const seen = alerts(page);
+  await openLive(page);
+  assert.equal(seen.n, 1, "the second poll does not announce the same text again");
+  audioDown = false;
+  await page.run("liveAudioPoll(document.getElementById('live-audio'), liveState.serial)");
+  assert.equal(page.document.querySelector("#notice").textContent, "Cannot reach the robot.", "the state poll still fails");
+  await page.run("liveAudioPoll(document.getElementById('live-audio'), liveState.serial)");
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(seen.n, 1);
+  stateDown = false;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(page.document.querySelector("#notice").textContent, "", "both recovered: the toast goes");
+});
+
+test("a poll that fails again after a recovery announces again", async (t) => {
+  let down = true;
+  const page = await livePage(t, { ...UNREACHABLE, "GET /api/live/state": () => { if (down) throw new TypeError("Failed to fetch"); return STATE; } });
+  const seen = alerts(page);
+  await openLive(page);
+  down = false;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  down = true;
+  await page.run("livePoll(document.getElementById('live-cards'), liveState.serial)");
+  assert.equal(seen.n, 2);
+});
+
+test("el() styles through the CSSOM, which isEqualNode compares as the style attribute", async (t) => {
+  const page = await livePage(t);
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).getAttribute("style")'), "--a: 1s;");
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).isEqualNode(el("span", { style: { "--a": "1s" } }))'), true);
+  assert.equal(page.run('el("span", { style: { "--a": "1s" } }).isEqualNode(el("span", { style: { "--a": "2s" } }))'), false);
+});
+
+test("a poll with equal data keeps every card node; a changed value replaces only its card", async (t) => {
+  let valence = 0.25;
+  const page = await livePage(t, { "GET /api/live/state": () => ({ ...STATE, mood: { ...STATE.mood, valence } }) });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const first = [...grid.children];
+  await sleep(POLL_MS * 4);
+  assert.ok(polls(page) >= 3);
+  assert.ok([...grid.children].every((node, i) => node === first[i]), "same nodes after equal polls");
+  valence = 0.5;
+  await sleep(POLL_MS * 4);
+  const now = [...grid.children];
+  assert.equal(now.length, 9);
+  assert.notEqual(now[0], first[0], "the mood card is new");
+  assert.ok(now[0].textContent.includes("0.50"));
+  assert.ok(now.slice(1).every((node, i) => node === first[i + 1]), "the other cards are the same nodes");
+});
+
+test("a beating pulse replaces the beat card on each poll (the resync), and only that card", async (t) => {
+  const page = await livePage(t, { "GET /api/live/state": { ...STATE, ...BEAT } });
+  await openLive(page);
+  const grid = page.document.querySelector("#live-cards");
+  const first = [...grid.children];
+  const pulse = page.document.querySelector("#live-pulse");
+  const index = first.findIndex((n) => n.id === "live-beat-card");
+  await sleep(POLL_MS * 4);
+  assert.notEqual(page.document.querySelector("#live-pulse"), pulse, "a new pulse element restarts the animation");
+  assert.ok([...grid.children].every((node, i) => i === index || node === first[i]));
 });

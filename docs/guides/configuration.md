@@ -529,7 +529,9 @@ alone.
 
 **Not the same as the robot's sleep.** The owner can put the robot to sleep from the platform
 (motors off). With the default `runtime.pause_when_asleep: true`, RoboEmot then pauses perception,
-the listener and the behaviour tick, and nothing is sent to the cloud while the robot sleeps.
+the listener and the behaviour tick, stops the microphone capture (nothing can use the sound
+then), and nothing is sent to the cloud while the robot sleeps. A wake word does not wake a robot
+the platform put to sleep.
 
 **Privacy.** With `circadian.light_source: camera`, the robot reads only a light level from the
 frames. No frame is stored.

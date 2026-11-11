@@ -93,21 +93,29 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
 
 def test_effects_are_wired_from_the_vendored_runtime():
     fx = (STATIC / "fx.js").read_text()
-    assert 'from "./vendor/sondalab-ui-kit/effects.js"' in fx
+    assert 'import("./vendor/sondalab-ui-kit/effects.js")' in fx
     assert "mount()" in fx
     assert not re.search(r"glass", fx)
+
+
+def test_effects_load_after_the_first_paint():
+    # a static import would fetch and parse the runtime (~0.2 MB with its modules) before it
+    fx = (STATIC / "fx.js").read_text()
+    assert not re.search(r"(?m)^\s*import\s", fx)
+    assert "requestIdleCallback(loadEffects, { timeout: FX_IDLE_TIMEOUT_MS })" in fx
 
 
 def test_local_stylesheet_has_only_the_registered_product_accent():
     css = (STATIC / "style.css").read_text()
     assert not re.search(r"\brgba?\(|\bhsla?\(|\boklch\(", css)
     # the roboemot accent per theme, from the kit's accent-registry.json
+    # light keeps the kit's ring (derived from the accent, darker): the accent itself is too light
     assert sorted(re.findall(r"#[0-9a-fA-F]{3,8}\b", css)) == [
-        "#f726b4",
         "#f726b4",
         "#ff48c4",
         "#ff48c4",
     ]
+    assert not re.search(r'\[data-sl-theme="light"\][^{]*\{[^}]*--sl-focus-ring', css)
     assert "url(" not in css and "@import" not in css
 
 
@@ -116,6 +124,47 @@ def test_local_stylesheet_hides_every_hidden_element():
     # needs its own global one; jsdom applies no stylesheet, so the JS tests cannot see this
     css = (STATIC / "style.css").read_text()
     assert re.search(r"(?m)^\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", css)
+
+
+def test_scrolling_and_the_settings_nav_clear_the_sticky_header():
+    # jsdom applies no stylesheet: the rules that use the measured header height (app.js
+    # headerWatch) and hide the nav on a narrow screen are checked here as text
+    css = (STATIC / "style.css").read_text()
+    assert re.search(r"(?m)^html \{ scroll-padding-top: calc\(var\(--app-header-h, 0px\)", css)
+    assert re.search(r"\.settings-nav \{[^}]*top: calc\(var\(--app-header-h, 0px\)", css)
+    # the header's controls cancel that padding, or focusing a tab scrolls the page up
+    assert re.search(
+        r"(?m)^\.sl-header :is\(button, a, input, select\) \{ scroll-margin-top: "
+        r"calc\(-1 \* \(var\(--app-header-h, 0px\) \+ var\(--sl-space-3\)\)\); \}",
+        css,
+    )
+    narrow = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.S)
+    assert narrow and re.search(r"\.settings-nav \{ display: none; \}", narrow.group(1))
+
+
+def test_the_tab_strip_does_not_overflow_downwards():
+    # the kit tab's margin-bottom: -1px reached past the scrolling strip (a 1px vertical scroll,
+    # measured in Chrome); jsdom has no layout, so the rules that remove it are checked as text
+    css = (STATIC / "style.css").read_text()
+    strip = re.search(r"(?m)^#tabs \{(.*?)\}", css, re.S)
+    assert strip and "border-bottom: 0" in strip.group(1)
+    assert "inset 0 -1px var(--slc-border)" in strip.group(1)
+    assert "--sl-focus-ring-offset: calc(-1 * var(--sl-focus-ring-width" in strip.group(1)
+    assert re.search(r"(?m)^#tabs \.sl-tabs__tab \{ margin-bottom: 0; \}", css)
+
+
+def test_a_coarse_pointer_gets_44px_targets_and_a_fine_one_keeps_the_kit_sizes():
+    # jsdom has no layout or media queries: measured in Chrome with touch emulation, checked here
+    css = (STATIC / "style.css").read_text()
+    coarse = re.search(r"@media \(pointer: coarse\) \{(.*?)\n\}", css, re.S)
+    assert coarse, "one coarse-pointer block"
+    body = coarse.group(1)
+    for control in (".sl-btn", ".sl-segmented__item", ".sl-tabs__tab", ".sl-chip", ".sl-disclosure",
+                    ".sl-icon-btn", ".sl-check", ".sl-switch"):  # fmt: skip
+        assert control in body, control
+    assert "min-block-size: calc(var(--sl-space-6) + var(--sl-space-3));" in body  # 2rem + 0.75rem
+    assert re.search(r"\.row \{ gap: var\(--sl-space-3\); \}", body)
+    assert "min-block-size" not in css.replace(body, ""), "no size change outside the coarse block"
 
 
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
@@ -129,6 +178,8 @@ def test_first_party_scripts_have_no_inline_style_or_html_injection():
             "document.write",
         ):
             assert banned not in text, (name, banned)
+        # the SVG namespace names the toast icons' element type; it is never fetched
+        text = text.replace('"http://www.w3.org/2000/svg"', "")
         assert "http://" not in text and "https://" not in text
 
 
@@ -145,7 +196,7 @@ def _page_js() -> str:
 
 def _keys_used_by_app() -> set[str]:
     js = _page_js()
-    return set(re.findall(r"""\bt\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
+    return set(re.findall(r"""\btn?\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
 
 
 def test_every_string_key_the_page_reads_exists_in_both_languages():
@@ -180,6 +231,18 @@ def test_every_restart_effect_core_accepts_has_text_in_both_languages():
     assert {k for k in EN if k.startswith("settings_restart_effect_")} == {
         "settings_restart_effect_" + e for e in RESTART_EFFECTS
     }
+
+
+def test_every_singular_form_has_its_plural_key_and_is_read_through_tn():
+    # tn(key, n) picks key + "_one" when n is 1: a `_one` key without its base key, or one whose
+    # base key the page reads with t() (never picking the singular), is a dead string
+    names = ("app.js", "settings.js", "live.js", "emotions.js")
+    js = "".join((STATIC / n).read_text() for n in names)
+    counted = set(re.findall(r"""\btn\(\s*"([a-z0-9_]+)"\s*,""", js))
+    for lang in (EN, IT):
+        singular = {k[: -len("_one")] for k in lang if k.endswith("_one")}
+        assert singular and singular <= set(lang)
+        assert singular <= counted, sorted(singular - counted)
 
 
 def test_tabs_are_the_strings_that_exist():
@@ -348,3 +411,13 @@ def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
         assert "settings_edit" not in lang and "settings_platform_name" not in lang
     js = _page_js()
     assert "SETTING_GROUPS" not in js and "settingEditor" not in js
+
+
+def test_text_the_page_holds_itself_matches_the_string_tables():
+    # PAGE_HELD in app.js is shown when /api/strings cannot be loaded; it must say the same
+    js = (STATIC / "app.js").read_text()
+    block = js[js.index("const PAGE_HELD = {") : js.index("};", js.index("const PAGE_HELD = {"))]
+    for lang, table in (("en", EN), ("it", IT)):
+        line = re.search(rf"^\s+{lang}: \{{(.*)\}},$", block, re.M).group(1)
+        pairs = dict(re.findall(r'([a-z_]+): "([^"]*)"', line))
+        assert pairs and pairs == {k: table[k] for k in pairs}, lang

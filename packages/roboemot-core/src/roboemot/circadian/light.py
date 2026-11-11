@@ -37,9 +37,12 @@ class LightEstimator:
         self.level: Level | None = None
 
     @staticmethod
-    def stats(frame: np.ndarray) -> tuple[float, float]:
-        """Mean luminance and noise of a frame (RGB channel order for a colour image)."""
-        img = np.asarray(frame, dtype=np.float32) / UINT8_MAX
+    def stats(frame: np.ndarray, row_step: int = 1) -> tuple[float, float]:
+        """Mean luminance and noise of a frame (RGB channel order for a colour image), on every
+        ``row_step``-th row (``light.sample_row_step``). Rows are skipped before the float
+        conversion, so the cost and the temporaries shrink with the step; columns stay whole,
+        so the horizontal-difference noise still compares neighbouring pixels."""
+        img = np.asarray(frame[::row_step], dtype=np.float32) / UINT8_MAX
         luma_img = img @ LUMA_WEIGHTS if img.ndim == COLOR_NDIM else img
         luma = float(luma_img.mean())
         # Noise: robust spread of horizontal pixel differences (flat regions dominate).
@@ -49,7 +52,7 @@ class LightEstimator:
     def measure(
         self, frame: np.ndarray, *, exposure_s: float | None = None, gain: float | None = None
     ) -> LightReading:
-        luma, noise = self.stats(frame)
+        luma, noise = self.stats(frame, self.cfg.sample_row_step)
         return self.classify(luma, noise, exposure_s=exposure_s, gain=gain)
 
     def classify(

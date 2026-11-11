@@ -72,6 +72,19 @@ HOLD_ANIMAL, HOLD_TENTATIVE, HOLD_MOVING = "animal", "tentative", "moving"
 HOLD_REASONS = (HOLD_ANIMAL, HOLD_TENTATIVE, HOLD_MOVING)
 
 
+def _frozen(matrix: np.ndarray) -> np.ndarray:
+    """``matrix`` made read-only: the Kalman constants below are shared by every track."""
+    matrix.flags.writeable = False
+    return matrix
+
+
+# Constant-velocity Kalman model on (cx, cy, w, h) and their velocities: built once, not per call.
+STATE_EYE = _frozen(np.eye(STATE_DIM))
+MEASURE_EYE = _frozen(np.eye(MEASURE_DIM))
+PROJECTION = _frozen(np.eye(MEASURE_DIM, STATE_DIM))  # the box part of the state
+VELOCITY_COUPLING = _frozen(np.eye(STATE_DIM, k=MEASURE_DIM))  # position += velocity * dt
+
+
 def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Pairwise IoU of two ``(n, 4)`` and ``(m, 4)`` arrays of xyxy boxes.
 
@@ -182,11 +195,10 @@ class Track:
     def _predict(self, stamp: float) -> None:
         dt = max(0.0, stamp - self._stamp)
         h = max(self._mean[HEIGHT], 1.0)
-        transition = np.eye(STATE_DIM)
-        transition[:MEASURE_DIM, MEASURE_DIM:] = np.eye(MEASURE_DIM) * dt
+        transition = STATE_EYE + VELOCITY_COUPLING * dt
         q_pos = (POSITION_STD * h) ** 2
         q_vel = (VELOCITY_STD * h) ** 2
-        noise = np.diag([q_pos] * MEASURE_DIM + [q_vel] * MEASURE_DIM)
+        noise = np.diag(np.repeat([q_pos, q_vel], MEASURE_DIM))
         self._mean = transition @ self._mean
         self._cov = transition @ self._cov @ transition.T + noise
         self._stamp = stamp
@@ -210,15 +222,17 @@ class Track:
             self._mean[MEASURE_DIM:] = (position - before) / dt
 
     def _correct_box(self, box: Box) -> None:
+        """Kalman update with ``box`` as the measurement. The gain ``P H^T S^-1`` comes from a
+        linear solve of ``S^T K^T = (P H^T)^T`` rather than an explicit inverse: the same gain
+        to float rounding, cheaper and better conditioned for a small box."""
         h = max(self._mean[HEIGHT], 1.0)
-        meas_cov = np.eye(MEASURE_DIM) * (POSITION_STD * h) ** 2
-        proj = np.zeros((MEASURE_DIM, STATE_DIM))
-        proj[:, :MEASURE_DIM] = np.eye(MEASURE_DIM)
-        innovation = _cxcywh(box) - proj @ self._mean
-        s = proj @ self._cov @ proj.T + meas_cov
-        gain = self._cov @ proj.T @ np.linalg.inv(s)
+        meas_cov = MEASURE_EYE * (POSITION_STD * h) ** 2
+        innovation = _cxcywh(box) - PROJECTION @ self._mean
+        cov_proj = self._cov @ PROJECTION.T
+        s = PROJECTION @ cov_proj + meas_cov
+        gain = np.linalg.solve(s.T, cov_proj.T).T
         self._mean = self._mean + gain @ innovation
-        self._cov = (np.eye(STATE_DIM) - gain @ proj) @ self._cov
+        self._cov = (STATE_EYE - gain @ PROJECTION) @ self._cov
 
 
 @dataclass
@@ -247,6 +261,11 @@ class Tracker:
         self._ids = ids if ids is not None else itertools.count(1)
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
+
+    @property
+    def live(self) -> int:
+        """How many tracks are alive now, tentative ones included (not yet expired)."""
+        return len(self._tracks)
 
     def holds(
         self, stamp: float, labels: Collection[str], min_move_px: float, hold_s: float
