@@ -184,7 +184,8 @@ class TraitsWorker:
     ignored, so it cannot trigger itself. The router is rebuilt (keeping its token budgets)
     when the routes or the safety config change; if building it fails the old one stays. After
     a failed rating the same prompt and routes are not asked again for
-    ``persona.traits_retry_s`` (a later wake-up is scheduled for when it ends).
+    ``persona.traits_retry_s``, also across a switch to manual and back (a later wake-up is
+    scheduled for when it ends).
 
     ``close`` cancels a request in flight and waits at most ``JOIN_TIMEOUT_S``. Cancellation is
     cooperative: a blocking synchronous call on the loop (not expected from the router, which is
@@ -290,7 +291,9 @@ class TraitsWorker:
                 self._loop.call_later(left, self._wake.set)
                 return
         rated = await apply_llm_traits(self.stack, self.router, self.cache, self.names)
-        self._failed = (key, self.clock()) if persona.traits_source == "llm" and not rated else None
+        # A manual run keeps the backoff: switching back to llm within it asks no sooner.
+        if persona.traits_source == "llm":
+            self._failed = None if rated else (key, self.clock())
 
     def _sync_router(self, cfg: RoboEmotConfig) -> None:
         """Rebuild the shared router when routes or safety changed (the hub keeps the old one if

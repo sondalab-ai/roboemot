@@ -309,32 +309,57 @@ def test_only_prompt_source_routes_and_minor_safety_wake_it():
     assert not woken("conversation.language", "safety.minor_motion_factor")
 
 
-def test_a_failed_rating_is_not_asked_again_within_the_backoff(tmp_path, started):
+def handled_runs(monkeypatch, worker: TraitsWorker) -> list[int]:
+    """How many wake-ups the worker has handled, a run skipped for the backoff included: a test
+    waits for the count instead of sleeping, so a loaded machine cannot reorder its steps."""
+    count = [0]
+    real = worker._run_once
+
+    async def counting():
+        try:
+            await real()
+        finally:
+            count[0] += 1
+
+    monkeypatch.setattr(worker, "_run_once", counting)
+    return count
+
+
+def test_a_failed_rating_is_not_asked_again_within_the_backoff(tmp_path, started, monkeypatch):
     server = Server(status=500)
     stack, worker = make(tmp_path, server, retry=60.0)
+    handled = handled_runs(monkeypatch, worker)
     started.append(worker)
     worker.start()
-    assert wait_for(lambda: len(server.requests) == 1)
-    for _ in range(3):
+    assert wait_for(lambda: handled[0] == 1) and len(server.requests) == 1
+    for n in (2, 3, 4):
         worker.request()
-        time.sleep(0.05)
+        assert wait_for(lambda n=n: handled[0] == n)
+    # The worker runs with the manual source before the switch back (the order a loaded
+    # machine made by chance): that run must not drop the backoff.
     stack.set("persona.traits_source", "manual", layer="app")
+    assert wait_for(lambda: handled[0] == 5)
     stack.set("persona.traits_source", "llm", layer="app")
-    time.sleep(0.2)
+    assert wait_for(lambda: handled[0] == 6)
     assert len(server.requests) == 1
 
 
-def test_the_backoff_ends_by_itself_or_when_the_routes_change(tmp_path, started):
+def test_the_backoff_ends_by_itself_or_when_the_routes_change(tmp_path, started, monkeypatch):
     server = Server(status=500)
     stack, worker = make(tmp_path, server, retry=0.3)
+    now = [0.0]
+    worker.clock = lambda: now[0]  # the backoff reads this clock: it ends when the test says
+    handled = handled_runs(monkeypatch, worker)
     started.append(worker)
     worker.start()
-    assert wait_for(lambda: len(server.requests) == 1)
+    assert wait_for(lambda: handled[0] == 1) and len(server.requests) == 1
     worker.request()
-    time.sleep(0.1)
+    # Within the backoff: skipped, and the wake-up it schedules skips again while the clock stands.
+    assert wait_for(lambda: handled[0] >= 2)
     assert len(server.requests) == 1
-    assert wait_for(lambda: len(server.requests) == 2)  # the scheduled wake-up after 0.3 s
-    worker.clock = lambda: 0.0  # as if it had only just failed: new routes still reset it
+    now[0] = 0.3  # the backoff is over
+    assert wait_for(lambda: len(server.requests) == 2)  # the scheduled wake-up asks again
+    # The clock stays at the second failure, so the backoff is on again: new routes reset it.
     stack.set("llm_routes", [{**ROUTE, "model": "m2"}], layer="app")
     assert wait_for(lambda: len(server.requests) == 3)
 
