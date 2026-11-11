@@ -42,6 +42,7 @@ YUNET_TOP_K = 5000
 YUNET_BOX_END = 4
 YUNET_KPS_END = 14
 YUNET_SCORE_COLUMN = 14
+YUNET_STRIDE_PX = 32  # the coarsest feature map: OpenCV pads the input to a multiple of it
 
 SFACE_MODEL_ID = "sface-2021dec"
 SFACE_SIZE = 112
@@ -111,8 +112,20 @@ def _unit(x: np.ndarray) -> np.ndarray:
     return (x / np.linalg.norm(x)).astype(np.float32)
 
 
+def fitted_input(nw: int, nh: int, w: int, h: int) -> tuple[int, int]:
+    """The detector input for a picture of ``nw`` x ``nh`` letterboxed into ``w`` x ``h``: the
+    input without the rows and columns the picture leaves empty, in whole strides and never
+    larger than ``w`` x ``h``. A 16:9 frame fills 320x180 of 320x240, so it runs at 320x192."""
+
+    def up(px: int) -> int:
+        return -(-px // YUNET_STRIDE_PX) * YUNET_STRIDE_PX
+
+    return min(w, up(nw)), min(h, up(nh))
+
+
 class YuNetDetector:
-    """YuNet through ``cv2.FaceDetectorYN``, letterboxed top-left into the input size."""
+    """YuNet through ``cv2.FaceDetectorYN``, letterboxed top-left into the input size. The
+    configured size sets the scale; the empty part of the letterbox is not run (SPEC 13)."""
 
     def __init__(self, path: Path, score_min: float, input_size: tuple[int, int]):
         self._size = input_size
@@ -125,10 +138,13 @@ class YuNetDetector:
 
         The frame is letterboxed into the detector input (aspect ratio kept) and the boxes and
         landmarks are scaled back to the original pixels. The lowest scores feed the tracker.
+        The input is cut to the picture (:func:`fitted_input`): the scale stays, and the rows a
+        wide frame leaves black cost no detector time.
         """
         w, h = self._size
         scale = letterbox_scale(image.shape[1], image.shape[0], w, h)
         nw, nh = int(image.shape[1] * scale), int(image.shape[0] * scale)
+        w, h = fitted_input(nw, nh, w, h)
         canvas = np.zeros((h, w, CHANNELS), np.uint8)
         canvas[:nh, :nw] = cv2.resize(image, (nw, nh))
         self._det.setInputSize((w, h))
