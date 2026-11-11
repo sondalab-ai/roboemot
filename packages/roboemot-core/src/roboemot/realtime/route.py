@@ -83,7 +83,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.schema import LLMRoute, RoboEmotConfig, realtime_voice
 from ..diag import EventSink, no_events
 from ..health.network import route_endpoint
 from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
@@ -219,6 +219,7 @@ def session_update(
     *,
     create_response: bool | None = None,
     interrupt_response: bool = False,
+    route: LLMRoute | None = None,
 ) -> dict[str, Any]:
     """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate (null at
     the native 16 kHz, which Pollen's server requires) and out at the server's own, the voice,
@@ -228,8 +229,9 @@ def session_update(
     a turn after ``server_silence_ms``, with ``input: audio`` the input transcription's language
     (``transcription_language``, else ``conversation.language``), model (left out when empty)
     and ``hint`` as its ``prompt`` (the robot's name, :meth:`RealtimeRoute.hint`; left out
-    when None), and the tools (left as they are when None). The route and the realtime check
-    (``realtime.check``, no hint) send the same one."""
+    when None), and the tools (left as they are when None). The voice is ``route``'s own when
+    it sets one (``realtime_voice``). The route and the realtime check (``realtime.check``, no
+    hint) send the same one."""
     rt, vad = cfg.voice.realtime_route, cfg.voice.vad
     audio = rt.input == "audio"
     return protocol.session_update(
@@ -238,7 +240,7 @@ def session_update(
         if cfg.voice.sample_rate_hz == protocol.NATIVE_INPUT_RATE_HZ
         else cfg.voice.sample_rate_hz,
         output_rate_hz=None,
-        voice=rt.voice or None,
+        voice=realtime_voice(route, rt) or None,
         vad_threshold=vad.threshold,
         silence_ms=round(rt.server_silence_ms),
         create_response=server_turns(cfg) if create_response is None else create_response,
@@ -753,7 +755,7 @@ class RealtimeRoute:
                 self.state, self.reason = "connecting", None
             self.tools_offered = frozenset()  # a new session holds no tool
             hint = self.hint(cfg)
-            update = session_update(cfg, self.base_instructions(), hint=hint)
+            update = session_update(cfg, self.base_instructions(), hint=hint, route=route)
             fallback: dict[str, Any] = {}
             key = (route.name, route.base_url, cfg.voice.realtime_route.transcription_model)
             if hint is not None:  # the client sends this one instead where the hint is refused
@@ -882,7 +884,9 @@ class RealtimeRoute:
         sent_to, sent = self._interrupt_sent  # one reference: read without _lock
         if interrupt is None:
             interrupt = sent and sent_to is self._token
-        return session_update(cfg, instructions, tools, hint, interrupt_response=interrupt)
+        return session_update(
+            cfg, instructions, tools, hint, interrupt_response=interrupt, route=self.route(cfg)
+        )
 
     def hint(self, cfg: RoboEmotConfig) -> str | None:
         """The transcription hint a connect offers: the robot's name alone

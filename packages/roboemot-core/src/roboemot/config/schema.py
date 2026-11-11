@@ -26,6 +26,7 @@ from ..timezones import zone
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 ROUTE_NAME_MAX_CHARS = 64
 ROUTE_SCHEMES = ("http", "https")  # the OpenAI-compatible client speaks only these (SPEC 8)
+GEMINI_SCHEMES = ("wss",)  # a gemini_live route's base_url is its WebSocket URL (SPEC 8)
 
 
 def param(
@@ -5328,11 +5329,12 @@ class PersonaConfig(Strict):
         return self
 
 
-def route_url_ok(url: str) -> bool:
+def route_url_ok(url: str, schemes: tuple[str, ...] = ROUTE_SCHEMES) -> bool:
     """Whether ``url`` is a route base URL the client can use as written (SPEC 8): parsed by
-    httpx, the library that sends the request, with an http(s) scheme and a host, and no space,
-    control character or backslash (parsers read a backslash differently). A query is accepted
-    here, for configs that carry one; the web UI refuses a query or fragment (``url_query``)."""
+    httpx, the library that sends the request, with a scheme in ``schemes`` (http(s) unless a
+    ``gemini_live`` route asks for ``wss``) and a host, and no space, control character or
+    backslash (parsers read a backslash differently). A query is accepted here, for configs that
+    carry one; the web UI refuses a query or fragment (``url_query``)."""
     import httpx  # lazy: keeps the config package light
 
     if any(c.isspace() or ord(c) < ord(" ") or c == "\\" for c in url):
@@ -5341,7 +5343,7 @@ def route_url_ok(url: str) -> bool:
         parsed = httpx.URL(url)
     except (httpx.InvalidURL, ValueError, TypeError):
         return False
-    return parsed.scheme in ROUTE_SCHEMES and bool(parsed.host)
+    return parsed.scheme in schemes and bool(parsed.host)
 
 
 class LLMRoute(Strict):
@@ -5389,6 +5391,26 @@ class LLMRoute(Strict):
         "base_url + /realtime, http becomes ws and https wss); chat requests never use it. "
         "A change on a route with a key needs the admin",
     )
+    protocol: Literal["openai_realtime", "gemini_live"] = param(
+        "openai_realtime",
+        "Wire protocol of a kind: realtime route. openai_realtime: the OpenAI realtime subset "
+        "at base_url + /realtime. gemini_live: Google Gemini Live at base_url as written (a "
+        "wss:// URL), the key in the x-goog-api-key header; it needs voice.realtime_route mode: "
+        "direct and turns: robot",
+    )
+    voice: str = param(
+        "",
+        "Server voice of this realtime route; empty uses voice.realtime_route.voice",
+    )
+    connect_timeout_s: float | None = param(
+        None,
+        "This realtime route's voice.realtime_route.connect_timeout_s: the longest the session "
+        "allocation, the WebSocket handshake and the server's session confirmation may take "
+        "together. null: the shared value",
+        unit="s",
+        ge=1,
+        le=30,
+    )
     locality: Literal["auto", "local", "cloud"] = param(
         "auto",
         "Whether the route may see real names. auto: local for this machine and the home "
@@ -5408,12 +5430,37 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
-        if not route_url_ok(self.base_url):
+        if self.protocol == "gemini_live":
+            if self.kind != "realtime":
+                raise ValueError(f"route {self.name}: protocol gemini_live needs kind: realtime")
+            if not route_url_ok(self.base_url, GEMINI_SCHEMES):
+                raise ValueError(
+                    f"route {self.name}: a gemini_live base_url must be a wss:// URL with a "
+                    "host, without spaces, control characters or '\\'"
+                )
+        elif not route_url_ok(self.base_url):
             raise ValueError(
                 f"route {self.name}: base_url must be an http(s) URL with a host, without "
                 "spaces, control characters or '\\'"
             )
         return self
+
+
+def realtime_voice(route: LLMRoute | None, settings: RealtimeRouteConfig) -> str:
+    """The server voice a realtime session asks for (SPEC 8): the route's own ``voice`` when
+    set, else the shared ``voice.realtime_route.voice``; empty means the server's default.
+    ``route`` None (no route resolved) falls back to the shared value."""
+    return route.voice if route is not None and route.voice else settings.voice
+
+
+def realtime_connect_timeout_s(route: LLMRoute | None, settings: RealtimeRouteConfig) -> float:
+    """The connect budget of a realtime session (SPEC 8): the route's own ``connect_timeout_s``
+    when set, else the shared ``voice.realtime_route.connect_timeout_s``. A Gemini route needs
+    more than the shared 5 s on some first connects (S0: up to 10.6 s to ``setupComplete``).
+    ``route`` None falls back to the shared value."""
+    if route is not None and route.connect_timeout_s is not None:
+        return route.connect_timeout_s
+    return settings.connect_timeout_s
 
 
 class LLMCheckConfig(Strict):
@@ -6136,6 +6183,27 @@ with warnings.catch_warnings():
                 raise ValueError(
                     f"voice.openai_speech.route {speech!r} names a kind: realtime route; "
                     "the speech backend needs a chat route"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _gemini_route_fits(self) -> RoboEmotConfig:
+            """A ``protocol: gemini_live`` realtime route runs only in direct mode with robot
+            turns: Gemini has no session allocator here and no server VAD events the route
+            maps (SPEC 8, Gemini Live wire)."""
+            rt = self.voice.realtime_route
+            route = next((r for r in self.llm_routes if r.name == rt.route), None)
+            if route is None or route.protocol != "gemini_live":
+                return self
+            if rt.mode != "direct":
+                raise ValueError(
+                    f"voice.realtime_route.route {rt.route!r} is a gemini_live route: "
+                    "voice.realtime_route.mode must be direct"
+                )
+            if rt.turns != "robot":
+                raise ValueError(
+                    f"voice.realtime_route.route {rt.route!r} is a gemini_live route: "
+                    "voice.realtime_route.turns must be robot"
                 )
             return self
 

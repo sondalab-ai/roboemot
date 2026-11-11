@@ -484,6 +484,18 @@ EN: dict[str, str] = {
         "conversations do not use it as a chat model. Changing it later on a route with a key "
         "needs the configuration file."
     ),
+    "route_protocol": "Realtime protocol",
+    "route_protocol_openai_realtime": "OpenAI realtime",
+    "route_protocol_gemini_live": "Gemini Live",
+    "route_protocol_hint": (
+        "Only for a realtime speech route. Gemini Live connects to the address as written "
+        "(wss://), needs direct mode and robot turns, and cannot be changed later from here."
+    ),
+    "route_voice": "Voice",
+    "route_voice_hint": (
+        "Only for a realtime speech route: the server's voice name. Empty uses the shared "
+        "realtime voice setting."
+    ),
     "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
@@ -1480,6 +1492,19 @@ IT: dict[str, str] = {
         "Un modello voce in tempo reale riceve audio via WebSocket al suo indirizzo + /realtime; "
         "le conversazioni non lo usano come modello di chat. Cambiarlo dopo, su un modello con "
         "chiave, richiede il file di configurazione."
+    ),
+    "route_protocol": "Protocollo in tempo reale",
+    "route_protocol_openai_realtime": "OpenAI realtime",
+    "route_protocol_gemini_live": "Gemini Live",
+    "route_protocol_hint": (
+        "Solo per un modello voce in tempo reale. Gemini Live si collega all'indirizzo così com'è "
+        "(wss://), richiede la modalità diretta e i turni decisi dal robot, e da qui non si può "
+        "cambiare dopo."
+    ),
+    "route_voice": "Voce",
+    "route_voice_hint": (
+        "Solo per un modello voce in tempo reale: il nome della voce del server. Vuoto usa "
+        "l'impostazione condivisa della voce in tempo reale."
     ),
     "route_key_hosts": (
         "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."

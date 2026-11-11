@@ -237,7 +237,13 @@ class _Run:
     def go(self, client: Any) -> None:
         instructions, text = _turn(self.cfg, self.route)
         ok = client.connect(
-            session_update(self.cfg, instructions, create_response=False, interrupt_response=False)
+            session_update(
+                self.cfg,
+                instructions,
+                create_response=False,
+                interrupt_response=False,
+                route=self.route,
+            )
         )
         self._hosts(client.snapshot(), client.reason)
         r = self.report

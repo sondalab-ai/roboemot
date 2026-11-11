@@ -38,12 +38,14 @@ section number in commit messages that implement or change behaviour.
   and no daemon polling for it (the daemon journals every REST call). While the platform does not hold
   the motors enabled the robot is asleep (`robot.asleep` on the bus) and the runtime pauses perception,
   listener and the behaviour tick (`runtime.pause_when_asleep`).
-- **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
+- **Chat routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
-  forced tool choice, `seed` or non-default sampling. A `kind: realtime` route speaks the realtime
-  subset of SPEC 8 (Realtime speech route) over a WebSocket (`roboemot.realtime`), never chat; its one
-  exception to `tool_choice="auto"` is `tool_choice: "none"` on the request after the tool-round
-  cap, which forbids no tool, so it is not forced tool choice.
+  forced tool choice, `seed` or non-default sampling. A `kind: realtime` route speaks, over a
+  WebSocket (`roboemot.realtime`) and never chat, either the OpenAI realtime subset of SPEC 8
+  (Realtime speech route; `protocol: openai_realtime`, the default) or Gemini Live
+  (`protocol: gemini_live`, SPEC 8 Gemini Live wire: key in `x-goog-api-key`, robot turns and
+  direct mode only). Its one exception to `tool_choice="auto"` is `tool_choice: "none"` on the
+  request after the tool-round cap, which forbids no tool, so it is not forced tool choice.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Robot hierarchy (SPEC 4A, 11, 12A):** robot-specific behaviour only through a core protocol plus a

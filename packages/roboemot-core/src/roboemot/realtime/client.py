@@ -3,9 +3,10 @@
 :class:`RealtimeClient` runs on its own thread with its own event loop, like ``SpeechOutput``.
 ``connect`` allocates a session through the :class:`~roboemot.realtime.session.SessionProvider`,
 checks the URL (``connect_target``), opens the socket and sends ``session.update``; it returns
-once the server answered ``session.updated``, within ``voice.realtime_route.connect_timeout_s``
-for the whole sequence. Server events are parsed (``protocol.parse``) and handed to
-``on_event`` on the client thread; unknown ones are only counted.
+once the server answered ``session.updated``, within the route's ``connect_timeout_s`` (else
+``voice.realtime_route.connect_timeout_s``) for the whole sequence. Server events are parsed
+(``protocol.parse``) and handed to ``on_event`` on the client thread; unknown ones are only
+counted.
 
 Transport rules:
 
@@ -51,7 +52,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from .. import shutdown
-from ..config.schema import LLMRoute, RealtimeRouteConfig
+from ..config.schema import LLMRoute, RealtimeRouteConfig, realtime_connect_timeout_s
 from ..llm.pseudonyms import url_is_local
 from . import protocol
 from .session import (
@@ -233,7 +234,7 @@ class RealtimeClient:
         future = self._submit(self._connect(session_update, fallback, prefer_fallback))
         s = self.settings
         try:
-            return bool(future.result(s.connect_timeout_s + s.send_timeout_s))
+            return bool(future.result(self._connect_timeout_s() + s.send_timeout_s))
         except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
             future.cancel()
             with self._lock:
@@ -322,6 +323,11 @@ class RealtimeClient:
             while len(self._sent_types) > SENT_TYPES_KEPT:
                 self._sent_types.popitem(last=False)
 
+    def _connect_timeout_s(self) -> float:
+        """The connect budget of this route: its own ``connect_timeout_s`` when set, else the
+        shared ``voice.realtime_route.connect_timeout_s`` (``realtime_connect_timeout_s``)."""
+        return realtime_connect_timeout_s(self.route, self.settings)
+
     def _key(self) -> dict[str, str]:
         """Only the ``Authorization`` header of the route's key, or nothing."""
         value = self._auth_headers().get(AUTH_HEADER)
@@ -342,7 +348,7 @@ class RealtimeClient:
             self._sent_types.clear()
             self._counts["connects"] += 1
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.settings.connect_timeout_s
+        deadline = loop.time() + self._connect_timeout_s()
         try:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
