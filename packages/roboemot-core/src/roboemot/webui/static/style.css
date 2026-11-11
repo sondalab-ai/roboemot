@@ -1,7 +1,8 @@
 /* Layout only. Colour, type and controls come from the vendored Sondalab kit (data-sl-product="roboemot").
    The one colour here is the product accent, per theme (kit agent/accent-registry.json, roboemot);
-   high contrast keeps the kit's own. */
-[data-sl-theme="light"] { --sl-accent-default: #f726b4; --sl-focus-ring: #f726b4; }
+   high contrast keeps the kit's own. The light theme takes the kit's focus ring, derived from this
+   accent (themes/light.css): the accent itself is 2.87:1 on the light canvas, under WCAG 1.4.11's 3:1. */
+[data-sl-theme="light"] { --sl-accent-default: #f726b4; }
 [data-sl-theme="dark"] { --sl-accent-default: #ff48c4; --sl-focus-ring: #ff48c4; }
 
 *, *::before, *::after { box-sizing: border-box; }

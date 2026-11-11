@@ -109,12 +109,13 @@ def test_local_stylesheet_has_only_the_registered_product_accent():
     css = (STATIC / "style.css").read_text()
     assert not re.search(r"\brgba?\(|\bhsla?\(|\boklch\(", css)
     # the roboemot accent per theme, from the kit's accent-registry.json
+    # light keeps the kit's ring (derived from the accent, darker): the accent itself is too light
     assert sorted(re.findall(r"#[0-9a-fA-F]{3,8}\b", css)) == [
-        "#f726b4",
         "#f726b4",
         "#ff48c4",
         "#ff48c4",
     ]
+    assert not re.search(r'\[data-sl-theme="light"\][^{]*\{[^}]*--sl-focus-ring', css)
     assert "url(" not in css and "@import" not in css
 
 
