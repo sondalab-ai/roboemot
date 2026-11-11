@@ -131,7 +131,7 @@ test("the panel follows the page language", async (t) => {
   assert.ok(cue.includes("Suono di ripiego: la voce cloud non poteva rispondere"));
   assert.ok(cue.includes("il cloud ha rifiutato la risposta (function_call_output_pending)"));
   assert.ok(cue.includes("sessione azzerata (una chiamata a uno strumento è rimasta aperta)"));
-  assert.ok(facing.includes("testa girata di 41.5 gradi, limite 30 gradi"));
+  assert.ok(facing.includes("testa girata di 41,5 gradi, limite 30 gradi"), "a decimal comma in Italian");
   assert.ok(cut.includes("robot in riproduzione sì"));
 });
 

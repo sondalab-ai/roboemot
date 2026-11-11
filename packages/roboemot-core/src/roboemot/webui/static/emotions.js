@@ -16,7 +16,7 @@ const EMO_PERCENT = 100;
 const emoState = { serial: 0, controls: null, grid: null }; // grid: the state cards of the open view
 
 function emoNumber(value) {
-  return value.toFixed(2);
+  return num(value, 2);
 }
 
 // A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number; the bar
@@ -78,14 +78,14 @@ function emoName(name) {
 function emoMovedRow(m) {
   const source = m.rule === null ? t("emo_llm") : t("emo_rule", { n: m.rule });
   return el("li", { class: "emo-moved" },
-    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: m.age_s.toFixed(1) })), " ",
+    el("span", { class: "sl-eyebrow" }, t("emo_ago", { n: num(m.age_s, 1) })), " ",
     m.rule === null ? [] : [el("code", { class: "sl-code" }, m.event), " "], source, " → ",
     m.label === null ? t("emo_no_label") : word("affect_label_", m.label), ": ",
     t("emo_delta", { dv: emoSigned(m.dv), da: emoSigned(m.da) }));
 }
 
 function emoSigned(value) {
-  return (value > 0 ? "+" : "") + emoNumber(value);
+  return num(value, 2, true);
 }
 
 function emoMovedCard(moved) {

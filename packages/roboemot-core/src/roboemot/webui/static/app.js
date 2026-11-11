@@ -37,6 +37,20 @@ function when(value, timeOnly) {
   return timeOnly ? d.toLocaleTimeString(state.lang) : d.toLocaleString(state.lang);
 }
 
+// A number in the page language with exactly `digits` decimals ("0,62" on an Italian page, where
+// toFixed wrote "0.62"); `signed` puts "+" before a positive value and no sign on zero. One
+// formatter per language, digit count and sign rule, kept: the Live tab formats every second.
+const numberFormats = new Map();
+function num(value, digits, signed) {
+  const key = state.lang + "|" + digits + "|" + Boolean(signed);
+  if (!numberFormats.has(key)) {
+    numberFormats.set(key, new Intl.NumberFormat(state.lang, {
+      minimumFractionDigits: digits, maximumFractionDigits: digits, signDisplay: signed ? "exceptZero" : "auto",
+    }));
+  }
+  return numberFormats.get(key).format(value);
+}
+
 // The only text the page holds itself, for when it cannot load its strings: the same keys and
 // texts as webui/strings.py (tests/test_webui_page.py checks that they match).
 const PAGE_HELD = {
