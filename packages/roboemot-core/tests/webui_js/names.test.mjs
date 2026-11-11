@@ -158,6 +158,23 @@ test("settings: Add and Remove of a list name the setting", async () => {
   labelInName(remove, "pairs");
 });
 
+test("settings: a chip's name starts with its visible item, then says it removes it", async () => {
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, settings_remove: "Remove", settings_choice_invalid: "{value} (not valid)" } },
+    "GET /api/settings": { pin_required: true, fields: [
+      d("voice.tags", "string_list", { value: ["calm"] }),
+      d("voice.kinds", "enum_list", { value: ["cat", "gone"], choices: ["cat", "dog"] }),
+    ] },
+  });
+  await page.run("settingsView()");
+  page.document.querySelector("#grp-core-voice").click();
+  await settle();
+  const chips = [...page.document.querySelectorAll(".sl-chip")];
+  assert.deepEqual(chips.map((c) => named(c).name), ["calm: Remove", "cat: Remove", "gone (not valid): Remove"]);
+  for (const c of chips) labelInName(c, "Remove");
+});
+
 // Every header cell of a table has text: visible on a data column, hidden on the action column.
 const headTexts = (table) => [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
 

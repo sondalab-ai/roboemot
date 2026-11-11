@@ -323,11 +323,14 @@ function chipsControl(desc, id, opts) {
   const chips = el("div", { class: "sl-chips", role: "group", "aria-label": opts.label });
   const paint = () => {
     const stale = (item) => desc.kind === "enum_list" && !(desc.choices || []).includes(item);
-    chips.replaceChildren(...items.map((item) => el("button", {
-      type: "button", class: "sl-chip" + PRESS, ...(stale(item) ? { "data-invalid": "1" } : {}),
-      "aria-label": t("settings_remove_item", { item: String(item) }),
-      onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
-    }, stale(item) ? t("settings_choice_invalid", { value: String(item) }) : String(item))));
+    chips.replaceChildren(...items.map((item) => {
+      const shown = stale(item) ? t("settings_choice_invalid", { value: String(item) }) : String(item);
+      return el("button", {
+        type: "button", class: "sl-chip" + PRESS, ...(stale(item) ? { "data-invalid": "1" } : {}),
+        "aria-label": rowName(shown, t("settings_remove")), // the item first, as shown (WCAG 2.5.3)
+        onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
+      }, shown);
+    }));
   };
   let entry;
   let adder;
