@@ -78,6 +78,30 @@ test("secrets: Remove names the secret; a secret in use says why it cannot go, i
   assert.equal(hiddenHeads(page.document.querySelector("table")).at(-1), "Actions");
 });
 
+// Every header cell of a table has text: visible on a data column, hidden on the action column.
+const headTexts = (table) => [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+
+test("registry, catalogue and secrets: every column has a header", async () => {
+  const page = await loadPage({
+    ...BASE,
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, display_name: "Name", last_seen: "Last seen",
+      secret_name: "Name", table_kind_status: "Kind and status", table_kind_origin: "Kind and origin",
+      table_secret_status: "Status", table_secret_used_by: "Used by" } },
+    "GET /api/registry": { records: [{ id: "p1", kind: "person", display_name: "Mia", status: "active", last_seen: null }] },
+    "GET /api/registry/quarantined": { keys: [] },
+    "GET /api/catalogue": { records: [{ id: "c1", kind: "object", display_name: "Lamp", status: "active", origin: "xmp", has_appearance: false, category: null }],
+      live: [], limits: { max_xmp_bytes: 1e6, max_image_bytes: 1e6, max_items: 10 }, tombstones: 0 },
+    "GET /api/routes": { routes: [], name_max_chars: 32 },
+    "GET /api/secrets": { secrets: [{ name: "k", set: true, used_by: [] }], max_name_chars: 32, max_value_chars: 64 },
+  });
+  await page.run("registryView()");
+  assert.deepEqual(headTexts(page.document.querySelector("table")), ["Name", "Kind and status", "Last seen", "Actions"]);
+  await page.run("catalogueView()");
+  assert.deepEqual(headTexts(page.document.querySelector("table")), ["Name", "Kind and origin", "Actions"]);
+  await page.run("routesView()");
+  assert.deepEqual(headTexts(page.document.querySelector("table")), ["Name", "Status", "Used by", "Actions"]);
+});
+
 function d(path, kind, extra = {}) {
   return {
     path, kind, nullable: false, value: null, default: null, source: "schema", ge: null, le: null, unit: null,

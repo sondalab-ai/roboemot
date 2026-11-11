@@ -647,7 +647,7 @@ async function registryView() {
   const rows = list.records;
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
-    [t("display_name"), "", t("last_seen"), null],
+    [t("display_name"), t("table_kind_status"), t("last_seen"), null],
     rows.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
@@ -774,7 +774,7 @@ async function catalogueView() {
   const pending = data.records.filter((r) => r.status === "pending");
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
-    [t("display_name"), "", null],
+    [t("display_name"), t("table_kind_origin"), null],
     data.records.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
@@ -871,7 +871,7 @@ function secretsCard(data, reload) {
       }), hintId ? el("p", { class: "hint", id: hintId }, t("secret_in_use_hint")) : [])));
   });
   return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
-    rows.length ? table([t("secret_name"), "", "", null], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    rows.length ? table([t("secret_name"), t("table_secret_status"), t("table_secret_used_by"), null], rows) : el("p", { class: "hint" }, t("secrets_none")),
     form);
 }
 
