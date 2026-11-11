@@ -97,6 +97,7 @@ test("the levels card shows both meters with their dBFS and the noise floor", as
   const bars = [...card.querySelectorAll('[role="progressbar"]')];
   assert.equal(bars.length, 2);
   assert.ok(bars[0].getAttribute("aria-valuenow") > bars[1].getAttribute("aria-valuenow"), "louder is fuller");
+  assert.deepEqual(bars.map((b) => b.getAttribute("aria-valuetext")), ["-23.4 dBFS", "-40.0 dBFS"], "the level, not a percentage");
 });
 
 test("paused, no data and unavailable levels show words, not numbers", async (t) => {
@@ -109,6 +110,8 @@ test("paused, no data and unavailable levels show words, not numbers", async (t)
   for (const bar of page.document.querySelectorAll("#live-levels [role=progressbar]")) {
     assert.equal(bar.getAttribute("aria-valuenow"), "0");
   }
+  const said = [...page.document.querySelectorAll("#live-levels [role=progressbar]")].map((b) => b.getAttribute("aria-valuetext"));
+  assert.deepEqual(said, ["paused", "not available"], "the bar says the state, not 0 %");
 });
 
 test("the transcript lists turns oldest first, newest last, with who said it", async (t) => {

@@ -78,6 +78,18 @@ test("enrollment: a failed status request is retried at the slow delay and the c
   page.run("stopPolling()");
 });
 
+test("enrollment: the frames bar says how many frames of how many, not a percentage", async () => {
+  const page = await loadPage({
+    "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 },
+    "GET /api/live/viewers": { video_viewers_active: false, poll_ms: 60000 },
+    "GET /api/enrollment/status": { state: "collecting", frames_collected: 2, frames_needed: 5, can_complete: false, hints: [] },
+  });
+  await settle();
+  const bar = page.document.querySelector("#enroll-cards [role=progressbar]");
+  assert.equal(bar.getAttribute("aria-valuetext"), "2 / 5");
+  page.run("stopPolling()");
+});
+
 test("enrollment: a retry armed before the tab was left sends nothing", async () => {
   let timers = null;
   const page = await loadPage({

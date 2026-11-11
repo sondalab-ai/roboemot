@@ -19,9 +19,11 @@ function emoNumber(value) {
   return value.toFixed(2);
 }
 
-// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number.
+// A signed value in [-1, 1] as a bar from 0 to 100 (0 at the middle), with its number; the bar
+// says the number too, not the percentage it is drawn at.
 function emoAxis(label, value) {
-  return [liveRow(label, emoNumber(value)), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT)];
+  const text = emoNumber(value);
+  return [liveRow(label, text), progress(label, Math.round(((value + 1) / 2) * EMO_PERCENT), EMO_PERCENT, text)];
 }
 
 function emoAffectCard(a) {
@@ -30,7 +32,7 @@ function emoAffectCard(a) {
     emoAxis(t("live_valence"), a.valence),
     emoAxis(t("live_arousal"), a.arousal),
     liveRow(t("live_intensity"), emoNumber(a.intensity)),
-    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT),
+    progress(t("live_intensity"), Math.round(a.intensity * EMO_PERCENT), EMO_PERCENT, emoNumber(a.intensity)),
     el("p", { class: "hint" }, t("emo_baseline", { v: emoNumber(a.baseline_valence), a: emoNumber(a.baseline_arousal) })));
 }
 
@@ -56,7 +58,7 @@ function emoCircadianCard(c) {
   if (c === null) return card(t("tab_emotions"), t("emo_circadian"), el("p", { class: "hint" }, t("live_circ_off")));
   const parts = [el("p", {}, badge(word("live_circ_", c.state), "info"))];
   if (c.sleepiness !== null) {
-    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT));
+    parts.push(liveRow(t("emo_sleepiness"), emoNumber(c.sleepiness)), progress(t("emo_sleepiness"), Math.round(c.sleepiness * EMO_PERCENT), EMO_PERCENT, emoNumber(c.sleepiness)));
   }
   parts.push(liveRow(t("emo_circ_amplitude"), emoNumber(c.amplitude)));
   return card(t("tab_emotions"), t("emo_circadian"), parts);

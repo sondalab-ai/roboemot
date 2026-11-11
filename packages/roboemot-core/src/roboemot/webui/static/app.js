@@ -143,12 +143,15 @@ function badge(text, tone) {
   return el("span", { class: "sl-badge sl-badge--" + tone }, text);
 }
 
-function progress(label, value, max) {
+// A kit bar for `value` of `max`. `valueText` is what assistive technology says instead of a
+// percentage (aria-valuetext): the value as the page shows it, with its unit, where the bar maps a
+// value that is not a share (a signed axis, a level in dBFS, frames of a total).
+function progress(label, value, max, valueText) {
   const top = Math.max(max, 1);
   const shown = Math.min(value, top);
   return el("div", {
     class: "sl-progress", role: "progressbar", "aria-label": label,
-    "aria-valuemin": 0, "aria-valuemax": top, "aria-valuenow": shown,
+    "aria-valuemin": 0, "aria-valuemax": top, "aria-valuenow": shown, "aria-valuetext": valueText,
     style: { "--sl-progress": Math.round((shown / top) * 100) + "%" },
   }, el("span", { class: "sl-progress__bar" }));
 }
@@ -538,7 +541,7 @@ async function renderEnrollment(box, s, current) {
   }
   parts.push(
     el("p", {}, t("frames") + ": " + s.frames_collected + " / " + s.frames_needed),
-    progress(t("frames"), s.frames_collected, s.frames_needed),
+    progress(t("frames"), s.frames_collected, s.frames_needed, s.frames_collected + " / " + s.frames_needed),
   );
   if (s.hints.length) {
     parts.push(el("ul", {}, s.hints.map((h) => el("li", {}, state.strings["hint_" + h] || h))));

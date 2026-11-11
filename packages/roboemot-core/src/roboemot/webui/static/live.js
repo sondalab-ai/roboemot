@@ -713,9 +713,11 @@ function liveSetMeter(meter, level) {
   const ok = level.state === "ok" && level.db !== null;
   const span = -LIVE_METER_FLOOR_DB;
   const pct = ok ? Math.round(Math.min(Math.max((level.db - LIVE_METER_FLOOR_DB) / span, 0), 1) * LIVE_PERCENT) : 0;
+  const text = ok ? t("live_db", { n: level.db.toFixed(1) }) : t("live_level_" + level.state);
   meter.bar.setAttribute("aria-valuenow", pct);
+  meter.bar.setAttribute("aria-valuetext", text); // the level in dBFS, or its state: not a percentage
   meter.bar.style.setProperty("--sl-progress", pct + "%");
-  meter.text.textContent = ok ? t("live_db", { n: level.db.toFixed(1) }) : t("live_level_" + level.state);
+  meter.text.textContent = text;
 }
 
 function liveAudioBuild(box) {
