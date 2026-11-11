@@ -156,13 +156,21 @@ function progress(label, value, max, valueText) {
   }, el("span", { class: "sl-progress__bar" }));
 }
 
+// The accessible name of a control repeated on each row: its visible text first (WCAG 2.5.3,
+// label in name), then the row it acts on, so "Rename" on three rows is three different names.
+function rowName(action, name) {
+  return t("named_action", { action, name });
+}
+
 function empty(eyebrow, body) {
   return el("div", { class: "sl-empty" }, markedEyebrow("span", eyebrow), el("p", { class: "sl-empty__body" }, body));
 }
 
+// A kit table. A `null` head is an action column: its header is for assistive technology only.
 function table(head, rows) {
+  const th = (h) => el("th", {}, h === null ? el("span", { class: "sr-only" }, t("table_actions")) : h);
   return el("div", { class: "table-scroll" }, el("table", { class: "sl-table" },
-    el("thead", {}, el("tr", {}, head.map((h) => el("th", {}, h)))),
+    el("thead", {}, el("tr", {}, head.map(th))),
     el("tbody", {}, rows)));
 }
 
@@ -616,7 +624,7 @@ async function registryView() {
   const rows = list.records;
   const entities = rows.filter((r) => r.kind !== "person");
   const body = rows.length === 0 ? empty(t("tab_registry"), t("registry_empty")) : table(
-    [t("display_name"), "", t("last_seen"), ""],
+    [t("display_name"), "", t("last_seen"), null],
     rows.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind)), " ",
@@ -646,7 +654,7 @@ function rowActions(r, entities) {
       run: ({ value }) => api("POST", "/api/registry/" + r.id + "/rename", { display_name: value }),
     });
     if (done) await reload();
-  }, { small: true })];
+  }, { small: true, attrs: { "aria-label": rowName(t("rename"), r.display_name) } })];
   if (r.kind === "person") {
     buttons.push(button(t("forget"), "danger", async () => {
       const done = await ask({
@@ -654,7 +662,7 @@ function rowActions(r, entities) {
         run: ({ pin }) => api("POST", "/api/registry/" + r.id + "/forget", { confirm: true, pin: pin }),
       });
       if (done) await reload();
-    }, { small: true }));
+    }, { small: true, attrs: { "aria-label": rowName(t("forget"), r.display_name) } }));
   } else {
     for (const other of entities.filter((o) => o.id !== r.id)) {
       buttons.push(button(t("merge") + " " + other.display_name, "plain", async () => {
@@ -664,7 +672,7 @@ function rowActions(r, entities) {
           run: () => api("POST", "/api/registry/merge", { keep_id: other.id, drop_id: r.id }),
         });
         if (done) await reload();
-      }, { small: true }));
+      }, { small: true, attrs: { "aria-label": rowName(t("merge") + " " + other.display_name, r.display_name) } }));
     }
     buttons.push(button(t("delete"), "danger", async () => {
       const done = await ask({
@@ -672,7 +680,7 @@ function rowActions(r, entities) {
         run: () => api("POST", "/api/registry/" + r.id + "/delete", { confirm: true }),
       });
       if (done) await reload();
-    }, { small: true }));
+    }, { small: true, attrs: { "aria-label": rowName(t("delete"), r.display_name) } }));
   }
   return buttons;
 }
@@ -743,7 +751,7 @@ async function catalogueView() {
   const pending = data.records.filter((r) => r.status === "pending");
   const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
   const records = data.records.length === 0 ? empty(t("catalogue_pending"), t("catalogue_none")) : table(
-    [t("display_name"), "", ""],
+    [t("display_name"), "", null],
     data.records.map((r) => el("tr", { "data-row": r.id },
       el("td", {}, r.display_name),
       el("td", {}, el("span", { class: "sl-tag sl-tag--plain" }, t("kind_" + r.kind) + (r.category ? " (" + word("category_", r.category) + ")" : "")), " " + origin(r)),
@@ -828,13 +836,19 @@ function secretsCard(data, reload) {
     });
     if (done) { notice(t("secret_removed", { name: s.name })); await reload(); }
   });
-  const rows = data.secrets.map((s) => el("tr", { "data-row": s.name },
-    el("td", {}, s.name),
-    el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
-    el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
-    el("td", {}, button(t("secret_remove"), "danger", () => remove(s), { small: true, attrs: { disabled: s.used_by.length > 0, title: s.used_by.length ? t("secret_in_use_hint") : null } }))));
+  // A secret in use cannot be removed: the reason is a visible line in its row, linked to the button.
+  const rows = data.secrets.map((s, n) => {
+    const hintId = s.used_by.length ? "secret-in-use-" + n : null;
+    return el("tr", { "data-row": s.name },
+      el("td", {}, s.name),
+      el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
+      el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
+      el("td", {}, el("div", { class: "stack" }, button(t("secret_remove"), "danger", () => remove(s), {
+        small: true, attrs: { disabled: s.used_by.length > 0, "aria-label": rowName(t("secret_remove"), s.name), "aria-describedby": hintId },
+      }), hintId ? el("p", { class: "hint", id: hintId }, t("secret_in_use_hint")) : [])));
+  });
   return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
-    rows.length ? table([t("secret_name"), "", "", ""], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    rows.length ? table([t("secret_name"), "", "", null], rows) : el("p", { class: "hint" }, t("secrets_none")),
     form);
 }
 

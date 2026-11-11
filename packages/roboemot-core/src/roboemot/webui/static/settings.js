@@ -459,7 +459,8 @@ function settingTags(row, editable) {
 // refreshSettings, so a row with unsaved edits is not rebuilt when that availability flips.
 function restartBadge() {
   const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
-  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge;
+  const name = rowName(t("settings_restart_badge"), t("settings_restart_goto")); // the badge's text first
+  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": name, title: t("settings_restart_goto") }, badge) : badge;
 }
 
 const canRestart = () => {
@@ -638,9 +639,10 @@ function settingActions(node, ctl, failure) {
     writeNotice(result, "settings_reset_done");
     await settingsReload(row.path);
   };
-  const actions = [button(t("settings_save"), "primary", () => guarded(save), { small: true })];
+  const named = (label) => ({ small: true, attrs: { "aria-label": rowName(label, row.path) } });
+  const actions = [button(t("settings_save"), "primary", () => guarded(save), named(t("settings_save")))];
   if (row.source === "runtime") {
-    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), { small: true }));
+    actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), named(t("settings_reset_layer"))));
   }
   return el("div", { class: "row" }, actions);
 }
@@ -695,7 +697,7 @@ function entryBlock(node, key) {
       revealedSettings = new Map();
       writeNotice(result, "settings_entry_removed");
       await settingsReload(null);
-    }), { small: true })
+    }), { small: true, attrs: { "aria-label": rowName(t("settings_remove_entry"), path) } })
     : [];
   return el("div", { class: "entry-block stack", "data-entry": path }, el("div", { class: "row" }, el("h4", { class: "setting-entry" }, toggle), remove), body);
 }
