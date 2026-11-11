@@ -55,18 +55,21 @@ test("after a rename the focus is on the Rename button of the same row, drawn ag
   ];
   const page = await loadPage({
     ...registry(records),
+    // real names: the accessible name holds the row's name, which the rename changes
+    "GET /api/strings": { language: "en", strings: { named_action: "{action}: {name}", rename: "Rename", forget: "Forget" } },
     "POST /api/registry/p1/rename": (b) => { name = b.display_name; return {}; },
   });
   page.document.querySelector('#tabs [data-tab="registry"]').click();
   await settle();
   await settle();
-  const opener = rowButton(page, "p1", "rename");
+  const opener = rowButton(page, "p1", "Rename");
+  assert.equal(opener.getAttribute("aria-label"), "Rename: Mia");
   opener.focus();
   opener.click();
   await confirmDialog(page, { value: "Mila" });
   const focus = page.document.activeElement;
   assert.notEqual(opener.isConnected, true, "the row was drawn again");
-  assert.equal(focus, rowButton(page, "p1", "rename"), "the equal control of the same row");
+  assert.equal(focus, rowButton(page, "p1", "Rename"), "the equal control of the same row, though its name changed");
   assert.ok(page.document.querySelector('tr[data-row="p1"]').textContent.includes("Mila"));
 });
 

@@ -357,7 +357,7 @@ function stopPolling() {
 
 // The control that opened the last dialog, described so that its equal can be found once the
 // caller's reload has drawn the view again: the row it sat in (`data-row`, `data-path`,
-// `data-entry`), its accessible name and the title of its card.
+// `data-entry`), its names and the title of its card.
 const focusReturn = { spot: null };
 const FOCUSABLE = "button, input, select, textarea, a[href]";
 
@@ -370,21 +370,23 @@ function focusSpot(node) {
   const head = box && box.querySelector(".sl-card__title, h3");
   return {
     node, attr, key: attr ? row.getAttribute(attr) : null, tag: node.tagName,
-    name: node.getAttribute("aria-label") || node.textContent.trim(),
+    label: node.getAttribute("aria-label"), text: node.textContent.trim(),
     card: head ? head.textContent.trim() : null,
   };
 }
 
 const focusUsable = (node) => !node.disabled && !node.closest("[hidden]");
 
-// The control equal to `spot` in the redrawn view (same row, tag and name), else the heading of
-// the card that held it: its own control (a group toggle), or the heading itself, focusable with
-// tabindex -1 only until it loses the focus.
+// The control equal to `spot` in the redrawn view (same row and tag; the same accessible name, else
+// the same visible text: a rename changes the name "Rename: Mia", not the text "Rename"), else the
+// heading of the card that held it: its own control (a group toggle), or the heading itself,
+// focusable with tabindex -1 only until it loses the focus.
 function focusTarget(spot) {
   const view = document.getElementById("view");
   const row = spot.attr ? [...view.querySelectorAll("[" + spot.attr + "]")].find((n) => n.getAttribute(spot.attr) === spot.key) : null;
-  const same = row && [...row.querySelectorAll(FOCUSABLE)].find((n) =>
-    n.tagName === spot.tag && (n.getAttribute("aria-label") || n.textContent.trim()) === spot.name && focusUsable(n));
+  const usable = row ? [...row.querySelectorAll(FOCUSABLE)].filter((n) => n.tagName === spot.tag && focusUsable(n)) : [];
+  const same = (spot.label && usable.find((n) => n.getAttribute("aria-label") === spot.label)) ||
+    usable.find((n) => n.textContent.trim() === spot.text);
   if (same) return same;
   const head = spot.card && [...view.querySelectorAll(".sl-card")].map((c) => c.querySelector(".sl-card__title, h3"))
     .find((h) => h && h.textContent.trim() === spot.card && !h.closest("[hidden]"));
