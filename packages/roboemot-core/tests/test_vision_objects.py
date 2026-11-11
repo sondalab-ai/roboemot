@@ -296,15 +296,26 @@ def real_stages():
     return onnx.load_stages(CACHE, RoboEmotConfig().vision)
 
 
+def strongest(detections) -> dict:
+    """The highest-scored detection of each label. The detector also returns weaker ones down to
+    ``vision.object_low_score`` (the tracker's low-score pass): a second, faint cup must not
+    stand in for the one COCO marks."""
+    best: dict = {}
+    for d in detections:
+        if d.label not in best or d.score > best[d.label].score:
+            best[d.label] = d
+    return best
+
+
 @pytest.mark.models
 def test_real_detector_finds_the_cat_and_the_cup(real_stages):
-    found = {d.label: d for d in real_stages.object_detector.detect(sample("000000078426.jpg"))}
+    found = strongest(real_stages.object_detector.detect(sample("000000078426.jpg")))
     assert {"cat", "cup"} <= set(found)
     cat, cup = found["cat"], found["cup"]
     assert cat.score > 0.6 and cup.score > 0.4
     assert iou(cat.box, COCO_BOXES["000000078426.jpg"]["cat"]) > 0.5
     assert iou(cup.box, COCO_BOXES["000000078426.jpg"]["cup"]) > 0.5
-    only_cup = {d.label: d for d in real_stages.object_detector.detect(sample("000000002592.jpg"))}
+    only_cup = strongest(real_stages.object_detector.detect(sample("000000002592.jpg")))
     assert iou(only_cup["cup"].box, COCO_BOXES["000000002592.jpg"]["cup"]) > 0.5
 
 
