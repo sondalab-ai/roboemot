@@ -387,6 +387,11 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
         assert wait_for(lambda: bool(mini.clears), 5), "barge-in never stopped the speaker"
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
+        # The barge-in stops the speaker first and records its latencies after, on its own
+        # thread: wait for the record (the last one it writes), not only for the stop.
+        assert wait_for(lambda: "detect_to_stop" in app.bargein.snapshot()["latency"], 5), (
+            "the barge-in recorded no detect_to_stop latency"
+        )
         bargein_snap = app.bargein.snapshot()
         triggers, latency_bi = bargein_snap["triggers"], bargein_snap["latency"]
         assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
