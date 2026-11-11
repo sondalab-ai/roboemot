@@ -55,6 +55,10 @@ FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 RESPONSE_DONE = "response.done"
 ITEM_DELETED = "conversation.item.deleted"
 ITEM_TRUNCATED = "conversation.item.truncated"
+# Events a wire codec makes for a server outside the subset (Gemini Live, ``gemini_wire``); the
+# parser never returns them.
+USAGE_REPORT = "response.usage_report"
+GO_AWAY = "session.go_away"
 
 AUDIO_FORMAT = "audio/pcm"  # PCM16 little endian, mono
 # The rate of the reply's PCM when the server does not say. The session asks for the server's
@@ -350,16 +354,39 @@ class ResponseDone(ServerEvent):
 
 @dataclass(frozen=True)
 class ItemDeleted(ServerEvent):
-    """The server deleted a conversation item (the reply to ``conversation.item.delete``)."""
+    """The server deleted a conversation item (the reply to ``conversation.item.delete``);
+    ``emulated``: a wire codec acknowledged it for a server that has no item delete."""
 
     item_id: str | None = field(default=None, repr=False)
+    emulated: bool = False
 
 
 @dataclass(frozen=True)
 class ItemTruncated(ServerEvent):
-    """The server cut an assistant audio item (the reply to ``conversation.item.truncate``)."""
+    """The server cut an assistant audio item (the reply to ``conversation.item.truncate``);
+    ``emulated``: a wire codec acknowledged it for a server that has no item truncate."""
 
     item_id: str | None = field(default=None, repr=False)
+    emulated: bool = False
+
+
+@dataclass(frozen=True)
+class UsageReport(ServerEvent):
+    """Tokens a server reports after the responses they cover ended (Gemini Live's
+    ``turnComplete``, seconds after the last ``response.done``): ``response_ids`` the responses
+    of that model turn (each charged its estimate at its ``response.done``, whose
+    ``total_tokens`` was None), ``total_tokens`` the turn's total. Never a response event."""
+
+    response_ids: tuple[str, ...] = field(default=(), repr=False)
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class GoAway(ServerEvent):
+    """The server will close the session soon (Gemini Live's ``goAway``): ``time_left_ms``
+    when it says how soon. The client lets the current response end, then reconnects."""
+
+    time_left_ms: int | None = None
 
 
 @dataclass(frozen=True)
