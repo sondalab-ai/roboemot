@@ -206,8 +206,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] `test_app_llm_traits.py::test_shutdown_does_not_wait_for_a_stuck_route` failed once in a full local run
       (10.7 s against its 10 s wall-time bound, 2026-11-05). On `main` its call phase already takes 8.1-9.1 s,
       so the margin is thin. Make it timing-independent, or review the bound.
-- [ ] `test_traits_worker.py::test_a_failed_rating_is_not_asked_again_within_the_backoff` failed once under
-      full-suite load (2026-11-05, S1b review). It passed 32/32 alone. Check it for wall-clock waits.
+- [x] `test_traits_worker.py::test_a_failed_rating_is_not_asked_again_within_the_backoff` failed once under
+      full-suite load (2026-11-05, S1b review). Root cause: a manual run cleared the backoff (a product
+      race) and the test slept against it. Both fixed in PR 231 (2026-11-11).
 - [ ] `test_realtime_cues.py::test_a_skipped_audio_turn_ends_the_listening_cue_and_shows_no_other_cue` failed
       once in a full run (2026-11-06, S2). Not reproduced in 20 runs under load on the branch or on `main`.
       Cause unknown.
@@ -218,3 +219,23 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       live on the route. It now waits for the route's `responses` count.
 - [x] `test_realtime_tone.py::test_an_invalid_only_tone_round_gets_its_output_and_no_extra_response`: both CI
       failures predate PR 168 (`7ba46ee`), which waits for the output to cross the socket. No change.
+
+## Parked performance ideas (review of 2026-11-11, owner: possible improvements, parked)
+
+Measured on the robot (CM4 at 1.8 GHz) on 2026-11-11. None is planned; each has its number so a
+later decision needs no new measure.
+
+- [ ] Clip library as JSON. `data/emotions/clips.yaml` takes 1.33 s to parse at each app start (the
+      same data as JSON: 0.03 s). Needs a SPEC 4A edit (the Apache-2.0 modified-file notice is the
+      YAML header today), a change of `scripts/import_pollen_emotions.py` and a new data file.
+- [ ] Asleep load that is left after the microphone stop (PR 229): 15.3% of one core, 453 wake-ups/s.
+      The SDK's own Python threads (`recv_events`, `_recv_loop`) use about 7.5%, the camera feed thread
+      (`queue0:src`) about 5%, the motion loop 2%. A cut needs a change in how the SDK's media and
+      client are used while asleep; the result is uncertain.
+- [ ] Camera pump rate. `roboemot-camera` reads at up to `vision.rates.camera_hz` (30) for 8 Hz of
+      vision work and uses 7.4 to 8.9% of one core at nice 5 while awake. A lower read rate saves at
+      most about 5%; its timing against the detector schedule is fragile and needs the real camera.
+- [ ] Dropped with a measure, listed so they are not proposed again: no music classifier load when
+      `music.enabled` is off (the YAMNet load takes 0.04 s), background load of the vision models (all
+      five load in 1.45 s), a gate before Silero VAD (the listener is 11.5% of one core in steady state,
+      Silero about 8% at 2.4 ms per call).
