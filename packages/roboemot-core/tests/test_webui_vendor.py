@@ -151,12 +151,16 @@ def test_a_stale_etag_gets_the_file(client):
     assert resp.body
 
 
-def test_everything_else_stays_no_store_without_an_etag(client):
-    for path in ["/", "/static/app.js", "/static/style.css", "/static/fx.js", "/api/strings"]:
+def test_first_party_files_revalidate_and_the_api_stays_no_store(client):
+    for path in ["/", "/static/app.js", "/static/style.css", "/static/fx.js"]:
         resp = client.request("GET", path, headers={"If-None-Match": "*"})
-        assert resp.status == 200, path
-        assert resp.headers["Cache-Control"] == "no-store", path
-        assert "ETag" not in resp.headers, path
+        assert resp.status == 304, path
+        assert resp.headers["Cache-Control"] == "no-cache", path
+        assert resp.headers["ETag"], path
+    resp = client.request("GET", "/api/strings", headers={"If-None-Match": "*"})
+    assert resp.status == 200
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert "ETag" not in resp.headers
 
 
 @pytest.mark.parametrize(
@@ -189,10 +193,10 @@ def test_head_on_a_vendored_file_is_200_with_headers_and_no_body(client):
     assert int(resp.headers["Content-Length"]) == (VENDOR / "tokens.css").stat().st_size
 
 
-def test_head_on_a_first_party_file_is_no_store_and_a_missing_one_404(client):
+def test_head_on_a_first_party_file_is_no_cache_and_a_missing_one_404(client):
     resp = client.request("HEAD", "/static/app.js")
     assert resp.status == 200 and resp.body == b""
-    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["Cache-Control"] == "no-cache" and resp.headers["ETag"]
     assert client.request("HEAD", ROUTE + "nope.css").status == 404
 
 
