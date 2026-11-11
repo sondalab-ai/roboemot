@@ -48,6 +48,20 @@ reads until ``None``, ``1 + DRAIN_MAX`` reads, or as long as the stall lasted. E
 the voice queue as soon as it is read. The reflex gets only the newest chunk of a pass, and only
 if it is at most ``max_gap_s`` behind; every other chunk read is counted in ``dropped_stale``.
 
+Capture pause (SPEC 12A, Asleep; core ``CapturePause``). While the platform sleeps and nothing
+needs the sound, ``pause_capture`` asks the reading thread to call ``media.stop_recording()`` and
+then wait on an event, with no SDK read and no timed wake-up, until ``resume_capture`` or
+``stop``. Every SDK call stays on that thread, so the app tick never waits for ALSA. On resume the
+thread calls ``media.start_recording()``, empties the voice queue, marks the next voice chunk
+``gap``, starts a fresh resampler stream and a fresh stamp chain (the first chunk has no previous
+one) and does not count the sleep as a stall. A failed restart sets ``unavailable`` with the
+exception type and is tried again every poll period, logged once. In reachy-mini 1.12 and 1.13
+(``media/audio_gstreamer.py``) one GStreamer pipeline holds the capture and the playback chains,
+and ``stop_recording``/``start_recording`` set that whole pipeline to NULL/PLAYING: the speaker
+is silent while the capture is paused, and plays again once it resumes. Nothing plays while the
+pause applies (the speech is cut first, cues are muted asleep). ``start_recording`` ignores the
+``set_state`` result, so a restart the SDK could not do shows as ``no_data``, not as an error.
+
 Privacy (SPEC 12): without ``voice`` a chunk is only held while its RMS and the level sums are
 taken, and only those scalars leave this module. With ``voice`` the queue holds audio for the voice
 pipeline by design and nothing else; frames are never published on the bus, written to disk or
@@ -115,7 +129,8 @@ class ReachyAudio:
     chunk also goes, downmixed and resampled to ``voice_rate_hz``, to a queue of at most
     ``voice_queue_s`` seconds that ``read`` drains. ``state`` is one of ``off`` (not started),
     ``unavailable`` (no audio system or start failed; ``reason`` says which), ``no_data``
-    (running, nothing usable yet) and ``running``. The stamp is the monotonic time of the read.
+    (running, nothing usable yet), ``running`` and ``paused`` (capture stopped while the robot
+    is asleep). The stamp is the monotonic time of the read.
     """
 
     def __init__(
@@ -156,6 +171,9 @@ class ReachyAudio:
         self._in_channels: int | None = None
         self._resampler: StreamResampler | None = None
         self._stop = threading.Event()
+        self._pause_asked = threading.Event()  # capture pause requested (CapturePause)
+        self._wake = threading.Event()  # wakes a thread idle in the capture pause
+        self._halted = False  # the thread stopped the capture for the pause (thread-owned)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._state, self._reason = "off", None
@@ -172,6 +190,23 @@ class ReachyAudio:
         """Turn the voice queue on or off before ``start`` (the app learns whether a listener
         exists only after the hub is built); a hub without a consumer queues nothing."""
         self._voice = enabled
+
+    def pause_capture(self) -> None:
+        """Ask the reading thread to stop the SDK capture and idle (module docstring, Capture
+        pause). Idempotent, returns at once; a hub that is not running only keeps the request."""
+        self._pause_asked.set()
+        self._wake.set()
+
+    def resume_capture(self) -> None:
+        """Ask the reading thread to restart the capture with no audio from before the pause.
+        Idempotent, returns at once; it never starts a capture that ``start`` did not."""
+        self._pause_asked.clear()
+        self._wake.set()
+
+    @property
+    def capture_paused(self) -> bool:
+        """Whether the capture pause is requested (the thread applies it within a pass)."""
+        return self._pause_asked.is_set()
 
     def snapshot(self) -> dict[str, Any]:
         """State for the debug report: scalars and a reason, never audio."""
@@ -299,6 +334,7 @@ class ReachyAudio:
         except Exception as exc:
             self._set("unavailable", f"start_recording failed: {type(exc).__name__}")
             return
+        self._halted = False
         self._level_reset()
         self._last_end = None
         if self._voice:
@@ -395,6 +431,7 @@ class ReachyAudio:
         """Stop the thread, wait briefly, then stop the capture. A thread stuck in the SDK keeps
         its handle, so a later ``start`` does not run a second one beside it."""
         self._stop.set()
+        self._wake.set()  # a thread idle in the capture pause
         with self._voice_cond:
             self._voice_closed = True
             self._voice_cond.notify_all()
@@ -480,9 +517,55 @@ class ReachyAudio:
             self._state, self._reason = "running", None
         return True
 
+    def _halt(self, media: Any) -> None:
+        """Stop the capture for the pause (once) and end the stamp chain; the thread then idles."""
+        if self._halted:
+            return
+        self._halted = True
+        try:
+            media.stop_recording()
+        except Exception as exc:
+            log.warning("audio: stop_recording: %s", type(exc).__name__)
+        self._last_end = None
+        self._set("paused", "capture stopped while the robot is asleep")
+
+    def _restart(self, media: Any) -> bool:
+        """Start the capture again after the pause, with nothing from before it (module
+        docstring, Capture pause). False when ``start_recording`` failed (retried next pass)."""
+        try:
+            media.start_recording()
+        except Exception as exc:
+            reason = f"start_recording failed: {type(exc).__name__}"
+            if reason != self._last_error:
+                log.warning("audio: %s", reason)
+                self._last_error = reason
+            self._set("unavailable", reason)
+            return False
+        self._halted, self._last_error, self._last_end = False, None, None
+        with self._level_lock:
+            self._level_reset()
+        if self._resampler is not None and self._in_rate is not None:
+            self._resampler = StreamResampler(self._in_rate, self._voice_rate)
+        with self._voice_cond:
+            self._voice_q.clear()
+            self._voice_queued, self._voice_gap = 0, self._voice
+        self._set("no_data", "no audio chunk read yet")
+        return True
+
     def _run(self) -> None:
         ended = self._clock()
+        media = self._mini.media
         while not self._stop.is_set():
+            self._wake.clear()  # before the checks: a request after them still wakes the wait
+            if self._pause_asked.is_set():
+                self._halt(media)
+                self._wake.wait()
+                continue
+            if self._halted:
+                if not self._restart(media):
+                    self._stop.wait(self._period)
+                    continue
+                ended = self._clock()  # the sleep is no stall: nothing to catch up
             # Read what is queued, then wait out the rest of the period; after a stall, catch up.
             # The gap runs from the end of the last pass, so a long pass (a drain) is no stall.
             gap = self._clock() - ended
