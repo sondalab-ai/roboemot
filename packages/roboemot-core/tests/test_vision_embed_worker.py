@@ -190,7 +190,8 @@ def test_cut_covers_the_pixels_a_backend_takes_from_the_frame():
 
 def run_burst(tmp_path, worker_mode):
     app = Appearance()
-    pipe, worker = pipeline(tmp_path, app, worker=worker_mode)
+    # A recognised gap of 2 s keeps the steady embeddings inside the 12 frames.
+    pipe, worker = pipeline(tmp_path, app, worker=worker_mode, entity_reembed_recognised_s=2.0)
     votes = observed(pipe)
     known = []
     for i in range(12):
