@@ -75,7 +75,12 @@ test("a view that fails before it draws shows the error in the view with a retry
   const failed = view(page).querySelector("#view-failed");
   assert.ok(failed && failed.classList.contains("sl-card"), "a kit card in the view");
   assert.ok(failed.textContent.includes("Settings are not available."));
-  assert.equal(page.document.querySelector("#notice").textContent, "Settings are not available.", "the toast stays");
+  // shown once (the card), announced once: the alert region holds the text for assistive technology only
+  assert.equal(page.document.querySelectorAll("#notice .sl-toast").length, 0, "no toast repeats the card");
+  const alert = page.document.getElementById("notice-alert");
+  assert.equal(alert.textContent, "Settings are not available.");
+  assert.ok(alert.firstElementChild.classList.contains("sr-only"));
+  assert.equal(alert.querySelector("button"), null, "nothing focusable that nobody sees");
   const retry = failed.querySelector("button");
   assert.equal(retry.textContent, "Try again");
   down = false;
@@ -92,6 +97,7 @@ test("a view that drew and then failed keeps its content", async () => {
   await page.run("guardedView(async () => { newView(); document.getElementById('view').append(el('p', { id: 'drawn' }, 'x')); throw new Error('generic'); })");
   assert.ok(view(page).querySelector("#drawn"), "the content stays");
   assert.equal(view(page).querySelector("#view-failed"), null);
+  assert.equal(page.document.querySelectorAll("#notice-alert .sl-toast").length, 1, "with no card, the toast says it");
 });
 
 test("a session that expired while a view loads goes to the login, not to the error card", async () => {

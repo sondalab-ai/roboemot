@@ -501,3 +501,20 @@ test("routes: a chat check report adds no realtime list and no empty node", asyn
   const box = card.querySelector("[role=status]");
   assert.equal(box.childNodes.length, 2, "the verdict line and the check list only");
 });
+
+test("the Edit toggle says whether the route form is open and which form it opens", async () => {
+  const route = { name: "cloud", model: "m", endpoint: "h", base_url: "http://h", locality: "cloud", kind: "chat", key: "none",
+    secret: null, removable: true, running: false, last_check: null };
+  const page = await routesPage({ "GET /api/routes": { routes: [route], name_max_chars: 32 } });
+  const toggle = [...page.document.querySelectorAll('[data-row="cloud"] .row > button')].find((b) => b.textContent === "route_edit");
+  const form = page.document.getElementById(toggle.getAttribute("aria-controls"));
+  assert.ok(form && form.querySelector("form"), "aria-controls names the edit form");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(form.hidden, true);
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(form.hidden, false);
+  toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(form.hidden, true);
+});

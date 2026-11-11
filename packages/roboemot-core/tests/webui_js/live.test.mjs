@@ -35,7 +35,7 @@ const STRINGS = {
   live_memory: "Memory used: {n} %",
   live_disk: "Disk: {free} GB free ({n} % used)",
   live_wifi: "Wi-Fi: {n} dBm, link quality {q}",
-  live_process_mem: "RoboEmot memory: {n} MB, {threads} threads",
+  live_process_mem: "RoboEmot memory: {mb} MB, {n} threads",
   live_throttle: "Throttling",
   live_throttle_active: "Now: {names}",
   live_throttle_flag_under_voltage: "under-voltage",
