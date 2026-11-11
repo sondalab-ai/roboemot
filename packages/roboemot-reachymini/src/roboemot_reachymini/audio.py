@@ -519,14 +519,13 @@ class ReachyAudio:
 
     def _halt(self, media: Any) -> None:
         """Stop the capture for the pause (once) and end the stamp chain; the thread then idles."""
-        if self._halted:
-            return
-        self._halted = True
-        try:
-            media.stop_recording()
-        except Exception as exc:
-            log.warning("audio: stop_recording: %s", type(exc).__name__)
-        self._last_end = None
+        if not self._halted:  # already halted: a restart failed, the capture is still stopped
+            self._halted = True
+            try:
+                media.stop_recording()
+            except Exception as exc:
+                log.warning("audio: stop_recording: %s", type(exc).__name__)
+            self._last_end = None
         self._set("paused", "capture stopped while the robot is asleep")
 
     def _restart(self, media: Any) -> bool:

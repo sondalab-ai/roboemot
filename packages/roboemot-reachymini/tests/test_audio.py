@@ -859,6 +859,9 @@ def test_a_failing_restart_reports_unavailable_with_the_reason():
         snap = audio.snapshot()
         assert snap["state"] == "unavailable"
         assert snap["reason"] == "start_recording failed: OSError"
+        audio.pause_capture()  # asleep again while the restart keeps failing
+        assert wait_for(lambda: audio.snapshot()["state"] == "paused")
+        assert m.stopped == 1
     finally:
         audio.stop()
     assert audio.snapshot()["state"] == "off"
