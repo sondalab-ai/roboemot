@@ -99,24 +99,105 @@ def test_a_record_of_the_same_kind_votes_whatever_its_category(tmp_path):
     assert runs(pipe)["burst"] == CFG.vision.embedding_burst - 1
 
 
-def test_a_recognised_object_keeps_the_steady_rate(tmp_path):
-    pipe, app = rig(tmp_path)
-    reg = pipe.matcher.registry
-    mug = reg.enroll_entity("object", "Mug", np.stack([axis(3)] * 5), APP_MODEL, category="cup")
+def embed_stamps(pipe, app, start, stop, dets=None):
+    """Process frames ``start`` .. ``stop - 1`` (``dets`` maps a frame index to its
+    detections); returns the capture stamps of the frames that ran an entity embedding."""
     stamps = []
-    for i in range(20):
+    for i in range(start, stop):
+        if dets is not None:
+            pipe.object_detector.dets = dets(i)
         before = len(app.boxes)
         run(pipe, i, i + 1)
         if len(app.boxes) > before:
             stamps.append(float(i))
+    return stamps
+
+
+def recognised_rig(tmp_path, **kw):
+    pipe, app = rig(tmp_path, **kw)
+    reg = pipe.matcher.registry
+    mug = reg.enroll_entity("object", "Mug", np.stack([axis(3)] * 5), APP_MODEL, category="cup")
+    return pipe, app, mug
+
+
+def test_a_recognised_still_object_waits_the_recognised_gap(tmp_path):
+    """Owner decision 2026-11-11: a recognised thing whose box keeps its size and shape is
+    embedded again every ``entity_reembed_recognised_s`` (10 s), not every 2 s."""
+    pipe, app, mug = recognised_rig(tmp_path)
+    stamps = embed_stamps(pipe, app, 0, 60)
     (state,) = pipe._entities.values()
     assert state.owner_id == mug.entity_id
     votes = CFG.identity.votes_required
     assert runs(pipe)["new"] == 1 and runs(pipe)["burst"] == votes - 1
+    gap = CFG.vision.entity_reembed_recognised_s
+    assert gap == 10.0
+    assert np.diff(stamps[votes - 1 :]).tolist() == [gap] * (len(stamps) - votes)
+    assert runs(pipe)["recognised"] == len(stamps) - votes >= 4
+    assert runs(pipe)["floor"] == 0 and skips(pipe)["settled"] > 0
+
+
+def test_a_recognised_gap_of_two_keeps_the_old_steady_rate(tmp_path):
+    pipe, app, mug = recognised_rig(tmp_path, entity_reembed_recognised_s=2.0)
+    stamps = embed_stamps(pipe, app, 0, 20)
+    (state,) = pipe._entities.values()
+    assert state.owner_id == mug.entity_id
+    votes = CFG.identity.votes_required
     period = 1 / CFG.vision.rates.appearance_hz
     assert np.diff(stamps[votes - 1 :]).tolist() == [period] * (len(stamps) - votes)
-    assert runs(pipe)["recognised"] == len(stamps) - votes
-    assert runs(pipe)["floor"] == 0 and runs(pipe)["recognised"] >= 7
+    assert runs(pipe)["recognised"] == len(stamps) - votes >= 7
+
+
+def test_a_recognised_track_never_takes_the_unknown_floor(tmp_path):
+    pipe, app, _ = recognised_rig(tmp_path, entity_reembed_recognised_s=100.0)
+    stamps = embed_stamps(pipe, app, 0, 90)
+    assert runs(pipe)["floor"] == 0 and runs(pipe)["recognised"] == 0
+    assert len(stamps) == CFG.identity.votes_required
+
+
+def test_a_recognised_track_whose_box_changes_size_is_embedded_at_once(tmp_path):
+    pipe, app, _ = recognised_rig(tmp_path)
+    big = Detection((90, 90, 170, 170), 0.8, "cup")  # area x1.8
+    stamps = embed_stamps(pipe, app, 0, 20, lambda i: [CUP] if i < 9 else [big])
+    assert 9.0 in stamps and runs(pipe)["changed"] == 1
+
+
+def test_a_recognised_track_whose_box_changes_shape_is_embedded_at_once(tmp_path):
+    pipe, app, _ = recognised_rig(tmp_path)
+    wide = Detection((85, 112, 175, 152), 0.8, "cup")  # aspect x2.25
+    stamps = embed_stamps(pipe, app, 0, 20, lambda i: [CUP] if i < 9 else [wide])
+    assert 9.0 in stamps and runs(pipe)["changed"] == 1
+
+
+def test_a_recognised_track_seen_again_after_a_missed_run_is_embedded_at_once(tmp_path):
+    """A comeback is the likeliest moment for another thing to take the track over."""
+    pipe, app, _ = recognised_rig(tmp_path)
+    stamps = embed_stamps(pipe, app, 0, 20, lambda i: [] if i == 8 else [CUP])
+    assert len(pipe._entities) == 1  # the same track
+    assert 9.0 in stamps and runs(pipe)["reacquired"] == 1
+
+
+def test_a_recognised_track_change_still_waits_the_appearance_period(tmp_path):
+    """A change right after an embedding waits ``1 / rates.appearance_hz`` like any other."""
+    pipe, app, _ = recognised_rig(tmp_path)
+    run(pipe, 0, 12)  # recognised; the last embedding at 4 s
+    big = Detection((90, 90, 170, 170), 0.8, "cup")
+    waved = [CUP, big]
+    stamps = embed_stamps(pipe, app, 12, 24, lambda i: [waved[i % 2]])
+    period = 1 / CFG.vision.rates.appearance_hz
+    assert stamps and min(np.diff([*stamps]).tolist(), default=period) >= period
+
+
+def test_a_recognised_track_gives_the_same_embeddings_twice(tmp_path):
+    """Replay determinism (SPEC 14): the recognised gap uses capture stamps only."""
+
+    def once(path):
+        pipe, app, _ = recognised_rig(path)
+        stamps = embed_stamps(pipe, app, 0, 45, lambda i: [] if i == 20 else [CUP])
+        return stamps, skips(pipe), runs(pipe)
+
+    first = once(tmp_path / "a")
+    assert first == once(tmp_path / "b")
+    assert first[2]["recognised"] > 0 and first[2]["reacquired"] == 1
 
 
 def test_an_unknown_track_is_recognised_by_a_record_enrolled_later(tmp_path):
@@ -434,7 +515,7 @@ def test_the_shown_track_runs_only_its_votes_and_keeps_its_owner(tmp_path):
     assert state.owner_id == mug.entity_id and skips(pipe)["episode"] >= 25
     pipe.governor.set_active("objects", False)
     run(pipe, 40, 43)
-    assert runs(pipe)["recognised"] >= 1  # the steady rate is back
+    assert runs(pipe)["changed"] + runs(pipe)["recognised"] >= 1  # the usual rules are back
 
 
 COUCH = Detection((60, 40, 260, 240), 0.8, "couch")  # behind the person, centre (160, 140)

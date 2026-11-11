@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from roboemot import priority, shutdown
+from roboemot import priority, shutdown, thread_names
 from roboemot.config import ConfigStack
 from roboemot.manifest import Manifest
 from roboemot.robot_platform import RobotPlatform, RobotSession
@@ -53,6 +53,7 @@ class Runtime:
         admin = restore_settings(
             stack, manifest, lambda: realtime_key_hosts(built[0]) if built else []
         )
+        thread_names.install()  # before any thread starts: top -H then names them (SPEC 13)
         runtime_cfg = stack.effective().runtime
         priority.configure(runtime_cfg.background_nice, runtime_cfg.background_threads)
         p = assemble(host, stack, manifest, self.platform, self.session)

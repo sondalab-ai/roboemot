@@ -2050,8 +2050,8 @@ class VisionRates(Strict):
     )
     appearance_hz: float = param(
         0.5,
-        "Appearance embedding rate of a recognised animal or object track, and the shortest "
-        "gap between two embeddings of any track after the new-track burst",
+        "Highest appearance embedding rate (DINOv2-S) of an animal or object track after the "
+        "new-track burst: the shortest gap between two of its embeddings",
         unit="Hz",
         ge=0.05,
         le=30,
@@ -2409,7 +2409,13 @@ class VisionConfig(Strict):
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
     )
     detector_height_px: int = param(
-        240, "Face detector input height", unit="px", ge=64, le=1280, restart=True
+        240,
+        "Face detector input height. With the width it sets the scale of the picture; rows and "
+        "columns the picture leaves empty are not run (a 16:9 camera runs at 320x192)",
+        unit="px",
+        ge=64,
+        le=1280,
+        restart=True,
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
@@ -2494,8 +2500,18 @@ class VisionConfig(Strict):
     entity_reembed_floor_s: float = param(
         60.0,
         "An unknown animal or object track whose box keeps its size and shape is embedded "
-        "again (DINOv2-S) only after this much capture time; recognised tracks keep "
-        "rates.appearance_hz",
+        "again (DINOv2-S) only after this much capture time; recognised tracks wait "
+        "entity_reembed_recognised_s",
+        unit="s",
+        ge=2,
+        le=3600,
+    )
+    entity_reembed_recognised_s: float = param(
+        10.0,
+        "A recognised animal or object track whose box keeps its size and shape is embedded "
+        "again (DINOv2-S, about 1.2 s of CPU on the CM4) only after this much capture time; "
+        "a size or shape change or a missed object run makes it due at once; 2 gives about "
+        "the old rates.appearance_hz rate",
         unit="s",
         ge=2,
         le=3600,
