@@ -18,8 +18,10 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,15 @@ class RouteBusy(RuntimeError):
     budget in parallel."""
 
 
+class PreviewRate(RuntimeError):
+    """A voice preview of this route started less than ``preview_min_interval_s`` ago;
+    ``retry_after_s`` is what is left of it."""
+
+    def __init__(self, retry_after_s: float) -> None:
+        super().__init__("preview_rate")
+        self.retry_after_s = retry_after_s
+
+
 class RouteChecker:
     """What the web UI needs for routes: ``list_routes()`` and ``start(name)``.
 
@@ -91,7 +102,10 @@ class RouteChecker:
         realtime_provider: Callable[[], SessionProvider | None] | None = None,
         realtime_tools: Callable[[], list[dict[str, Any]] | None] | None = None,
         realtime_status: Callable[[], dict[str, Any] | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
+        self._previews: dict[str, float] = {}  # route name -> when its last preview started
         self.cfg, self.store, self._router = cfg, store, router
         self._realtime_provider = realtime_provider
         self._realtime_tools = realtime_tools
@@ -173,25 +187,34 @@ class RouteChecker:
 
     def preview(self, name: str, voice: str, wait_s: float) -> bytes:
         """Say the voice preview of realtime route ``name`` in ``voice`` (SPEC 8, Voice
-        preview) and return its WAV; one at a time, never beside a check (``RouteBusy``). It
-        runs on its own thread, bounded by ``wait_s``; this call waits that long for the audio
-        (``PreviewFailed("timeout")`` past it), the session's close comes after. ``KeyError``
-        for an unknown route; the check's refusals and :class:`PreviewFailed` otherwise."""
+        preview) and return its WAV; one at a time, never beside a check (``RouteBusy``), and
+        one per route per ``preview_min_interval_s`` (:class:`PreviewRate`). It runs on its own
+        thread, bounded by ``wait_s`` less ``preview_reply_margin_s``; this call waits
+        ``wait_s`` for the audio or the preview's failure (``PreviewFailed("timeout")`` past
+        it), the session's close comes after. ``KeyError`` for an unknown route; the check's
+        refusals and :class:`PreviewFailed` otherwise."""
         cfg = self.cfg()
         route = next((r for r in cfg.llm_routes if r.name == name), None)
         if route is None:
             raise KeyError(name)
         if route.kind != "realtime":
             raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
+        rt = cfg.voice.realtime_route
         with self._lock:
             if self._running is not None or self._previewing:
                 raise RouteBusy(name)
+            since = self._clock() - self._previews.get(name, -math.inf)
+            if since < rt.preview_min_interval_s:
+                raise PreviewRate(rt.preview_min_interval_s - since)
             router = self._router() or self._private_router(cfg)
             self._previewing = True
+            self._previews[name] = self._clock()
+        # the preview gives up a margin before this wait, so its own code reaches the caller
+        deadline_s = max(0.0, wait_s - rt.preview_reply_margin_s)
         result: concurrent.futures.Future[bytes] = concurrent.futures.Future()
         thread = threading.Thread(
             target=self._preview,
-            args=(route, voice, cfg, router, wait_s, result),
+            args=(route, voice, cfg, router, deadline_s, result),
             name="roboemot-voice-preview",
             daemon=True,
         )

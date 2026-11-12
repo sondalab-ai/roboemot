@@ -47,7 +47,7 @@ from .auth import LoginLimiter, PinStore, Sessions
 from .descriptions import localize
 from .guard import same_origin
 from .robot_section import PATH_ROOT
-from .routes import RouteBusy
+from .routes import PreviewRate, RouteBusy
 from .secrets_admin import SecretInUse, secret_name, secret_value
 from .settings import SettingNotAllowed
 from .strings import STRINGS, language_for
@@ -81,8 +81,9 @@ STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
 ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind", "protocol", "voice"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
-VOICE_NAME = re.compile(r"[A-Za-z0-9_. -]{0,64}")  # a server voice name the preview may ask for
-PREVIEW_SHARE = 0.8  # of the request deadline: the rest is for reading and writing the request
+# a server voice name the preview may ask for: empty (the route's default), or at most 64
+# characters that start with a letter, digit or underscore (never only spaces, a dot or a dash)
+VOICE_NAME = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_. -]{0,63})?")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
 LIVE_CURSOR_DIGITS = 15  # digits of the transcript cursor a client may send
@@ -1188,18 +1189,27 @@ class WebApi:
         text, a transcript or a key. Refused before anything is sent as the check is."""
         port = self._routes_port()
         body = self._json_body(req)
-        v.only_keys(body, {"route", "voice"})
+        extra = sorted(set(body) - {"route", "voice"})
+        if extra:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request", field=extra[0])
         name, voice = body.get("route"), body.get("voice", "")
         if not isinstance(name, str) or not ROUTE_NAME.fullmatch(name):
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request", field="route")
         if not isinstance(voice, str) or not VOICE_NAME.fullmatch(voice):
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request", field="voice")
+        web = self.web
         try:
-            wav = port.preview(name, voice.strip(), self.web.request_deadline_s * PREVIEW_SHARE)
+            wav = port.preview(
+                name, voice.rstrip(), web.request_deadline_s * web.request_work_share
+            )
         except KeyError as exc:
             raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
         except RouteBusy as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
+        except PreviewRate as exc:
+            raise ApiError(
+                HTTPStatus.TOO_MANY_REQUESTS, "preview_rate", retry_after=exc.retry_after_s
+            ) from exc
         except RouteKindUnsupported as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_kind") from exc
         except RouteBudgetExhausted as exc:

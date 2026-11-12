@@ -440,6 +440,9 @@ EN: dict[str, str] = {
     "err_routes_unavailable": "Routes are not available.",
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
+    "err_preview_rate": (
+        "A voice sample of this route was asked for a moment ago. Wait a few seconds."
+    ),
     "err_route_budget": "The daily token budget of the route is spent.",
     "err_route_kind": "This kind of route cannot be checked.",
     "err_route_secret": "The route key is not available. Set it on the robot: roboemot secrets set",
@@ -521,6 +524,7 @@ EN: dict[str, str] = {
     "voice_preview_err_provider": "No sample: no session provider for this route.",
     "voice_preview_err_no_extra": "No sample: the realtime extra is not installed.",
     "voice_preview_err_failed": "No sample: the preview failed.",
+    "voice_preview_err_decode": "The sample arrived but the browser could not play it.",
     "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
@@ -1496,6 +1500,10 @@ IT: dict[str, str] = {
     "err_routes_unavailable": "I modelli non sono disponibili.",
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
+    "err_preview_rate": (
+        "Un campione della voce di questo modello è stato chiesto un attimo fa. Aspetta "
+        "qualche secondo."
+    ),
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
     "err_route_kind": "Questo tipo di modello non si può controllare.",
     "err_route_secret": "La chiave non è disponibile. Impostala sul robot: roboemot secrets set.",
@@ -1590,6 +1598,7 @@ IT: dict[str, str] = {
     ),
     "voice_preview_err_no_extra": "Nessun campione: l'extra realtime non è installato.",
     "voice_preview_err_failed": "Nessun campione: l'anteprima non è riuscita.",
+    "voice_preview_err_decode": "Il campione è arrivato ma il browser non riesce a riprodurlo.",
     "route_key_hosts": (
         "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
     ),

@@ -42,62 +42,19 @@ from .check import (
     offline_tools,
     refuse_unavailable,
 )
+from .gemini_wire import GEMINI_VOICES
+from .protocol import QWEN3_VOICES
 from .route import EVENT_PREFIX, PCM_SAMPLE_BYTES, realtime_extra, session_update
 from .session import GEMINI_LIVE, DirectSession, SessionProvider
 from .turn import line_instructions
 
 log = logging.getLogger(__name__)
 
-# Gemini Live's 30 prebuilt voices (the owner's list, 2026-11-11).
-GEMINI_VOICES = (
-    "Zephyr",
-    "Puck",
-    "Charon",
-    "Kore",
-    "Fenrir",
-    "Leda",
-    "Orus",
-    "Aoede",
-    "Callirrhoe",
-    "Autonoe",
-    "Enceladus",
-    "Iapetus",
-    "Umbriel",
-    "Algieba",
-    "Despina",
-    "Erinome",
-    "Algenib",
-    "Rasalgethi",
-    "Laomedeia",
-    "Achernar",
-    "Alnilam",
-    "Schedar",
-    "Gacrux",
-    "Pulcherrima",
-    "Achird",
-    "Zubenelgenubi",
-    "Vindemiatrix",
-    "Sadachbia",
-    "Sadaltager",
-    "Sulafat",
-)
-# Qwen3-TTS's voices, which the platform's openai_realtime server speaks (the owner's list,
-# 2026-11-11).
-QWEN3_VOICES = (
-    "Aiden",
-    "Ryan",
-    "Dylan",
-    "Eric",
-    "Ono_Anna",
-    "Serena",
-    "Sohee",
-    "Uncle_Fu",
-    "Vivian",
-)
 # The voices the web UI offers per route protocol; any other name may still be typed.
 KNOWN_VOICES = {GEMINI_LIVE: GEMINI_VOICES, "openai_realtime": QWEN3_VOICES}
 PREVIEW_EVENT = f"{EVENT_PREFIX}preview_1"
 WAV_CHANNELS = 1
+INSTRUCTION_SENDS = 2  # the line rule goes in the setup and in the request: both are charged
 OFFLINE = "offline"  # the router knows the network is down
 PSEUDONYMS = "pseudonyms"  # as the client names it: real names may not reach a cloud host
 AUDIO_CAP = "audio_cap"
@@ -222,7 +179,7 @@ class _Preview(_Run):
             raise PreviewFailed(SEND_FAILED)
         sent_at = self.clock()
         done = self._response(sent_at)
-        self._charge(done, len(instructions) * 2)  # the setup's and the request's
+        self._charge(done, len(instructions) * INSTRUCTION_SENDS)
         rounds, cap = 0, self.cfg.conversation.max_tool_rounds
         while done is not None and self.calls and rounds < cap:
             rounds += 1
@@ -240,7 +197,9 @@ class _Preview(_Run):
         return _wav(bytes(self.pcm), self.rate_hz or protocol.NATIVE_OUTPUT_RATE_HZ)
 
     def _audio(self, pcm: bytes) -> bool:
-        """Keep the chunk unless it would pass ``preview_max_bytes`` (``audio_cap``)."""
+        """Keep the chunk's whole samples (a stray odd byte would shift every later sample)
+        unless they would pass ``preview_max_bytes`` (``audio_cap``)."""
+        pcm = pcm[: _whole(len(pcm))]
         if len(self.pcm) + len(pcm) > self.cfg.voice.realtime_route.preview_max_bytes:
             self.report.failure = AUDIO_CAP
             return False
@@ -254,11 +213,18 @@ class _Preview(_Run):
 
 
 def _wav(pcm: bytes, rate_hz: int) -> bytes:
-    """``pcm`` (PCM16 mono at ``rate_hz``) as a WAV file in memory, never on disk."""
+    """``pcm`` (PCM16 mono at ``rate_hz``) as a WAV file in memory, never on disk; a stray
+    odd byte at the end is left out."""
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
         w.setnchannels(WAV_CHANNELS)
         w.setsampwidth(PCM_SAMPLE_BYTES)
         w.setframerate(rate_hz)
-        w.writeframes(pcm)
+        w.writeframes(pcm[: _whole(len(pcm))])
     return out.getvalue()
+
+
+def _whole(n_bytes: int) -> int:
+    """``n_bytes`` rounded down to whole PCM16 samples. The wire codecs already refuse an odd
+    chunk; this keeps the WAV valid whatever reaches it."""
+    return n_bytes - n_bytes % PCM_SAMPLE_BYTES

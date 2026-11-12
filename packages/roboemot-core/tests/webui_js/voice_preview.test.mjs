@@ -20,19 +20,27 @@ const STRINGS = {
 const PATH = "/api/routes/voice_preview";
 const WAV = new Uint8Array([82, 73, 70, 70]).buffer;
 
-// A Web Audio stand-in: records decodes and started sources.
+// A Web Audio stand-in: records decodes and started sources. `played.badDecode` makes the decode
+// reject; `played.ended` makes stop() throw as a source that already ended does.
 function fakeAudio(window, played) {
   window.AudioContext = class {
     constructor() { this.state = "running"; this.destination = {}; played.contexts += 1; }
-    async decodeAudioData(buffer) { played.decoded.push(buffer.byteLength); return { duration: 1 }; }
+    async decodeAudioData(buffer) {
+      if (played.badDecode) throw new Error("EncodingError");
+      played.decoded.push(buffer.byteLength);
+      return { duration: 1 };
+    }
     createBufferSource() {
-      return { connect() {}, start() { played.started += 1; }, stop() { played.stopped += 1; } };
+      return {
+        connect() {}, start() { played.started += 1; },
+        stop() { played.stopped += 1; if (played.ended) throw new Error("InvalidStateError"); },
+      };
     }
   };
 }
 
 async function page(routes, extra = {}) {
-  const played = { contexts: 0, decoded: [], started: 0, stopped: 0 };
+  const played = { contexts: 0, decoded: [], started: 0, stopped: 0, badDecode: false, ended: false };
   const p = await loadPage({
     "GET /api/strings": STRINGS,
     "GET /api/routes": { routes, voices: VOICES, name_max_chars: 32 },
@@ -110,8 +118,11 @@ test("the Settings voice row of a realtime route gets the picker and the play bu
     unit: null, restart: false, admin_only: false, opt_in: false, conservative: null, description: "", choices: null,
     item_kind: null, length: null, key: null, entry: null, secret: false, private: false, writable: true, removable: null, ...extra,
   });
-  const fields = [d("llm_routes.gemini.voice", "text", { value: "Puck", default: "" })];
-  const p = await page([ROUTE], { "GET /api/settings": { fields, pin_required: true }, [`POST ${PATH}`]: () => wav() });
+  const fields = [
+    d("llm_routes.gemini.voice", "text", { value: "Puck", default: "" }),
+    d("llm_routes.pollen.voice", "text", { value: "", default: "" }),
+  ];
+  const p = await page([ROUTE, POLLEN], { "GET /api/settings": { fields, pin_required: true }, [`POST ${PATH}`]: () => wav() });
   await p.run("settingsView()");
   p.document.querySelector("#grp-core-llm_routes").click();
   await settle();
@@ -128,4 +139,39 @@ test("the Settings voice row of a realtime route gets the picker and the play bu
   await settle();
   assert.deepEqual(posts(p)[0].body, { route: "gemini", voice: "Puck" });
   assert.equal(p.played.started, 1);
+  const pollen = p.document.querySelector('[data-path="llm_routes.pollen.voice"] datalist');
+  assert.deepEqual(options(pollen), VOICES.openai_realtime);
+  assert.equal(p.calls.filter((c) => c.method === "GET" && c.path === "/api/routes").length, 1, "one fetch for all voice rows");
+});
+
+async function pressed(p) {
+  const status = p.document.querySelector("#route-gemini-voice-preview");
+  const play = [...p.document.querySelectorAll("button")].find((b) => b.getAttribute("aria-describedby") === status.id);
+  play.click();
+  await settle();
+  await settle();
+  return status.textContent;
+}
+
+test("a WAV the browser cannot decode is worded as such and plays nothing", async () => {
+  const p = await page([ROUTE], {
+    "GET /api/strings": { language: "en", strings: { voice_preview_err_decode: "Cannot play it." } },
+    [`POST ${PATH}`]: () => wav(),
+  });
+  p.played.badDecode = true;
+  await p.run("routesView()");
+  assert.equal(await pressed(p), "Cannot play it.");
+  assert.equal(p.played.started, 0);
+});
+
+test("a second press while the first sample plays stops it first, even once it has ended", async () => {
+  const p = await page([ROUTE], { [`POST ${PATH}`]: () => wav() });
+  await p.run("routesView()");
+  await pressed(p);
+  assert.equal(p.played.started, 1);
+  await pressed(p);
+  assert.deepEqual([p.played.stopped, p.played.started], [1, 2], "the first stopped, the second started");
+  p.played.ended = true; // stop() on a source that already ended throws InvalidStateError
+  assert.match(await pressed(p), /voice_preview_played/);
+  assert.equal(p.played.started, 3);
 });

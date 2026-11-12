@@ -20,6 +20,7 @@ const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
+  routes: null, // GET /api/routes for the voice rows (a promise), once per settings view
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -28,7 +29,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(),
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null,
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -449,13 +450,17 @@ function buildControl(desc, id, opts) {
 
 // The voice row of a realtime route (llm_routes.<name>.voice): its input picks from the voices
 // known for the route's protocol and gets the route's preview button, both from GET /api/routes
-// (the routes tab's picker). A chat route's row, or a failed fetch, keeps the plain text field.
+// (the routes tab's picker), fetched once per settings view for all voice rows. A chat route's
+// row, or a failed fetch, keeps the plain text field.
 function routeVoiceExtras(path, input) {
   const name = SETTING_ROUTE_VOICE.exec(path)[1];
   const list = el("datalist", { id: input.id + "-voices" });
   input.setAttribute("list", list.id);
   const box = el("div", { class: "stack" }, list);
-  api("GET", "/api/routes").then((data) => {
+  if (!settingsState.routes) {
+    settingsState.routes = api("GET", "/api/routes").catch((err) => { settingsState.routes = null; throw err; });
+  }
+  settingsState.routes.then((data) => {
     const route = data.routes.find((r) => r.name === name);
     if (!route || route.kind !== "realtime") return;
     state.routeVoices = data.voices || {};
@@ -991,6 +996,7 @@ async function settingsView() {
   const current = newView();
   const view = document.getElementById("view");
   view.replaceChildren();
+  settingsState.routes = null; // the voice rows fetch the routes again, once for the view
   const data = await api("GET", "/api/settings");
   if (!current()) return;
   view.replaceChildren();

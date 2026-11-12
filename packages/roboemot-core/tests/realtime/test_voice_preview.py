@@ -242,3 +242,21 @@ def test_a_slow_setup_fails_within_the_previews_deadline(gemini):
         run(cfg, deadline_s=2.0)
     assert exc.value.code == "connect_timeout"
     assert time.monotonic() - started < 2.0 + 1.5  # the deadline, the close and some slack
+
+
+def test_an_odd_byte_never_reaches_the_wav():
+    data = preview._wav(b"\x01\x02\x03", OUTPUT_RATE_HZ)
+    _, _, _, pcm = wav_of(data)
+    assert len(pcm) == 2
+    cfg = make_cfg(pollen_route("http://127.0.0.1:1"))
+    run_ = preview._Preview(cfg.llm_routes[0], cfg, None, None, time.monotonic, 0.0)
+    assert run_._audio(b"\x01\x02\x03") and run_._audio(b"\x04\x05")
+    assert bytes(run_.pcm) == b"\x01\x02\x04\x05"  # whole samples only: later ones stay aligned
+
+
+def test_a_server_sending_3_byte_chunks_gives_no_odd_wav(gemini):
+    srv = gemini([["audio"]])
+    srv.chunk = b"\x01\x02\x03"  # the codec refuses an odd chunk: nothing to play
+    with pytest.raises(preview.PreviewFailed) as exc:
+        run(make_cfg(gemini_route(srv.base_url())))
+    assert exc.value.code == preview.NO_AUDIO

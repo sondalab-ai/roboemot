@@ -415,9 +415,17 @@ def test_a_released_hold_with_no_content_yet_stalls_at_the_first_token_timeout(g
     ear = listen(rig, ["x"])
     try:
         ear.say()
-        assert ear.settle(lambda: rig.route.snapshot()["client"]["stalls"] == 1, 10.0)
-        started = rig.route.snapshot()
-        assert started["failures"] == {"stall": 1}
+
+        # the client counts the stall when its watchdog fires, the route a moment later when
+        # the close reaches it: both are read from one snapshot. The reconnect after the loss
+        # carries no request, so no second stall can follow.
+        def stalled_once() -> bool:
+            snap = rig.route.snapshot()
+            return snap["client"]["stalls"] == 1 and snap["failures"] == {"stall": 1}
+
+        assert ear.settle(stalled_once, 10.0), rig.route.snapshot()["failures"]
+        ear.settle(lambda: False, 0.6)  # past another first-token timeout
+        assert rig.route.snapshot()["failures"] == {"stall": 1}
     finally:
         ear.close()
 

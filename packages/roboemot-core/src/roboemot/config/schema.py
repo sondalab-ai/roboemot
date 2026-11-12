@@ -4299,6 +4299,23 @@ class RealtimeRouteConfig(Strict):
         le=16_777_216,
         conservative="lower",
     )
+    preview_reply_margin_s: float = param(
+        0.5,
+        "How much sooner than the web request's wait a voice preview itself gives up, so the "
+        "page gets the preview's own failure code",
+        unit="s",
+        ge=0.1,
+        le=5,
+    )
+    preview_min_interval_s: float = param(
+        3.0,
+        "Shortest time between two voice previews of one route in the web UI; one sooner is "
+        "refused (preview_rate) before anything is sent",
+        unit="s",
+        ge=0,
+        le=600,
+        conservative="higher",
+    )
 
     @field_validator("tone_labels")
     @classmethod
@@ -5680,7 +5697,7 @@ class CatalogueConfig(Strict):
     import_budget_s: float = param(
         8.0,
         "Time one import may spend embedding photo regions; the rest is skipped and reported "
-        "(never more than half of webui.request_deadline_s)",
+        "(never more than webui.request_work_share of webui.request_deadline_s)",
         unit="s",
         ge=1,
         le=60,
@@ -5988,6 +6005,15 @@ class WebUIConfig(Strict):
         unit="s",
         ge=1,
         le=300,
+        conservative="lower",
+    )
+    request_work_share: float = param(
+        0.8,
+        "Share of webui.request_deadline_s that the work of one request may take (a catalogue "
+        "import's embeddings, a voice preview); the rest is for reading, writing and replying",
+        unit="ratio",
+        ge=0.1,
+        le=0.9,
         conservative="lower",
     )
     session_max_s: float = param(

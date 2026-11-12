@@ -21,17 +21,20 @@ from roboemot.llm.conformance import (
     RouteKeyUnavailable,
     RouteKindUnsupported,
 )
+from roboemot.llm.router import Router
 from roboemot.realtime.preview import GEMINI_VOICES, QWEN3_VOICES, PreviewFailed
 from roboemot.webui import make_server
-from roboemot.webui.routes import RouteBusy, RouteChecker
+from roboemot.webui.routes import PreviewRate, RouteBusy, RouteChecker
 from test_webui import PIN, Client, FakeService
 
 PATH = "/api/routes/voice_preview"
 BODY = {"route": "rt", "voice": "Serena"}
 
 
-def make_cfg(base_url: str = "http://127.0.0.1:1/v1", **kw) -> RoboEmotConfig:
-    route = {
+def make_cfg(base_url: str = "http://127.0.0.1:1/v1", route=None, **rt) -> RoboEmotConfig:
+    """One local Pollen-style route ``rt`` (or ``route``); no rate limit unless ``rt`` sets
+    one, so a test may preview twice in a row."""
+    route = route or {
         "name": "rt",
         "base_url": base_url,
         "model": "s2s",
@@ -42,8 +45,7 @@ def make_cfg(base_url: str = "http://127.0.0.1:1/v1", **kw) -> RoboEmotConfig:
     return RoboEmotConfig(
         webui={"bind": "127.0.0.1", "port": 0},
         llm_routes=[route],
-        voice={"realtime_route": {"mode": "direct"}},
-        **kw,
+        voice={"realtime_route": {"mode": "direct", "preview_min_interval_s": 0, **rt}},
     )
 
 
@@ -101,19 +103,44 @@ def test_it_needs_a_session_and_the_csrf_token(port_served, tmp_path):
 @pytest.mark.parametrize(
     "body",
     [
-        {"route": "rt"} | {"extra": 1},
+        {"route": "rt", "voice": "Kore", "extra": 1},
         {"voice": "Kore"},
         {"route": "../x", "voice": "Kore"},
         {"route": "rt", "voice": 3},
         {"route": "rt", "voice": "Kore\n"},
         {"route": "rt", "voice": "x" * 65},
+        {"route": "rt", "voice": "   "},
+        {"route": "rt", "voice": ".Kore"},
+        {"route": "rt", "voice": "-Kore"},
         {"route": "rt", "voice": "https://x.example/"},
     ],
 )
 def test_a_bad_body_is_refused_before_the_port(port_served, body):
     port = Port()
-    assert port_served(port).request("POST", PATH, body).status in (400, 422)
+    assert port_served(port).request("POST", PATH, body).status == 400
     assert port.calls == []
+
+
+@pytest.mark.parametrize(
+    ("voice", "sent"), [("x" * 64, "x" * 64), ("", ""), ("Uncle_Fu ", "Uncle_Fu")]
+)
+def test_a_voice_of_64_characters_or_none_passes(port_served, voice, sent):
+    port = Port()
+    assert port_served(port).request("POST", PATH, {"route": "rt", "voice": voice}).status == 200
+    assert port.calls[0][1] == sent
+
+
+def test_a_preview_sooner_than_the_interval_is_429_with_its_wait(port_served):
+    resp = port_served(Port(exc=PreviewRate(2.2))).request("POST", PATH, BODY)
+    assert (resp.status, resp.json) == (429, {"error": "preview_rate"})
+    assert resp.headers["Retry-After"] == "3"
+
+
+def test_the_wait_is_the_request_work_share_of_the_deadline(port_served):
+    port = Port()
+    port_served(port).request("POST", PATH, BODY)
+    web = make_cfg().webui
+    assert port.calls[0][2] == pytest.approx(web.request_deadline_s * web.request_work_share)
 
 
 def test_the_wav_comes_back_as_audio_with_the_voice_asked(port_served):
@@ -239,3 +266,112 @@ def test_a_chat_route_and_an_unknown_one_are_refused(tmp_path):
         checker.preview("c", "Kore", 1)
     with pytest.raises(KeyError):
         checker.preview("nope", "Kore", 1)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_previews_of_one_route_are_spaced_by_the_interval_others_are_not(monkeypatch):
+    two = {"name": "two", "base_url": "http://127.0.0.1:1/v1", "model": "s2s", "kind": "realtime"}
+    cfg = make_cfg(preview_min_interval_s=3)
+    cfg = cfg.model_copy(
+        update={"llm_routes": [*cfg.llm_routes, make_cfg(route=two).llm_routes[0]]}
+    )
+    clock = Clock()
+    checker = RouteChecker(lambda: cfg, clock=clock)
+    monkeypatch.setattr(
+        "roboemot.webui.routes.preview_voice", lambda *_a, ready, **_k: ready(b"RIFF")
+    )
+    assert checker.preview("rt", "Kore", 5) == b"RIFF"
+    assert idle(checker)
+    clock.now += 1.0
+    with pytest.raises(PreviewRate) as exc:
+        checker.preview("rt", "Kore", 5)
+    assert exc.value.retry_after_s == pytest.approx(2.0)
+    assert checker.preview("two", "Kore", 5) == b"RIFF"  # per route
+    assert idle(checker)
+    clock.now += 2.0
+    assert checker.preview("rt", "Kore", 5) == b"RIFF"
+
+
+def test_the_preview_gives_up_a_margin_before_the_callers_wait(monkeypatch):
+    cfg = make_cfg(preview_reply_margin_s=0.4)
+    seen: list[float] = []
+
+    def failing(*_a, ready, deadline_s, **_k):
+        seen.append(deadline_s)
+        exc = PreviewFailed("connect_timeout")
+        ready(exc)
+        raise exc
+
+    monkeypatch.setattr("roboemot.webui.routes.preview_voice", failing)
+    with pytest.raises(PreviewFailed) as exc:
+        RouteChecker(lambda: cfg).preview("rt", "Kore", 2.0)
+    assert exc.value.code == "connect_timeout"  # its own code, not the caller's timeout
+    assert seen == [pytest.approx(1.6)]
+
+
+def test_a_running_check_makes_a_preview_busy(monkeypatch):
+    cfg = make_cfg()
+    checker = RouteChecker(lambda: cfg)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_check(*_a, **_k):
+        started.set()
+        release.wait(5)
+        raise RuntimeError("done")
+
+    monkeypatch.setattr("roboemot.webui.routes.check_realtime_route", slow_check)
+    checker.start("rt")
+    assert started.wait(5)
+    with pytest.raises(RouteBusy):
+        checker.preview("rt", "Kore", 1)
+    release.set()
+    checker.thread.join(5)
+    assert not checker._previewing
+
+
+@pytest.mark.parametrize("broken", ["session_update", "client_factory"])
+def test_the_busy_flag_clears_when_the_session_cannot_be_built(monkeypatch, broken, caplog):
+    import roboemot.realtime.client as client_module
+    import roboemot.realtime.preview as preview_module
+
+    def boom(*_a, **_k):
+        raise RuntimeError(KEY)
+
+    if broken == "client_factory":
+        monkeypatch.setattr(client_module, "RealtimeClient", boom)
+    else:
+        monkeypatch.setattr(preview_module, "session_update", boom)
+    cfg = make_cfg()
+    checker = RouteChecker(lambda: cfg)
+    with pytest.raises(PreviewFailed) as exc:
+        checker.preview("rt", "Kore", 5)
+    assert exc.value.code == "failed" and idle(checker)
+    assert KEY not in caplog.text
+
+
+def test_a_cap_reached_mid_stream_in_the_second_tool_round_fails_and_clears_busy(gemini):
+    srv = gemini([["call:note_tone", "audio"]], chunks=40, chunk_ms=100)
+    route = {
+        "name": "gemini",
+        "base_url": srv.base_url(),
+        "model": "gemini-3.8-live",
+        "kind": "realtime",
+        "protocol": "gemini_live",
+        "api_key": "${secret:gemini_key}",
+        "locality": "local",
+    }
+    cfg = make_cfg(route=route, tone_tool=True, preview_max_bytes=65_536, send_timeout_s=1)
+    router = Router(cfg.llm_routes, cfg.safety, secrets=lambda _name: KEY)
+    checker = RouteChecker(lambda: cfg, router=lambda: router)
+    with pytest.raises(PreviewFailed) as exc:
+        checker.preview("gemini", "Kore", 8)
+    assert exc.value.code == "audio_cap"
+    assert srv.tool_responses, "the cap came in the round after the tool call"
+    assert idle(checker)

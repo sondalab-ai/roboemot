@@ -80,6 +80,39 @@ OUTPUT_RATE_HZ = 24000  # Gemini Live's reply PCM16 (audio/pcm;rate=24000, S0 20
 AUDIO_MIME = "audio/pcm;rate={rate}"
 AUDIO_MIME_PREFIX = "audio/pcm"
 MIME_RATE = re.compile(r"rate=([0-9]{1,6})")
+# Gemini Live's 30 prebuilt voices (the web UI's voice picker, SPEC 8 Voice preview).
+GEMINI_VOICES = (
+    "Zephyr",
+    "Puck",
+    "Charon",
+    "Kore",
+    "Fenrir",
+    "Leda",
+    "Orus",
+    "Aoede",
+    "Callirrhoe",
+    "Autonoe",
+    "Enceladus",
+    "Iapetus",
+    "Umbriel",
+    "Algieba",
+    "Despina",
+    "Erinome",
+    "Algenib",
+    "Rasalgethi",
+    "Laomedeia",
+    "Achernar",
+    "Alnilam",
+    "Schedar",
+    "Gacrux",
+    "Pulcherrima",
+    "Achird",
+    "Zubenelgenubi",
+    "Vindemiatrix",
+    "Sadachbia",
+    "Sadaltager",
+    "Sulafat",
+)
 MODEL_PREFIX = "models/"
 KEY_HEADER = "x-goog-api-key"  # the key's only place: never the URL (S0 2026-11-11)
 # Gemini's close of a refused connect (S0) and of a session idle for about two minutes (S3)

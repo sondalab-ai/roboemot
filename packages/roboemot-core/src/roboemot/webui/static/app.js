@@ -1004,10 +1004,16 @@ async function playVoicePreview(name, voice, status) {
       let data = {};
       try { data = await resp.json(); } catch (e) { data = {}; }
       if (resp.status === 401 && data.error === "unauthorized") { await boot(); return; }
-      status.textContent = previewError(data);
+      status.textContent = previewError(data, resp);
       return;
     }
-    await playWav(await resp.arrayBuffer());
+    const buffer = await resp.arrayBuffer();
+    try {
+      await playWav(buffer);
+    } catch (err) {
+      status.textContent = t("voice_preview_err_decode");
+      return;
+    }
     status.textContent = t("voice_preview_played", { voice: voice || t("voice_preview_default") });
   } catch (err) {
     status.textContent = explain(err);
@@ -1015,9 +1021,14 @@ async function playVoicePreview(name, voice, status) {
 }
 
 // What a failed preview says: its code worded (a 1008 close as a refusal that can be transient),
-// else the API's error code as every call words it.
-function previewError(data) {
-  if (data.error !== "preview_failed") return explain(new Error(data.error || "generic"));
+// else the API's error code as every call words it (with the wait a 429 names).
+function previewError(data, resp) {
+  if (data.error !== "preview_failed") {
+    const err = new Error(data.error || "generic");
+    err.status = resp.status;
+    err.retryAfter = Number(resp.headers.get("Retry-After"));
+    return explain(err);
+  }
   if (data.close_code === 1008) return t("voice_preview_err_1008");
   return state.strings["voice_preview_err_" + data.code] || t("voice_preview_failed", { code: data.code });
 }
@@ -1030,7 +1041,9 @@ async function playWav(buffer) {
   if (!voicePlayer.ctx) voicePlayer.ctx = new (window.AudioContext || window.webkitAudioContext)();
   if (voicePlayer.ctx.state === "suspended") await voicePlayer.ctx.resume();
   const decoded = await voicePlayer.ctx.decodeAudioData(buffer);
-  if (voicePlayer.source) voicePlayer.source.stop();
+  if (voicePlayer.source) {
+    try { voicePlayer.source.stop(); } catch (e) { /* already ended (InvalidStateError) */ }
+  }
   voicePlayer.source = voicePlayer.ctx.createBufferSource();
   voicePlayer.source.buffer = decoded;
   voicePlayer.source.connect(voicePlayer.ctx.destination);
