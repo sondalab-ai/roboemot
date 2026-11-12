@@ -20,7 +20,8 @@ binary frame.
   ``interrupt`` sends ``interrupted`` on its own (Gemini cutting its answer) and ends the turn;
   ``go_away`` sends ``goAway``. After the steps: ``generationComplete``, then after
   ``turn_complete_s`` ``turnComplete`` with ``usageMetadata`` ``usage``.
-- ``delay_s`` holds each answer back that long.
+- ``delay_s`` holds each answer back that long; ``setup_delay_s`` holds ``setupComplete``
+  back that long (S0 saw up to 10.6 s on some first connects).
 - ``idle_close_s``: a connection with no client message for that long is closed with
   ``close_code`` (1008), as Gemini closes a session idle for about two minutes (S3 run
   2026-11-12).
@@ -28,7 +29,8 @@ binary frame.
 
 ``setups`` holds every ``setup`` (one per connection), ``received`` every client message,
 ``requests`` every handshake (path with its query, headers), ``tool_responses`` every
-``toolResponse``'s function responses. Nothing is logged.
+``toolResponse``'s function responses, ``client_closes`` the close code of every connection the
+client closed itself. Nothing is logged.
 """
 
 from __future__ import annotations
@@ -105,6 +107,7 @@ class GeminiServer:
         idle_close_s: float | None = None,
         close_code: int = POLICY,
         usage_gate: threading.Event | None = None,
+        setup_delay_s: float = 0.0,
     ) -> None:
         self.tls_files = tls_files
         self.answers = answers or [["audio"]]
@@ -116,6 +119,8 @@ class GeminiServer:
         self.refuse, self.delay_s, self.time_left = refuse, delay_s, time_left
         self.idle_close_s, self.close_code = idle_close_s, close_code
         self.usage_gate = usage_gate
+        self.setup_delay_s = setup_delay_s
+        self.client_closes: list[int] = []
         self.idle_closes = 0
         self.requests: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
@@ -184,8 +189,9 @@ class GeminiServer:
         session = _Session(self, ws)
         try:
             await session.serve()
-        except ConnectionClosed:
-            pass
+        except ConnectionClosed as exc:
+            if exc.rcvd is not None:
+                self.client_closes.append(exc.rcvd.code)
         finally:
             session.stop()
 
@@ -217,6 +223,8 @@ class _Session:
             srv.closes += 1
             await self.ws.close(POLICY, REFUSAL)
             return
+        if srv.setup_delay_s:
+            await asyncio.sleep(srv.setup_delay_s)
         await self.send({"setupComplete": {}})
         await self.send({"sessionResumptionUpdate": {"newHandle": "h1", "resumable": True}})
         while True:

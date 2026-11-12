@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 
 from .. import paths
-from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.schema import LLMRoute, RoboEmotConfig, active_realtime_route
 from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
@@ -45,6 +45,15 @@ from ..secret_store import SecretStore
 
 log = logging.getLogger(__name__)
 FILE_MODE = 0o600
+# what the Routes tab shows of the running realtime session (``RealtimeRoute.snapshot``)
+SESSION_FIELDS = (
+    "state",
+    "reason",
+    "idle_closes",
+    "go_aways",
+    "usage_reports",
+    "items_delete_emulated",
+)
 
 
 class RouteBusy(RuntimeError):
@@ -61,6 +70,11 @@ class RouteChecker:
     aliases as the conversation does (SPEC 8, Pseudonyms) when ``privacy.pseudonyms_to_cloud``
     is on. ``realtime_provider`` returns the robot's session provider (the one the runtime
     built); without it, direct mode uses :class:`DirectSession` and platform mode has none.
+    ``realtime_tools()`` builds a ``gemini_live`` check's setup tools (``offline_tools`` with
+    the robot's gestures); without it, ``offline_tools`` of the config. ``realtime_status``
+    returns the running realtime
+    route's debug snapshot: the active realtime route's entry shows a few of its fields
+    (``session``).
     """
 
     def __init__(
@@ -72,9 +86,13 @@ class RouteChecker:
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         names: NameSource | None = None,
         realtime_provider: Callable[[], SessionProvider | None] | None = None,
+        realtime_tools: Callable[[], list[dict[str, Any]] | None] | None = None,
+        realtime_status: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self.cfg, self.store, self._router = cfg, store, router
         self._realtime_provider = realtime_provider
+        self._realtime_tools = realtime_tools
+        self._realtime_status = realtime_status
         self._names = names
         self._factory = http_client_factory
         self._private: Router | None = None
@@ -88,10 +106,14 @@ class RouteChecker:
         endpoint than the route has now is not shown. A route whose key is a ``${secret:name}``
         reference shows ``secret`` (the name and whether it is set), never the value; ``key`` says
         which kind of key the route has (``none``, ``secret`` or ``literal``). ``api_key`` and the
-        credentials of the URL are never included, and ``base_url`` is null when it holds any."""
+        credentials of the URL are never included, and ``base_url`` is null when it holds any.
+        A realtime route also has ``session``: the running session when it is the active
+        realtime route (``_session``), else null."""
+        cfg = self.cfg()
+        session = self._session(cfg)  # outside the lock: the route takes its own
+        active = active_realtime_route(cfg)
         with self._lock:
             running = self._running
-            cfg = self.cfg()
             store = SecretStore.for_data_dir(cfg.data_dir)
             return [
                 {
@@ -106,6 +128,11 @@ class RouteChecker:
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
                     "last_check": self._current_report(r),
+                    **(
+                        {"session": session if r is active else None}
+                        if r.kind == "realtime"
+                        else {}
+                    ),
                 }
                 for r in cfg.llm_routes
             ]
@@ -159,7 +186,12 @@ class RouteChecker:
         try:
             if route.kind == "realtime":
                 realtime = check_realtime_route(
-                    route, cfg, router=router, provider=self._provider(cfg), config=self.cfg
+                    route,
+                    cfg,
+                    router=router,
+                    provider=self._provider(cfg),
+                    tools=self._realtime_tools,
+                    config=self.cfg,
                 )
                 self._keep(route, realtime.to_dict())
                 return
@@ -201,6 +233,29 @@ class RouteChecker:
             self._reports[route.name] = report
             self._save()
             self._running = None
+
+    def _session(self, cfg: RoboEmotConfig) -> dict[str, Any] | None:
+        """The running realtime session as the Routes tab shows it (SPEC 8, 12A): its state,
+        reason code and the counts that matter for a Gemini route (``SESSION_FIELDS``), with
+        the codec's non-zero counts (``wire``: this session and all). None while realtime is
+        off, no realtime route is active, no route runs or its snapshot fails (logged by type
+        only)."""
+        rt = cfg.voice.realtime_route
+        if self._realtime_status is None or not rt.enabled or active_realtime_route(cfg) is None:
+            return None
+        try:
+            snap = self._realtime_status()
+        except Exception as exc:
+            log.warning("routes: realtime session status: %s", type(exc).__name__)
+            return None
+        if snap is None:
+            return None
+        wire = snap.get("wire") or {}
+        return {
+            **{k: snap.get(k) for k in SESSION_FIELDS},
+            "wire_session": _nonzero(wire.get("session")),
+            "wire_total": _nonzero(wire.get("total")),
+        }
 
     def _provider(self, cfg: RoboEmotConfig) -> SessionProvider | None:
         """The session provider of the realtime check (see the class docstring)."""
@@ -276,3 +331,8 @@ def _now_iso() -> str:
     import datetime as dt
 
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+
+
+def _nonzero(counts: dict[str, int] | None) -> dict[str, int]:
+    """The non-zero entries of a codec's counts (none for the plain subset)."""
+    return {k: v for k, v in (counts or {}).items() if v}

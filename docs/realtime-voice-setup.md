@@ -153,10 +153,8 @@ While the route is down, the local pipeline answers (Vosk and Piper, when instal
 
 ## Gemini Live (Google): a second provider
 
-**Not ready yet.** This section documents the configuration of the `gemini_live` protocol (SPEC 8,
-Gemini Live wire). The robot speaks it from slice S3 of the Gemini Live epic on; the route
-**Check** (web UI and `roboemot realtime check`) learns it in slice S4, so until then it may fail
-on a Gemini route that works.
+This section documents the configuration of the `gemini_live` protocol (SPEC 8, Gemini Live
+wire). The route **Check** (web UI and `roboemot realtime check`) speaks it too (step 3).
 
 Gemini Live is a separate route beside `pollen`. Pollen's route stays as it is; you switch
 between the two with `voice.realtime_route.route` and a restart.
@@ -223,7 +221,32 @@ llm_routes:
   it in `app.yaml`, or search `llm_routes` in the **Settings** tab.
 - The base URL has no query: the web UI refuses one.
 
-### 3. Switch to Gemini
+### 3. Check the route
+
+**Routes** tab, `gemini`, **Check** (**Controlla**). It works before you switch to Gemini: a Gemini
+route is always checked in direct mode, and its key goes only to the route's own host. A working
+route shows:
+
+| Field | Expected |
+| --- | --- |
+| Protocol | Gemini Live |
+| Mode | `direct` |
+| Connect host | `generativelanguage.googleapis.com` |
+| Key to the connect host | `sent` (in the `x-goog-api-key` header) |
+| session.updated seen | `true` (Gemini's `setupComplete`) |
+| Setup (ms) | usually 500 to 700, rarely up to about 10 000 |
+| First audio (ms) | a figure (a tool call Gemini makes first is answered and counted in) |
+| Item delete | `emulated`: Gemini has no item delete, so this is not a server confirmation |
+| Tools in the setup | the skills, skip and tone tools a turn offers |
+| Tokens the server reported later | Gemini's own count, a few seconds after the answer |
+
+A connect Gemini refuses shows the server close code only: `1008` can be transient (S0 saw one
+refusal, then six connects passed), so check again before you change the key. The card of the
+active realtime route also shows its running session: its state and reason (`server_refused`
+after `voice.realtime_route.refusals_to_report` refusals in a row), the idle closes, the goAway
+notices, the late token counts, the emulated item deletes and the codec's counts.
+
+### 4. Switch to Gemini
 
 A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot` (the default);
 the configuration refuses anything else, one edit at a time. In the **Settings** tab, edit in this
@@ -236,7 +259,7 @@ order:
 4. Restart RoboEmot (section 5, Restart RoboEmot).
 
 With `voice.realtime_route.input: audio` the utterances' audio goes to Google, and that needs the
-opt-in `privacy.realtime_audio` (section 4). With `input: text` only the local transcript goes.
+opt-in `privacy.realtime_audio` (section 4 of the Pollen steps). With `input: text` only the local transcript goes.
 
 To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
 

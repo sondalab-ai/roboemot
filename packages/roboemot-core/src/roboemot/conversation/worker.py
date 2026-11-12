@@ -116,14 +116,14 @@ from ..persona import apply_to_register, effects
 from ..realtime import protocol as rt_protocol
 from ..realtime.turn import (
     SKIP_TOOL,
+    TONE_NOTED,
     TONE_TOOL,
     Reply,
     ResponseRun,
     heard_words,
     line_instructions,
     replay_block,
-    skip_tool,
-    tone_tool,
+    session_tools,
     truncate_played,
     wait_in_order,
 )
@@ -151,7 +151,6 @@ INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (histo
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 # ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
-TONE_NOTED = '{"ok": true}'  # the result of a note_tone call (SPEC 8, Tone tool)
 TONE_INVALID = '{"error": "unknown_tone"}'  # not one of voice.realtime_route.tone_labels
 CANCELLED = "cancelled"  # the response.done status of a response cancelled (S2: by the server)
 
@@ -1198,7 +1197,7 @@ class ConversationWorker:
         function tools (skills, the skip tool) and tone tool; ``shown``: the skills and choices
         a stream's opening already gave the server (a server turn's), else taken now. With
         ``max_tool_rounds`` 0 the skip and tone tools are the only ones offered."""
-        conv, rt_cfg = turn.cfg.conversation, turn.cfg.voice.realtime_route
+        conv = turn.cfg.conversation
         if shown is not None:
             offered, choices = shown[0], shown[1]
         else:
@@ -1210,11 +1209,7 @@ class ConversationWorker:
             max_chars=conv.tool_arg_max_chars,
             choices=choices,
         )
-        skip, tone = rt_cfg.skip_tool, rt_cfg.tone_tool
-        skills = bool(tools) and not ((skip or tone) and conv.max_tool_rounds == 0)
-        functions = rt_protocol.function_tools(tools) if skills else []
-        functions += [skip_tool()] if skip else []
-        toned = [tone_tool(rt_cfg.tone_labels)] if tone else []
+        functions, toned = session_tools(tools, turn.cfg)
         return offered, choices, functions, toned
 
     def _stream_session(self, job: Any) -> tuple[str, Any]:

@@ -51,6 +51,7 @@ SKIP_DESCRIPTION = (
     "(see the instructions)."
 )
 TONE_TOOL = "note_tone"  # the tone tool (voice.realtime_route.tone_tool)
+TONE_NOTED = '{"ok": true}'  # the result of a note_tone call (SPEC 8, Tone tool)
 TONE_DESCRIPTION = (
     "Report the tone of voice of the person's last utterance. Call it once, in the same "
     "response as your spoken reply, never instead of it."
@@ -529,6 +530,21 @@ def tone_tool(labels: list[str]) -> dict[str, Any]:
             "required": ["tone"],
         },
     }
+
+
+def session_tools(
+    chat_tools: list[dict[str, Any]], cfg: Any
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A realtime session's function tools (the skills' ``chat_tools`` in the realtime format,
+    the skip tool) and its tone tool, as ``cfg`` (a ``RoboEmotConfig``) offers them: with
+    ``max_tool_rounds`` 0 the skip and tone tools are the only ones offered. The worker's turns
+    and the realtime check's setup share it."""
+    conv, rt = cfg.conversation, cfg.voice.realtime_route
+    skills = bool(chat_tools) and not ((rt.skip_tool or rt.tone_tool) and conv.max_tool_rounds == 0)
+    functions = protocol.function_tools(chat_tools) if skills else []
+    functions += [skip_tool()] if rt.skip_tool else []
+    toned = [tone_tool(rt.tone_labels)] if rt.tone_tool else []
+    return functions, toned
 
 
 def replay_block(turns: list[list[dict[str, Any]]]) -> str:

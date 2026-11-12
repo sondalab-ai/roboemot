@@ -1064,12 +1064,40 @@ async function saveRoute(route, v) {
 }
 
 const REALTIME_FACTS = [
-  "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
-  "update_seen", "first_audio_ms", "item_delete", "charged", "failure",
+  "protocol", "mode", "allocator_host", "connect_host", "header_to_connect_host",
+  "platform_id_sent", "update_seen", "setup_ms", "first_audio_ms", "item_delete",
+  "tools_sent", "charged", "usage_reported", "failure", "close_code",
   "server_error_code", "server_error_about",
 ];
 
-const REALTIME_WORDS = { mode: "rt_mode_", header_to_connect_host: "rt_header_", item_delete: "rt_item_", failure: "live_code_" };
+const REALTIME_WORDS = {
+  protocol: "route_protocol_", mode: "rt_mode_", header_to_connect_host: "rt_header_", item_delete: "rt_item_",
+  failure: "live_code_", close_code: "rt_close_",
+};
+
+// Facts shown only where they apply: the allocator in platform mode, a Gemini setup's tools and
+// its late token totals on a gemini_live route; a report from before a fact has none of it.
+const REALTIME_SHOWN = {
+  allocator_host: (r) => r.mode === "platform",
+  tools_sent: (r) => r.protocol === "gemini_live",
+  usage_reported: (r) => r.protocol === "gemini_live",
+};
+
+// What the Routes tab shows of the running session of the active realtime route (SPEC 8, 12A).
+const SESSION_FACTS = [
+  "state", "reason", "idle_closes", "go_aways", "usage_reports", "items_delete_emulated",
+  "wire_session", "wire_total",
+];
+
+// One fact of the running session: a state or reason worded, codec counts as "name n", or a count.
+function sessionFact(name, value) {
+  if (name === "state" || name === "reason") return value === null || value === undefined ? t("live_none") : word("live_code_", value);
+  if (value && typeof value === "object") {
+    const counts = Object.entries(value);
+    return counts.length ? counts.map(([k, n]) => k + " " + n).join(", ") : t("live_none");
+  }
+  return realtimeFact(name, value);
+}
 
 // One fact of a realtime check: yes / no, a worded code, or a host or server code as it is.
 function realtimeFact(name, value) {
@@ -1117,7 +1145,10 @@ async function routesView() {
   // A realtime check names hosts and outcome codes only (SPEC 8, 12): codes are worded, hosts
   // and the server's own error codes are shown as they come.
   const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
-    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + realtimeFact(f, report[f]))))];
+    [el("ul", {}, REALTIME_FACTS.filter((f) => f in report && (!REALTIME_SHOWN[f] || REALTIME_SHOWN[f](report)))
+      .map((f) => el("li", {}, t("rt_" + f) + ": " + realtimeFact(f, report[f]))))];
+  const sessionFacts = (s) => !s ? [] : [markedEyebrow("p", t("route_session")),
+    el("ul", {}, SESSION_FACTS.map((f) => el("li", {}, t("rt_s_" + f) + ": " + sessionFact(f, s[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
@@ -1154,7 +1185,7 @@ async function routesView() {
         (r.protocol && r.protocol !== ROUTE_PROTOCOL_DEFAULT ? ", " + t("route_protocol_" + r.protocol) : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
-      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
+      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, sessionFacts(r.session), edit), r.running);
     routeCard.dataset.row = r.name;
     return routeCard;
   });
