@@ -21,6 +21,8 @@ binary frame.
   ``go_away`` sends ``goAway``. After the steps: ``generationComplete``, then after
   ``turn_complete_s`` ``turnComplete`` with ``usageMetadata`` ``usage``.
 - ``delay_s`` holds each answer back that long.
+- ``idle_close_s``: a connection with no client message for that long is closed with 1008, as
+  Gemini closes a session idle for about two minutes (S3 run 2026-11-12).
 
 ``setups`` holds every ``setup`` (one per connection), ``received`` every client message,
 ``requests`` every handshake (path with its query, headers), ``tool_responses`` every
@@ -49,6 +51,7 @@ OUTPUT_RATE_HZ = 24000
 REPLY = "Ciao! Sto benissimo, grazie."
 HEARD = "Ciao Neve, come stai oggi?"
 REFUSAL = "The caller does not have permission"
+IDLE = "idle"
 POLICY = 1008
 SAMPLE_PAIR = b"\x10\x00\x20\x00"  # two PCM16 samples
 SERVER_LOG = logging.getLogger("tests.realtime.gemini_server")
@@ -96,6 +99,7 @@ class GeminiServer:
         refuse: int = 0,
         delay_s: float = 0.0,
         time_left: str = "5s",
+        idle_close_s: float | None = None,
     ) -> None:
         self.tls_files = tls_files
         self.answers = answers or [["audio"]]
@@ -105,6 +109,8 @@ class GeminiServer:
         self.usage, self.turn_complete_s = usage, turn_complete_s
         self.call_args = call_args or {}
         self.refuse, self.delay_s, self.time_left = refuse, delay_s, time_left
+        self.idle_close_s = idle_close_s
+        self.idle_closes = 0
         self.requests: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
         self.setups: list[dict[str, Any]] = []
@@ -207,7 +213,13 @@ class _Session:
             return
         await self.send({"setupComplete": {}})
         await self.send({"sessionResumptionUpdate": {"newHandle": "h1", "resumable": True}})
-        async for frame in self.ws:
+        while True:
+            try:
+                frame = await asyncio.wait_for(self.ws.recv(), srv.idle_close_s)
+            except TimeoutError:  # Gemini closes a session idle for about two minutes
+                srv.idle_closes += 1
+                await self.ws.close(POLICY, IDLE)
+                return
             msg = json.loads(frame)
             srv.received.append(msg)
             await self.on_message(msg)

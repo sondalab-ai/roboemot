@@ -216,6 +216,21 @@ def test_a_go_away_reconnects_once_idle_and_the_setup_replays_the_history(gemini
     assert rig.route.snapshot()["failures"] == {}
 
 
+def test_an_idle_close_is_no_loss_and_the_next_turn_answers_on_the_route(gemini, rigs):
+    srv = gemini([["audio"]], idle_close_s=0.8)
+    rig = rigs(srv)
+    assert rig.route.ready()
+    assert wait_for(lambda: rig.route.snapshot()["idle_closes"] >= 2 and rig.route.connected, 10.0)
+    snap = rig.route.snapshot()
+    assert snap["idle_closes"] >= 2 and snap["failures"] == {}  # never a loss
+    assert rig.route._resets_in_row == 0 and rig.route._reopen_at == 0.0  # no backoff step
+    assert rig.network.realtime.online  # the link never went down
+    srv.idle_close_s = None
+    assert wait_for(lambda: rig.route.connected, 5.0)
+    rig.turn("ciao")
+    assert rig.events[-1]["outcome"] == "ok" and rig.chat_hosts() == []
+
+
 def test_a_1008_on_connect_is_retried_not_an_account_error(gemini, rigs, caplog):
     srv = gemini(refuse=1)
     rig = rigs(srv)

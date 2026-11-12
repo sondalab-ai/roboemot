@@ -53,9 +53,9 @@ A BLOCKING call Gemini waits on is never left open: before the next activity or 
 and when the route deletes an unanswered call's item, the codec answers it ``skipped``.
 
 Known limits: on a barge-in the route settles a cut round's calls after the next burst
-began, so their real outputs never reach Gemini (the calls were answered ``skipped``); the
-``skipped`` payload and the JSON Schema declarations are unverified on the live server (S3's
-end-to-end run checks them).
+began, so their real outputs never reach Gemini (the calls were answered ``skipped``). The
+``skipped`` payload (no spoken reply follows) and the skills' JSON Schema declarations were
+accepted by the live server (S3 run, 2026-11-12).
 
 Events keep text and audio out of ``repr`` (``protocol``); the codec logs nothing (SPEC 12).
 """

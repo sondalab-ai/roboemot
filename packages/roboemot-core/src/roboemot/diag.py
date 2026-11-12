@@ -61,7 +61,15 @@ REASONS: dict[str, tuple[str, ...]] = {
         "replaced",
     ),
     "bargein": ("cut", "cut_own", "released"),  # a candidate episode closed (cut_own: a hum)
-    "session": ("reset", "reconnected", "connect_failed", "lost", "server_error"),
+    "session": (
+        "reset",
+        "reconnected",
+        "connect_failed",
+        "lost",
+        "server_error",
+        "go_away",
+        "idle_close",
+    ),  # fmt: skip
     "audio": ("transcript_timeout",),  # the server's transcript of sent audio never came
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw
     "alone": ("start", "face", "sound"),  # the robot holds still, or what ended it (SPEC 5A)
@@ -94,7 +102,7 @@ ROUTE_REASONS = (
     "no_opt_in", "no_extra", "provider", "pseudonyms", "budget", "unavailable",
     # the robot's own closes and resets (OWN_CLOSES, the reset reasons)
     "conversation_end", "asleep", "shutdown", "reconfigured", "expired", "input_reset",
-    "pending_calls",
+    "pending_calls", "go_away", "idle_close",
     # the client's close and connect reasons (roboemot.realtime.client)
     "closed_by_server", "connect_failed", "connect_timeout", "connection_lost",
     "key_unavailable", "oversize", "receive_failed", "send_failed", "send_stuck", "stall",

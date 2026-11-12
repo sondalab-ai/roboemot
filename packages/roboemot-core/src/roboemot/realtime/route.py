@@ -66,7 +66,9 @@ seconds after a response ended (``UsageReport``): each response is charged its e
 gone. A ``goAway`` closes the session once nothing runs on it (no request, no turn holding the
 input) and reconnects it in the background; the next turn replays what the new session lacks. A
 ``cancelled`` end the robot did not ask for is Gemini cutting its own answer: the response is
-marked interrupted, so its turn asks nothing more.
+marked interrupted, so its turn asks nothing more. Gemini closes a session idle for about two
+minutes (code 1008, no ``goAway``; S3 run 2026-11-12): a server close with nothing running on the
+session is no loss (no backoff step, the link stays up) and reconnects in the background.
 
 Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
 12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
@@ -137,6 +139,7 @@ CANCEL_PREFIX = "rc_"  # the event ids of the robot's response.cancel events (S2
 CANCELS_KEPT = 32  # cancel event ids remembered, to tell an error about one (S2)
 ESTIMATES_KEPT = 64  # responses whose charged estimate a late usage report corrects (Gemini)
 RESPONSE_CANCELLED = "cancelled"  # the response.done status of a cancelled response
+IDLE_CLOSE = "idle_close"  # a Gemini session its server closed while nothing ran on it
 # the server's refusal of a cancel with no response active (benign: it ended or the server's
 # own interrupt cancelled it first, S2)
 CANCEL_NOT_ACTIVE = "response_cancel_not_active"
@@ -1356,34 +1359,40 @@ class RealtimeRoute:
                 return
             tok.leaving = True
             self._counts["go_aways"] += 1
-        self.events("session", "go_away")
         self._leave(tok)
 
     def _leave(self, token: _Token | None) -> None:
-        """Close a session its server is leaving (``goAway``) when nothing runs on it: no
-        request in flight and no turn holding the input (a tool round sends several requests).
-        It is detached and closed, and the background reconnect opens the next one (not a
-        loss: no backoff step); the worker replays the history it lacks."""
-        if token is None or not token.leaving:
-            return
+        """Close a session its server is leaving (``goAway``) when nothing runs on it
+        (``_hand_over``)."""
+        if token is not None and token.leaving:
+            self._hand_over(token, "go_away", "go_away_reconnects")
+
+    def _hand_over(self, token: _Token, reason: str, counter: str) -> bool:
+        """Swap ``token``'s session for a new one when nothing runs on it: no request in flight
+        and no turn holding the input (a tool round sends several requests). It is detached and
+        closed, and the background reconnect opens the next one: not a loss (no backoff step,
+        the link stays up); the worker replays the history it lacks. False when it is busy or
+        not the current session (nothing done)."""
         with self._lock:
             busy = self._input_holds > 0 or any(
                 r.token is token for r in (*self._pending, *self._live.values())
             )
             if busy or token is not self._token:
-                return
-            self._counts["go_away_reconnects"] += 1
+                return False
+            self._counts[counter] += 1
             self._closes += 1
-            self._close_reason = "go_away"
+            self._close_reason = reason
             client, orphans = self._detach()
             closes = self._closes
             self._lost = True  # the next session is a reconnect
-            self._reopen_after = "go_away"
+            self._reopen_after = reason
         self._retry_wake.set()
-        self._settle(orphans, "go_away")
+        self.events("session", reason)
+        self._settle(orphans, reason)
         if client is not None:
-            self._close_client(client, "go_away")
+            self._close_client(client, reason)
         self._reconnect_soon(closes)
+        return True
 
     def _interrupts(self, token: _Token | None) -> bool:
         """Whether ``token``'s session interrupts its own answer when its VAD hears speech
@@ -1707,6 +1716,13 @@ class RealtimeRoute:
                 self._count("stale_callbacks")
             self._settle(reqs, reason)
             return
+        idle = stored and not reqs and tok is not None and tok.gemini
+        if (
+            idle
+            and reason == "closed_by_server"
+            and self._hand_over(tok, IDLE_CLOSE, "idle_closes")
+        ):
+            return  # Gemini closes a session idle for about two minutes: not a loss
         self._give_up(reqs)
         if reason not in OWN_CLOSES and reason != "closed":
             self.network.report_realtime(False)
@@ -2236,6 +2252,7 @@ COUNTERS = (
     "usage_repeats",  # ... naming only responses already reported: not charged again
     "go_aways",  # the server said it would close the session (Gemini goAway)
     "go_away_reconnects",  # ... closed once idle, reconnected in the background
+    "idle_closes",  # Gemini closed a session nothing ran on (no loss): reconnected
     "transcripts",
     "transcript_timeouts",
     "unrequested",
