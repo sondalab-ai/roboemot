@@ -375,6 +375,7 @@ class ConversationWorker:
             realtime.base_instructions = self._base_instructions
             realtime.server_turn = self._server_response
             realtime.stream_session = self._stream_session
+            realtime.connect_session = self._connect_session
             # the transcription hint is the name the prompt and the wake word use (SPEC 8)
             realtime.transcription_name = lambda: self._prompt_name(self.stack.effective())
         self.apply_config(stack.effective())
@@ -921,12 +922,20 @@ class ConversationWorker:
             seed=turn.speech_id,
         )
 
-    def _rt_instructions(self, turn: _Turn, delivery: Delivery, *, line: bool = False) -> str:
+    def _rt_instructions(
+        self,
+        turn: _Turn,
+        delivery: Delivery,
+        *,
+        line: bool = False,
+        generation: int | None = None,
+    ) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
         out the skip rule and the conversation hint (the server must say it, not judge it), and
         the tone rule too, as do the round after a tone-only response and every tool round
-        after the first."""
+        after the first. ``generation``: the session the replay is for (default: the
+        current one)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -946,7 +955,8 @@ class ConversationWorker:
             affect=f"{state.label}, intensity {state.intensity:.1f}",
             summary_max_chars=(conv.profile_summary_max_chars, conv.scene_summary_max_chars),
         )[0]["content"]
-        generation = self.realtime.generation
+        if generation is None:
+            generation = self.realtime.generation
         with self._lock:
             missing = [t for t in self._turns if not t or t[0].get("rt", (None,))[0] != generation]
         mood = delivery.instructions if cfg.voice.realtime_route.mood_instructions else ""
@@ -1218,13 +1228,27 @@ class ConversationWorker:
         active route's ``connect_timeout_s`` (else the shared one), the opening goes with parts
         1 to 4 and the session's tools as they are (counted ``stream_session_fallbacks``): a
         stream never stops on it."""
+        return self._session_parts(lambda: self._stream_session_on_loop(job))
+
+    def _connect_session(self, generation: int) -> tuple[str, Any]:
+        """What a ``gemini_live`` connect carries (SPEC 8, Gemini Live wire; asked on the
+        connecting thread): Gemini answers an audio turn before that turn's update and
+        instructions reach it, so its setup holds what a turn would send, as a stream's
+        opening does, with the replay of the turns ``generation`` (the session being opened)
+        lacks. It falls back as ``_stream_session`` does."""
+        return self._session_parts(lambda: self._stream_session_on_loop(None, generation))
+
+    def _session_parts(self, make: Any) -> tuple[str, Any]:
+        """Run ``make()`` (a coroutine building the instructions and tools) on the worker's
+        loop from another thread, bounded by the active route's ``connect_timeout_s``; parts 1
+        to 4 and no tools when it fails (``stream_session_fallbacks``)."""
         loop = self._loop
         try:
             if loop is None:
                 raise RuntimeError("no loop")
             cfg = self.stack.effective()
             wait = realtime_connect_timeout_s(active_realtime_route(cfg), cfg.voice.realtime_route)
-            future = asyncio.run_coroutine_threadsafe(self._stream_session_on_loop(job), loop)
+            future = asyncio.run_coroutine_threadsafe(make(), loop)
             try:
                 return future.result(wait)
             except BaseException:
@@ -1235,7 +1259,11 @@ class ConversationWorker:
             self._counts["stream_session_fallbacks"] += 1
             return self._base_instructions(), None
 
-    async def _stream_session_on_loop(self, job: Any) -> tuple[str, list[dict[str, Any]]]:
+    async def _stream_session_on_loop(
+        self, job: Any, generation: int | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """The instructions and tools a fresh turn would send now (``_stream_session``); the
+        skills shown go on ``job`` when there is one; the replay is for ``generation``."""
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
@@ -1244,8 +1272,9 @@ class ConversationWorker:
         if cfg.voice.realtime_route.skip_tool:
             turn.conversation = self._conversation_state(utterance, cfg, now)
         offered, choices, functions, toned = self._rt_tools(turn)
-        instructions = self._rt_instructions(turn, self._delivery(turn))
-        job.shown = (offered, choices, turn.conversation)
+        instructions = self._rt_instructions(turn, self._delivery(turn), generation=generation)
+        if job is not None:
+            job.shown = (offered, choices, turn.conversation)
         return instructions, functions + toned
 
     def _server_response(self, offer: Any) -> bool:

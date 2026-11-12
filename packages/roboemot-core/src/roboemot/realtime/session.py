@@ -48,6 +48,7 @@ REALTIME_PATH = "/realtime"
 WS_SCHEMES = {"http": "ws", "https": "wss"}
 DEFAULT_PORTS = {"ws": 80, "wss": 443}
 NO_KEY = ("", "none")
+GEMINI_LIVE = "gemini_live"  # the route protocol whose base_url is its WebSocket URL
 IDENTITY = "identity"
 # headers that describe the body as received; the rebuilt reply holds it decoded and whole
 BODY_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}
@@ -269,14 +270,23 @@ def realtime_url(base_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, path, parts.query, ""))
 
 
+def session_url(route: LLMRoute) -> str:
+    """The WebSocket URL a route's own session connects to: a ``gemini_live`` route's
+    ``base_url`` as written (a ``wss`` URL, checked at load), else ``realtime_url``."""
+    if route.protocol == GEMINI_LIVE:
+        return route.base_url
+    return realtime_url(route.base_url)
+
+
 class DirectSession:
-    """Direct mode: connect to the route's own ``base_url`` + ``/realtime``. The key, if any, goes
-    to that host only."""
+    """Direct mode: connect to the route's own URL (``session_url``: ``base_url`` +
+    ``/realtime``, or a ``gemini_live`` route's ``base_url``). The key, if any, goes to that host
+    only."""
 
     key_hosts: tuple[str, ...] = ()
 
     async def allocate(self, request: AllocationRequest) -> Allocation:
-        return Allocation(realtime_url(request.route.base_url))
+        return Allocation(session_url(request.route))
 
 
 def _host_port(url: str) -> tuple[str, str, int]:
@@ -396,11 +406,11 @@ def connect_target(
 
 
 def route_origin(route: LLMRoute) -> tuple[str, str, int] | None:
-    """Scheme, host and port of the route's own WebSocket origin (``realtime_url`` of its
-    ``base_url``: https gives wss, http ws, the default port when none is written), or None
-    when the base URL cannot give one."""
+    """Scheme, host and port of the route's own WebSocket origin (``session_url``: https gives
+    wss, http ws, the default port when none is written), or None when the base URL cannot give
+    one."""
     try:
-        return _host_port(realtime_url(route.base_url))
+        return _host_port(session_url(route))
     except UrlRefused:
         return None
 

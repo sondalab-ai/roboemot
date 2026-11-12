@@ -58,6 +58,16 @@ conversation's end after a loss keeps it): the status clears without waiting for
 and that turn does not pay the connect. A loss counts in the reset streak, so a server that keeps
 dropping its sessions is reconnected ever more slowly.
 
+A ``gemini_live`` session (SPEC 8, Gemini Live wire) starts with what a turn would send (the
+tools and the turn's instructions, with the replay of the history it lacks: ``connect_session``),
+since Gemini answers an audio turn before the turn's own update reaches it. Its tokens come
+seconds after a response ended (``UsageReport``): each response is charged its estimate at its
+``response.done``, and the report charges only what its total adds, once, also for a session
+gone. A ``goAway`` closes the session once nothing runs on it (no request, no turn holding the
+input) and reconnects it in the background; the next turn replays what the new session lacks. A
+``cancelled`` end the robot did not ask for is Gemini cutting its own answer: the response is
+marked interrupted, so its turn asks nothing more.
+
 Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
 12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
 session lost (its close reason) and a server error (its code only, never its message).
@@ -90,7 +100,13 @@ from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
-from .session import DirectSession, ProviderUnavailable, SessionProvider, load_session_provider
+from .session import (
+    GEMINI_LIVE,
+    DirectSession,
+    ProviderUnavailable,
+    SessionProvider,
+    load_session_provider,
+)
 from .turn import HeldResponse
 
 log = logging.getLogger(__name__)
@@ -119,6 +135,8 @@ ITEM_PREFIX = "re_"  # the client's own item ids (user text, tool results)
 EVENT_PREFIX = "rq_"  # the event ids of the robot's response.create events
 CANCEL_PREFIX = "rc_"  # the event ids of the robot's response.cancel events (S2)
 CANCELS_KEPT = 32  # cancel event ids remembered, to tell an error about one (S2)
+ESTIMATES_KEPT = 64  # responses whose charged estimate a late usage report corrects (Gemini)
+RESPONSE_CANCELLED = "cancelled"  # the response.done status of a cancelled response
 # the server's refusal of a cancel with no response active (benign: it ended or the server's
 # own interrupt cancelled it first, S2)
 CANCEL_NOT_ACTIVE = "response_cancel_not_active"
@@ -136,9 +154,13 @@ CONTROL_EVENTS = (protocol.RESPONSE_CANCEL, protocol.ITEM_DELETE, protocol.ITEM_
 class _Token:
     """Identifies one client's callbacks: those of a client that is not the current (or the
     connecting) one are dropped, so a late close of an old session never touches a new one.
-    ``detached``: the route let go of that client itself, so its close is expected."""
+    ``detached``: the route let go of that client itself, so its close is expected.
+    ``gemini``: its session speaks Gemini Live; ``leaving``: its server said it will close it
+    (``goAway``), so it is closed and reconnected once nothing runs on it."""
 
     detached: bool = False
+    gemini: bool = False
+    leaving: bool = False
 
 
 @dataclass
@@ -165,6 +187,7 @@ class Request:
     # interrupt_response it cancels it on its own: its round asks nothing more, and no
     # audio of it plays from then on
     interrupted: bool = False
+    cancel_sent: bool = False  # the robot cancelled it while its run followed it
 
 
 # what the audio input says of a response the server created on its own (``RealtimeInput.claim``)
@@ -368,6 +391,9 @@ class RealtimeRoute:
         self._live: dict[str, Request] = {}  # created, response.done not yet seen
         # ids of the responses whose response.done was counted (and its usage charged)
         self._charged: collections.deque[str] = collections.deque(maxlen=LATENCY_WINDOW)
+        # the estimate charged per response a server reports its tokens for later (Gemini)
+        self._estimated: collections.OrderedDict[str, int] = collections.OrderedDict()
+        self._reported: collections.deque[str] = collections.deque(maxlen=ESTIMATES_KEPT)
         self._ids = itertools.count(1)
         self._events = itertools.count(1)
         self.state = "off"
@@ -441,6 +467,13 @@ class RealtimeRoute:
         # what a stream's opening session.update carries: the instructions and tools a turn
         # would send (the worker's), so the server's own answer reads them
         self.stream_session: Callable[[Any], tuple[str, Any]] = lambda job: (
+            self.base_instructions(),
+            None,
+        )
+        # what a gemini_live connect carries (the worker's): the instructions and tools a turn
+        # would send, with the replay of the turns the session being opened (its generation)
+        # lacks
+        self.connect_session: Callable[[int], tuple[str, Any]] = lambda generation: (
             self.base_instructions(),
             None,
         )
@@ -756,7 +789,13 @@ class RealtimeRoute:
                 self.state, self.reason = "connecting", None
             self.tools_offered = frozenset()  # a new session holds no tool
             hint = self.hint(cfg)
-            update = session_update(cfg, self.base_instructions(), hint=hint, route=route)
+            if route.protocol == GEMINI_LIVE:  # its setup is all a session ever gets
+                instructions, tools = self.connect_session(self.generation + 1)
+                if tools is not None:
+                    self.tools_offered = frozenset(t["name"] for t in tools)
+            else:
+                instructions, tools = self.base_instructions(), None
+            update = session_update(cfg, instructions, tools, hint=hint, route=route)
             fallback: dict[str, Any] = {}
             key = (route.name, route.base_url, cfg.voice.realtime_route.transcription_model)
             if hint is not None:  # the client sends this one instead where the hint is refused
@@ -845,6 +884,7 @@ class RealtimeRoute:
             factory = RealtimeClient
         with self._lock:
             closes = self._closes
+        token.gemini = route.protocol == GEMINI_LIVE
         box: list[Any] = []
         client = factory(
             route,
@@ -1201,7 +1241,34 @@ class RealtimeRoute:
         for r in reqs:
             if self._first_charge(r, r.response_id):
                 self.charge(r.estimate)
+                self._note_estimate(r.response_id, r.estimate)
                 self.note_response(None)
+
+    def _note_estimate(self, response_id: str | None, tokens: int) -> None:
+        """Remember the estimate charged for ``response_id`` (the last ``ESTIMATES_KEPT``), so
+        a usage report that comes later charges only what its total adds."""
+        if response_id is None:
+            return
+        with self._lock:
+            self._estimated[response_id] = tokens
+            while len(self._estimated) > ESTIMATES_KEPT:
+                self._estimated.popitem(last=False)
+
+    def _usage(self, report: protocol.UsageReport) -> None:
+        """A server's token count for responses that ended before it (Gemini's
+        ``turnComplete``), on any session, also one gone: the estimates already charged for its
+        responses are taken off its total, the rest is charged (never below zero). A response
+        is reported once: a report that names only responses already reported charges nothing;
+        a report that names none charges its whole total."""
+        with self._lock:
+            fresh = [i for i in report.response_ids if i not in self._reported]
+            if report.response_ids and not fresh:
+                self._counts["usage_repeats"] += 1
+                return
+            self._reported.extend(fresh)
+            charged = sum(self._estimated.pop(i, 0) for i in fresh)
+            self._counts["usage_reports"] += 1
+        self.charge(max(0, report.total_tokens - charged))
 
     def _first_charge(self, req: Request | None, response_id: str | None) -> bool:
         """Whether this response is charged now (False when it already was): keyed by its
@@ -1238,7 +1305,11 @@ class RealtimeRoute:
             if not current and event.output_rate_hz:
                 self._count("stale_callbacks")
             return
-        if isinstance(event, protocol.ResponseCreated):
+        if isinstance(event, protocol.UsageReport):
+            self._usage(event)  # spent tokens, whichever session they were spent on
+        elif isinstance(event, protocol.GoAway):
+            self._go_away(token)
+        elif isinstance(event, protocol.ResponseCreated):
             self._created(event, token)
         elif isinstance(event, protocol.ServerError):
             self._error(event, token)
@@ -1248,7 +1319,9 @@ class RealtimeRoute:
             with self._lock:
                 current = self._current(token)
                 if current:  # the server confirmed a delete or a truncate (the HIL reads them)
-                    self._counts[CONFIRMATIONS[type(event)]] += 1
+                    acked = isinstance(event, protocol.ItemDeleted | protocol.ItemTruncated)
+                    table = EMULATED if acked and event.emulated else CONFIRMATIONS
+                    self._counts[table[type(event)]] += 1
             if not current:
                 self._count("stale_callbacks")
         elif isinstance(event, OF_THE_INPUT):
@@ -1272,6 +1345,45 @@ class RealtimeRoute:
                 current = self._current(token)
             if not current:
                 self._count("stale_callbacks")
+
+    def _go_away(self, token: _Token | None) -> None:
+        """The server will close this session soon (``goAway``): it is closed once nothing runs
+        on it (``_leave``), and the server's own close is the backstop."""
+        with self._lock:
+            tok = token or self._token
+            if tok is None or not self._current(token):
+                self._counts["stale_callbacks"] += 1
+                return
+            tok.leaving = True
+            self._counts["go_aways"] += 1
+        self.events("session", "go_away")
+        self._leave(tok)
+
+    def _leave(self, token: _Token | None) -> None:
+        """Close a session its server is leaving (``goAway``) when nothing runs on it: no
+        request in flight and no turn holding the input (a tool round sends several requests).
+        It is detached and closed, and the background reconnect opens the next one (not a
+        loss: no backoff step); the worker replays the history it lacks."""
+        if token is None or not token.leaving:
+            return
+        with self._lock:
+            busy = self._input_holds > 0 or any(
+                r.token is token for r in (*self._pending, *self._live.values())
+            )
+            if busy or token is not self._token:
+                return
+            self._counts["go_away_reconnects"] += 1
+            self._closes += 1
+            self._close_reason = "go_away"
+            client, orphans = self._detach()
+            closes = self._closes
+            self._lost = True  # the next session is a reconnect
+            self._reopen_after = "go_away"
+        self._retry_wake.set()
+        self._settle(orphans, "go_away")
+        if client is not None:
+            self._close_client(client, "go_away")
+        self._reconnect_soon(closes)
 
     def _interrupts(self, token: _Token | None) -> bool:
         """Whether ``token``'s session interrupts its own answer when its VAD hears speech
@@ -1444,6 +1556,9 @@ class RealtimeRoute:
         would, with the robot's own event id (``_cancel``)."""
         with self._lock:
             client = self._client or self._connecting
+            for req in self._live.values():
+                if req.run is not None and req.token is self._token:
+                    req.cancel_sent = True  # its cancelled end is the robot's, not the server's
         if client is None:
             return False
         self._cancel(client)
@@ -1521,6 +1636,17 @@ class RealtimeRoute:
             if late:  # the server cancelled it on the person's speech: none of it plays (S2)
                 self._counts["late_audio_dropped"] += 1
                 run = None
+            own_cut = (
+                done
+                and run is not None
+                and tok is not None
+                and tok.gemini
+                and event.status == RESPONSE_CANCELLED
+                and not (req.cancel_sent or req.interrupted)
+            )
+            if own_cut and req is not None:  # Gemini cut its answer: the turn asks no more
+                req.interrupted = True
+                self._counts["server_interrupts"] += 1
             recorder = req.recorder if req is not None and run is None else None
             gone: list[str] = []
             if req is not None and req.dropped:
@@ -1543,6 +1669,8 @@ class RealtimeRoute:
             return
         if run is not None:
             run.deliver(event)
+        if done:
+            self._leave(tok)
 
     def _account(self, done: protocol.ResponseDone, req: Request | None) -> None:
         """Every ``response.done`` is counted and charged once (keyed by its response id, or
@@ -1556,6 +1684,7 @@ class RealtimeRoute:
             self.charge(done.total_tokens)
         elif req is not None:
             self.charge(req.estimate)
+            self._note_estimate(done.response_id, req.estimate)
 
     def _on_close(self, reason: str, token: _Token | None = None) -> None:
         """A client's socket closed. A session that was up and is lost on its own (not a close
@@ -1653,8 +1782,12 @@ class RealtimeRoute:
             self._input_holds += 1
 
     def release_input(self) -> None:
+        """The turn ended: bursts may go again, and a session its server is leaving closes
+        now if nothing else runs on it (``_leave``)."""
         with self._lock:
             self._input_holds = max(0, self._input_holds - 1)
+            token = self._token
+        self._leave(token)
 
     def input_held(self) -> bool:
         with self._lock:
@@ -2068,7 +2201,8 @@ class RealtimeRoute:
         out["unknown_events"] = snap.get("unknown", 0)
         out["oversize"] = snap.get("oversize", 0)
         out.update(by_state)
-        out["client"] = {k: v for k, v in snap.items() if k != "key_hosts"}
+        out["wire"] = snap.get("wire")  # the Gemini codec's counts, None for the plain subset
+        out["client"] = {k: v for k, v in snap.items() if k not in ("key_hosts", "wire")}
         return out
 
 
@@ -2096,6 +2230,12 @@ COUNTERS = (
     "items_delete_confirmed",
     "items_truncated",
     "items_truncate_confirmed",
+    "items_delete_emulated",  # acked by the wire codec: the server has no item delete (Gemini)
+    "items_truncate_emulated",  # ... no item truncate
+    "usage_reports",  # token counts that came after their responses ended (Gemini)
+    "usage_repeats",  # ... naming only responses already reported: not charged again
+    "go_aways",  # the server said it would close the session (Gemini goAway)
+    "go_away_reconnects",  # ... closed once idle, reconnected in the background
     "transcripts",
     "transcript_timeouts",
     "unrequested",
@@ -2135,6 +2275,11 @@ COUNTERS = (
 CONFIRMATIONS: dict[type, str] = {
     protocol.ItemDeleted: "items_delete_confirmed",
     protocol.ItemTruncated: "items_truncate_confirmed",
+}
+# ... and the counter of one a wire codec acknowledged itself (``emulated``)
+EMULATED: dict[type, str] = {
+    protocol.ItemDeleted: "items_delete_emulated",
+    protocol.ItemTruncated: "items_truncate_emulated",
 }
 
 # the server events about the input audio (the audio input collects them)

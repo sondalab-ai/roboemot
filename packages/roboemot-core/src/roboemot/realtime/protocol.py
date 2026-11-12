@@ -384,7 +384,7 @@ class UsageReport(ServerEvent):
 @dataclass(frozen=True)
 class GoAway(ServerEvent):
     """The server will close the session soon (Gemini Live's ``goAway``): ``time_left_ms``
-    when it says how soon. The client lets the current response end, then reconnects."""
+    when it says how soon. The route lets what runs on the session end, then reconnects."""
 
     time_left_ms: int | None = None
 

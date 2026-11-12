@@ -153,10 +153,10 @@ While the route is down, the local pipeline answers (Vosk and Piper, when instal
 
 ## Gemini Live (Google): a second provider
 
-**Not usable yet.** This section documents the configuration of the `gemini_live` protocol (SPEC 8,
-Gemini Live wire). The robot cannot speak it before the slices S2 to S4 of the Gemini Live epic
-land (the codec, the client and the route check). Until then a Gemini route loads but does not
-connect, and the local pipeline answers.
+**Not ready yet.** This section documents the configuration of the `gemini_live` protocol (SPEC 8,
+Gemini Live wire). The robot speaks it from slice S3 of the Gemini Live epic on; the route
+**Check** (web UI and `roboemot realtime check`) learns it in slice S4, so until then it may fail
+on a Gemini route that works.
 
 Gemini Live is a separate route beside `pollen`. Pollen's route stays as it is; you switch
 between the two with `voice.realtime_route.route` and a restart.
