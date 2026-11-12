@@ -20,8 +20,9 @@ register a provider in the ``roboemot.realtime`` entry-point group under the man
   URL from ``repr``; ``origin`` is ``scheme://host:port`` only);
 - the key is sent only to the route's own origin (scheme, host and port of its ``base_url``,
   ``https`` read as ``wss``), or over ``wss`` to a host matching one of the provider's
-  ``key_hosts`` suffixes, declared in code (shown in the report). A keyed route whose connect
-  host is neither is refused, nothing is sent.
+  ``key_hosts`` suffixes, declared in code (shown in the report); a ``gemini_live`` route's key
+  goes to its own origin only. A keyed route whose connect host is neither is refused, nothing
+  is sent.
 
 A refusal raises :class:`UrlRefused` whose message is a reason code only.
 """
@@ -48,6 +49,7 @@ REALTIME_PATH = "/realtime"
 WS_SCHEMES = {"http": "ws", "https": "wss"}
 DEFAULT_PORTS = {"ws": 80, "wss": 443}
 NO_KEY = ("", "none")
+GEMINI_LIVE = "gemini_live"  # the route protocol whose base_url is its WebSocket URL
 IDENTITY = "identity"
 # headers that describe the body as received; the rebuilt reply holds it decoded and whole
 BODY_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}
@@ -269,14 +271,23 @@ def realtime_url(base_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, path, parts.query, ""))
 
 
+def session_url(route: LLMRoute) -> str:
+    """The WebSocket URL a route's own session connects to: a ``gemini_live`` route's
+    ``base_url`` as written (a ``wss`` URL, checked at load), else ``realtime_url``."""
+    if route.protocol == GEMINI_LIVE:
+        return route.base_url
+    return realtime_url(route.base_url)
+
+
 class DirectSession:
-    """Direct mode: connect to the route's own ``base_url`` + ``/realtime``. The key, if any, goes
-    to that host only."""
+    """Direct mode: connect to the route's own URL (``session_url``: ``base_url`` +
+    ``/realtime``, or a ``gemini_live`` route's ``base_url``). The key, if any, goes to that host
+    only."""
 
     key_hosts: tuple[str, ...] = ()
 
     async def allocate(self, request: AllocationRequest) -> Allocation:
-        return Allocation(realtime_url(request.route.base_url))
+        return Allocation(session_url(request.route))
 
 
 def _host_port(url: str) -> tuple[str, str, int]:
@@ -382,9 +393,11 @@ def connect_target(
     # The approval trusts the route's scheme, host and port (``secret_violations``): the key goes
     # to that exact origin, or over wss to a host the provider declared.
     at_route = (scheme, host, port) == own
-    # a declared host gets the key on the wss port only, never on a port the allocator names
+    # a declared host gets the key on the wss port only, never on a port the allocator names; a
+    # gemini_live key goes to the route's own origin only (it has no session allocator)
     declared = (
-        scheme == "wss"
+        route.protocol != GEMINI_LIVE
+        and scheme == "wss"
         and port == DEFAULT_PORTS["wss"]
         and host_matches(host, allocation.key_hosts)
     )
@@ -396,11 +409,11 @@ def connect_target(
 
 
 def route_origin(route: LLMRoute) -> tuple[str, str, int] | None:
-    """Scheme, host and port of the route's own WebSocket origin (``realtime_url`` of its
-    ``base_url``: https gives wss, http ws, the default port when none is written), or None
-    when the base URL cannot give one."""
+    """Scheme, host and port of the route's own WebSocket origin (``session_url``: https gives
+    wss, http ws, the default port when none is written), or None when the base URL cannot give
+    one."""
     try:
-        return _host_port(realtime_url(route.base_url))
+        return _host_port(session_url(route))
     except UrlRefused:
         return None
 

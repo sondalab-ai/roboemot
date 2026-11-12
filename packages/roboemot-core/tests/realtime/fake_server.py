@@ -26,7 +26,7 @@ answered with an ``error`` (``unknown_parameter``; its ``event_id`` names the up
 the delete's ``event_id``, its message quoting the request).
 
 Every handshake is recorded (path with its query, headers) in ``requests``; client events in
-``received``.
+``received``, and their frames as sent in ``frames``.
 """
 
 from __future__ import annotations
@@ -76,6 +76,7 @@ class FakeServer:
         self.oversize_bytes = oversize_bytes
         self.requests: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
+        self.frames: list[str | bytes] = []
         self.port = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
@@ -141,6 +142,7 @@ class FakeServer:
         await self._send(ws, {"type": "session.created", "session": {}})
         async for frame in ws:
             event = json.loads(frame)
+            self.frames.append(frame)
             self.received.append(event)
             self._of(ws).append(event)
             kind = event.get("type")

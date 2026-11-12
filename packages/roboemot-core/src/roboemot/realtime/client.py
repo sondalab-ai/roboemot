@@ -5,13 +5,21 @@
 checks the URL (``connect_target``), opens the socket and sends ``session.update``; it returns
 once the server answered ``session.updated``, within the route's ``connect_timeout_s`` (else
 ``voice.realtime_route.connect_timeout_s``) for the whole sequence. Server events are parsed
-(``protocol.parse``) and handed to ``on_event`` on the client thread; unknown ones are only
-counted.
+and handed to ``on_event`` on the client thread; unknown ones are only counted.
+
+Each session speaks through a wire codec (``wire``): ``OpenAIWire`` (the subset as is, every
+``openai_realtime`` route) or, for a ``gemini_live`` route, a new ``GeminiWire`` per session (a
+reconnect starts a new one: what the last one held, an answer, calls, outputs, is lost). The
+codec runs on the client's loop only: ``encode`` inside the loop's send, and the events it
+answers itself go through the same path as the server's (the response watchdog, then
+``on_event``), on the loop, before its messages are written, so a fast server's answer never
+reaches the owner before the ``response.created`` the codec made for it.
 
 Transport rules:
 
-- the only credential is an ``Authorization`` header, sent only when the URL rules allow it; a
-  route with a key whose header resolves empty never connects (``key_unavailable``);
+- the only credential is one header, sent only when the URL rules allow it: ``Authorization``,
+  or the bare key in ``x-goog-api-key`` for a ``gemini_live`` route (never in its URL); a route
+  with a key whose header resolves empty never connects (``key_unavailable``);
 - a provider that cannot allocate raises ``ProviderRefused``: the client closes with its reason
   code (``provider_http_<code>``, ...). ``platform_id()`` (the opt-in) is read at each
   allocation, and the snapshot keeps whether the last allocation request carried the platform
@@ -43,6 +51,7 @@ import inspect
 import itertools
 import logging
 import threading
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -52,10 +61,17 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from .. import shutdown
-from ..config.schema import LLMRoute, RealtimeRouteConfig, realtime_connect_timeout_s
+from ..config.schema import (
+    LLMRoute,
+    RealtimeRouteConfig,
+    realtime_connect_timeout_s,
+    realtime_voice,
+)
 from ..llm.pseudonyms import url_is_local
 from . import protocol
+from .gemini_wire import KEY_HEADER, GeminiWire
 from .session import (
+    GEMINI_LIVE,
     NO_KEY,
     AllocationRequest,
     ConnectTarget,
@@ -64,6 +80,7 @@ from .session import (
     UrlRefused,
     connect_target,
 )
+from .wire import OpenAIWire, Wire
 
 log = logging.getLogger(__name__)
 # The WebSocket library logs the request line (path and query), every header (the key) and
@@ -96,6 +113,8 @@ RESPONSE_EVENTS = (
     protocol.ResponseDone,
 )
 STATES = ("idle", "connecting", "connected", "closed")
+# every Gemini session of this process, numbered: its codec's ids never repeat across sessions
+_SESSIONS = itertools.count(1)
 
 
 class _NoRedirect(ws_connect):
@@ -166,8 +185,12 @@ class RealtimeClient:
         self._platform_id_sent = False  # the last allocation request carried the identifier
         # connect's fallback update: None (not sent), "preferred" (sent first), "resent"
         self._update_fallback: str | None = None
+        self._wire: Wire = OpenAIWire(settings.max_message_bytes)  # the session's (``_connect``)
         self.state = "idle"
         self.reason: str | None = None
+        self.close_code: int | None = None  # the server's close code of the last failure
+        # the codec counts of the sessions before the current one (``_connect`` adds them)
+        self._wire_totals: collections.Counter[str] = collections.Counter()
         self._counts: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
         self._malformed: collections.Counter[str] = collections.Counter()
@@ -220,10 +243,13 @@ class RealtimeClient:
         session_update: dict[str, Any],
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
+        timeout_s: float | None = None,
     ) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
-        client thread). False on any failure, with ``reason`` set to a code. The wait is bounded
-        by ``connect_timeout_s`` (plus ``send_timeout_s`` for the socket's own close): a close
+        client thread). False on any failure, with ``reason`` set to a code (and
+        ``close_code`` to the server's close code when it closed the socket). The wait is
+        bounded by ``timeout_s`` (what is left of the owner's connect budget; None: the route's
+        ``connect_timeout_s``) plus ``send_timeout_s`` for the socket's own close: a close
         from another thread stops the loop, and the connect's future would never resolve.
         ``fallback``: the update sent once, on the same socket, when the server answers the first
         with an ``error`` (the only event sent yet, so the error is about it) whose code is not
@@ -231,10 +257,11 @@ class RealtimeClient:
         ``prefer_fallback(origin)`` holds for the connect endpoint; the snapshot's
         ``update_fallback`` says which (``resent``, ``preferred``) or None."""
         self.start()
-        future = self._submit(self._connect(session_update, fallback, prefer_fallback))
+        budget = self._connect_timeout_s() if timeout_s is None else timeout_s
+        future = self._submit(self._connect(session_update, fallback, prefer_fallback, budget))
         s = self.settings
         try:
-            return bool(future.result(self._connect_timeout_s() + s.send_timeout_s))
+            return bool(future.result(budget + s.send_timeout_s))
         except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
             future.cancel()
             with self._lock:
@@ -287,15 +314,18 @@ class RealtimeClient:
                 "key_hosts": list(self.provider.key_hosts),
                 "failures": dict(self._failures),
                 "malformed": dict(self._malformed),
+                "wire": self._wire_report(),
                 **{k: self._counts[k] for k in _COUNTERS},
             }
 
     # ----------------------------------------------------------------- loop side
 
-    def _fail(self, reason: str) -> None:
+    def _fail(self, reason: str, code: int | None = None) -> None:
+        """The session failed or closed (``reason``; ``code``: the server's close code, kept as
+        ``close_code`` for the owner, which reads it in its close hook)."""
         with self._lock:
             self._failures[reason] += 1
-            self.reason = reason
+            self.reason, self.close_code = reason, code
             self.state = "closed"
         self._closed_cb(reason)
 
@@ -329,18 +359,50 @@ class RealtimeClient:
         return realtime_connect_timeout_s(self.route, self.settings)
 
     def _key(self) -> dict[str, str]:
-        """Only the ``Authorization`` header of the route's key, or nothing."""
+        """The route's key as the one header its protocol takes, or nothing: the
+        ``Authorization`` header as the router gives it, or for a ``gemini_live`` route the bare
+        key in ``x-goog-api-key``."""
         value = self._auth_headers().get(AUTH_HEADER)
-        return {AUTH_HEADER: value} if value else {}
+        if not value:
+            return {}
+        if self.route.protocol == GEMINI_LIVE:
+            bare = value.removeprefix(BEARER).strip()
+            return {KEY_HEADER: bare} if bare else {}
+        return {AUTH_HEADER: value}
+
+    def _wire_report(self) -> dict[str, dict[str, int]] | None:
+        """The codec's counts (``_lock`` held): this session's and the totals since the client
+        was built; None for the plain subset."""
+        session = _wire_counts(self._wire)
+        if session is None:
+            return None
+        total = Counter(self._wire_totals)
+        total.update(session)  # update keeps the zero counts
+        return {"session": session, "total": dict(total)}
+
+    def _new_wire(self) -> Wire:
+        """The codec of one session: a new ``GeminiWire`` (the route's model, the message cap,
+        its voice, a process-wide session number) for a ``gemini_live`` route, else the
+        identity ``OpenAIWire``, which is stateless (a new one changes nothing)."""
+        if self.route.protocol == GEMINI_LIVE:
+            voice = realtime_voice(self.route, self.settings) or None
+            cap = self.settings.max_message_bytes
+            return GeminiWire(self.route.model, cap, voice, next(_SESSIONS))
+        return OpenAIWire(self.settings.max_message_bytes)
 
     async def _connect(
         self,
         session_update: dict[str, Any],
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
+        budget_s: float | None = None,
     ) -> bool:
         await self._close(None)
+        wire = self._new_wire()
         with self._lock:
+            self._wire_totals.update(_wire_counts(self._wire) or {})
+            self._wire = wire
+            self.close_code = None
             self.state, self.reason, self._target = "connecting", None, None
             self._refused_host = None
             self._update_fallback = None
@@ -348,7 +410,7 @@ class RealtimeClient:
             self._sent_types.clear()
             self._counts["connects"] += 1
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._connect_timeout_s()
+        deadline = loop.time() + (self._connect_timeout_s() if budget_s is None else budget_s)
         try:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
@@ -390,10 +452,16 @@ class RealtimeClient:
             log.warning("realtime route %s: session refused (%s)", self.route.name, exc.reason)
             self._fail(exc.reason)
         except Exception as exc:  # a library error can embed the URL: the type only
+            # a close during the connect (Gemini's intermittent 1008, S0) is a connect failure
+            # the route retries; its code is logged, never its reason text
+            code = exc.rcvd.code if isinstance(exc, ConnectionClosed) and exc.rcvd else None
             log.warning(
-                "realtime route %s: connect failed: %s", self.route.name, type(exc).__name__
+                "realtime route %s: connect failed: %s%s",
+                self.route.name,
+                type(exc).__name__,
+                f" (close code {code})" if code is not None else "",
             )
-            self._fail("connect_failed")
+            self._fail("connect_failed", code)
         else:
             with self._lock:
                 self.state = "connected"
@@ -411,7 +479,7 @@ class RealtimeClient:
             headers = self._key()
         except Exception:
             headers = {}
-        key = headers.get(AUTH_HEADER, "")
+        key = next(iter(headers.values()), "")
         if self.route.api_key not in NO_KEY and not key.removeprefix(BEARER).strip():
             raise _KeyUnavailable  # never connect a keyed route without its key
         if self._local_only() and not url_is_local(self.route.base_url, self.route.locality):
@@ -449,12 +517,16 @@ class RealtimeClient:
         )
 
     async def _send_update(self, ws: ClientConnection, update: dict[str, Any]) -> None:
-        """Send a connect's ``session.update``, with an ``event_id`` of the client's own unless
-        it carries one."""
+        """Send a connect's ``session.update`` through the codec (Gemini's ``setup``), with an
+        ``event_id`` of the client's own unless it carries one."""
         update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **update}
         self._note_sent(update)
-        await ws.send(protocol.encode(update))
-        self._count("sent")
+        frames, local = self._wire.encode(update)
+        for event in local:
+            self._handle(event, local=True)
+        for frame in frames:
+            await ws.send(protocol.encode(frame))
+            self._count("sent")
 
     async def _await_session(
         self, ws: ClientConnection, fallback: dict[str, Any] | None = None
@@ -462,54 +534,72 @@ class RealtimeClient:
         """Read until ``session.updated``; a server error before it refuses the session, unless
         a ``fallback`` update is left and the error is not an account error: the fallback is
         sent (once, through the owner's gate again) and the wait goes on. That error is not
-        handed to the owner (it would count as unexplained): ``update_fallback`` reports it."""
+        handed to the owner (it would count as unexplained): ``update_fallback`` reports it.
+        A frame's events are all handed out before the wait ends on its ``session.updated``."""
         while True:
-            event = self._parse(await ws.recv())
-            resend = (
-                isinstance(event, protocol.ServerError)
-                and fallback is not None
-                and event.code not in protocol.ACCOUNT_ERRORS
-            )
-            if resend and fallback is not None:
-                if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
-                    raise _SessionRefused("reconfigured")
-                log.info(
-                    "realtime route %s: server error %s on session.update (cause not given); "
-                    "sent the fallback update",
-                    self.route.name,
-                    event.code,
+            updated = False
+            for event in self._parse(await ws.recv()):
+                resend = (
+                    isinstance(event, protocol.ServerError)
+                    and fallback is not None
+                    and event.code not in protocol.ACCOUNT_ERRORS
                 )
-                await self._send_update(ws, fallback)
-                fallback = None
-                with self._lock:
-                    self._update_fallback = "resent"
-                continue
-            self._deliver(event)
-            if event.type == protocol.SESSION_UPDATED:
+                if resend and fallback is not None:
+                    if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
+                        raise _SessionRefused("reconfigured")
+                    log.info(
+                        "realtime route %s: server error %s on session.update (cause not "
+                        "given); sent the fallback update",
+                        self.route.name,
+                        event.code,
+                    )
+                    await self._send_update(ws, fallback)
+                    fallback = None
+                    with self._lock:
+                        self._update_fallback = "resent"
+                    continue
+                self._deliver(event)
+                updated = updated or event.type == protocol.SESSION_UPDATED
+                if isinstance(event, protocol.ServerError):
+                    log.warning(
+                        "realtime route %s: server error %s about %s",
+                        self.route.name,
+                        event.code,
+                        self._server_error[1],
+                    )
+                    raise _SessionRefused("server_error")
+            if updated:
                 return
-            if isinstance(event, protocol.ServerError):
-                log.warning(
-                    "realtime route %s: server error %s about %s",
-                    self.route.name,
-                    event.code,
-                    self._server_error[1],
-                )
-                raise _SessionRefused("server_error")
 
-    def _parse(self, frame: str | bytes) -> protocol.ServerEvent:
-        event = protocol.parse(frame, self.settings.max_message_bytes)
+    def _parse(self, frame: str | bytes) -> list[protocol.ServerEvent]:
+        """One server frame through the session's codec, its events counted (``received`` per
+        frame; unknown, malformed, errors and audio bytes per event)."""
+        events = self._wire.decode(frame)
         with self._lock:
             self._counts["received"] += 1
-            if isinstance(event, protocol.Unknown):
-                self._counts["unknown"] += 1
-            elif isinstance(event, protocol.Malformed):
-                self._malformed[event.reason] += 1
-            elif isinstance(event, protocol.ServerError):
-                self._counts["server_errors"] += 1
-                self._server_error = (event.code, self._sent_types.get(event.event_id or ""))
-            elif isinstance(event, protocol.AudioDelta):
-                self._counts["audio_bytes_received"] += len(event.pcm)
-        return event
+            for event in events:
+                if isinstance(event, protocol.Unknown):
+                    self._counts["unknown"] += 1
+                elif isinstance(event, protocol.Malformed):
+                    self._malformed[event.reason] += 1
+                elif isinstance(event, protocol.ServerError):
+                    self._counts["server_errors"] += 1
+                    about = self._sent_types.get(event.event_id or "")
+                    self._server_error = (event.code, about)
+                elif isinstance(event, protocol.AudioDelta):
+                    self._counts["audio_bytes_received"] += len(event.pcm)
+        return events
+
+    def _handle(self, event: protocol.ServerEvent, *, local: bool = False) -> None:
+        """One event of an open session, the server's or one the codec answered itself
+        (``local``): ``Unknown`` is only counted (``_parse``); while a response is due it moves
+        the watchdog (``_watch``), then it is handed out. A local ``response.created`` is not
+        the server's first word: the first-token wait goes on."""
+        if isinstance(event, protocol.Unknown):
+            return
+        if self._awaiting and not (local and isinstance(event, protocol.ResponseCreated)):
+            self._watch(event)
+        self._deliver(event)
 
     def _deliver(self, event: protocol.ServerEvent) -> None:
         try:
@@ -539,15 +629,11 @@ class RealtimeClient:
 
     async def _receive(self, ws: ClientConnection) -> None:
         """The receive loop: parse, track the response in progress, hand events out."""
-        reason = "closed"
+        reason, code = "closed", None
         try:
             while True:
-                event = self._parse(await ws.recv())
-                if isinstance(event, protocol.Unknown):
-                    continue  # counted only: no progress, not handed out
-                if self._awaiting:
-                    self._watch(event)
-                self._deliver(event)
+                for event in self._parse(await ws.recv()):
+                    self._handle(event)
         except ConnectionClosed as exc:
             sent = exc.sent.code if exc.sent is not None else None
             if sent == CLOSE_TOO_BIG:
@@ -564,7 +650,10 @@ class RealtimeClient:
                     log.warning("realtime route %s: send stuck, socket lost", self.route.name)
             else:
                 reason = "closed_by_server" if exc.rcvd is not None else "connection_lost"
-                log.info("realtime route %s: socket closed (%s)", self.route.name, reason)
+                code = exc.rcvd.code if exc.rcvd is not None else None  # never its reason text
+                log.info(
+                    "realtime route %s: socket closed (%s, code %s)", self.route.name, reason, code
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -573,7 +662,7 @@ class RealtimeClient:
         self._arm(None)
         self._awaiting = False
         if self._ws is ws:
-            self._fail(reason)
+            self._fail(reason, code)
             self._receiver = None  # ending on its own: nothing to cancel
             await self._drop_socket()
 
@@ -606,11 +695,15 @@ class RealtimeClient:
                 # armed before the write: a fast server may answer while the send still drains
                 self._awaiting, self._awaiting_id = True, event["event_id"]
                 self._arm(self.route.first_token_timeout_s)
+            frames, local = self._wire.encode(event)
+            for answered in local:  # before the write: they precede what the server answers
+                self._handle(answered, local=True)
             self._sending = True
             try:
-                await asyncio.wait_for(
-                    ws.send(protocol.encode(event)), self.settings.send_timeout_s
-                )
+                for frame in frames:
+                    await asyncio.wait_for(
+                        ws.send(protocol.encode(frame)), self.settings.send_timeout_s
+                    )
             except TimeoutError:
                 self._count("send_stuck")
                 log.warning("realtime route %s: send stuck, socket aborted", self.route.name)
@@ -637,7 +730,7 @@ class RealtimeClient:
                     self._fail("send_stuck")
                     await self._drop_socket()
                 return False
-        self._count("sent")
+        self._count("sent", len(frames))
         sent_audio = audio_bytes(event)
         if sent_audio:
             self._count("audio_bytes_sent", sent_audio)
@@ -692,6 +785,12 @@ def audio_bytes(event: dict[str, Any]) -> int:
     text = event.get("audio", "")
     padding = len(text) - len(text.rstrip("="))
     return len(text) // BASE64_CHARS * BASE64_BYTES - padding
+
+
+def _wire_counts(wire: Wire) -> dict[str, int] | None:
+    """What a session's codec ignored, dropped or emulated (``GeminiWire.counts``, a fixed set
+    of keys, so the copy is safe off the loop), or None for the plain subset."""
+    return dict(wire.counts) if isinstance(wire, GeminiWire) else None
 
 
 def ws_target_local(target: ConnectTarget | None) -> bool:

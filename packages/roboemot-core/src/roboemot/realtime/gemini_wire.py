@@ -53,9 +53,9 @@ A BLOCKING call Gemini waits on is never left open: before the next activity or 
 and when the route deletes an unanswered call's item, the codec answers it ``skipped``.
 
 Known limits: on a barge-in the route settles a cut round's calls after the next burst
-began, so their real outputs never reach Gemini (the calls were answered ``skipped``); the
-``skipped`` payload and the JSON Schema declarations are unverified on the live server (S3's
-end-to-end run checks them).
+began, so their real outputs never reach Gemini (the calls were answered ``skipped``). The
+``skipped`` payload (no spoken reply follows) and the skills' JSON Schema declarations were
+accepted by the live server (S3 run, 2026-11-12).
 
 Events keep text and audio out of ``repr`` (``protocol``); the codec logs nothing (SPEC 12).
 """
@@ -81,6 +81,9 @@ AUDIO_MIME = "audio/pcm;rate={rate}"
 AUDIO_MIME_PREFIX = "audio/pcm"
 MIME_RATE = re.compile(r"rate=([0-9]{1,6})")
 MODEL_PREFIX = "models/"
+KEY_HEADER = "x-goog-api-key"  # the key's only place: never the URL (S0 2026-11-11)
+# Gemini's close of a refused connect (S0) and of a session idle for about two minutes (S3)
+REFUSED_CLOSE = 1008
 TOOL_BEHAVIOR = "BLOCKING"  # Gemini waits for the toolResponse (S0 gate 4)
 EMPTY_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 MS_PER_S = 1000
@@ -172,10 +175,15 @@ class _Hold:
 class GeminiWire:
     """See the module docstring. ``model`` is the route's model (``models/`` added when
     missing); ``voice`` (the route's own) wins over the update's; ``max_bytes`` caps a frame
-    as the client caps the socket. ``counts`` holds what was ignored, dropped or emulated."""
+    as the client caps the socket. ``session`` (the client's session count) goes into every id
+    the codec makes, so no id of one session repeats in the next: the route keys its charges by
+    response id across sessions. ``counts`` holds what was ignored, dropped or emulated."""
 
-    def __init__(self, model: str, max_bytes: int, voice: str | None = None) -> None:
+    def __init__(
+        self, model: str, max_bytes: int, voice: str | None = None, session: int | None = None
+    ) -> None:
         self.model = model if model.startswith(MODEL_PREFIX) else MODEL_PREFIX + model
+        self._session = "" if session is None else f"{session}_"
         self.voice = voice or None
         self.max_bytes = max_bytes
         self.counts: Counter[str] = Counter({name: 0 for name in COUNTERS})
@@ -292,7 +300,7 @@ class GeminiWire:
             if turns:
                 frames.append({"clientContent": {"turns": turns, "turnComplete": False}})
             frames.append({"realtimeInput": {"activityStart": {}}})
-            self._burst = f"{INPUT_ITEM_PREFIX}{next(self._items)}"
+            self._burst = self._item_id(INPUT_ITEM_PREFIX)
             self._sent.append(self._burst)
         mime = AUDIO_MIME.format(rate=self._input_rate)
         data = event.get("audio", "")
@@ -478,8 +486,11 @@ class GeminiWire:
         return turns
 
     def _new_response(self) -> _Response:
-        n = next(self._responses)
+        n = f"{self._session}{next(self._responses)}"
         return _Response(f"{RESPONSE_PREFIX}{n}", f"{OUTPUT_ITEM_PREFIX}{n}")
+
+    def _item_id(self, prefix: str) -> str:
+        return f"{prefix}{self._session}{next(self._items)}"
 
     # ----------------------------------------------------------------- decode
 
@@ -557,7 +568,7 @@ class GeminiWire:
         an older model turn still sends); an end completes a transcript already in (one with
         no start before it gets a synthesized one, ``_adopt``)."""
         if kind == ACTIVITY_START:
-            item = self._sent.pop(0) if self._sent else f"{INPUT_ITEM_PREFIX}{next(self._items)}"
+            item = self._sent.pop(0) if self._sent else self._item_id(INPUT_ITEM_PREFIX)
             self._heard = _Activity(item)
             self._dropping = False
             return [protocol.SpeechBoundary(protocol.SPEECH_STARTED, item, ms)]
@@ -625,7 +636,7 @@ class GeminiWire:
 
     def _heard_activity(self) -> _Activity:
         if self._heard is None:
-            self._heard = _Activity(f"{INPUT_ITEM_PREFIX}{next(self._items)}")
+            self._heard = _Activity(self._item_id(INPUT_ITEM_PREFIX))
         return self._heard
 
     def _final(self, heard: _Activity) -> protocol.InputTranscript:
@@ -708,7 +719,7 @@ class GeminiWire:
         resp.started = True
         events = self._end_output(resp)
         for call_id, name, arguments in calls:
-            item = f"{CALL_ITEM_PREFIX}{next(self._items)}"
+            item = self._item_id(CALL_ITEM_PREFIX)
             self._call_items[item] = call_id
             events.append(
                 protocol.FunctionCall(

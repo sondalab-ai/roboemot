@@ -184,6 +184,8 @@ EN: dict[str, str] = {
     "live_ev_session_connect_failed": "Cloud connection failed ({why})",
     "live_ev_session_lost": "Cloud session lost ({why})",
     "live_ev_session_server_error": "Cloud server error: {code}",
+    "live_ev_session_go_away": "Cloud session ending: reconnected once idle",
+    "live_ev_session_idle_close": "Idle cloud session closed by the server: next turn reconnects",
     "live_ev_audio_transcript_timeout": "No transcript from the cloud within {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Facing check skipped: CPU at {cpu_percent}% (limit {cpu_max_percent}%)"
@@ -830,6 +832,10 @@ EN: dict[str, str] = {
     "live_code_input_reset": "audio input reset",
     "live_code_pending_calls": "a tool call left open",
     "live_code_closed_by_server": "closed by the server",
+    "live_code_go_away": "the server ended the session",
+    "live_code_idle_close": "idle, closed by the server",
+    "live_code_server_refused": "refused by the server again (key, quota or access)",
+    "live_code_setup_unready": "the session setup was not ready",
     "live_code_connect_failed": "connection failed",
     "live_code_connect_timeout": "connection timed out",
     "live_code_connection_lost": "connection lost",
@@ -1188,6 +1194,8 @@ IT: dict[str, str] = {
     "live_ev_session_connect_failed": "Collegamento al cloud fallito ({why})",
     "live_ev_session_lost": "Sessione cloud persa ({why})",
     "live_ev_session_server_error": "Errore del server cloud: {code}",
+    "live_ev_session_go_away": "Sessione cloud in chiusura: ricollegata appena libera",
+    "live_ev_session_idle_close": "Sessione cloud inattiva chiusa: il prossimo turno la ricollega",
     "live_ev_audio_transcript_timeout": "Nessuna trascrizione dal cloud entro {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Controllo dello sguardo saltato: CPU al {cpu_percent}% (limite {cpu_max_percent}%)"
@@ -1855,6 +1863,10 @@ IT: dict[str, str] = {
     "live_code_input_reset": "ingresso audio azzerato",
     "live_code_pending_calls": "una chiamata a uno strumento rimasta aperta",
     "live_code_closed_by_server": "chiusa dal server",
+    "live_code_go_away": "il server ha chiuso la sessione",
+    "live_code_idle_close": "inattiva, chiusa dal server",
+    "live_code_server_refused": "rifiutata di nuovo dal server (chiave, quota o accesso)",
+    "live_code_setup_unready": "la configurazione della sessione non era pronta",
     "live_code_connect_failed": "connessione fallita",
     "live_code_connect_timeout": "connessione scaduta",
     "live_code_connection_lost": "connessione persa",
