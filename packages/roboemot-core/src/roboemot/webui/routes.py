@@ -14,11 +14,14 @@ report holds statuses and short reasons only.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import logging
+import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,7 @@ from ..llm.conformance import (
 from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
 from ..realtime.check import check_realtime_route
+from ..realtime.preview import PreviewFailed, preview_voice
 from ..realtime.session import DirectSession, SessionProvider
 from ..redact import secret_shaped
 from ..secret_store import SecretStore
@@ -57,7 +61,17 @@ SESSION_FIELDS = (
 
 
 class RouteBusy(RuntimeError):
-    """Another check is running; they are serialised so they cannot spend a budget in parallel."""
+    """Another check or voice preview is running; they are serialised so they cannot spend a
+    budget in parallel."""
+
+
+class PreviewRate(RuntimeError):
+    """A voice preview of this route started less than ``preview_min_interval_s`` ago;
+    ``retry_after_s`` is what is left of it."""
+
+    def __init__(self, retry_after_s: float) -> None:
+        super().__init__("preview_rate")
+        self.retry_after_s = retry_after_s
 
 
 class RouteChecker:
@@ -88,7 +102,10 @@ class RouteChecker:
         realtime_provider: Callable[[], SessionProvider | None] | None = None,
         realtime_tools: Callable[[], list[dict[str, Any]] | None] | None = None,
         realtime_status: Callable[[], dict[str, Any] | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
+        self._previews: dict[str, float] = {}  # route name -> when its last preview started
         self.cfg, self.store, self._router = cfg, store, router
         self._realtime_provider = realtime_provider
         self._realtime_tools = realtime_tools
@@ -98,6 +115,7 @@ class RouteChecker:
         self._private: Router | None = None
         self._lock = threading.Lock()
         self._running: str | None = None
+        self._previewing = False
         self.thread: threading.Thread | None = None
         self._reports: dict[str, dict[str, Any]] = self._load()
 
@@ -153,7 +171,7 @@ class RouteChecker:
         if route.kind not in ("chat", "realtime"):
             raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
         with self._lock:
-            if self._running is not None:
+            if self._running is not None or self._previewing:
                 raise RouteBusy(name)
             router = self._router() or self._private_router(cfg)
             problem = router.key_problem(route)
@@ -166,6 +184,87 @@ class RouteChecker:
             target=self._run, args=(route, cfg, router), name="roboemot-route-check", daemon=True
         )
         self.thread.start()
+
+    def preview(self, name: str, voice: str, wait_s: float) -> bytes:
+        """Say the voice preview of realtime route ``name`` in ``voice`` (SPEC 8, Voice
+        preview) and return its WAV; one at a time, never beside a check (``RouteBusy``), and
+        one per route per ``preview_min_interval_s`` (:class:`PreviewRate`). It runs on its own
+        thread, bounded by ``wait_s`` less ``preview_reply_margin_s``; this call waits
+        ``wait_s`` for the audio or the preview's failure (``PreviewFailed("timeout")`` past
+        it), the session's close comes after. ``KeyError`` for an unknown route; the check's
+        refusals and :class:`PreviewFailed` otherwise."""
+        cfg = self.cfg()
+        route = next((r for r in cfg.llm_routes if r.name == name), None)
+        if route is None:
+            raise KeyError(name)
+        if route.kind != "realtime":
+            raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
+        rt = cfg.voice.realtime_route
+        with self._lock:
+            if self._running is not None or self._previewing:
+                raise RouteBusy(name)
+            since = self._clock() - self._previews.get(name, -math.inf)
+            if since < rt.preview_min_interval_s:
+                raise PreviewRate(rt.preview_min_interval_s - since)
+            router = self._router() or self._private_router(cfg)
+            self._previewing = True
+            self._previews[name] = self._clock()
+        # the preview gives up a margin before this wait, so its own code reaches the caller
+        deadline_s = max(0.0, wait_s - rt.preview_reply_margin_s)
+        result: concurrent.futures.Future[bytes] = concurrent.futures.Future()
+        thread = threading.Thread(
+            target=self._preview,
+            args=(route, voice, cfg, router, deadline_s, result),
+            name="roboemot-voice-preview",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            return result.result(wait_s)
+        except concurrent.futures.TimeoutError as exc:
+            raise PreviewFailed("timeout") from exc
+
+    def _preview(
+        self,
+        route: LLMRoute,
+        voice: str,
+        cfg: RoboEmotConfig,
+        router: Router,
+        wait_s: float,
+        result: concurrent.futures.Future[bytes],
+    ) -> None:
+        """Thread body of :meth:`preview`: the audio or the failure goes to ``result`` as soon
+        as it is known (before the session's close); the busy flag is cleared only once the
+        session is closed."""
+
+        def ready(out: bytes | PreviewFailed) -> None:
+            if isinstance(out, PreviewFailed):
+                result.set_exception(out)
+            else:
+                result.set_result(out)
+
+        try:
+            preview_voice(
+                route,
+                voice,
+                cfg,
+                router=router,
+                provider=self._provider(cfg),
+                tools=self._realtime_tools,
+                deadline_s=wait_s,
+                config=self.cfg,
+                ready=ready,
+            )
+        except (PreviewFailed, RouteKeyUnavailable, RouteBudgetExhausted) as exc:
+            if not result.done():
+                result.set_exception(exc)
+        except Exception as exc:
+            log.error("voice preview %s failed: %s", route.name, type(exc).__name__)
+            if not result.done():
+                result.set_exception(PreviewFailed("failed"))
+        finally:
+            with self._lock:
+                self._previewing = False
 
     def _private_router(self, cfg: RoboEmotConfig) -> Router:
         if self._private is None or self._private.secrets_changed():

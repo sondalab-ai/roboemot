@@ -164,6 +164,7 @@ BEHAVIOUR_MODULES = [
     "realtime/turn.py",
     "realtime/input.py",
     "realtime/check.py",
+    "realtime/preview.py",
     "realtime/wire.py",
     "realtime/gemini_wire.py",
 ]

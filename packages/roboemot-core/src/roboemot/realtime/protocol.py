@@ -69,6 +69,19 @@ NATIVE_OUTPUT_RATE_HZ = 16000
 # an explicit 16000 with unknown_or_invalid_event, robot run 2026-10-28; its own app sends null).
 NATIVE_INPUT_RATE_HZ = 16000
 PCM_SAMPLE_BYTES = 2
+# Qwen3-TTS's voices, which a speech-to-speech server of this subset speaks (the web UI's voice
+# picker, SPEC 8 Voice preview).
+QWEN3_VOICES = (
+    "Aiden",
+    "Ryan",
+    "Dylan",
+    "Eric",
+    "Ono_Anna",
+    "Serena",
+    "Sohee",
+    "Uncle_Fu",
+    "Vivian",
+)
 TOOL_CHOICES = ("auto", "none")  # "none" only after the tool-round cap: it forbids no tool
 RESPONSE_STATUSES = ("completed", "cancelled", "incomplete", "failed")
 # Per-stage latencies a speech-to-speech server may put in response.done metadata (seconds).

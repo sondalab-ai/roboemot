@@ -200,6 +200,20 @@ def offline_tools(
     return functions + toned
 
 
+def refuse_unavailable(route: LLMRoute, router: Any) -> None:
+    """Refuse ``route`` before anything is sent: not a ``kind: realtime`` route
+    (:class:`RouteKindUnsupported`), its key unreadable (:class:`RouteKeyUnavailable`) or
+    its daily budget spent (:class:`RouteBudgetExhausted`). The check and the voice preview
+    (``realtime.preview``) both start here."""
+    if route.kind != "realtime":
+        raise RouteKindUnsupported(f"route {route.name} is a {route.kind} route")
+    problem = router.key_problem(route)
+    if problem is not None:
+        raise RouteKeyUnavailable(f"route {route.name}: {problem}")
+    if router.used(route.name) >= route.daily_token_budget:
+        raise RouteBudgetExhausted(f"route {route.name}: daily token budget is spent")
+
+
 def check_realtime_route(
     route: LLMRoute,
     cfg: RoboEmotConfig,
@@ -230,13 +244,7 @@ def check_realtime_route(
     privacy gates (pseudonyms, the platform identifier) are read from it at each use, as the
     route reads them (``cfg`` when omitted). ``mode`` is the provider's (direct when it is a
     :class:`DirectSession`), not the configuration's: ``mode`` takes effect at a restart."""
-    if route.kind != "realtime":
-        raise RouteKindUnsupported(f"route {route.name} is a {route.kind} route")
-    problem = router.key_problem(route)
-    if problem is not None:
-        raise RouteKeyUnavailable(f"route {route.name}: {problem}")
-    if router.used(route.name) >= route.daily_token_budget:
-        raise RouteBudgetExhausted(f"route {route.name}: daily token budget is spent")
+    refuse_unavailable(route, router)
     rt = cfg.voice.realtime_route
     report = RealtimeReport(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
@@ -473,8 +481,13 @@ class _Run:
                 continue
             if isinstance(event, protocol.ResponseCreated):
                 created = True
-            elif isinstance(event, protocol.AudioDelta) and r.first_audio_ms is None:
-                r.first_audio_ms = round((self.clock() - sent_at) * MS_PER_S, 1)
+            elif isinstance(event, protocol.AudioDelta):
+                if r.first_audio_ms is None:
+                    r.first_audio_ms = round((self.clock() - sent_at) * MS_PER_S, 1)
+                if not self._audio(event.pcm):
+                    break
+            elif isinstance(event, protocol.SessionEvent):
+                self._session(event)
             elif isinstance(event, protocol.ReplyTranscript):
                 self.reply_chars += len(event.text)  # counted for the estimate, never kept
             elif isinstance(event, protocol.FunctionCall):
@@ -483,6 +496,14 @@ class _Run:
                 self.usage_seen = False
                 return event
         return None
+
+    def _audio(self, pcm: bytes) -> bool:
+        """A reply audio chunk: the check keeps nothing (never audio, SPEC 12); False ends
+        the response here (a subclass's cap, with ``failure`` set)."""
+        return True
+
+    def _session(self, event: protocol.SessionEvent) -> None:
+        """A ``session.created`` / ``session.updated`` the connect left queued: unused here."""
 
     def _first_audio(self) -> None:
         r = self.report
