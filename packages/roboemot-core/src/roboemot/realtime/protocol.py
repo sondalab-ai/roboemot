@@ -375,7 +375,9 @@ class UsageReport(ServerEvent):
     """Tokens a server reports after the responses they cover ended (Gemini Live's
     ``turnComplete``, seconds after the last ``response.done``): ``response_ids`` the responses
     of that model turn (each charged its estimate at its ``response.done``, whose
-    ``total_tokens`` was None), ``total_tokens`` the turn's total. Never a response event."""
+    ``total_tokens`` was None), ``total_tokens`` the turn's total. The codec names each response
+    in one report at most (``gemini_wire``), so reports never overlap; the route skips a report
+    whose responses were all reported before. Never a response event."""
 
     response_ids: tuple[str, ...] = field(default=(), repr=False)
     total_tokens: int = 0

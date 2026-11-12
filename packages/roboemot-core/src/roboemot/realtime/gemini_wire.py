@@ -82,6 +82,8 @@ AUDIO_MIME_PREFIX = "audio/pcm"
 MIME_RATE = re.compile(r"rate=([0-9]{1,6})")
 MODEL_PREFIX = "models/"
 KEY_HEADER = "x-goog-api-key"  # the key's only place: never the URL (S0 2026-11-11)
+# Gemini's close of a refused connect (S0) and of a session idle for about two minutes (S3)
+REFUSED_CLOSE = 1008
 TOOL_BEHAVIOR = "BLOCKING"  # Gemini waits for the toolResponse (S0 gate 4)
 EMPTY_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 MS_PER_S = 1000

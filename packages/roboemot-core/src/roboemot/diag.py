@@ -102,7 +102,7 @@ ROUTE_REASONS = (
     "no_opt_in", "no_extra", "provider", "pseudonyms", "budget", "unavailable",
     # the robot's own closes and resets (OWN_CLOSES, the reset reasons)
     "conversation_end", "asleep", "shutdown", "reconfigured", "expired", "input_reset",
-    "pending_calls", "go_away", "idle_close",
+    "pending_calls", "go_away", "idle_close", "server_refused", "setup_unready",
     # the client's close and connect reasons (roboemot.realtime.client)
     "closed_by_server", "connect_failed", "connect_timeout", "connection_lost",
     "key_unavailable", "oversize", "receive_failed", "send_failed", "send_stuck", "stall",

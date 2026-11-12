@@ -20,8 +20,9 @@ register a provider in the ``roboemot.realtime`` entry-point group under the man
   URL from ``repr``; ``origin`` is ``scheme://host:port`` only);
 - the key is sent only to the route's own origin (scheme, host and port of its ``base_url``,
   ``https`` read as ``wss``), or over ``wss`` to a host matching one of the provider's
-  ``key_hosts`` suffixes, declared in code (shown in the report). A keyed route whose connect
-  host is neither is refused, nothing is sent.
+  ``key_hosts`` suffixes, declared in code (shown in the report); a ``gemini_live`` route's key
+  goes to its own origin only. A keyed route whose connect host is neither is refused, nothing
+  is sent.
 
 A refusal raises :class:`UrlRefused` whose message is a reason code only.
 """
@@ -392,9 +393,11 @@ def connect_target(
     # The approval trusts the route's scheme, host and port (``secret_violations``): the key goes
     # to that exact origin, or over wss to a host the provider declared.
     at_route = (scheme, host, port) == own
-    # a declared host gets the key on the wss port only, never on a port the allocator names
+    # a declared host gets the key on the wss port only, never on a port the allocator names; a
+    # gemini_live key goes to the route's own origin only (it has no session allocator)
     declared = (
-        scheme == "wss"
+        route.protocol != GEMINI_LIVE
+        and scheme == "wss"
         and port == DEFAULT_PORTS["wss"]
         and host_matches(host, allocation.key_hosts)
     )

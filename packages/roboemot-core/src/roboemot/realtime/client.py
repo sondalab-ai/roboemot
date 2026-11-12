@@ -51,6 +51,7 @@ import inspect
 import itertools
 import logging
 import threading
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -187,6 +188,9 @@ class RealtimeClient:
         self._wire: Wire = OpenAIWire(settings.max_message_bytes)  # the session's (``_connect``)
         self.state = "idle"
         self.reason: str | None = None
+        self.close_code: int | None = None  # the server's close code of the last failure
+        # the codec counts of the sessions before the current one (``_connect`` adds them)
+        self._wire_totals: collections.Counter[str] = collections.Counter()
         self._counts: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
         self._malformed: collections.Counter[str] = collections.Counter()
@@ -239,10 +243,13 @@ class RealtimeClient:
         session_update: dict[str, Any],
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
+        timeout_s: float | None = None,
     ) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
-        client thread). False on any failure, with ``reason`` set to a code. The wait is bounded
-        by ``connect_timeout_s`` (plus ``send_timeout_s`` for the socket's own close): a close
+        client thread). False on any failure, with ``reason`` set to a code (and
+        ``close_code`` to the server's close code when it closed the socket). The wait is
+        bounded by ``timeout_s`` (what is left of the owner's connect budget; None: the route's
+        ``connect_timeout_s``) plus ``send_timeout_s`` for the socket's own close: a close
         from another thread stops the loop, and the connect's future would never resolve.
         ``fallback``: the update sent once, on the same socket, when the server answers the first
         with an ``error`` (the only event sent yet, so the error is about it) whose code is not
@@ -250,10 +257,11 @@ class RealtimeClient:
         ``prefer_fallback(origin)`` holds for the connect endpoint; the snapshot's
         ``update_fallback`` says which (``resent``, ``preferred``) or None."""
         self.start()
-        future = self._submit(self._connect(session_update, fallback, prefer_fallback))
+        budget = self._connect_timeout_s() if timeout_s is None else timeout_s
+        future = self._submit(self._connect(session_update, fallback, prefer_fallback, budget))
         s = self.settings
         try:
-            return bool(future.result(self._connect_timeout_s() + s.send_timeout_s))
+            return bool(future.result(budget + s.send_timeout_s))
         except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
             future.cancel()
             with self._lock:
@@ -306,16 +314,18 @@ class RealtimeClient:
                 "key_hosts": list(self.provider.key_hosts),
                 "failures": dict(self._failures),
                 "malformed": dict(self._malformed),
-                "wire": _wire_counts(self._wire),
+                "wire": self._wire_report(),
                 **{k: self._counts[k] for k in _COUNTERS},
             }
 
     # ----------------------------------------------------------------- loop side
 
-    def _fail(self, reason: str) -> None:
+    def _fail(self, reason: str, code: int | None = None) -> None:
+        """The session failed or closed (``reason``; ``code``: the server's close code, kept as
+        ``close_code`` for the owner, which reads it in its close hook)."""
         with self._lock:
             self._failures[reason] += 1
-            self.reason = reason
+            self.reason, self.close_code = reason, code
             self.state = "closed"
         self._closed_cb(reason)
 
@@ -360,10 +370,20 @@ class RealtimeClient:
             return {KEY_HEADER: bare} if bare else {}
         return {AUTH_HEADER: value}
 
+    def _wire_report(self) -> dict[str, dict[str, int]] | None:
+        """The codec's counts (``_lock`` held): this session's and the totals since the client
+        was built; None for the plain subset."""
+        session = _wire_counts(self._wire)
+        if session is None:
+            return None
+        total = Counter(self._wire_totals)
+        total.update(session)  # update keeps the zero counts
+        return {"session": session, "total": dict(total)}
+
     def _new_wire(self) -> Wire:
         """The codec of one session: a new ``GeminiWire`` (the route's model, the message cap,
         its voice, a process-wide session number) for a ``gemini_live`` route, else the
-        identity ``OpenAIWire``."""
+        identity ``OpenAIWire``, which is stateless (a new one changes nothing)."""
         if self.route.protocol == GEMINI_LIVE:
             voice = realtime_voice(self.route, self.settings) or None
             cap = self.settings.max_message_bytes
@@ -375,11 +395,14 @@ class RealtimeClient:
         session_update: dict[str, Any],
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
+        budget_s: float | None = None,
     ) -> bool:
         await self._close(None)
         wire = self._new_wire()
         with self._lock:
+            self._wire_totals.update(_wire_counts(self._wire) or {})
             self._wire = wire
+            self.close_code = None
             self.state, self.reason, self._target = "connecting", None, None
             self._refused_host = None
             self._update_fallback = None
@@ -387,7 +410,7 @@ class RealtimeClient:
             self._sent_types.clear()
             self._counts["connects"] += 1
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._connect_timeout_s()
+        deadline = loop.time() + (self._connect_timeout_s() if budget_s is None else budget_s)
         try:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
@@ -438,7 +461,7 @@ class RealtimeClient:
                 type(exc).__name__,
                 f" (close code {code})" if code is not None else "",
             )
-            self._fail("connect_failed")
+            self._fail("connect_failed", code)
         else:
             with self._lock:
                 self.state = "connected"
@@ -606,7 +629,7 @@ class RealtimeClient:
 
     async def _receive(self, ws: ClientConnection) -> None:
         """The receive loop: parse, track the response in progress, hand events out."""
-        reason = "closed"
+        reason, code = "closed", None
         try:
             while True:
                 for event in self._parse(await ws.recv()):
@@ -639,7 +662,7 @@ class RealtimeClient:
         self._arm(None)
         self._awaiting = False
         if self._ws is ws:
-            self._fail(reason)
+            self._fail(reason, code)
             self._receiver = None  # ending on its own: nothing to cancel
             await self._drop_socket()
 

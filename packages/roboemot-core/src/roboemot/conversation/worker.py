@@ -1230,24 +1230,27 @@ class ConversationWorker:
         stream never stops on it."""
         return self._session_parts(lambda: self._stream_session_on_loop(job))
 
-    def _connect_session(self, generation: int) -> tuple[str, Any]:
+    def _connect_session(self, generation: int, wait_s: float) -> tuple[str, Any]:
         """What a ``gemini_live`` connect carries (SPEC 8, Gemini Live wire; asked on the
         connecting thread): Gemini answers an audio turn before that turn's update and
         instructions reach it, so its setup holds what a turn would send, as a stream's
         opening does, with the replay of the turns ``generation`` (the session being opened)
-        lacks. It falls back as ``_stream_session`` does."""
-        return self._session_parts(lambda: self._stream_session_on_loop(None, generation))
+        lacks, within ``wait_s`` (the connect's budget: the socket gets what is left). It falls
+        back as ``_stream_session`` does (no tools: the route then opens no session)."""
+        return self._session_parts(lambda: self._stream_session_on_loop(None, generation), wait_s)
 
-    def _session_parts(self, make: Any) -> tuple[str, Any]:
+    def _session_parts(self, make: Any, wait_s: float | None = None) -> tuple[str, Any]:
         """Run ``make()`` (a coroutine building the instructions and tools) on the worker's
-        loop from another thread, bounded by the active route's ``connect_timeout_s``; parts 1
-        to 4 and no tools when it fails (``stream_session_fallbacks``)."""
+        loop from another thread, bounded by ``wait_s`` (None: the active route's
+        ``connect_timeout_s``); parts 1 to 4 and no tools when it fails
+        (``stream_session_fallbacks``)."""
         loop = self._loop
         try:
             if loop is None:
                 raise RuntimeError("no loop")
             cfg = self.stack.effective()
             wait = realtime_connect_timeout_s(active_realtime_route(cfg), cfg.voice.realtime_route)
+            wait = wait if wait_s is None else wait_s
             future = asyncio.run_coroutine_threadsafe(make(), loop)
             try:
                 return future.result(wait)

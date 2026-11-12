@@ -21,8 +21,10 @@ binary frame.
   ``go_away`` sends ``goAway``. After the steps: ``generationComplete``, then after
   ``turn_complete_s`` ``turnComplete`` with ``usageMetadata`` ``usage``.
 - ``delay_s`` holds each answer back that long.
-- ``idle_close_s``: a connection with no client message for that long is closed with 1008, as
-  Gemini closes a session idle for about two minutes (S3 run 2026-11-12).
+- ``idle_close_s``: a connection with no client message for that long is closed with
+  ``close_code`` (1008), as Gemini closes a session idle for about two minutes (S3 run
+  2026-11-12).
+- ``usage_gate`` (a ``threading.Event``) holds every ``turnComplete`` until it is set.
 
 ``setups`` holds every ``setup`` (one per connection), ``received`` every client message,
 ``requests`` every handshake (path with its query, headers), ``tool_responses`` every
@@ -58,6 +60,7 @@ SERVER_LOG = logging.getLogger("tests.realtime.gemini_server")
 SERVER_LOG.setLevel(logging.CRITICAL + 1)
 SERVER_LOG.propagate = False
 TOOL_WAIT_S = 5.0
+GATE_POLL_S = 0.01
 CLOSE_TIMEOUT_S = 0.5
 
 
@@ -100,6 +103,8 @@ class GeminiServer:
         delay_s: float = 0.0,
         time_left: str = "5s",
         idle_close_s: float | None = None,
+        close_code: int = POLICY,
+        usage_gate: threading.Event | None = None,
     ) -> None:
         self.tls_files = tls_files
         self.answers = answers or [["audio"]]
@@ -109,7 +114,8 @@ class GeminiServer:
         self.usage, self.turn_complete_s = usage, turn_complete_s
         self.call_args = call_args or {}
         self.refuse, self.delay_s, self.time_left = refuse, delay_s, time_left
-        self.idle_close_s = idle_close_s
+        self.idle_close_s, self.close_code = idle_close_s, close_code
+        self.usage_gate = usage_gate
         self.idle_closes = 0
         self.requests: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
@@ -218,7 +224,7 @@ class _Session:
                 frame = await asyncio.wait_for(self.ws.recv(), srv.idle_close_s)
             except TimeoutError:  # Gemini closes a session idle for about two minutes
                 srv.idle_closes += 1
-                await self.ws.close(POLICY, IDLE)
+                await self.ws.close(srv.close_code, IDLE)
                 return
             msg = json.loads(frame)
             srv.received.append(msg)
@@ -299,6 +305,9 @@ class _Session:
     async def turn_complete(self, after_s: float = 0.0) -> None:
         if after_s:
             await asyncio.sleep(after_s)
+        gate = self.server.usage_gate
+        while gate is not None and not gate.is_set():
+            await asyncio.sleep(GATE_POLL_S)
         await self.send(
             {
                 "serverContent": {"turnComplete": True},

@@ -171,6 +171,8 @@ Read this before you add the route.
   people under 18. A robot at home can hear children.
 - The owner accepted both risks on 2026-11-11 (SPEC 12). `privacy.realtime_audio` still decides
   whether any audio leaves the robot.
+- Every Gemini connect, reconnects included, carries the current profile summary, scene summary
+  and the replay of the conversation so far in its setup (owner decision 2026-11-12).
 
 ### 1. Create a key and store it
 
@@ -237,5 +239,15 @@ With `voice.realtime_route.input: audio` the utterances' audio goes to Google, a
 opt-in `privacy.realtime_audio` (section 4). With `input: text` only the local transcript goes.
 
 To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
+
+### What to expect
+
+- Gemini closes a session that has been quiet for about two minutes. The robot does not
+  reconnect at once: the next turn connects, so the first answer after a quiet spell waits for
+  the connect, usually 0.5 to 0.7 s, rarely up to about 10 s (owner decision 2026-11-12). The
+  Live tab shows it as an idle close.
+- If Google refuses the connects again and again (the key, the free-tier quota or access), the
+  route reports `server_refused` after `voice.realtime_route.refusals_to_report` refusals in a
+  row (3) and keeps retrying with a growing wait; the local pipeline answers meanwhile.
 
 Or edit `voice.realtime_route` in `app.yaml` (all fields at once) and restart.

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 from gemini_server import GeminiServer, tls
 
 
 @pytest.fixture(scope="module")
 def certs(tmp_path_factory):
-    """One self-signed certificate per test module."""
+    """One self-signed certificate per test module (``openssl`` makes it: skipped without)."""
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed: no certificate for the TLS fake server")
     return tls(tmp_path_factory.mktemp("gemini_tls"))
 
 

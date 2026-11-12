@@ -4266,6 +4266,22 @@ class RealtimeRouteConfig(Strict):
         ge=65_536,
         le=16_777_216,
     )
+    idle_close_min_age_s: float = param(
+        60.0,
+        "A gemini_live session its server closes with code 1008 after living at least this long, "
+        "with nothing running on it, was closed for being idle: no loss, reconnected at the next "
+        "turn. A younger one, or another code, is a loss (backoff)",
+        unit="s",
+        ge=1,
+        le=3600,
+    )
+    refusals_to_report: int = param(
+        3,
+        "Consecutive connects a gemini_live server refuses with code 1008 before the route report"
+        "s server_refused (key, quota or access); the retry backoff still applies",
+        ge=1,
+        le=20,
+    )
 
     @field_validator("tone_labels")
     @classmethod
