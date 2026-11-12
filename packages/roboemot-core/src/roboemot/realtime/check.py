@@ -13,6 +13,15 @@ and runs, within ``llm_check.deadline_s``:
   ``refused`` (an ``error`` echoing the delete or the item's create), ``unconfirmed`` (no answer
   within the route's ``stall_timeout_s``) or ``not_run``.
 
+A ``gemini_live`` route (SPEC 8, Gemini Live wire) is checked in direct mode only, whatever
+provider is passed: its key goes to its own origin, never to a session allocator. Its setup
+carries the tools a turn offers (the running worker's skills, skip and tone tools; without a
+worker, the default skills built offline), within the route's connect budget; a tool call is
+answered (never run) and the continuation is followed, up to ``conversation.max_tool_rounds``.
+Its item delete is the codec's own ack: ``emulated``, not a server confirmation. Its tokens
+come after the response ended (``UsageReport``): the estimate is charged at the end and the
+late total charges only what it adds, waited for within the deadline (``usage_reported``).
+
 It sends no microphone audio. The response is charged to the route's daily token budget (its
 usage, else the chars/4 estimate, as the route charges); a spent budget or an unreadable key
 refuses the check before anything is sent. Like the chat check it is advisory and stored next
@@ -34,10 +43,11 @@ import queue
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.schema import LLMRoute, RoboEmotConfig, realtime_connect_timeout_s
 from ..llm.conformance import (
     FAIL,
     PASS,
@@ -51,9 +61,12 @@ from ..llm.conformance import (
 )
 from ..llm.prompt import CHARS_PER_TOKEN
 from ..llm.pseudonyms import route_is_local
+from ..skills import SkillRegistry
+from ..skills.defaults import SkillEnv, default_skills
 from . import protocol
 from .route import EVENT_PREFIX, ITEM_PREFIX, MS_PER_S, realtime_extra, session_update
-from .session import NO_KEY, DirectSession, SessionProvider
+from .session import GEMINI_LIVE, NO_KEY, DirectSession, SessionProvider
+from .turn import TONE_NOTED, session_tools
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +79,10 @@ RESPONSE_EVENT = f"{EVENT_PREFIX}check_1"
 DELETE_EVENT = "ev_check_delete"
 STALL = "stall"  # as the client's own watchdog names a response that stopped
 SEND_FAILED = "send_failed"
-ITEM_VERDICTS = ("accepted", "refused", "unconfirmed")  # the delete's verdict when it ran
+SETUP_UNREADY = "setup_unready"  # as the route names a Gemini setup without the turn's tools
+# the delete's verdict when it ran; ``emulated``: the wire codec acked it (Gemini has no delete)
+ITEM_VERDICTS = ("accepted", "refused", "unconfirmed", "emulated")
+CALL_OUTPUT = TONE_NOTED  # the answer to a call: never run, acknowledged as the tone tool is
 # Every ``CheckResult.code`` this module gives (the page words each; a test walks the module's
 # syntax tree and holds the calls to this list).
 REASON_CODES = (
@@ -91,7 +107,10 @@ class RealtimeReport:
     code when the session failed. ``server_error_code`` / ``server_error_about``: the last server
     error's code and the type of our event it names (never its message). ``error``: the check
     did not complete (``timeout``, ``budget``, ``secret``, ``provider``, ``no_extra``,
-    ``failed``)."""
+    ``failed``). ``setup_ms``: the connect, from the tools' build to ``session.updated``.
+    ``close_code``: the server's close code when it closed the connect (never its reason
+    text). ``tools_sent``: the tools of a ``gemini_live`` setup. ``usage_reported``: the late
+    token totals a ``gemini_live`` server reported (None: none came in time)."""
 
     route: str
     model: str
@@ -112,6 +131,11 @@ class RealtimeReport:
     server_error_about: str | None = None
     checks: list[CheckResult] = field(default_factory=list)
     error: str = ""
+    protocol: str = "openai_realtime"
+    setup_ms: float | None = None
+    close_code: int | None = None
+    tools_sent: int = 0
+    usage_reported: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -141,12 +165,35 @@ def _turn(cfg: RoboEmotConfig, route: LLMRoute) -> tuple[str, str]:
     return messages[0]["content"], messages[-1]["content"]
 
 
+def offline_tools(cfg: RoboEmotConfig) -> list[dict[str, Any]]:
+    """The tools a ``gemini_live`` setup carries when no worker runs (the CLI): the default
+    skills listed in ``conversation.llm_skills``, built over an environment that acts on
+    nothing (the affect labels as gestures, no name in view), and the skip and tone tools, as
+    the worker offers them (``session_tools``)."""
+    labels = list(cfg.affect.labels)
+    env = SkillEnv(
+        gestures=lambda: labels,
+        play=lambda _name: False,
+        look_names=list,
+        look_at=lambda _target: False,
+        affect=SimpleNamespace(cfg=cfg.affect),
+    )
+    conv = cfg.conversation
+    offered = default_skills(env).offered(conv.llm_skills)
+    chat = SkillRegistry.tools(
+        offered, enum_max=conv.tool_enum_max_items, max_chars=conv.tool_arg_max_chars
+    )
+    functions, toned = session_tools(chat, cfg)
+    return functions + toned
+
+
 def check_realtime_route(
     route: LLMRoute,
     cfg: RoboEmotConfig,
     *,
     router: Any,
     provider: SessionProvider | None,
+    tools: Callable[[float], list[dict[str, Any]] | None] | None = None,
     client_factory: Callable[..., Any] | None = None,
     extra: Callable[[], bool] = realtime_extra,
     deadline_s: float | None = None,
@@ -157,7 +204,10 @@ def check_realtime_route(
     """Run the check (module docstring) and return its report; blocking, never on an event
     loop. ``router`` gives the key (``auth_headers``) and the daily budget (``used``,
     ``charge``); ``provider`` is the session provider ``voice.realtime_route.mode`` selects
-    (None in platform mode without one: ``error: provider``). Raises
+    (None in platform mode without one: ``error: provider``); a ``gemini_live`` route always
+    uses :class:`DirectSession` instead. ``tools(wait_s)`` builds a ``gemini_live`` setup's
+    tools (the running worker's ``realtime_tools``; None from it fails the connect,
+    ``setup_unready``); without it they are built offline (:func:`offline_tools`). Raises
     :class:`RouteKindUnsupported`, :class:`RouteKeyUnavailable` and
     :class:`RouteBudgetExhausted` before anything is sent. ``deadline_s`` defaults to
     ``llm_check.deadline_s`` and bounds the waits after the connect; the connect is bounded
@@ -178,6 +228,9 @@ def check_realtime_route(
     report = RealtimeReport(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
+    report.protocol = route.protocol
+    if route.protocol == GEMINI_LIVE:
+        provider = DirectSession()  # its key goes to its own origin only, never an allocator
     if route.api_key in NO_KEY:
         report.header_to_connect_host = "none"
     report.mode = "direct" if isinstance(provider, DirectSession) else "platform"
@@ -195,6 +248,7 @@ def check_realtime_route(
         client_factory = RealtimeClient
     end = clock() + (cfg.llm_check.deadline_s if deadline_s is None else deadline_s)
     run = _Run(route, cfg, router, report, clock, end)
+    run.tools = tools or (lambda _wait_s: offline_tools(cfg))
     client = client_factory(
         route,
         rt,
@@ -232,28 +286,50 @@ class _Run:
         self.route, self.cfg, self.router, self.report = route, cfg, router, report
         self.clock, self.end = clock, end
         self.events: queue.Queue[Any] = queue.Queue()
+        self.gemini = route.protocol == GEMINI_LIVE
+        self.tools: Callable[[float], list[dict[str, Any]] | None] = lambda _wait_s: None
         self.create_refused = False
         self.reply_chars = 0
+        self.response_event = RESPONSE_EVENT
+        self.calls: list[str] = []  # the call ids of the last response (never their arguments)
+        self.estimates: dict[str, int] = {}  # response id -> estimate a late total corrects
+        self.reported: set[str] = set()
 
     def go(self, client: Any) -> None:
         instructions, text = _turn(self.cfg, self.route)
-        ok = client.connect(
-            session_update(
-                self.cfg,
-                instructions,
-                create_response=False,
-                interrupt_response=False,
-                route=self.route,
-            )
-        )
-        self._hosts(client.snapshot(), client.reason)
         r = self.report
+        started = self.clock()
+        budget = realtime_connect_timeout_s(self.route, self.cfg.voice.realtime_route)
+        tools: list[dict[str, Any]] | None = None
+        timeout: dict[str, float] = {}
+        if self.gemini:  # its setup is all the session gets: the tools a turn offers
+            tools = self.tools(budget)
+            if tools is None:
+                r.failure = SETUP_UNREADY
+                why = SETUP_UNREADY
+                r.checks.append(CheckResult(CONNECT, FAIL, why, "session_failed", {"failure": why}))
+                return
+            r.tools_sent = len(tools)
+            timeout = {"timeout_s": max(0.0, budget - (self.clock() - started))}
+        update = session_update(
+            self.cfg,
+            instructions,
+            tools,
+            create_response=False,
+            interrupt_response=False,
+            route=self.route,
+        )
+        ok = client.connect(update, **timeout)
+        snap = client.snapshot()
+        self._hosts(snap, client.reason)
+        r.close_code = snap.get("close_code")
         r.update_seen = ok
         if not ok:
             r.failure = client.reason
             why = client.reason or "closed"
             r.checks.append(CheckResult(CONNECT, FAIL, why, "session_failed", {"failure": why}))
             return
+        r.setup_ms = round((self.clock() - started) * MS_PER_S, 1)
         r.checks.append(CheckResult(CONNECT, PASS, "", "connected"))
         if not self._sent(client, {**protocol.text_item(text, ITEM_ID), "event_id": CREATE_EVENT}):
             return
@@ -262,9 +338,31 @@ class _Run:
             return
         done = self._response(sent_at)
         self._charge(done, len(instructions) + len(text))
+        rounds, cap = 0, self.cfg.conversation.max_tool_rounds
+        while self.gemini and done is not None and self.calls and rounds < cap:
+            rounds += 1
+            sent = self._answer_calls(client, rounds)
+            if sent is None:
+                return
+            done = self._response(sent_at)
+            self._charge(done, sent)
+        self._first_audio()
         if r.error or r.failure is not None:
             return  # the response did not complete: the session is not trusted further
         self._delete(client)
+        self._await_usage()
+
+    def _answer_calls(self, client: Any, round_no: int) -> int | None:
+        """Answer the last response's calls (``CALL_OUTPUT``: no skill runs) and ask for the
+        continuation; the characters sent, or None when a write failed."""
+        calls, self.calls = self.calls, []
+        for call_id in calls:
+            if not self._sent(client, protocol.function_output(call_id, CALL_OUTPUT)):
+                return None
+        self.response_event = f"{RESPONSE_EVENT}_{round_no}"
+        if not self._sent(client, protocol.response_create(event_id=self.response_event)):
+            return None
+        return len(CALL_OUTPUT) * len(calls)
 
     def _sent(self, client: Any, event: dict[str, Any]) -> bool:
         """Send ``event`` and wait for the write (bounded by the client's ``send_timeout_s``);
@@ -305,11 +403,14 @@ class _Run:
                 self.report.error = "timeout"
             return None
         try:
-            return self.events.get(timeout=min(wait_s, left))
+            event = self.events.get(timeout=min(wait_s, left))
         except queue.Empty:
             if deadline_is_error and self.clock() >= self.end:
                 self.report.error = "timeout"
             return None
+        if isinstance(event, protocol.UsageReport):
+            self._usage(event)
+        return event
 
     def _response(self, sent_at: float) -> protocol.ResponseDone | None:
         """Follow the response to its ``response.done`` (the first audio delta is timed);
@@ -328,7 +429,7 @@ class _Run:
             if isinstance(event, protocol.ServerError):
                 if event.event_id == CREATE_EVENT:
                     self.create_refused = True
-                if event.event_id == RESPONSE_EVENT:
+                if event.event_id == self.response_event:
                     r.failure = "refused"
                     break
                 continue
@@ -338,10 +439,10 @@ class _Run:
                 r.first_audio_ms = round((self.clock() - sent_at) * MS_PER_S, 1)
             elif isinstance(event, protocol.ReplyTranscript):
                 self.reply_chars += len(event.text)  # counted for the estimate, never kept
+            elif isinstance(event, protocol.FunctionCall):
+                self.calls.append(event.call_id)
             elif isinstance(event, protocol.ResponseDone):
-                self._first_audio()
                 return event
-        self._first_audio()
         return None
 
     def _first_audio(self) -> None:
@@ -356,13 +457,41 @@ class _Run:
             r.checks.append(CheckResult(FIRST_AUDIO, FAIL, "no audio", "no_audio"))
 
     def _charge(self, done: protocol.ResponseDone | None, sent_chars: int) -> None:
-        """The response's usage, else the chars/4 estimate of what was sent and heard."""
+        """The response's usage, else the chars/4 estimate of what was sent and heard (kept
+        by response id on a ``gemini_live`` route, for its late total to correct)."""
         tokens = done.total_tokens if done is not None else None
         if tokens is None:
             tokens = (sent_chars + self.reply_chars) // CHARS_PER_TOKEN
+            if self.gemini and done is not None and done.response_id is not None:
+                self.estimates[done.response_id] = tokens
+        self.reply_chars = 0
         if tokens > 0:
             self.router.charge(self.route.name, tokens)
-        self.report.charged = tokens
+        self.report.charged += tokens
+
+    def _usage(self, report: protocol.UsageReport) -> None:
+        """A late token total (Gemini's ``turnComplete``), as the route takes it: the
+        estimates already charged for its responses come off it, the rest is charged; a
+        report naming only responses already reported charges nothing, one naming none its
+        whole total."""
+        fresh = [i for i in report.response_ids if i not in self.reported]
+        if report.response_ids and not fresh:
+            return
+        self.reported.update(fresh)
+        extra = max(0, report.total_tokens - sum(self.estimates.pop(i, 0) for i in fresh))
+        if extra > 0:
+            self.router.charge(self.route.name, extra)
+        r = self.report
+        r.charged += extra
+        r.usage_reported = (r.usage_reported or 0) + report.total_tokens
+
+    def _await_usage(self) -> None:
+        """Wait, within the deadline (no error past it), for the late totals of the responses
+        still charged at their estimate; a close ends the wait."""
+        while self.estimates:
+            event = self._next(self.end - self.clock(), deadline_is_error=False)
+            if event is None or isinstance(event, _Closed):
+                return
 
     def _delete(self, client: Any) -> None:
         """``conversation.item.delete`` of the check's item, and the server's answer."""
@@ -380,7 +509,7 @@ class _Run:
             if event is None or isinstance(event, _Closed):
                 break
             if isinstance(event, protocol.ItemDeleted) and event.item_id == ITEM_ID:
-                verdict = "accepted"
+                verdict = "emulated" if event.emulated else "accepted"
                 break
             if isinstance(event, protocol.ServerError) and event.event_id in (
                 DELETE_EVENT,

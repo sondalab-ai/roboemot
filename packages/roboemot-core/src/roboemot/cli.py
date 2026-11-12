@@ -223,6 +223,11 @@ REPORT_FIELDS = (
     "item_delete",
     "charged",
     "failure",
+    "protocol",
+    "setup_ms",
+    "close_code",
+    "tools_sent",
+    "usage_reported",
 )
 
 
@@ -244,6 +249,7 @@ def _realtime(args: argparse.Namespace) -> int:
     from .llm.router import Router
     from .realtime.check import check_realtime_route
     from .realtime.route import select_provider
+    from .realtime.session import GEMINI_LIVE, DirectSession
     from .secret_store import SecretStore
 
     cfg = _stack(args).effective()
@@ -252,8 +258,10 @@ def _realtime(args: argparse.Namespace) -> int:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
     router = Router([route], cfg.safety, secrets=SecretStore.for_data_dir(cfg.data_dir).get)
-    # no manifest is loaded here: a provider factory must accept None (SPEC 8, Session providers)
-    provider = select_provider(cfg, _realtime_robot(args), None)
+    # no manifest is loaded here: a provider factory must accept None (SPEC 8, Session providers);
+    # a gemini_live route never uses one (its key goes to its own origin only)
+    gemini = route.protocol == GEMINI_LIVE
+    provider = DirectSession() if gemini else select_provider(cfg, _realtime_robot(args), None)
     report = check_realtime_route(route, cfg, router=router, provider=provider)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))

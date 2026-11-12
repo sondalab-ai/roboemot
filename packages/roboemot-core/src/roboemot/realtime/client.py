@@ -312,6 +312,7 @@ class RealtimeClient:
                 "platform_id_sent": self._platform_id_sent,
                 "update_fallback": self._update_fallback,
                 "key_hosts": list(self.provider.key_hosts),
+                "close_code": self.close_code,
                 "failures": dict(self._failures),
                 "malformed": dict(self._malformed),
                 "wire": self._wire_report(),

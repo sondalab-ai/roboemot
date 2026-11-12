@@ -85,6 +85,17 @@ def test_the_connect_sends_setup_first_and_waits_for_setup_complete(gemini, rigs
     assert "wire" not in snap["client"]
 
 
+def test_the_workers_realtime_tools_are_the_setups_tools(gemini, rigs):
+    """What the route check's setup carries on the robot (SPEC 8, Realtime check): the same
+    tools as the route's own connect, never its instructions."""
+    srv = gemini()
+    rig = rigs(srv, rt={"skip_tool": True, "tone_tool": True})
+    assert rig.route.ready()
+    setup_names = [d["name"] for d in srv.setups[0]["tools"][0]["functionDeclarations"]]
+    tools = rig.worker.realtime_tools(5.0)
+    assert tools is not None and [t["name"] for t in tools] == setup_names
+
+
 # ------------------------------------------------------------------ turns
 
 

@@ -11,6 +11,7 @@ from typing import Any
 
 from roboemot import paths
 from roboemot.config import ConfigStack
+from roboemot.realtime.check import offline_tools
 from roboemot.secret_store import SecretStore
 from roboemot.webui import Server, make_server
 from roboemot.webui.routes import RouteChecker
@@ -127,6 +128,14 @@ def start_webui(
                 router=host.route_check_router,
                 names=host.name_source,
                 realtime_provider=lambda: p.realtime_provider,  # the runtime's own (SPEC 8)
+                realtime_tools=lambda wait_s: (  # the worker's, else built offline
+                    c.realtime_tools(wait_s)
+                    if (c := host.conversation) is not None
+                    else offline_tools(stack.effective())
+                ),
+                realtime_status=lambda: (
+                    r.snapshot() if (r := host.realtime_route) is not None else None
+                ),
             ),
             live=live,
             emotions=emotions,
