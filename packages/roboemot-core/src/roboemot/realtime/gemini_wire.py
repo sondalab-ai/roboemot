@@ -7,12 +7,13 @@ S0 probe saw on ``gemini-3.8-live`` (2026-11-11).
 Out (``encode``):
 
 - the first ``session.update`` is ``setup`` (manual activity, input and output transcription,
-  sliding-window compression, BLOCKING function declarations); later ones only keep changed
-  instructions, sent as context text (``clientContent``, ``turnComplete`` false) right before
-  the next activity or text turn, never between a ``toolCall`` and its ``toolResponse``;
+  sliding-window compression, BLOCKING function declarations with their JSON Schema); later
+  ones only keep changed instructions: the lines the session does not hold yet go as context
+  text (``clientContent``, ``turnComplete`` false) right before the next activity or text
+  turn, never between a ``toolCall`` and its ``toolResponse`` (a removed line is not sent);
 - a burst's appends are ``realtimeInput.audio`` after an ``activityStart``, its commit
-  ``activityEnd``; ``conversation.item.create`` text and ``function_call_output`` are kept
-  until the next ``response.create``;
+  ``activityEnd``; ``conversation.item.create`` text (which supersedes an answer still held)
+  and ``function_call_output`` are kept until the next ``response.create``;
 - ``response.create`` releases the held answer, or sends the buffered outputs as one
   ``toolResponse``, or a text turn (``turnComplete`` true: the text items, else the
   response's instructions, a fixed line); its ``response.created`` is answered locally, so a
@@ -32,15 +33,29 @@ it has the transcript. So the answer's events are held from the commit until the
 ``response.create`` and released in order as one response; a delete of that turn's item (the
 route declined it) or a new burst discards them. Input events are never held. The server's
 ``ACTIVITY_START`` is the fence between model turns: content before it is the older turn's
-(a reply still streaming, or one dropped after a cancel), content after it the new turn's.
+(a reply still streaming, or one dropped after a cancel), content after it the new turn's. A
+server that skips the start (``ACTIVITY_END``, a transcript or the answer of a sent activity
+first) gets one synthesized, without a position.
 
-Usage: ``turnComplete`` carries ``usageMetadata`` seconds after ``generationComplete`` ended the
-response, so each ``response.done`` has ``total_tokens`` None (the route charges its estimate)
-and the turn's total comes as a ``UsageReport`` naming the responses it covers.
+Usage and turn ends: every ``generationComplete`` owes one ``turnComplete``, which comes with
+``usageMetadata`` seconds later, possibly once the next turn is under way. So each
+``response.done`` has ``total_tokens`` None (the route charges its estimate), an owed
+``turnComplete`` only reports its turn's total as a ``UsageReport`` naming the responses that
+ended before it (it never ends a newer response), and an output transcript that comes after
+its response ended is dropped (counted: the route follows no response after its done).
+
+Drops: after a cancel, a discarded answer, or calls answered ``skipped``, what Gemini still
+says is dropped until its next ``generationComplete``, ``turnComplete``, ``interrupted`` or
+``ACTIVITY_START``. A text turn sent right after skipped calls is not dropped: Gemini may
+answer both in one reply, which is the text turn's.
 
 A BLOCKING call Gemini waits on is never left open: before the next activity or text turn,
-and when the route deletes an unanswered call's item, the codec answers it ``skipped`` and
-drops what Gemini says after.
+and when the route deletes an unanswered call's item, the codec answers it ``skipped``.
+
+Known limits: on a barge-in the route settles a cut round's calls after the next burst
+began, so their real outputs never reach Gemini (the calls were answered ``skipped``); the
+``skipped`` payload and the JSON Schema declarations are unverified on the live server (S3's
+end-to-end run checks them).
 
 Events keep text and audio out of ``repr`` (``protocol``); the codec logs nothing (SPEC 12).
 """
@@ -50,22 +65,27 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from itertools import count
 from typing import Any
 
 from roboemot.realtime import protocol
 
-INPUT_RATE_HZ = 16000  # Gemini Live's input PCM16 rate (an update that names a rate wins)
+# the input rate the audio's mimeType names when the update asks for the native rate (null)
+INPUT_RATE_HZ = 16000
 OUTPUT_RATE_HZ = 24000  # Gemini Live's reply PCM16 (audio/pcm;rate=24000, S0 2026-11-11)
 AUDIO_MIME = "audio/pcm;rate={rate}"
+AUDIO_MIME_PREFIX = "audio/pcm"
+MIME_RATE = re.compile(r"rate=([0-9]{1,6})")
 MODEL_PREFIX = "models/"
 TOOL_BEHAVIOR = "BLOCKING"  # Gemini waits for the toolResponse (S0 gate 4)
 EMPTY_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 MS_PER_S = 1000
-DURATION_UNIT = "s"  # protobuf Duration as JSON: "1.689375s"
+# protobuf Duration as JSON ("1.689375s"); bounded, so no huge number is ever built
+DURATION = re.compile(r"([0-9]{1,12})(\.[0-9]{1,9})?s")
 ACTIVITY_START = "ACTIVITY_START"
 ACTIVITY_END = "ACTIVITY_END"
 CONTEXT_PREFIX = "[Updated instructions]\n"
@@ -83,11 +103,16 @@ COUNTERS = (
     "resumption_updates",
     "tool_call_cancellations",
     "thought_parts",
-    "text_parts",
+    "text_answer_parts",  # text in an audio session's model turn: never spoken, dropped
     "other_parts",
+    "audio_rate_mismatch",
+    "bad_durations",
     "unknown_messages",
     "unknown_activity",
+    "activity_starts_missing",
     "late_input_transcripts",
+    "late_reply_transcripts",
+    "context_removals_unsent",
     "held_discarded",
     "dropped_after_cancel",
     "unrequested_dropped",
@@ -102,7 +127,7 @@ COUNTERS = (
 )
 
 
-class _Bad(Exception):
+class _FrameError(Exception):
     """A field of the wrong type (internal: the frame becomes ``Malformed``)."""
 
     def __init__(self, reason: str) -> None:
@@ -137,13 +162,11 @@ class _Activity:
 @dataclass
 class _Hold:
     """An answer held from a commit until the route's ``response.create``: the turn's input
-    item, the response the answer opened (None until content came), its events, and whether
-    the model turn ended (its ``turnComplete`` came)."""
+    item, the response the answer opened (None until content came) and its events."""
 
     item: str = field(repr=False)
     response: _Response | None = None
     events: list[protocol.ServerEvent] = field(default_factory=list, repr=False)
-    ended: bool = False
 
 
 class GeminiWire:
@@ -162,7 +185,7 @@ class GeminiWire:
         self._input_rate = INPUT_RATE_HZ
         self._context_sent = ""
         self._context: str | None = None
-        self._texts: list[str] = []
+        self._texts: list[tuple[str | None, str]] = []  # (item id, text) of user texts kept
         self._outputs: dict[str, dict[str, Any]] = {}
         self._calls: dict[str, str] = {}  # call id -> name: calls Gemini waits on
         self._call_items: dict[str, str] = {}  # call item -> call id, while it is open
@@ -174,6 +197,10 @@ class GeminiWire:
         self._open: _Response | None = None
         self._dropping = False
         self._closed: list[str] = []  # responses ended since the last usage report
+        # one entry per generationComplete whose turnComplete is still to come: the responses
+        # that ended in that turn (its usage report names them)
+        self._owed: list[list[str]] = []
+        self._usage_ids: list[str] | None = None  # set by an owed turnComplete for its usage
 
     def __repr__(self) -> str:
         return f"GeminiWire(holding={self._hold is not None}, dropping={self._dropping})"
@@ -250,7 +277,8 @@ class GeminiWire:
 
     def _note_context(self, instructions: str) -> None:
         """Keep ``instructions`` for the next turn when the session does not hold them yet
-        (the latest wins: each update carries the whole instructions)."""
+        (the latest wins: each update carries the whole instructions; only the lines the
+        session lacks are sent, ``_context_turns``)."""
         self._context = None if instructions == self._context_sent else instructions
 
     def _append(self, event: dict[str, Any]) -> tuple[list[dict], list]:
@@ -299,11 +327,12 @@ class GeminiWire:
             and part.get("type") == "input_text"
             and isinstance(part.get("text"), str)
         ]
-        if item.get("type") == "message" and texts:
-            self._texts.append("".join(texts))
-        else:
+        if item.get("type") != "message" or not texts:
             self.counts["items_unsupported"] += 1
-        return [], []
+            return [], []
+        item_id = item.get("id")
+        self._texts.append((item_id if isinstance(item_id, str) else None, "".join(texts)))
+        return [], self._discard()  # new input: an answer still held is superseded
 
     def _item_delete(self, event: dict[str, Any]) -> tuple[list[dict], list]:
         """Acked here (Gemini keeps its own history). The held turn's item discards the
@@ -315,6 +344,8 @@ class GeminiWire:
         frames: list[dict[str, Any]] = []
         if self._hold is not None and item == self._hold.item:
             local += self._discard()
+        if item is not None:
+            self._texts = [(i, t) for i, t in self._texts if i != item]  # never sent later
         call_id = self._call_items.pop(item, None) if isinstance(item, str) else None
         if call_id is not None and call_id in self._calls and call_id not in self._outputs:
             self._skipped.add(call_id)
@@ -351,9 +382,10 @@ class GeminiWire:
             if instructions is not None:
                 self._note_context(instructions)
         else:
-            if self._calls:  # calls the route never saw (a discarded answer): not this turn's
+            if self._calls:
+                # calls the route never saw (a discarded answer) are answered first; Gemini
+                # may answer both in one reply, so nothing after is dropped (it is this turn's)
                 frames.append(self._tool_response())
-                self._dropping = True
             if instructions is not None and self._texts:
                 self._note_context(instructions)
             line = instructions if instructions is not None and not self._texts else None
@@ -390,16 +422,20 @@ class GeminiWire:
 
     def _discard(self) -> list[protocol.ServerEvent]:
         """Drop the held answer; a usage report it held still goes (without the discarded
-        response). Unless its model turn ended, the rest of it is dropped as it comes."""
+        response). While Gemini may still generate it (no response yet, or one not ended)
+        the rest is dropped as it comes. Its activity, if never started, is forgotten."""
         hold, self._hold = self._hold, None
         if hold is None:
             return []
+        if hold.item in self._sent:
+            self._sent.remove(hold.item)
         rid = hold.response.id if hold.response is not None else None
         if rid is not None:
             self.counts["held_discarded"] += 1
-            if rid in self._closed:
-                self._closed.remove(rid)
-        if not hold.ended:
+            for ids in (self._closed, *self._owed):
+                if rid in ids:
+                    ids.remove(rid)
+        if hold.response is None or not hold.response.done:
             self._dropping = True
         return [
             protocol.UsageReport(
@@ -427,12 +463,17 @@ class GeminiWire:
         return {"toolResponse": {"functionResponses": answers}}
 
     def _context_turns(self) -> list[dict[str, Any]]:
-        """The kept context (changed instructions first, then user texts) as user turns."""
+        """The kept context as user turns: the instructions' lines the session does not hold
+        yet first (a line only removed is not sent: counted), then the user texts."""
         turns = []
         if self._context is not None:
-            turns.append(_user(CONTEXT_PREFIX + self._context))
+            added = _added_lines(self._context_sent, self._context)
+            if added:
+                turns.append(_user(CONTEXT_PREFIX + added))
+            else:
+                self.counts["context_removals_unsent"] += 1
             self._context_sent, self._context = self._context, None
-        turns += [_user(text) for text in self._texts]
+        turns += [_user(text) for _, text in self._texts]
         self._texts.clear()
         return turns
 
@@ -468,7 +509,7 @@ class GeminiWire:
             return [protocol.Malformed(MALFORMED, "shape")]
         try:
             facts = _facts(data)
-        except _Bad as bad:
+        except _FrameError as bad:
             return [protocol.Malformed(MALFORMED, bad.reason)]
         out: list[protocol.ServerEvent] = []
         for kind, value in facts:
@@ -497,20 +538,24 @@ class GeminiWire:
             return self._turn_complete()
         if kind == "interrupted":
             return self._interrupted()
-        out = self._complete_input()
+        out = self._adopt_held() + self._complete_input()
         if kind == "audio":
             out += self._content(pcm=value)
         elif kind == "said":
-            out += self._content(said=value)
+            if self._owed and not self._current_started():
+                self.counts["late_reply_transcripts"] += 1  # its response is done already
+            else:
+                out += self._content(said=value)
         elif kind == "calls":
             out += self._tool_call(value)
         elif kind == "generated":
             out += self._generated()
         return out
 
-    def _activity(self, kind: str, ms: int) -> list[protocol.ServerEvent]:
+    def _activity(self, kind: str, ms: int | None) -> list[protocol.ServerEvent]:
         """``voiceActivity``: a start is the next sent activity's item (and fences off what
-        an older model turn still sends); an end completes a transcript already in."""
+        an older model turn still sends); an end completes a transcript already in (one with
+        no start before it gets a synthesized one, ``_adopt``)."""
         if kind == ACTIVITY_START:
             item = self._sent.pop(0) if self._sent else f"{INPUT_ITEM_PREFIX}{next(self._items)}"
             self._heard = _Activity(item)
@@ -519,9 +564,11 @@ class GeminiWire:
         if kind != ACTIVITY_END:
             self.counts["unknown_activity"] += 1
             return []
+        out: list[protocol.ServerEvent] = []
+        if self._heard is None or self._heard.ended:
+            out += self._adopt()
         heard = self._heard_activity()
         heard.ended = True
-        out: list[protocol.ServerEvent] = []
         if heard.text and not heard.final:
             out.append(self._final(heard))
         out.append(protocol.SpeechBoundary(protocol.SPEECH_STOPPED, heard.item, ms))
@@ -530,17 +577,51 @@ class GeminiWire:
     def _input_text(self, text: str) -> list[protocol.ServerEvent]:
         """A piece of the input transcript: a delta of the current activity's item (and its
         completion when the activity already ended); after the completion only counted."""
+        out: list[protocol.ServerEvent] = []
+        if self._heard is None or self._heard.final:
+            out += self._adopt()
         heard = self._heard_activity()
         if heard.final:
             self.counts["late_input_transcripts"] += 1
-            return []
+            return out
         heard.text += text
-        out: list[protocol.ServerEvent] = [
-            protocol.InputTranscript(protocol.TRANSCRIPTION_DELTA, heard.item, text)
-        ]
+        out.append(protocol.InputTranscript(protocol.TRANSCRIPTION_DELTA, heard.item, text))
         if heard.ended:
             out.append(self._final(heard))
         return out
+
+    def _adopt(self) -> list[protocol.ServerEvent]:
+        """A sent activity the server reports without its ``ACTIVITY_START``: started now, as
+        the start would (no position: the route's burst holds it), so nothing stalls and the
+        next burst's start still lines up."""
+        if not self._sent:
+            return []
+        item = self._sent.pop(0)
+        self._heard = _Activity(item)
+        self._dropping = False
+        self.counts["activity_starts_missing"] += 1
+        return [protocol.SpeechBoundary(protocol.SPEECH_STARTED, item, None)]
+
+    def _adopt_held(self) -> list[protocol.ServerEvent]:
+        """Model content while the held activity was never started and no older reply
+        streams or is being dropped: the server skipped its start (``_adopt``)."""
+        hold = self._hold
+        out: list[protocol.ServerEvent] = []
+        older = self._dropping or self._older_live()
+        while hold is not None and hold.item in self._sent and not older:
+            out += self._adopt()
+        return out
+
+    def _older_live(self) -> bool:
+        """An open response that already has content: a reply still streaming."""
+        return self._open is not None and not self._open.done and self._open.started
+
+    def _current_started(self) -> bool:
+        """Whether the response content would go to has content already."""
+        hold = self._hold
+        if hold is not None and hold.item not in self._sent:
+            return hold.response is not None and hold.response.started
+        return self._older_live()
 
     def _heard_activity(self) -> _Activity:
         if self._heard is None:
@@ -639,12 +720,21 @@ class GeminiWire:
 
     def _generated(self) -> list[protocol.ServerEvent]:
         """``generationComplete`` ends the response (S0: the audio is over; ``turnComplete``
-        and its usage follow seconds later); one with no content still ends."""
-        resp = self._target()
-        if resp is None:
-            return []
-        resp.started = True
-        return self._emit([*self._end_output(resp), self._done(resp, "completed")], resp)
+        and its usage follow seconds later, so one is owed); one with no content still ends.
+        It also ends a drop."""
+        events: list[protocol.ServerEvent] = []
+        if self._dropping:
+            self.counts["dropped_after_cancel"] += 1
+            self._dropping = False
+        else:
+            resp = self._target()
+            if resp is not None:
+                resp.started = True
+                done = [*self._end_output(resp), self._done(resp, "completed")]
+                events = self._emit(done, resp)
+        self._owed.append(self._closed)
+        self._closed = []
+        return events
 
     def _interrupted(self) -> list[protocol.ServerEvent]:
         """Gemini cut its own answer (new input came): the open response is cancelled; after
@@ -658,23 +748,27 @@ class GeminiWire:
         return self._emit([*self._end_output(resp), self._done(resp, "cancelled")], resp)
 
     def _turn_complete(self) -> list[protocol.ServerEvent]:
-        """The model turn ended: the response it started and never ended ends now
-        (``_ending``); a held answer's turn is marked ended (its discard drops nothing more)."""
+        """The model turn ended. One a ``generationComplete`` already ended only reports its
+        usage (it may come once the next turn is under way: it never ends that one). Else the
+        response it started and never ended ends now (``_ending``); it also ends a drop."""
+        if self._owed:
+            self._usage_ids = self._owed.pop(0)
+            return []
         if self._dropping:
             self._dropping = False
             return []
-        hold = self._hold
-        older = self._open is not None and not self._open.done and self._open.started
-        if hold is not None and hold.response is not None and hold.response.started and not older:
-            hold.ended = True
         resp = self._ending()
         if resp is None:
             return []
         return self._emit([*self._end_output(resp), self._done(resp, "completed")], resp)
 
     def _usage(self, total: int) -> list[protocol.ServerEvent]:
-        """The model turn's tokens, for the responses ended since the last report."""
-        ids, self._closed = tuple(self._closed), []
+        """The model turn's tokens, for the responses of that turn: those an owed
+        ``turnComplete`` names, else those ended since the last report."""
+        if self._usage_ids is not None:
+            ids, self._usage_ids = tuple(self._usage_ids), None
+        else:
+            ids, self._closed = tuple(self._closed), []
         return self._emit([protocol.UsageReport(protocol.USAGE_REPORT, ids, total)])
 
     def _end_output(self, resp: _Response) -> list[protocol.ServerEvent]:
@@ -700,9 +794,11 @@ class GeminiWire:
 
 # --------------------------------------------------------------------------- reading
 
+BAD = object()  # a duration field that cannot be read (``_duration_ms``)
+
 
 def _facts(data: dict[str, Any]) -> list[tuple[str, Any]]:
-    """A server message as (kind, value) facts, in the order they apply; raises ``_Bad`` on
+    """A server message as (kind, value) facts, in the order they apply; raises ``_FrameError`` on
     a field of the wrong type. ``usageMetadata`` applies after the content it came with."""
     if not data:
         return [("ignored", "empty_frames")]
@@ -721,17 +817,22 @@ def _facts(data: dict[str, Any]) -> list[tuple[str, Any]]:
             activity = _obj(value)
             kind = activity.get("type")
             if not isinstance(kind, str):
-                raise _Bad("field")
-            facts.append(("activity", (kind, _duration_ms(activity.get("audioOffset")))))
+                raise _FrameError("field")
+            ms = _duration_ms(activity.get("audioOffset"))
+            if ms is BAD:
+                facts.append(("ignored", "bad_durations"))
+            facts.append(("activity", (kind, None if ms is BAD else ms)))
         elif key == "usageMetadata":
             total = _obj(value).get("totalTokenCount")
             if total is not None:
                 if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-                    raise _Bad("field")
+                    raise _FrameError("field")
                 usage.append(("usage", total))
         elif key == "goAway":
-            left = _obj(value).get("timeLeft")
-            facts.append(("go_away", None if left is None else _duration_ms(left)))
+            left = _duration_ms(_obj(value).get("timeLeft"))
+            if left is BAD:
+                facts.append(("ignored", "bad_durations"))
+            facts.append(("go_away", None if left is BAD else left))
         elif key == "sessionResumptionUpdate":
             facts.append(("ignored", "resumption_updates"))
         else:
@@ -747,7 +848,7 @@ def _server_content(content: dict[str, Any]) -> list[tuple[str, Any]]:
     if turn is not None:
         parts = _obj(turn).get("parts", [])
         if not isinstance(parts, list):
-            raise _Bad("field")
+            raise _FrameError("field")
         for part in parts:
             facts.append(_part(_obj(part)))
     if "outputTranscription" in content:
@@ -765,65 +866,71 @@ def _part(part: dict[str, Any]) -> tuple[str, Any]:
     if part.get("thought") is True:
         return ("ignored", "thought_parts")  # never spoken, never reply text
     if "inlineData" in part:
-        return ("audio", _pcm(_obj(part["inlineData"]).get("data")))
+        data = _obj(part["inlineData"])
+        mime = data.get("mimeType")
+        if isinstance(mime, str):
+            if not mime.startswith(AUDIO_MIME_PREFIX):
+                return ("ignored", "other_parts")
+            rate = MIME_RATE.search(mime)
+            if rate is not None and int(rate.group(1)) != OUTPUT_RATE_HZ:
+                return ("ignored", "audio_rate_mismatch")  # the route plays it at 24 kHz
+        return ("audio", _pcm(data.get("data")))
     if "text" in part:
-        return ("ignored", "text_parts")
+        return ("ignored", "text_answer_parts")
     return ("ignored", "other_parts")
 
 
 def _calls(tool_call: dict[str, Any]) -> list[tuple[str, str, str]]:
     calls = tool_call.get("functionCalls", [])
     if not isinstance(calls, list):
-        raise _Bad("field")
+        raise _FrameError("field")
     out = []
     for call in calls:
         call = _obj(call)
         call_id, name, args = call.get("id"), call.get("name"), call.get("args", {})
         if not isinstance(call_id, str) or not call_id or len(call_id) > protocol.ID_MAX_CHARS:
-            raise _Bad("field")
+            raise _FrameError("field")
         if not isinstance(name, str) or not name:
-            raise _Bad("field")
+            raise _FrameError("field")
         out.append((call_id, name, json.dumps(_obj(args), ensure_ascii=False)))
     return out
 
 
 def _obj(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise _Bad("field")
+        raise _FrameError("field")
     return value
 
 
 def _text(data: dict[str, Any]) -> str:
     value = data.get("text", "")
     if not isinstance(value, str):
-        raise _Bad("field")
+        raise _FrameError("field")
     return value
 
 
 def _pcm(value: Any) -> bytes:
     if not isinstance(value, str):
-        raise _Bad("field")
+        raise _FrameError("field")
     try:
         pcm = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
-        raise _Bad("base64") from None
+        raise _FrameError("base64") from None
     if len(pcm) % protocol.PCM_SAMPLE_BYTES:
-        raise _Bad("odd_pcm")
+        raise _FrameError("odd_pcm")
     return pcm
 
 
-def _duration_ms(value: Any) -> int:
+def _duration_ms(value: Any) -> Any:
     """A protobuf Duration ("1.689375s") in whole ms, exactly (no float error), floored the
-    same way for every position, so an activity that starts where the last ended matches."""
-    if not isinstance(value, str) or not value.endswith(DURATION_UNIT):
-        raise _Bad("field")
-    try:
-        seconds = Decimal(value[: -len(DURATION_UNIT)])
-    except InvalidOperation:
-        raise _Bad("field") from None
-    if not seconds.is_finite() or seconds < 0:
-        raise _Bad("field")
-    return int(seconds * MS_PER_S)
+    same way for every position, so an activity that starts where the last ended matches.
+    None when absent; ``BAD`` for anything that is not a bounded plain duration (the field
+    is then ignored, never the frame). Never raises."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or DURATION.fullmatch(value) is None:
+        return BAD
+    return int(Decimal(value[:-1]) * MS_PER_S)
 
 
 # --------------------------------------------------------------------------- writing
@@ -838,13 +945,21 @@ def _user(text: str) -> dict[str, Any]:
 
 
 def _declaration(tool: dict[str, Any]) -> dict[str, Any]:
-    """A realtime function tool as a Gemini function declaration (BLOCKING)."""
+    """A realtime function tool as a Gemini function declaration (BLOCKING). Its parameters
+    go as ``parametersJsonSchema``: skill schemas use JSON Schema (``additionalProperties``,
+    ``maxLength``, ``minimum``) outside the OpenAPI subset ``parameters`` takes."""
     return {
         "name": tool.get("name", ""),
         "description": tool.get("description", ""),
-        "parameters": tool.get("parameters") or EMPTY_PARAMETERS,
+        "parametersJsonSchema": tool.get("parameters") or EMPTY_PARAMETERS,
         "behavior": TOOL_BEHAVIOR,
     }
+
+
+def _added_lines(held: str, new: str) -> str:
+    """The lines of ``new`` that ``held`` does not have, in order."""
+    known = set(held.splitlines())
+    return "\n".join(line for line in new.splitlines() if line not in known)
 
 
 def _response_object(output: Any) -> dict[str, Any]:

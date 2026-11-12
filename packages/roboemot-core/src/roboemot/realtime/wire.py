@@ -20,6 +20,11 @@ from roboemot.realtime import protocol
 
 
 class Wire(Protocol):
+    """Thread contract: a codec has no lock. ``encode`` and ``decode`` run on the client's one
+    loop thread (``encode`` inside the client's send, never in the caller's ``send``, which
+    the route calls holding its own lock), and the local events ``encode`` returns are
+    delivered from that loop after the send, never synchronously to the caller."""
+
     def encode(
         self, event: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], list[protocol.ServerEvent]]: ...

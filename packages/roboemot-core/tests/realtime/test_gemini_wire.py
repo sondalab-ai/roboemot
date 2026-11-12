@@ -158,7 +158,7 @@ def test_first_session_update_becomes_setup():
                             {
                                 "name": "note_tone",
                                 "description": "Record the user's tone of voice.",
-                                "parameters": {
+                                "parametersJsonSchema": {
                                     "type": "object",
                                     "properties": {"tone": {"type": "string"}},
                                 },
@@ -167,7 +167,7 @@ def test_first_session_update_becomes_setup():
                             {
                                 "name": "get_time",
                                 "description": "Local time.",
-                                "parameters": {"type": "object", "properties": {}},
+                                "parametersJsonSchema": {"type": "object", "properties": {}},
                                 "behavior": "BLOCKING",
                             },
                         ]
@@ -642,7 +642,8 @@ def test_open_calls_are_answered_before_a_new_activity():
 
 def test_a_text_turn_after_a_declined_turn_still_sends_its_text():
     """A declined turn's held toolCall leaves a call open the route never saw: the next text
-    turn answers it ``skipped`` and still goes, and its answer follows the interruption."""
+    turn answers it ``skipped`` and still goes; Gemini's one merged answer is the text
+    turn's, never dropped."""
     w = wire()
     item = heard_turn(w)[0].item_id
     feed(w, tool_call(("note_tone", {"tone": "calm"}, "fc_1")))
@@ -665,13 +666,12 @@ def test_a_text_turn_after_a_declined_turn_still_sends_its_text():
         },
     ]
     assert types(local) == [p.RESPONSE_CREATED]
-    assert feed(w, audio(said="continuazione")) == []
-    feed(w, INTERRUPTED)
-    live = feed(w, audio(said="Sono le dieci."), GENERATED)
+    live = feed(w, audio(said="Ok. "), audio(said="Sono le dieci."), GENERATED)
     assert {e.response_id for e in live} == {local[0].response_id}
     assert [e.text for e in live if isinstance(e, p.ReplyTranscript) and e.final] == [
-        "Sono le dieci."
+        "Ok. Sono le dieci."
     ]
+    assert types(live)[-1] == p.RESPONSE_DONE
 
 
 def test_function_output_that_is_not_an_object_is_wrapped():
@@ -867,8 +867,6 @@ def test_binary_and_text_frames_decode_alike():
         (b"not json", "json"),
         (b"\xff\xfe", "json"),
         (b"[1, 2]", "shape"),
-        (json.dumps({"voiceActivity": {"type": "ACTIVITY_START", "audioOffset": 3}}), "field"),
-        (json.dumps({"voiceActivity": {"type": "ACTIVITY_START", "audioOffset": "x"}}), "field"),
         (json.dumps(audio(b"\x01\x02\x03")), "odd_pcm"),
         (
             json.dumps(
@@ -914,6 +912,370 @@ def test_events_keep_content_out_of_repr():
     _, local = send(w, p.response_create())
     shown = repr(events + local) + repr(w)
     assert "segreto" not in shown and "riservato" not in shown
+
+
+# --------------------------------------------------------------------------- review round
+
+
+BAD_DURATIONS = [
+    "1e999999s",
+    "1E5s",
+    "-1s",
+    "1_0s",
+    "NaNs",
+    "Infinitys",
+    "s",
+    "1.s",
+    ".5s",
+    "1.2345678901s",
+    "9" * 40 + "s",
+    "1.5",
+    " 1s",
+    "1s ",
+    "١s",
+    3,
+    1.5,
+    True,
+    [],
+    {},
+]
+
+
+@pytest.mark.parametrize("value", BAD_DURATIONS, ids=repr)
+def test_bad_durations_never_raise_and_are_ignored(value):
+    w = wire()
+    burst(w)
+    [start] = w.decode(frame(activity("ACTIVITY_START", value)))
+    assert start == p.SpeechBoundary(p.SPEECH_STARTED, start.item_id, None)
+    assert w.decode(frame({"goAway": {"timeLeft": value}})) == [p.GoAway(p.GO_AWAY, None)]
+    assert w.counts["bad_durations"] == 2
+
+
+def test_decode_never_raises_on_random_messages():
+    """Seeded fuzz: random nested values under every key the codec reads."""
+    import random
+
+    rng = random.Random(237)
+    leaves = [None, True, 0, -1, 2**70, 1.5, "", "x", "1e999999s", "1_0s", b64(PCM_OUT), "@@"]
+
+    def value(depth):
+        if depth > 3 or rng.random() < 0.4:
+            return rng.choice(leaves)
+        if rng.random() < 0.5:
+            return [value(depth + 1) for _ in range(rng.randint(0, 3))]
+        keys = [
+            "type",
+            "audioOffset",
+            "timeLeft",
+            "parts",
+            "inlineData",
+            "data",
+            "mimeType",
+            "text",
+            "thought",
+            "functionCalls",
+            "id",
+            "name",
+            "args",
+            "modelTurn",
+            "inputTranscription",
+            "outputTranscription",
+            "generationComplete",
+            "turnComplete",
+            "interrupted",
+            "totalTokenCount",
+        ]
+        return {rng.choice(keys): value(depth + 1) for _ in range(rng.randint(0, 4))}
+
+    tops = [
+        "setupComplete",
+        "serverContent",
+        "toolCall",
+        "toolCallCancellation",
+        "voiceActivity",
+        "usageMetadata",
+        "goAway",
+        "sessionResumptionUpdate",
+    ]
+    w = wire()
+    for _ in range(3000):
+        if rng.random() < 0.1:
+            burst(w)
+        if rng.random() < 0.05:
+            send(w, p.response_create())
+        message = {rng.choice(tops): value(0) for _ in range(rng.randint(1, 3))}
+        events = w.decode(frame(message, binary=rng.random() < 0.5))
+        assert all(isinstance(e, p.ServerEvent) for e in events)
+
+
+def test_a_late_turn_complete_reports_usage_and_never_ends_the_next_turn():
+    """N generationComplete, then N+1's commit and audio, then N's turnComplete, then the
+    rest of N+1: N+1 is released whole, and the usage names N's response only."""
+    w = wire()
+    heard_turn(w)
+    send(w, p.response_create())
+    first = feed(w, audio(said="Ciao"), GENERATED)
+    n = first[-1].response_id
+    heard_turn(w, start="1.689375s", end="3s")
+    assert feed(w, audio(PCM_OUT, said="Sto "), turn_complete(1785)) == []  # all held
+    assert feed(w, audio(PCM_OUT, said="bene."), GENERATED) == []
+    _, local = send(w, p.response_create())
+    n1 = local[0].response_id
+    assert n1 != n
+    assert types(local) == [
+        p.RESPONSE_CREATED,
+        p.AUDIO_DELTA,
+        p.REPLY_TRANSCRIPT_DELTA,
+        p.USAGE_REPORT,
+        p.AUDIO_DELTA,
+        p.REPLY_TRANSCRIPT_DELTA,
+        p.AUDIO_DONE,
+        p.REPLY_TRANSCRIPT_DONE,
+        p.RESPONSE_DONE,
+    ]
+    assert local[3] == p.UsageReport(p.USAGE_REPORT, (n,), 1785)
+    assert [e.text for e in local if isinstance(e, p.ReplyTranscript) and e.final] == ["Sto bene."]
+    assert len([e for e in local if isinstance(e, p.ResponseDone)]) == 1
+    assert feed(w, turn_complete(2239)) == [p.UsageReport(p.USAGE_REPORT, (n1,), 2239)]
+
+
+def test_a_late_turn_complete_never_ends_a_live_answer():
+    w = wire()
+    heard_turn(w)
+    send(w, p.response_create())
+    feed(w, audio(), GENERATED)
+    heard_turn(w, start="1.689375s", end="3s")
+    _, local = send(w, p.response_create())
+    feed(w, audio(said="Sto "))
+    assert feed(w, turn_complete(1785)) == [p.UsageReport(p.USAGE_REPORT, ("gresp_1",), 1785)]
+    live = feed(w, audio(said="bene."), GENERATED)
+    assert types(live)[-1] == p.RESPONSE_DONE and live[-1].response_id == local[0].response_id
+    assert [e.text for e in live if isinstance(e, p.ReplyTranscript) and e.final] == ["Sto bene."]
+
+
+def test_usage_reports_stay_in_order_across_a_release_and_the_next_turn():
+    w = wire()
+    heard_turn(w)
+    feed(w, audio(), GENERATED)
+    _, first = send(w, p.response_create())
+    assert types(first)[-1] == p.RESPONSE_DONE
+    assert feed(w, turn_complete(100)) == [p.UsageReport(p.USAGE_REPORT, ("gresp_1",), 100)]
+    heard_turn(w, start="1.689375s", end="3s")
+    feed(w, audio(), GENERATED, turn_complete(200))
+    _, second = send(w, p.response_create())
+    assert types(second)[-2:] == [p.RESPONSE_DONE, p.USAGE_REPORT]
+    assert second[-1] == p.UsageReport(p.USAGE_REPORT, (second[0].response_id,), 200)
+
+
+def test_tool_schemas_go_as_json_schema():
+    from roboemot.skills.schema import Param, Range, json_schema
+
+    params = json_schema(
+        [
+            Param("minutes", int, range=Range(1, 120), description="How long."),
+            Param("label", str, required=False, max_len=40),
+        ]
+    )
+    tool = {
+        "type": "function",
+        "name": "set_timer",
+        "description": "A timer.",
+        "parameters": params,
+    }
+    w = GeminiWire(MODEL, MAX)
+    setup = w.encode(update(tools=[tool]))[0][0]["setup"]
+    [declaration] = setup["tools"][0]["functionDeclarations"]
+    assert declaration["parametersJsonSchema"] == params
+    assert "parameters" not in declaration
+    assert params["additionalProperties"] is False
+    assert params["properties"]["minutes"]["maximum"] == 120
+    assert params["properties"]["label"]["maxLength"] == 40
+
+
+def test_a_user_text_supersedes_a_held_answer():
+    w = wire()
+    heard_turn(w)
+    feed(w, audio(said="Ciao"))
+    assert send(w, p.text_item("Scusa, volevo dire altro.")) == ([], [])
+    assert w.counts["held_discarded"] == 1
+    frames, local = send(w, p.response_create())
+    assert frames[-1]["clientContent"]["turns"] == [
+        {"role": "user", "parts": [{"text": "Scusa, volevo dire altro."}]}
+    ]
+    assert types(local) == [p.RESPONSE_CREATED]
+
+
+def test_a_text_item_deleted_before_response_create_is_never_sent():
+    w = wire()
+    send(w, p.text_item("prima", "t1"))
+    send(w, p.text_item("seconda", "t2"))
+    _, acks = send(w, p.item_delete("t1"))
+    assert acks == [p.ItemDeleted(p.ITEM_DELETED, "t1", emulated=True)]
+    frames, _ = send(w, p.response_create())
+    assert frames[0]["clientContent"]["turns"] == [{"role": "user", "parts": [{"text": "seconda"}]}]
+
+
+def test_skipped_calls_drop_only_until_the_first_turn_end():
+    w = wire()
+    heard_turn(w)
+    feed(w, tool_call(("get_time", {}, "fc_1")))
+    _, local = send(w, p.response_create())
+    send(w, p.item_delete(local[1].item_id))  # skipped: Gemini continues
+    assert feed(w, audio(), GENERATED) == []  # the continuation is dropped, up to its end
+    _, local = send(w, p.response_create("Say exactly: Ciao."))
+    live = feed(w, audio(said="Ciao."), GENERATED)
+    assert {e.response_id for e in live} == {local[0].response_id}
+    assert types(live)[-1] == p.RESPONSE_DONE
+
+
+def test_a_burst_without_activity_start_neither_stalls_nor_misaligns():
+    w = wire()
+    burst(w)
+    events = feed(w, heard("Ciao"), activity("ACTIVITY_END", "1.5s"))
+    assert types(events) == [
+        p.SPEECH_STARTED,
+        p.TRANSCRIPTION_DELTA,
+        p.TRANSCRIPTION_COMPLETED,
+        p.SPEECH_STOPPED,
+    ]
+    first = events[0].item_id
+    assert events[0].audio_ms is None and {e.item_id for e in events} == {first}
+    assert w.counts["activity_starts_missing"] == 1
+    feed(w, audio(said="Ciao!"), GENERATED)
+    _, local = send(w, p.response_create())
+    assert types(local)[-1] == p.RESPONSE_DONE and len(local) > 2
+    second = heard_turn(w, start="1.5s", end="3s")
+    assert second[0].item_id not in (None, first)
+    assert {e.item_id for e in second} == {second[0].item_id}
+
+
+def test_content_without_any_activity_event_adopts_the_held_activity():
+    w = wire()
+    burst(w)
+    events = feed(w, audio(said="Sì"))
+    assert types(events) == [p.SPEECH_STARTED]  # the answer itself is held
+    feed(w, GENERATED)
+    _, local = send(w, p.response_create())
+    assert types(local)[-1] == p.RESPONSE_DONE
+
+
+def test_a_reply_transcript_after_its_done_is_dropped_not_misplaced():
+    """The route follows no response after its done: a late tail is counted, and never
+    lands on the next response (documented limit)."""
+    w = wire()
+    heard_turn(w)
+    send(w, p.response_create())
+    feed(w, audio(said="Ciao"), GENERATED)
+    _, local = send(w, p.response_create("Say exactly: Altro."))
+    assert feed(w, {"serverContent": {"outputTranscription": {"text": " amico"}}}) == []
+    assert w.counts["late_reply_transcripts"] == 1
+    live = feed(w, turn_complete(10), audio(said="Altro."), GENERATED)
+    finals = [e for e in live if isinstance(e, p.ReplyTranscript) and e.final]
+    assert [e.text for e in finals] == ["Altro."]
+    assert finals[0].response_id == local[0].response_id
+
+
+def test_context_sends_only_the_lines_the_session_lacks():
+    w = GeminiWire(MODEL, MAX)
+    w.encode(update(instructions="Sei Neve.\nRispondi in italiano."))
+    send(w, update(instructions="Sei Neve.\nRispondi in italiano.\nParli con Marcello."))
+    frames = burst(w)
+    assert frames[0]["clientContent"]["turns"] == [
+        {"role": "user", "parts": [{"text": "[Updated instructions]\nParli con Marcello."}]}
+    ]
+    send(w, update(instructions="Sei Neve.\nRispondi in italiano."))  # a line removed only
+    assert burst(w)[0] == {"realtimeInput": {"activityStart": {}}}
+    assert w.counts["context_removals_unsent"] == 1
+
+
+def test_audio_at_another_rate_is_dropped():
+    w = wire()
+    heard_turn(w)
+    send(w, p.response_create())
+    other = {
+        "serverContent": {
+            "modelTurn": {
+                "parts": [
+                    {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": b64(PCM_OUT)}}
+                ]
+            }
+        }
+    }
+    assert feed(w, other) == []
+    assert w.counts["audio_rate_mismatch"] == 1
+    assert types(feed(w, audio())) == [p.AUDIO_DELTA]
+
+
+def test_a_text_answer_part_is_counted_and_dropped():
+    w = wire()
+    heard_turn(w)
+    send(w, p.response_create())
+    assert feed(w, {"serverContent": {"modelTurn": {"parts": [{"text": "Ciao"}]}}}) == []
+    assert w.counts["text_answer_parts"] == 1
+
+
+@pytest.mark.parametrize("before_start", [True, False])
+def test_interrupted_around_the_new_activity_after_a_cancel(before_start):
+    """Barge-in: the route cancels, a new burst goes, and Gemini's ``interrupted`` for the
+    old turn comes before or after the new ``ACTIVITY_START``: one done for the old answer,
+    the new one is held and released whole."""
+    w = wire()
+    heard_turn(w)
+    _, local = send(w, p.response_create())
+    old = local[0].response_id
+    feed(w, audio())
+    assert send(w, p.response_cancel())[1] == [p.ResponseDone(p.RESPONSE_DONE, old, "cancelled")]
+    burst(w)
+    order = [INTERRUPTED, activity("ACTIVITY_START", "1.689375s")]
+    if not before_start:
+        order.reverse()
+    assert [e for e in feed(w, *order) if not isinstance(e, p.SpeechBoundary)] == []
+    feed(w, heard("Basta"), activity("ACTIVITY_END", "2.5s"))
+    feed(w, audio(said="Va bene."), GENERATED)
+    _, local = send(w, p.response_create())
+    assert local[0].response_id != old
+    assert types(local)[-1] == p.RESPONSE_DONE and local[-1].status == "completed"
+    assert [e.text for e in local if isinstance(e, p.ReplyTranscript) and e.final] == ["Va bene."]
+
+
+def test_two_calls_one_output_one_deleted():
+    w = wire()
+    heard_turn(w)
+    feed(w, tool_call(("note_tone", {"tone": "calm"}, "fc_a"), ("get_time", {}, "fc_b")))
+    _, local = send(w, p.response_create())
+    calls = [e for e in local if isinstance(e, p.FunctionCall)]
+    send(w, p.function_output("fc_a", '{"ok": true}'))
+    frames, _ = send(w, p.item_delete(calls[1].item_id))
+    assert frames == [
+        {
+            "toolResponse": {
+                "functionResponses": [
+                    {"id": "fc_a", "name": "note_tone", "response": {"ok": True}},
+                    {"id": "fc_b", "name": "get_time", "response": {"result": "skipped"}},
+                ]
+            }
+        }
+    ]
+
+
+def test_a_call_item_deleted_after_its_output_keeps_the_output():
+    w = wire()
+    heard_turn(w)
+    feed(w, tool_call(("get_time", {}, "fc_1")))
+    _, local = send(w, p.response_create())
+    send(w, p.function_output("fc_1", '{"time": "22:30"}'))
+    frames, _ = send(w, p.item_delete(local[1].item_id))
+    assert frames == []
+    frames, _ = send(w, p.response_create())
+    assert frames == [
+        {
+            "toolResponse": {
+                "functionResponses": [
+                    {"id": "fc_1", "name": "get_time", "response": {"time": "22:30"}}
+                ]
+            }
+        }
+    ]
 
 
 # --------------------------------------------------------------------------- OpenAI identity
