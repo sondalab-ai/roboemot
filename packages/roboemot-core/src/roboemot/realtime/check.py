@@ -15,12 +15,15 @@ and runs, within ``llm_check.deadline_s``:
 
 A ``gemini_live`` route (SPEC 8, Gemini Live wire) is checked in direct mode only, whatever
 provider is passed: its key goes to its own origin, never to a session allocator. Its setup
-carries the tools a turn offers (the running worker's skills, skip and tone tools; without a
-worker, the default skills built offline), within the route's connect budget; a tool call is
-answered (never run) and the continuation is followed, up to ``conversation.max_tool_rounds``.
-Its item delete is the codec's own ack: ``emulated``, not a server confirmation. Its tokens
-come after the response ended (``UsageReport``): the estimate is charged at the end and the
-late total charges only what it adds, waited for within the deadline (``usage_reported``).
+carries the tools a turn offers (:func:`offline_tools`: the default skills, the skip and tone
+tools, with no name in view, SPEC 12); a tool call is answered (never run) and the
+continuation is followed, up to ``conversation.max_tool_rounds`` (calls still open past it:
+``tool_rounds_exceeded``; a setup with no tool: ``no_tools``, both advisory). Its item delete
+is the codec's own ack: ``emulated``, not a server confirmation. Its tokens come after the
+response ended (``UsageReport``): the estimate is charged at each ``response.done`` and the
+late total charges only what it adds; the check waits for it at most
+``voice.realtime_route.check_usage_wait_s``, and never past the deadline
+(``usage_reported``).
 
 It sends no microphone audio. The response is charged to the route's daily token budget (its
 usage, else the chars/4 estimate, as the route charges); a spent budget or an unreadable key
@@ -41,7 +44,7 @@ import datetime as dt
 import logging
 import queue
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -73,6 +76,7 @@ log = logging.getLogger(__name__)
 CONNECT = "realtime_connect"
 FIRST_AUDIO = "realtime_first_audio"
 ITEM_DELETE = "realtime_item_delete"
+TOOLS = "realtime_tools"  # advisory: a gemini_live setup without tools, a round cap reached
 ITEM_ID = f"{ITEM_PREFIX}check_1"  # the client-chosen id of the check's input_text item
 CREATE_EVENT = "ev_check_item"
 RESPONSE_EVENT = f"{EVENT_PREFIX}check_1"
@@ -86,9 +90,15 @@ CALL_OUTPUT = TONE_NOTED  # the answer to a call: never run, acknowledged as the
 # Every ``CheckResult.code`` this module gives (the page words each; a test walks the module's
 # syntax tree and holds the calls to this list).
 REASON_CODES = (
-    "connected", "session_failed", "first_audio", "no_audio", "item_create_refused",
+    "connected",
+    "session_failed",
+    "first_audio",
+    "no_audio",
+    "item_create_refused",
     *(f"item_delete_{v}" for v in ITEM_VERDICTS),
-)  # fmt: skip
+    "no_tools",
+    "tool_rounds_exceeded",
+)
 # client failures that stop the connect before the handshake: no key left the robot then
 BEFORE_HANDSHAKE = ("pseudonyms", "reconfigured")
 SEND_WAITS = 2  # a send's write waits at most this many send_timeout_s (the client's own bound)
@@ -165,14 +175,17 @@ def _turn(cfg: RoboEmotConfig, route: LLMRoute) -> tuple[str, str]:
     return messages[0]["content"], messages[-1]["content"]
 
 
-def offline_tools(cfg: RoboEmotConfig) -> list[dict[str, Any]]:
-    """The tools a ``gemini_live`` setup carries when no worker runs (the CLI): the default
-    skills listed in ``conversation.llm_skills``, built over an environment that acts on
-    nothing (the affect labels as gestures, no name in view), and the skip and tone tools, as
-    the worker offers them (``session_tools``)."""
+def offline_tools(
+    cfg: RoboEmotConfig, gestures: Callable[[], Sequence[str]] | None = None
+) -> list[dict[str, Any]]:
+    """The tools a ``gemini_live`` check's setup carries: the default skills listed in
+    ``conversation.llm_skills``, built over an environment that acts on nothing, and the skip
+    and tone tools, as the worker offers them (``session_tools``). ``gestures``: the robot's
+    playable names (the affect labels when None). No name in view ever goes in a choice list
+    (``look_at`` offers its categories only, SPEC 12)."""
     labels = list(cfg.affect.labels)
     env = SkillEnv(
-        gestures=lambda: labels,
+        gestures=gestures or (lambda: labels),
         play=lambda _name: False,
         look_names=list,
         look_at=lambda _target: False,
@@ -193,7 +206,7 @@ def check_realtime_route(
     *,
     router: Any,
     provider: SessionProvider | None,
-    tools: Callable[[float], list[dict[str, Any]] | None] | None = None,
+    tools: Callable[[], list[dict[str, Any]] | None] | None = None,
     client_factory: Callable[..., Any] | None = None,
     extra: Callable[[], bool] = realtime_extra,
     deadline_s: float | None = None,
@@ -205,12 +218,12 @@ def check_realtime_route(
     loop. ``router`` gives the key (``auth_headers``) and the daily budget (``used``,
     ``charge``); ``provider`` is the session provider ``voice.realtime_route.mode`` selects
     (None in platform mode without one: ``error: provider``); a ``gemini_live`` route always
-    uses :class:`DirectSession` instead. ``tools(wait_s)`` builds a ``gemini_live`` setup's
-    tools (the running worker's ``realtime_tools``; None from it fails the connect,
-    ``setup_unready``); without it they are built offline (:func:`offline_tools`). Raises
+    uses :class:`DirectSession` instead. ``tools()`` builds a ``gemini_live`` setup's tools
+    (None from it, or an exception, fails the connect: ``setup_unready``); without it they are
+    :func:`offline_tools` of ``cfg``. Raises
     :class:`RouteKindUnsupported`, :class:`RouteKeyUnavailable` and
     :class:`RouteBudgetExhausted` before anything is sent. ``deadline_s`` defaults to
-    ``llm_check.deadline_s`` and bounds the waits after the connect; the connect is bounded
+    ``llm_check.deadline_s``; no wait after the connect goes past it; the connect is bounded
     by the client's own ``connect_timeout_s`` (the route's, else the shared one) plus
     ``send_timeout_s``, and its close by about three
     ``send_timeout_s`` after that. ``config`` returns the committed configuration: the
@@ -248,7 +261,7 @@ def check_realtime_route(
         client_factory = RealtimeClient
     end = clock() + (cfg.llm_check.deadline_s if deadline_s is None else deadline_s)
     run = _Run(route, cfg, router, report, clock, end)
-    run.tools = tools or (lambda _wait_s: offline_tools(cfg))
+    run.tools = tools or (lambda: offline_tools(cfg))
     client = client_factory(
         route,
         rt,
@@ -261,6 +274,8 @@ def check_realtime_route(
     )
     try:
         run.go(client)
+        # a close during the turn has its code too
+        report.close_code = client.snapshot().get("close_code") or report.close_code
     finally:
         client.close()
     log.info(
@@ -287,13 +302,14 @@ class _Run:
         self.clock, self.end = clock, end
         self.events: queue.Queue[Any] = queue.Queue()
         self.gemini = route.protocol == GEMINI_LIVE
-        self.tools: Callable[[float], list[dict[str, Any]] | None] = lambda _wait_s: None
+        self.tools: Callable[[], list[dict[str, Any]] | None] = lambda: None
         self.create_refused = False
         self.reply_chars = 0
         self.response_event = RESPONSE_EVENT
         self.calls: list[str] = []  # the call ids of the last response (never their arguments)
         self.estimates: dict[str, int] = {}  # response id -> estimate a late total corrects
         self.reported: set[str] = set()
+        self.usage_seen = False  # a usage report came after the last response.done
 
     def go(self, client: Any) -> None:
         instructions, text = _turn(self.cfg, self.route)
@@ -303,11 +319,14 @@ class _Run:
         tools: list[dict[str, Any]] | None = None
         timeout: dict[str, float] = {}
         if self.gemini:  # its setup is all the session gets: the tools a turn offers
-            tools = self.tools(budget)
+            tools = self._tools()
             if tools is None:
                 r.failure = SETUP_UNREADY
-                why = SETUP_UNREADY
-                r.checks.append(CheckResult(CONNECT, FAIL, why, "session_failed", {"failure": why}))
+                r.checks.append(
+                    CheckResult(
+                        CONNECT, FAIL, SETUP_UNREADY, "session_failed", {"failure": SETUP_UNREADY}
+                    )
+                )
                 return
             r.tools_sent = len(tools)
             timeout = {"timeout_s": max(0.0, budget - (self.clock() - started))}
@@ -331,6 +350,8 @@ class _Run:
             return
         r.setup_ms = round((self.clock() - started) * MS_PER_S, 1)
         r.checks.append(CheckResult(CONNECT, PASS, "", "connected"))
+        if self.gemini and not tools:
+            r.checks.append(CheckResult(TOOLS, SKIP, "no tools", "no_tools"))
         if not self._sent(client, {**protocol.text_item(text, ITEM_ID), "event_id": CREATE_EVENT}):
             return
         sent_at = self.clock()
@@ -346,11 +367,28 @@ class _Run:
                 return
             done = self._response(sent_at)
             self._charge(done, sent)
+        capped = self.gemini and done is not None and bool(self.calls)
+        if capped:  # Gemini still waits on calls: no turn total is coming
+            why = f"{len(self.calls)} calls open after {rounds} rounds"
+            r.checks.append(
+                CheckResult(TOOLS, SKIP, why, "tool_rounds_exceeded", {"rounds": rounds})
+            )
         self._first_audio()
         if r.error or r.failure is not None:
             return  # the response did not complete: the session is not trusted further
         self._delete(client)
-        self._await_usage()
+        if not capped:
+            self._await_usage()
+
+    def _tools(self) -> list[dict[str, Any]] | None:
+        """The setup's tools, or None when their build failed (logged by type only)."""
+        try:
+            return self.tools()
+        except Exception as exc:
+            log.warning(
+                "realtime route %s check: setup tools: %s", self.route.name, type(exc).__name__
+            )
+            return None
 
     def _answer_calls(self, client: Any, round_no: int) -> int | None:
         """Answer the last response's calls (``CALL_OUTPUT``: no skill runs) and ask for the
@@ -442,6 +480,7 @@ class _Run:
             elif isinstance(event, protocol.FunctionCall):
                 self.calls.append(event.call_id)
             elif isinstance(event, protocol.ResponseDone):
+                self.usage_seen = False
                 return event
         return None
 
@@ -460,10 +499,13 @@ class _Run:
         """The response's usage, else the chars/4 estimate of what was sent and heard (kept
         by response id on a ``gemini_live`` route, for its late total to correct)."""
         tokens = done.total_tokens if done is not None else None
+        rid = done.response_id if done is not None else None
         if tokens is None:
             tokens = (sent_chars + self.reply_chars) // CHARS_PER_TOKEN
-            if self.gemini and done is not None and done.response_id is not None:
-                self.estimates[done.response_id] = tokens
+            if self.gemini and rid in self.reported:
+                tokens = 0  # its late total came first and was charged in full
+            elif self.gemini and rid is not None:
+                self.estimates[rid] = tokens
         self.reply_chars = 0
         if tokens > 0:
             self.router.charge(self.route.name, tokens)
@@ -472,11 +514,14 @@ class _Run:
     def _usage(self, report: protocol.UsageReport) -> None:
         """A late token total (Gemini's ``turnComplete``), as the route takes it: the
         estimates already charged for its responses come off it, the rest is charged; a
-        report naming only responses already reported charges nothing, one naming none its
-        whole total."""
+        report naming only responses already reported charges nothing. One naming none covers
+        every response still at its estimate (all of them come off: never charged twice)."""
+        self.usage_seen = True
         fresh = [i for i in report.response_ids if i not in self.reported]
         if report.response_ids and not fresh:
             return
+        if not report.response_ids:
+            fresh = list(self.estimates)
         self.reported.update(fresh)
         extra = max(0, report.total_tokens - sum(self.estimates.pop(i, 0) for i in fresh))
         if extra > 0:
@@ -486,10 +531,15 @@ class _Run:
         r.usage_reported = (r.usage_reported or 0) + report.total_tokens
 
     def _await_usage(self) -> None:
-        """Wait, within the deadline (no error past it), for the late totals of the responses
-        still charged at their estimate; a close ends the wait."""
-        while self.estimates:
-            event = self._next(self.end - self.clock(), deadline_is_error=False)
+        """Wait for the late total of the responses still at their estimate, until a usage
+        report came after the last ``response.done``, at most ``check_usage_wait_s`` and never
+        past the deadline (no error either way); a close ends the wait."""
+        until = self.clock() + self.cfg.voice.realtime_route.check_usage_wait_s
+        while self.estimates and not self.usage_seen:
+            left = until - self.clock()
+            if left <= 0:
+                return
+            event = self._next(left, deadline_is_error=False)
             if event is None or isinstance(event, _Closed):
                 return
 

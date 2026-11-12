@@ -58,6 +58,28 @@ def restore_settings(
     return WebAdmin(secrets, settings)
 
 
+def check_tools(stack: ConfigStack, p: Any) -> Callable[[], list[dict[str, Any]]]:
+    """The realtime check's setup tools on the robot (SPEC 8, Realtime check): the offline
+    tools under the committed config with the robot's playable gestures (motion names, never a
+    name in view, SPEC 12)."""
+
+    def tools() -> list[dict[str, Any]]:
+        return offline_tools(stack.effective(), p.expression.playable)
+
+    return tools
+
+
+def route_status(host: RuntimeHost) -> Callable[[], dict[str, Any] | None]:
+    """The running realtime route's debug snapshot for the Routes tab (SPEC 12A), or None
+    when no realtime route was built."""
+
+    def status() -> dict[str, Any] | None:
+        route = host.realtime_route
+        return route.snapshot() if route is not None else None
+
+    return status
+
+
 def realtime_key_hosts(p: Any) -> list[str]:
     """The key hosts of the pipeline's realtime session provider (none without a provider)."""
     return list(provider.key_hosts) if (provider := p.realtime_provider) is not None else []
@@ -128,14 +150,8 @@ def start_webui(
                 router=host.route_check_router,
                 names=host.name_source,
                 realtime_provider=lambda: p.realtime_provider,  # the runtime's own (SPEC 8)
-                realtime_tools=lambda wait_s: (  # the worker's, else built offline
-                    c.realtime_tools(wait_s)
-                    if (c := host.conversation) is not None
-                    else offline_tools(stack.effective())
-                ),
-                realtime_status=lambda: (
-                    r.snapshot() if (r := host.realtime_route) is not None else None
-                ),
+                realtime_tools=check_tools(stack, p),
+                realtime_status=route_status(host),
             ),
             live=live,
             emotions=emotions,

@@ -4282,6 +4282,14 @@ class RealtimeRouteConfig(Strict):
         ge=1,
         le=20,
     )
+    check_usage_wait_s: float = param(
+        12.0,
+        "The longest the realtime check of a gemini_live route waits after its answer for the "
+        "server's late token count; without it the estimate stays charged",
+        unit="s",
+        ge=0.5,
+        le=60,
+    )
 
     @field_validator("tone_labels")
     @classmethod

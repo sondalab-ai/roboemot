@@ -47,8 +47,13 @@ log = logging.getLogger(__name__)
 FILE_MODE = 0o600
 # what the Routes tab shows of the running realtime session (``RealtimeRoute.snapshot``)
 SESSION_FIELDS = (
-    "state", "reason", "idle_closes", "go_aways", "usage_reports", "items_delete_emulated",
-)  # fmt: skip
+    "state",
+    "reason",
+    "idle_closes",
+    "go_aways",
+    "usage_reports",
+    "items_delete_emulated",
+)
 
 
 class RouteBusy(RuntimeError):
@@ -65,8 +70,9 @@ class RouteChecker:
     aliases as the conversation does (SPEC 8, Pseudonyms) when ``privacy.pseudonyms_to_cloud``
     is on. ``realtime_provider`` returns the robot's session provider (the one the runtime
     built); without it, direct mode uses :class:`DirectSession` and platform mode has none.
-    ``realtime_tools(wait_s)`` builds a ``gemini_live`` check's setup tools (the worker's);
-    without it they are built offline. ``realtime_status`` returns the running realtime
+    ``realtime_tools()`` builds a ``gemini_live`` check's setup tools (``offline_tools`` with
+    the robot's gestures); without it, ``offline_tools`` of the config. ``realtime_status``
+    returns the running realtime
     route's debug snapshot: the active realtime route's entry shows a few of its fields
     (``session``).
     """
@@ -80,7 +86,7 @@ class RouteChecker:
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         names: NameSource | None = None,
         realtime_provider: Callable[[], SessionProvider | None] | None = None,
-        realtime_tools: Callable[[float], list[dict[str, Any]] | None] | None = None,
+        realtime_tools: Callable[[], list[dict[str, Any]] | None] | None = None,
         realtime_status: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self.cfg, self.store, self._router = cfg, store, router
@@ -232,10 +238,16 @@ class RouteChecker:
         """The running realtime session as the Routes tab shows it (SPEC 8, 12A): its state,
         reason code and the counts that matter for a Gemini route (``SESSION_FIELDS``), with
         the codec's non-zero counts (``wire``: this session and all). None while realtime is
-        off or no route runs."""
-        if self._realtime_status is None or not cfg.voice.realtime_route.enabled:
+        off, no realtime route is active, no route runs or its snapshot fails (logged by type
+        only)."""
+        rt = cfg.voice.realtime_route
+        if self._realtime_status is None or not rt.enabled or active_realtime_route(cfg) is None:
             return None
-        snap = self._realtime_status()
+        try:
+            snap = self._realtime_status()
+        except Exception as exc:
+            log.warning("routes: realtime session status: %s", type(exc).__name__)
+            return None
         if snap is None:
             return None
         wire = snap.get("wire") or {}

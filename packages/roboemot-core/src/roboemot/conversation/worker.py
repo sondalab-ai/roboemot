@@ -1234,26 +1234,6 @@ class ConversationWorker:
         back as ``_stream_session`` does (no tools: the route then opens no session)."""
         return self._session_parts(lambda: self._stream_session_on_loop(None, generation), wait_s)
 
-    def realtime_tools(self, wait_s: float) -> list[dict[str, Any]] | None:
-        """The tools a fresh realtime turn would offer now (skills, skip and tone tools), for
-        the realtime check's setup (SPEC 8, Realtime check; asked from another thread, built
-        on the worker's loop within ``wait_s``). Only the tools: the instructions, the profile
-        and the history stay here. None when the build fails."""
-        return self._session_parts(self._tools_on_loop, wait_s)[1]
-
-    async def _tools_on_loop(self) -> tuple[str, list[dict[str, Any]]]:
-        """``realtime_tools`` on the worker's loop: no instructions, the tools of a fresh turn."""
-        _, _, functions, toned = self._rt_tools(self._fresh_turn())
-        return "", functions + toned
-
-    def _fresh_turn(self) -> _Turn:
-        """A turn with no utterance yet, under the config now (what a fresh turn would be)."""
-        cfg, now = self.stack.effective(), self.clock()
-        language = cfg.conversation.language
-        quiet = Prosody(0.0, None, None, 0.0)
-        utterance = Utterance("", language, now, now, now, True, False, frozenset(), quiet)
-        return _Turn(utterance, cfg, language, self._register_for(cfg), 0, 0)
-
     def _session_parts(self, make: Any, wait_s: float | None = None) -> tuple[str, Any]:
         """Run ``make()`` (a coroutine building the instructions and tools) on the worker's
         loop from another thread, bounded by ``wait_s`` (None: the active route's
@@ -1282,11 +1262,13 @@ class ConversationWorker:
     ) -> tuple[str, list[dict[str, Any]]]:
         """The instructions and tools a fresh turn would send now (``_stream_session``); the
         skills shown go on ``job`` when there is one; the replay is for ``generation``."""
-        turn = self._fresh_turn()
-        if turn.cfg.voice.realtime_route.skip_tool:
-            turn.conversation = self._conversation_state(
-                turn.utterance, turn.cfg, turn.utterance.start_stamp
-            )
+        cfg, now = self.stack.effective(), self.clock()
+        language = cfg.conversation.language
+        quiet = Prosody(0.0, None, None, 0.0)
+        utterance = Utterance("", language, now, now, now, True, False, frozenset(), quiet)
+        turn = _Turn(utterance, cfg, language, self._register_for(cfg), 0, 0)
+        if cfg.voice.realtime_route.skip_tool:
+            turn.conversation = self._conversation_state(utterance, cfg, now)
         offered, choices, functions, toned = self._rt_tools(turn)
         instructions = self._rt_instructions(turn, self._delivery(turn), generation=generation)
         if job is not None:

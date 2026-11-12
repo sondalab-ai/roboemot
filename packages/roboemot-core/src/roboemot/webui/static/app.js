@@ -1064,9 +1064,10 @@ async function saveRoute(route, v) {
 }
 
 const REALTIME_FACTS = [
-  "protocol", "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
-  "update_seen", "setup_ms", "first_audio_ms", "item_delete", "tools_sent", "charged", "usage_reported",
-  "failure", "close_code", "server_error_code", "server_error_about",
+  "protocol", "mode", "allocator_host", "connect_host", "header_to_connect_host",
+  "platform_id_sent", "update_seen", "setup_ms", "first_audio_ms", "item_delete",
+  "tools_sent", "charged", "usage_reported", "failure", "close_code",
+  "server_error_code", "server_error_about",
 ];
 
 const REALTIME_WORDS = {
@@ -1084,7 +1085,8 @@ const REALTIME_SHOWN = {
 
 // What the Routes tab shows of the running session of the active realtime route (SPEC 8, 12A).
 const SESSION_FACTS = [
-  "state", "reason", "idle_closes", "go_aways", "usage_reports", "items_delete_emulated", "wire_session", "wire_total",
+  "state", "reason", "idle_closes", "go_aways", "usage_reports", "items_delete_emulated",
+  "wire_session", "wire_total",
 ];
 
 // One fact of the running session: a state or reason worded, codec counts as "name n", or a count.
