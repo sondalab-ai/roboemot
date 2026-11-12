@@ -38,6 +38,7 @@ from roboemot.llm.conformance import (
     RouteKeyUnavailable,
     RouteKindUnsupported,
 )
+from roboemot.realtime.preview import KNOWN_VOICES, PreviewFailed
 from roboemot.registry.records import Consent, ConsentError
 from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
@@ -80,6 +81,8 @@ STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
 ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind", "protocol", "voice"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
+VOICE_NAME = re.compile(r"[A-Za-z0-9_. -]{0,64}")  # a server voice name the preview may ask for
+PREVIEW_SHARE = 0.8  # of the request deadline: the rest is for reading and writing the request
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
 LIVE_CURSOR_DIGITS = 15  # digits of the transcript cursor a client may send
@@ -126,11 +129,13 @@ class RoutesPort(Protocol):
     ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy``,
     ``RouteKindUnsupported`` or ``RouteBudgetExhausted``; the outcome shows up in
     ``list_routes``. The UI copies what these return as is: they hold no key, prompt or reply
-    text.
+    text. ``preview`` blocks for at most ``wait_s`` and returns a voice preview's WAV, or
+    raises as ``start`` does and ``PreviewFailed`` (a code only).
     """
 
     def list_routes(self) -> list[dict[str, Any]]: ...
     def start(self, name: str) -> None: ...
+    def preview(self, name: str, voice: str, wait_s: float) -> bytes: ...
 
 
 class SettingsPort(Protocol):
@@ -486,6 +491,7 @@ class WebApi:
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
             ("POST", "/api/routes/remove"): self._route_remove,
+            ("POST", "/api/routes/voice_preview"): self._route_voice_preview,
             ("GET", "/api/secrets"): self._secrets_list,
             ("POST", "/api/secrets/set"): self._secret_set,
             ("POST", "/api/secrets/remove"): self._secret_remove,
@@ -1099,6 +1105,7 @@ class WebApi:
             {
                 "routes": [{**r, "removable": r["name"] in removable} for r in rows],
                 "realtime_key_hosts": hosts,  # where a realtime route's key may also go
+                "voices": {p: list(names) for p, names in KNOWN_VOICES.items()},
             },
         )
 
@@ -1172,6 +1179,37 @@ class WebApi:
         except RouteKeyUnavailable as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_secret") from exc
         return Response(HTTPStatus.ACCEPTED, {"running": True})
+
+    def _route_voice_preview(self, req: Request) -> Response:
+        """One voice preview of a realtime route (SPEC 8, Voice preview): body ``route`` (its
+        name) and ``voice`` (any server voice name; empty: the route's default). Session and
+        CSRF as for the route check. Returns ``audio/wav``; a failure is a code only
+        (``preview_failed`` with ``code`` and the server's ``close_code``), never a reason
+        text, a transcript or a key. Refused before anything is sent as the check is."""
+        port = self._routes_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"route", "voice"})
+        name, voice = body.get("route"), body.get("voice", "")
+        if not isinstance(name, str) or not ROUTE_NAME.fullmatch(name):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request", field="route")
+        if not isinstance(voice, str) or not VOICE_NAME.fullmatch(voice):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request", field="voice")
+        try:
+            wav = port.preview(name, voice.strip(), self.web.request_deadline_s * PREVIEW_SHARE)
+        except KeyError as exc:
+            raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
+        except RouteBusy as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
+        except RouteKindUnsupported as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_kind") from exc
+        except RouteBudgetExhausted as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
+        except RouteKeyUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_secret") from exc
+        except PreviewFailed as exc:
+            failed = {"error": "preview_failed", "code": exc.code, "close_code": exc.close_code}
+            return Response(HTTPStatus.BAD_GATEWAY, failed)
+        return Response(HTTPStatus.OK, wav, content_type="audio/wav")
 
     # ------------------------------------------------------------------ secrets
 

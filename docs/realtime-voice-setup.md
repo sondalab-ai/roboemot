@@ -81,6 +81,11 @@ the shell use SSH.
 The page asks you to confirm the hosts that receive the key. In a file, the same route is the
 `pollen` example in `configs/companion.yaml`.
 
+To choose the voice, open the route's **Edit** form once it is added: the **Voice** field lists
+Pollen's voices (Qwen3-TTS: `Aiden`, `Ryan`, `Dylan`, `Eric`, `Ono_Anna`, `Serena`, `Sohee`,
+`Uncle_Fu`, `Vivian`), and **Play voice** (**Ascolta la voce**) plays a short sample sentence in
+that voice. It works once the token is stored (step 2); empty keeps `voice.realtime_route.voice`.
+
 ## 4. Turn on the route
 
 **Settings** tab (**Impostazioni**), **Search** field (**Cerca**):
@@ -196,7 +201,7 @@ card works too. The robot sends the key only in the `x-goog-api-key` header, nev
 | Base URL | `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` |
 | Key | `gemini_key` |
 | Model | `gemini-3.8-live` |
-| Voice | one of `Kore`, `Aoede`, `Leda`, `Puck`, `Charon` |
+| Voice | pick one from the list, for example `Kore` (listen first: below) |
 
 The same route in `app.yaml`:
 
@@ -214,8 +219,15 @@ llm_routes:
 ```
 
 - `voice`: the route's own voice. It wins over `voice.realtime_route.voice`, which Pollen's
-  route keeps using. The five voices above were tried in Italian on 2026-11-11 and all sounded
-  fine. Google's documentation gives no gender for them.
+  route keeps using. `Kore`, `Aoede`, `Leda`, `Puck` and `Charon` were tried in Italian on
+  2026-11-11 and all sounded fine. Google's documentation gives no gender for them.
+- Pick a voice by ear: once the route is added, open its **Edit** form (or the
+  `llm_routes.gemini.voice` row in **Settings**), choose a voice from the list and press **Play
+  voice** (**Ascolta la voce**). The robot asks Gemini to say one short sentence in
+  `conversation.language` (English when there is no sentence for it) in that voice and plays it in
+  the browser. Only that text leaves the robot, and each preview counts against the route's
+  `daily_token_budget`. Save the route to keep the voice. A preview while the conversation's
+  session is up opens a second session, which the free tier may refuse (1008): try again later.
 - `connect_timeout_s`: the route's own connect budget. Some first connects took 10.6 s until
   Gemini confirmed the session, more than the shared 5 s. The web UI form has no field for it: set
   it in `app.yaml`, or search `llm_routes` in the **Settings** tab.

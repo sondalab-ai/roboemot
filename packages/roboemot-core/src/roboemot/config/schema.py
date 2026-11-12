@@ -4290,6 +4290,15 @@ class RealtimeRouteConfig(Strict):
         ge=0.5,
         le=60,
     )
+    preview_max_bytes: int = param(
+        1_048_576,
+        "The most reply audio one voice preview in the web UI may hold (PCM16, about 21 s at "
+        "24 kHz); a longer reply fails the preview",
+        unit="bytes",
+        ge=65_536,
+        le=16_777_216,
+        conservative="lower",
+    )
 
     @field_validator("tone_labels")
     @classmethod

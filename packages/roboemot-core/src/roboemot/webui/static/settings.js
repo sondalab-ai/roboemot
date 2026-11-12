@@ -9,6 +9,7 @@ const SETTING_ENTRY_KINDS = ["dict_of_model", "keyed_list"];
 const SETTING_SLIDER_STEPS = 100;
 const SETTING_DEFAULT_MAX_CHARS = 120;
 const SETTING_ROUTE_URL = /^llm_routes\.[^.]+\.base_url$/;
+const SETTING_ROUTE_VOICE = /^llm_routes\.([^.]+)\.voice$/;
 const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
@@ -446,6 +447,24 @@ function buildControl(desc, id, opts) {
   return desc.nullable && desc.kind !== "enum" ? nullable(desc, ctl, id) : ctl;
 }
 
+// The voice row of a realtime route (llm_routes.<name>.voice): its input picks from the voices
+// known for the route's protocol and gets the route's preview button, both from GET /api/routes
+// (the routes tab's picker). A chat route's row, or a failed fetch, keeps the plain text field.
+function routeVoiceExtras(path, input) {
+  const name = SETTING_ROUTE_VOICE.exec(path)[1];
+  const list = el("datalist", { id: input.id + "-voices" });
+  input.setAttribute("list", list.id);
+  const box = el("div", { class: "stack" }, list);
+  api("GET", "/api/routes").then((data) => {
+    const route = data.routes.find((r) => r.name === name);
+    if (!route || route.kind !== "realtime") return;
+    state.routeVoices = data.voices || {};
+    fillVoices(list, route.protocol);
+    box.append(voicePreview(name, () => input.value.trim(), input.id));
+  }).catch(() => {});
+  return box;
+}
+
 // ---------------------------------------------------------------- rows
 
 function settingTags(row, editable) {
@@ -580,6 +599,7 @@ function settingLeaf(node) {
     if (row.kind === "json" && !row.secret && row.writable) parts.push(el("p", { class: "hint" }, t("settings_json_readonly")));
   } else {
     parts.push(ctl.node);
+    if (SETTING_ROUTE_VOICE.test(row.path) && ctl.main) parts.push(routeVoiceExtras(row.path, ctl.main));
     const first = ctl.main || firstControl(ctl.node);
     const described = describedIds(row, ctl, id);
     if (first && described.length) first.setAttribute("aria-describedby", described.join(" "));

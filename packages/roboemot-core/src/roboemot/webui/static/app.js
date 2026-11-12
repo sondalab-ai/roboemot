@@ -923,12 +923,16 @@ function routeForm(route, secrets, nameMax, save) {
   const protocol = route ? null : el("select", { id: id("protocol"), class: "sl-field__input" },
     ROUTE_PROTOCOLS.map((p) => el("option", { value: p }, t("route_protocol_" + p))));
   if (protocol) protocol.value = ROUTE_PROTOCOL_DEFAULT;
-  const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", value: route ? route.voice || "" : "" });
-  // protocol and voice apply to a realtime route only: shown for that kind alone
+  const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", list: id("voices"), value: route ? route.voice || "" : "" });
+  const voices = voiceList(id("voices"), route ? route.protocol : protocol.value);
+  if (protocol) protocol.addEventListener("change", () => fillVoices(voices, protocol.value));
+  // protocol and voice apply to a realtime route only: shown for that kind alone; a stored route
+  // can preview the voice typed or picked
   const isRealtime = () => (route ? route.kind : kind.value) === "realtime";
   const realtimeOnly = [
     protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : null,
-    field(id("voice"), t("route_voice"), voice, t("route_voice_hint")),
+    el("div", { class: "stack" }, field(id("voice"), t("route_voice"), voice, t("route_voice_hint")), voices,
+      route ? voicePreview(route.name, () => voice.value.trim(), id("voice")) : []),
   ].filter(Boolean);
   const showRealtime = () => { for (const f of realtimeOnly) f.hidden = !isRealtime(); };
   if (kind) kind.addEventListener("change", showRealtime);
@@ -963,6 +967,74 @@ function routeForm(route, secrets, nameMax, save) {
   el("div", { class: "row" }, send));
   showRealtime();
   return form;
+}
+
+// The voices known for a route protocol (GET /api/routes `voices`), as the datalist of a voice
+// input: a picker that still takes any typed name.
+function voiceList(id, protocol) {
+  return fillVoices(el("datalist", { id }), protocol);
+}
+
+function fillVoices(list, protocol) {
+  const names = (state.routeVoices || {})[protocol || ROUTE_PROTOCOL_DEFAULT] || [];
+  list.replaceChildren(...names.map((n) => el("option", { value: n })));
+  return list;
+}
+
+// A play button for the voice `voiceOf()` names on route `name`, with its status line: busy while
+// the preview runs, a worded code when it fails. Nothing plays until the button is pressed.
+function voicePreview(name, voiceOf, idBase) {
+  const status = el("p", { class: "hint", id: idBase + "-preview", role: "status" });
+  const play = button(t("voice_preview_play"), "plain", () => whileBusy(play, () => playVoicePreview(name, voiceOf(), status)),
+    { small: true, attrs: { "aria-label": rowName(t("voice_preview_play"), name), "aria-describedby": status.id } });
+  return el("div", { class: "stack" }, el("div", { class: "row" }, play), status);
+}
+
+// One preview (POST /api/routes/voice_preview): the WAV is decoded and played with Web Audio (the
+// page's CSP has no media source for a blob URL). A failure is worded from its code only.
+async function playVoicePreview(name, voice, status) {
+  status.textContent = t("voice_preview_busy");
+  try {
+    const resp = await request("/api/routes/voice_preview", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(state.csrf ? { "X-CSRF-Token": state.csrf } : {}) },
+      body: JSON.stringify({ route: name, voice }),
+    });
+    if (!resp.ok) {
+      let data = {};
+      try { data = await resp.json(); } catch (e) { data = {}; }
+      if (resp.status === 401 && data.error === "unauthorized") { await boot(); return; }
+      status.textContent = previewError(data);
+      return;
+    }
+    await playWav(await resp.arrayBuffer());
+    status.textContent = t("voice_preview_played", { voice: voice || t("voice_preview_default") });
+  } catch (err) {
+    status.textContent = explain(err);
+  }
+}
+
+// What a failed preview says: its code worded (a 1008 close as a refusal that can be transient),
+// else the API's error code as every call words it.
+function previewError(data) {
+  if (data.error !== "preview_failed") return explain(new Error(data.error || "generic"));
+  if (data.close_code === 1008) return t("voice_preview_err_1008");
+  return state.strings["voice_preview_err_" + data.code] || t("voice_preview_failed", { code: data.code });
+}
+
+// One AudioContext for the page, made on the first play (a user gesture); a new preview stops the
+// one still playing.
+const voicePlayer = { ctx: null, source: null };
+
+async function playWav(buffer) {
+  if (!voicePlayer.ctx) voicePlayer.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (voicePlayer.ctx.state === "suspended") await voicePlayer.ctx.resume();
+  const decoded = await voicePlayer.ctx.decodeAudioData(buffer);
+  if (voicePlayer.source) voicePlayer.source.stop();
+  voicePlayer.source = voicePlayer.ctx.createBufferSource();
+  voicePlayer.source.buffer = decoded;
+  voicePlayer.source.connect(voicePlayer.ctx.destination);
+  voicePlayer.source.start();
 }
 
 // A key sent over http to a host that is not this machine crosses the network unencrypted.
@@ -1127,6 +1199,7 @@ async function routesView() {
   const data = await api("GET", "/api/routes");
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
+  state.routeVoices = data.voices || {};
   let secrets = null;
   let secretsError = null;
   try {

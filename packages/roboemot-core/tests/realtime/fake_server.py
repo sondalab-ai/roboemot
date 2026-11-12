@@ -196,7 +196,11 @@ class FakeServer:
         if detect and getattr(self, "ignore_interrupt", False):
             detect["interrupt_response"] = False
         session: dict[str, Any] = {
-            "audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}
+            "audio": {
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": getattr(self, "output_rate", 16000)}
+                }
+            }
         }
         if detect:
             session["audio"]["input"] = {"turn_detection": detect}

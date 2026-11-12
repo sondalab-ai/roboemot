@@ -496,9 +496,31 @@ EN: dict[str, str] = {
     ),
     "route_voice": "Voice",
     "route_voice_hint": (
-        "Only for a realtime speech route: the server's voice name. Empty uses the shared "
-        "realtime voice setting."
+        "Only for a realtime speech route: the server's voice name. Pick a known voice or type "
+        "any other name. Empty uses the shared realtime voice setting."
     ),
+    "voice_preview_play": "Play voice",
+    "voice_preview_busy": "Asking the server to say the sample sentence…",
+    "voice_preview_played": "Playing {voice}. Save the route to keep this voice.",
+    "voice_preview_default": "the default voice",
+    "voice_preview_failed": "No sample: the preview failed ({code}).",
+    "voice_preview_err_1008": (
+        "No sample: the server refused the session (1008). A free key may allow only one "
+        "session at a time; try again in a moment."
+    ),
+    "voice_preview_err_timeout": "No sample: the server took too long. Try again.",
+    "voice_preview_err_connect_timeout": "No sample: the connection took too long. Try again.",
+    "voice_preview_err_no_audio": "No sample: the server sent no audio.",
+    "voice_preview_err_audio_cap": "No sample: the reply was longer than the preview allows.",
+    "voice_preview_err_tool_rounds_exceeded": "No sample: the server kept calling tools.",
+    "voice_preview_err_offline": "No sample: the robot is offline.",
+    "voice_preview_err_pseudonyms": (
+        "No sample: pseudonyms are on, so a cloud route gets nothing."
+    ),
+    "voice_preview_err_setup_unready": "No sample: the session setup could not be built.",
+    "voice_preview_err_provider": "No sample: no session provider for this route.",
+    "voice_preview_err_no_extra": "No sample: the realtime extra is not installed.",
+    "voice_preview_err_failed": "No sample: the preview failed.",
     "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
@@ -1532,9 +1554,42 @@ IT: dict[str, str] = {
     ),
     "route_voice": "Voce",
     "route_voice_hint": (
-        "Solo per un modello voce in tempo reale: il nome della voce del server. Vuoto usa "
-        "l'impostazione condivisa della voce in tempo reale."
+        "Solo per un modello voce in tempo reale: il nome della voce del server. Scegli una "
+        "voce nota o scrivi un altro nome. Vuoto usa l'impostazione condivisa della voce in "
+        "tempo reale."
     ),
+    "voice_preview_play": "Ascolta la voce",
+    "voice_preview_busy": "Chiedo al server di dire la frase di prova…",
+    "voice_preview_played": "Riproduco {voice}. Salva il modello per tenere questa voce.",
+    "voice_preview_default": "la voce predefinita",
+    "voice_preview_failed": "Nessun campione: l'anteprima non è riuscita ({code}).",
+    "voice_preview_err_1008": (
+        "Nessun campione: il server ha rifiutato la sessione (1008). Una chiave gratuita può "
+        "permettere una sola sessione alla volta; riprova tra poco."
+    ),
+    "voice_preview_err_timeout": "Nessun campione: il server ci ha messo troppo. Riprova.",
+    "voice_preview_err_connect_timeout": (
+        "Nessun campione: la connessione ci ha messo troppo. Riprova."
+    ),
+    "voice_preview_err_no_audio": "Nessun campione: il server non ha mandato audio.",
+    "voice_preview_err_audio_cap": (
+        "Nessun campione: la risposta era più lunga di quanto l'anteprima permette."
+    ),
+    "voice_preview_err_tool_rounds_exceeded": (
+        "Nessun campione: il server continuava a chiamare strumenti."
+    ),
+    "voice_preview_err_offline": "Nessun campione: il robot non è in rete.",
+    "voice_preview_err_pseudonyms": (
+        "Nessun campione: gli pseudonimi sono attivi, quindi un modello cloud non riceve nulla."
+    ),
+    "voice_preview_err_setup_unready": (
+        "Nessun campione: non è stato possibile preparare la sessione."
+    ),
+    "voice_preview_err_provider": (
+        "Nessun campione: nessun fornitore di sessione per questo modello."
+    ),
+    "voice_preview_err_no_extra": "Nessun campione: l'extra realtime non è installato.",
+    "voice_preview_err_failed": "Nessun campione: l'anteprima non è riuscita.",
     "route_key_hosts": (
         "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
     ),
