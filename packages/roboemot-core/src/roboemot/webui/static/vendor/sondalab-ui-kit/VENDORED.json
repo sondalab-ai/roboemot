@@ -1,13 +1,13 @@
 {
   "package": "@sondalab/ui-kit",
-  "version": "0.42.0",
+  "version": "0.45.0",
   "license": "MIT",
-  "integrity": "sha512-p+bCDWDZV86DE9NGRNjXOJZL9GiV4rcK3ntgUP1KWIkUieF3GgN7+YchtPaARTN7Ej3Y3QCzAOFiz6IadbOKsA==",
+  "integrity": "sha512-en3k31D10GlOS3qmJ8WkrdL8a5YSdxhQvGU5j64256cFvKcSFChmNWv6jEgbMGVRNf8hJzMdc3MX/N4hj6t6SA==",
   "files": {
-    "package.json": "c8cbc35518e9215e18ced13872df635d12cc9a6a3f7fcb3749e434f31f6afe20",
+    "package.json": "8a3075484ffde3d572ddb43f563f1783b244c47968b5d432af7ce0d1194ab83b",
     "tokens.css": "75af3fe3d96e87b0b31a7bf9c804be5b67a1862f16a90df2212c1d2a7bde1d96",
-    "components.css": "a7cb7ba2d8e92aa0e8310a2e3d8a7c6809bb446eb1c427d565eeb67a6b98d285",
-    "effects.css": "1653dcb27b36e24cc6e4738b8d6f2042f1ab1669aa1f2b99fcf90f77cf7c37a1",
+    "components.css": "a77b128cbdc68ed99f7f3f5836febbba3613be832e4749e144619b6b4bac560b",
+    "effects.css": "e2eba5751e6754e9836dc29ade05554c77d750f9e772a401a37dc5dc4775e98b",
     "fonts.css": "205042dd8904cca90ba9b8891c1043b22d67cb8b8511334cef959a6508986e86",
     "themes/light.css": "c89f66b9d9c88c1b55bd23bbbfd349608c91db508aa5bc88cc5ba1d312d72c45",
     "themes/dark.css": "3fff0d7c0f21f25a23e3785e0dd924f101f9bfde404a2fa8ad994930f5bb5cba",

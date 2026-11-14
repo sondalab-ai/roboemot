@@ -25,10 +25,10 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-UI_KIT_VERSION = "0.42.0"
+UI_KIT_VERSION = "0.45.0"
 UI_KIT_INTEGRITY = (
-    "sha512-p+bCDWDZV86DE9NGRNjXOJZL9GiV4rcK3ntgUP1KWIkUieF3GgN7+"
-    "YchtPaARTN7Ej3Y3QCzAOFiz6IadbOKsA=="
+    "sha512-en3k31D10GlOS3qmJ8WkrdL8a5YSdxhQvGU5j64256cFvKcSFChmNWv6jEgbMGVR"
+    "Nf8hJzMdc3MX/N4hj6t6SA=="
 )
 TARBALL_URL = f"https://registry.npmjs.org/@sondalab/ui-kit/-/ui-kit-{UI_KIT_VERSION}.tgz"
 VENDOR_DIR = (
