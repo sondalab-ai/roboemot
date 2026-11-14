@@ -71,6 +71,24 @@ def test_the_header_is_the_palettes_own(monkeypatch: pytest.MonkeyPatch) -> None
     assert seen == [(("roboemot", ui.app_version(), ui.TAGLINE), {})]
 
 
+def test_plain_reaches_the_header_as_ascii_without_colour(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    monkeypatch.setattr(ui._term, "header", lambda *a, **kw: seen.append(kw) or "H\n")
+    ui.header(plain=True)
+    assert seen == [{"ascii": True, "mode": "none"}]  # the overrides, never a doctored env
+
+
+def test_plain_gives_the_uncoloured_lockup_on_a_colour_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tty_stdout = _tty_stdout(monkeypatch)
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert "\x1b[" in ui.header()  # the terminal is in colour without plain
+    ui.print_header(plain=True)
+    assert tty_stdout.getvalue() == f"sonda/lab roboemot {ui.app_version()}\n"
+
+
 @pytest.mark.parametrize("tty", [True, False])
 def test_version_prints_the_lockup(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tty: bool
