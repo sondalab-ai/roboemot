@@ -1,6 +1,6 @@
 {
   "name": "@sondalab/ui-kit",
-  "version": "0.42.0",
+  "version": "0.45.0",
   "description": "Sondalab design tokens as CSS custom properties + the agentic core: component catalog, compliance audit (sl-audit), and author/migrate/adopt workflows.",
   "keywords": [
     "design-system",
@@ -24,6 +24,9 @@
     "access": "public"
   },
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "sl-audit": "./agent/sl-audit.mjs"
   },
@@ -45,6 +48,9 @@
     "./halftone-core.js": "./halftone-core.js",
     "./halftone.js": "./halftone.js",
     "./signal.js": "./signal.js",
+    "./art-core.js": "./art-core.js",
+    "./art.js": "./art.js",
+    "./term.js": "./term.js",
     "./themes/light.css": "./themes/light.css",
     "./themes/dark.css": "./themes/dark.css",
     "./themes/high-contrast.css": "./themes/high-contrast.css",
@@ -83,6 +89,10 @@
     "halftone-core.js",
     "halftone.js",
     "signal.js",
+    "art-core.js",
+    "art.js",
+    "term.js",
+    "term-tokens.js",
     "effects.d.ts",
     "goo-field.d.ts",
     "geom.d.ts",
@@ -90,7 +100,11 @@
     "halftone-core.d.ts",
     "halftone.d.ts",
     "signal.d.ts",
+    "art-core.d.ts",
+    "art.d.ts",
     "glass-text.d.ts",
+    "term.d.ts",
+    "term-tokens.d.ts",
     "effects.js",
     "themes/light.css",
     "themes/dark.css",
