@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import os
 import re
 import shutil
 import sys
@@ -108,13 +107,11 @@ def app_version() -> str:
 def header(plain: bool = False) -> str:
     """The Sondalab header for stdout; "" without the palette, off a terminal and in accessible
     mode (the palette decides since 0.9.0). ``plain`` (no VT processing on Windows) gives the
-    uncoloured ASCII lockup."""
+    uncoloured ASCII lockup, through the palette's ``ascii`` and ``mode`` overrides (0.9.1)."""
     if _term is None:
         return ""
-    if plain:
-        env = {**os.environ, "NO_COLOR": "1", "SONDALAB_ASCII": "1"}
-        return str(_term.header(NAME, app_version(), TAGLINE, env=env))
-    return str(_term.header(NAME, app_version(), TAGLINE))
+    overrides = {"ascii": True, "mode": "none"} if plain else {}
+    return str(_term.header(NAME, app_version(), TAGLINE, **overrides))
 
 
 def print_header(plain: bool = False) -> None:

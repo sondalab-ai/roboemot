@@ -60,10 +60,17 @@
    depth companion, on every theme. On light they were two spectrum stops
    until the spectrum stopped painting effects (owner, 2026-10-02). Declared
    on the live host, not on :root, so a subtree that re-sets --slc-accent
-   gets its own. */
+   gets its own.
+   THE TAIL IS A LIGHT (owner, 2026-11-11, lab/run-light-paper, pick A). The
+   companion as declared is dark on the light theme, and a dark colour at an
+   alpha over paper darkens it: the tail read as a smear. It keeps the
+   companion's hue with its lightness floored at 0.76; the lift is paid in
+   chroma, capped at 0.11, which sRGB holds at that lightness for every
+   registered hue (effects-gamut.test.mjs). No theme branch: on ink the
+   companion is already near the floor. */
 [data-sl-fx-live] {
   --slfx-light-a: var(--slc-accent, var(--sl-accent-default));
-  --slfx-light-b: var(--slfx-depth);
+  --slfx-light-b: oklch(from var(--slfx-depth) max(l, 0.76) min(calc(c * 1.2), 0.11) h);
 }
 
 :root {
@@ -1931,9 +1938,10 @@
    bars meeting. Scoped to loading: --sweep's band keeps the profile fitted
    against the reference on lab/1x. */
 .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"]))::before {
-  /* THE ACCENT, and not the bloom pair. The ambient light is white, so the one
-     colour a surface shows while it is working should be the product's own,
-     which is what tells a loading card from a resting one at a glance. Both
+  /* THE ACCENT, and not the bloom pair: the one colour a surface shows while
+     it is working is the product's own. Since 0.44 the ambient curtains carry
+     the accent too, so what tells a loading card from a resting one is where
+     the light is: on the whole border here, low inside the pane there. Both
      stops are the same hue at two strengths: a band that changes colour along
      its length reads as decoration, where loading is one thing happening.
      Derived, never declared (AC-18).
@@ -1957,7 +1965,8 @@
    so the whole pattern slid as a rigid sheet. Now comb A is ::before and
    comb B is ::after, and each sways, leans, widens and lets its light climb
    on clocks of its own (the motion block below). The stops are the probe's.
-   The mask is two layers intersected: the fade to the top, and a softer band
+   The mask is two layers intersected: the fade, which holds full strength
+   over the lowest tenth and is gone at 62% of the sheet, and a softer band
    repeating on twice the height, whose position climbs. */
 .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before,
 .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
@@ -1969,46 +1978,39 @@
   pointer-events: none;
   transform-origin: 50% 100%;
   -webkit-mask:
-    linear-gradient(to top, black 0%, black 35%, transparent 100%) 0 0 / 100% 100% no-repeat,
+    linear-gradient(to top, black 0%, black 10%, transparent 62%) 0 0 / 100% 100% no-repeat,
     linear-gradient(to top, rgb(0 0 0 / 0.55) 0%, black 22%, rgb(0 0 0 / 0.55) 50%, black 72%, rgb(0 0 0 / 0.55) 100%) 0 0 / 100% 200% repeat-y;
   -webkit-mask-composite: source-in;
   mask:
-    linear-gradient(to top, black 0%, black 35%, transparent 100%) 0 0 / 100% 100% no-repeat,
+    linear-gradient(to top, black 0%, black 10%, transparent 62%) 0 0 / 100% 100% no-repeat,
     linear-gradient(to top, rgb(0 0 0 / 0.55) 0%, black 22%, rgb(0 0 0 / 0.55) 50%, black 72%, rgb(0 0 0 / 0.55) 100%) 0 0 / 100% 200% repeat-y;
   mask-composite: intersect;
-  /* WHITE ON INK (2026-09-12, owner: "userei luce bianca che si scompone"):
-     the page's own light pole, so the only colour in the pane is what the
-     glass makes of it. The two names stay separate because the pair is what
-     beats — a product that wants coloured curtains rebinds one of them. */
-  --slfx-pillar-a: var(--slfx-glint);
-  --slfx-pillar-b: var(--slfx-glint);
-}
-/* INK ON PAPER (owner, 2026-09-25, lab/pillars-organic L1 "a tad more
-   prominent"). The light pole on paper is near-white on a near-white pane,
-   and the curtains vanished. On paper they are folds of shadow instead: the
-   text ink at a fraction of the strength white carries on ink. */
-[data-sl-theme="light"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before,
-[data-sl-theme="light"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
-  --slfx-pillar-a: var(--slc-text, var(--sl-text-primary));
-  --slfx-pillar-b: var(--slc-text, var(--sl-text-primary));
-  --slfx-pillar-a1: 22%;
-  --slfx-pillar-a2: 19%;
-  --slfx-pillar-b1: 18%;
-  --slfx-pillar-b2: 15%;
+  /* THE ACCENT AND ITS DEPTH COMPANION, ON EVERY THEME (owner, 2026-11-11,
+     lab/curtains-next, pick A "horizon"). Sheet A is the accent, sheet B the
+     depth companion: the pair every other aurora reading is made of. Until
+     0.44 the curtains were the white pole on ink (2026-09-12) and the text
+     ink on paper (2026-09-25); at card size the first read as grey smudges
+     behind the copy and the second as dirt. Colour carries the contrast, so
+     one binding serves ink and paper and no rule branches on the theme. The
+     fade above ends at 62% of the sheet (it ran to the top), so the title and
+     the first lines of the copy sit on clean glass. The two names stay
+     separate because the pair is what beats. */
+  --slfx-pillar-a: var(--slfx-accent-vivid, var(--slc-accent, var(--sl-accent-default)));
+  --slfx-pillar-b: var(--slfx-depth);
 }
 .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before {
   background: repeating-linear-gradient(90deg,
-    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a1, 45%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.1154),
+    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a1, 62%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.1154),
     transparent calc(var(--slfx-pillar-pitch) * 0.25) calc(var(--slfx-pillar-pitch) * 0.5192),
-    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a2, 42%), transparent) calc(var(--slfx-pillar-pitch) * 0.6346),
+    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a2, 54%), transparent) calc(var(--slfx-pillar-pitch) * 0.6346),
     transparent calc(var(--slfx-pillar-pitch) * 0.7885) var(--slfx-pillar-pitch));
   background-size: calc(var(--slfx-pillar-pitch) * 3.0769) 100%;
 }
 .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
   background: repeating-linear-gradient(90deg,
-    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b1, 40%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.14),
+    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b1, 58%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.14),
     transparent calc(var(--slfx-pillar-pitch) * 0.30) calc(var(--slfx-pillar-pitch) * 0.62),
-    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b2, 36%), transparent) calc(var(--slfx-pillar-pitch) * 0.74),
+    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b2, 48%), transparent) calc(var(--slfx-pillar-pitch) * 0.74),
     transparent calc(var(--slfx-pillar-pitch) * 0.90) calc(var(--slfx-pillar-pitch) * 1.1));
   background-size: calc(var(--slfx-pillar-pitch) * 4.6154) 100%;
 }
