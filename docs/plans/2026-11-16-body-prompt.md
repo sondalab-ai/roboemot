@@ -41,7 +41,7 @@
   - `test_body_prompt_follows_the_persona_prompt`: cfg with `persona.body_prompt="BODY"`; `system_prompt(cfg, cfg.register.params)` splits on `"\n"`; line 0 is `cfg.persona.prompt`, line 1 is `"BODY"`. Same check on `realtime_instructions(...)`.
   - `test_empty_body_prompt_leaves_the_prompt_unchanged`: default cfg; no line equals `""` and line 1 is not empty-derived (prompt equals the one built with the field absent, i.e. compare to `_prompt` output where parts are filtered).
   - `test_body_prompt_too_long_is_rejected`: `PersonaConfig(body_prompt="x" * 301)` raises `ValidationError` with `"persona.body_prompt"` in the message.
-  - `test_worst_case_counts_the_body_prompt_cap`: `system_tokens_worst_case` grows by at least `body_prompt_max_chars // CHARS_PER_TOKEN` against a cfg where the body prompt is empty (it counts the cap, not the current text).
+  - `test_worst_case_counts_the_body_prompt_text_not_its_cap`: `system_tokens_worst_case` grows by about `len(body) // CHARS_PER_TOKEN`; raising `body_prompt_max_chars` changes nothing (revised after review: counted as written, like `persona.prompt`).
   - `test_body_prompt_change_needs_the_admin`: through `ConfigStack.set_runtime("persona.body_prompt", "x")` (no admin) raises `ConfigError`; with `admin=True` it applies. Follow the existing `persona.prompt` admin test pattern in `test_persona.py` / `test_config_stack*.py`.
 - [ ] **Step 2: Run** `pytest packages/roboemot-core/tests/test_body_prompt.py -v`. Expected: FAIL (no field).
 - [ ] **Step 3: Implement**
@@ -49,7 +49,7 @@
   - `body_prompt_max_chars: int = param(300, "Longest accepted body prompt", ge=50, le=2000, advanced=True)`.
   - Extend `_prompt_length` with the same check and message shape for `body_prompt`.
   - `_prompt`: `parts = [cfg.persona.prompt, cfg.persona.body_prompt, register.persona_fragment, ...]` (the existing filter drops empty parts).
-  - `system_tokens_worst_case`: build the prompt from a cfg copy whose `persona.body_prompt` is `"x" * body_prompt_max_chars`.
+  - `system_tokens_worst_case`: no change needed; `_prompt` already includes the body text as written.
   - `check_route_budgets` error text: add `persona.body_prompt` to the list of fields to shorten.
   - Update the module docstring order line and `_prompt`/`system_prompt` docstrings.
 - [ ] **Step 4: Run** the new tests plus `pytest packages/roboemot-core/tests/test_no_magic_numbers.py packages/roboemot-core/tests/test_persona.py packages/roboemot-core/tests/test_llm_history.py -q`. Expected: PASS.

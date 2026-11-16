@@ -32,7 +32,7 @@ short to save tokens.
   route check get it.
 - Not in: the trait rating (rates the persona text, does not speak as the robot) and the voice
   preview (a fixed line).
-- Budget: `system_tokens_worst_case` counts the body text at `body_prompt_max_chars`.
+- Budget: `system_tokens_worst_case` counts the body text as written, like `persona.prompt` (every change is re-checked).
 - Web UI: Reset restores the manifest text; an empty value sends no body text.
 - SPEC: 8 (prompt parts, free-text list), 11A (Persona, Guardrails), 4 (manifest behaviour keys).
 
