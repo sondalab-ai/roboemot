@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -10,6 +11,8 @@ import yaml
 from roboemot import cli
 from test_llm_conformance import ENGLISH, Fake, reply, text_chunks
 from test_llm_router import stop_loop_clock
+
+REPO = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +82,15 @@ def test_spent_budget_is_refused(app_yaml, monkeypatch, capsys):
     serve(monkeypatch, fake)
     assert cli.main(argv(app_yaml)) == 1
     assert "budget" in capsys.readouterr().err and fake.bodies == []
+
+
+def test_the_check_sends_the_manifest_body_prompt(app_yaml, monkeypatch):
+    manifest = REPO / "configs" / "manifests" / "reachy-mini-wireless.yaml"
+    body = yaml.safe_load(manifest.read_text())["behaviour"]["persona"]["body_prompt"]
+    fake = Fake()
+    serve(monkeypatch, fake)
+    cli.main(argv(app_yaml, "--manifest", str(manifest), "--dev"))
+    assert body in fake.bodies[0]["messages"][0]["content"]
 
 
 def test_the_check_sends_the_configured_system_prompt(app_yaml, monkeypatch):
