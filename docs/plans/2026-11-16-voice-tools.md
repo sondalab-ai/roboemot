@@ -205,7 +205,7 @@
   - `test_tool_announce.py::test_napping_robot_is_woken`.
   - `test_tool_announce.py::test_quiet_hours_rest_is_lifted_before_the_nod`: `nod` is requested only after the state left `resting`, and the request returns True.
   - `test_event_turn.py::test_event_turn_opens_a_closed_realtime_session`: with the session closed by idle, `event_turn` opens it and the reply plays.
-  - `test_config.py::test_announce_timeout_exceeds_realtime_connect_timeout`: a validator rejects `tools.scheduler.announce_timeout_s` at or below the realtime route's `connect_timeout_s`.
+  - (ruling 2026-11-16, E) no validator: `announce_timeout_s` counts from when the route can take the request; tests: slow connect inside `connect_timeout_s` gives no fallback, a connect failure gives the fallback.
   - `test_tool_announce.py::test_fallback_sentence_and_cue_when_route_fails`.
   - `test_tool_announce.py::test_timer_repeats_until_answered_at_most_repeat_max`.
 - [ ] **Step 2:** Run the tests. Expected: FAIL.
