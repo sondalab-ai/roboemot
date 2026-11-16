@@ -713,8 +713,13 @@ MANIFEST_BEHAVIOUR_KEYS = frozenset(
         "dance_motion_map",
         "voice",
         "motion",
+        "persona",
     }
 )  # what a robot manifest may set
+MANIFEST_PERSONA_KEYS = frozenset({"body_prompt"})  # the robot's body, as the LLM is told it
+# Prompt text a manifest may set without the admin: the manifest is product data, like the library
+# defaults, and describes its own hardware. Owner changes above it still need the admin.
+MANIFEST_PROMPT_PATHS = frozenset({"persona.body_prompt"})
 MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
 MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
 MANIFEST_VOICE_KEYS = frozenset(
@@ -795,6 +800,22 @@ def check_manifest_motion(motion: Any) -> None:
             f"manifest behaviour motion.arbiter may set {sorted(MANIFEST_ARBITER_KEYS)}, "
             f"not {extra}"
         )
+
+
+def check_manifest_persona(persona: Any) -> None:
+    """A manifest may describe its robot's body (``persona.body_prompt``, text) and nothing else
+    under ``persona``: the persona prompt and the traits stay with the owner (SPEC 11A)."""
+    if persona is None:
+        return
+    if not isinstance(persona, dict) or set(persona) - MANIFEST_PERSONA_KEYS:
+        extra = (
+            sorted(set(persona) - MANIFEST_PERSONA_KEYS) if isinstance(persona, dict) else persona
+        )
+        raise ConfigError(
+            f"manifest behaviour persona may set {sorted(MANIFEST_PERSONA_KEYS)}, not {extra}"
+        )
+    if not isinstance(persona.get("body_prompt", ""), str):
+        raise ConfigError("manifest behaviour persona.body_prompt must be text")
 
 
 def check_manifest_voice(voice: Any) -> None:
@@ -1184,6 +1205,7 @@ class ConfigStack:
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
             check_manifest_motion(behaviour.get("motion"))
+            check_manifest_persona(behaviour.get("persona"))
             saved = self.manifest, self.channels, self.clips, self.body_yaw
             self.manifest, self.channels = behaviour, frozenset(channels)
             self.clips = frozenset(clips)
@@ -1193,7 +1215,11 @@ class ConfigStack:
                 layer = RoboEmotConfig.model_validate(
                     deep_merge(defaults.model_dump(mode="python"), behaviour)
                 )
-                found = violations(defaults, layer)  # the manifest layer alone, vs the defaults
+                found = [  # the manifest layer alone, vs the defaults
+                    v
+                    for v in violations(defaults, layer)
+                    if not (v.kind == "admin" and v.path in MANIFEST_PROMPT_PATHS)
+                ]
                 if found:
                     raise GuardrailError(
                         "manifest behaviour would loosen: " + "; ".join(map(str, found))

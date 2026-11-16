@@ -59,6 +59,12 @@ safety:
   hard_stop: disable_motors
   watchdog_ms: 200
 behaviour:                      # config layer 2 (SPEC 11A): this robot's defaults
+  # Body (SPEC 8, part 1b): what the LLM is told about this body, from pose_groups, sensors and
+  # expressive_channels above. Short on purpose: it goes with every request. The owner may edit it.
+  persona:
+    body_prompt: >-
+      Your body: a head that tilts and turns on a base that rotates, two antennas you can move,
+      a camera, microphones and a speaker. You have no arms or legs and cannot walk.
   # Name (SPEC 4A, 8 stage 3): the default name when the owner and the daemon give none, and the
   # spellings the small Vosk models produce for it (`reachy` itself is out of their vocabulary).
   # Voice (SPEC 8): a child-like, gender-neutral voice, chosen by ear by the owner (2026-10-21).
