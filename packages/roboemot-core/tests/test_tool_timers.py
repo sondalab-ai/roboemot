@@ -105,6 +105,34 @@ def test_reminder_set_bad_date_returns_error_and_no_item(tmp_path):
     assert host.scheduler.items() == []
 
 
+def test_parse_errors_are_codes_and_only_ascii_digits_count(tmp_path):
+    host, fns, _ = rig(tmp_path, text_max_chars=10)
+    rs = fns["reminder_set"]
+    assert content(rs(text="x", time="08:00", repeat="days", days="1,²")) == {"error": "bad_days"}
+    assert content(rs(text="x", time="٠٨:٣٠")) == {"error": "bad_time"}
+    assert content(rs(text="x", time="7:5")) == {"error": "bad_time"}
+    assert content(rs(text="x", time="24:00")) == {"error": "bad_time"}
+    assert content(rs(text="x", time="20:00", date="２０２６-11-17")) == {"error": "bad_date"}
+    assert content(rs(text="a text far too long", time="20:00")) == {"error": "too_long"}
+    assert content(fns["timer_set"](seconds=60, label="a label far too long")) == {
+        "error": "too_long"
+    }
+    assert host.scheduler.items() == []
+
+
+def test_an_empty_reminder_text_is_refused(tmp_path):
+    host, fns, _ = rig(tmp_path)
+    for text in ("", "   "):
+        assert content(fns["reminder_set"](text=text, time="20:00")) == {"error": "empty"}
+    assert host.scheduler.items() == []
+
+
+def test_the_timer_bound_is_the_schema_ceiling():
+    from roboemot.config.schema import TIMER_MAX_CEILING_S
+
+    assert SchedulerConfig.model_fields["timer_max_s"].metadata[-1].le == TIMER_MAX_CEILING_S
+
+
 def test_reminder_set_resolves_local_date_and_time(tmp_path):
     host, fns, _ = rig(tmp_path)
     rs = fns["reminder_set"]

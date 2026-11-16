@@ -6901,6 +6901,10 @@ class WebUIConfig(Strict):
 # --------------------------------------------------------------------------- tools (SPEC 11)
 
 
+# The top of tools.scheduler.timer_max_s (a week), shared with the timer skill's argument range.
+TIMER_MAX_CEILING_S = 604800
+
+
 class SchedulerConfig(Strict):
     """Timers and reminders (SPEC 11, Voice tools: Scheduler store, Limits, Missed items, Due
     items, Fallback, Repeat; 11A). The limits sit under the Advanced fold of the Tools tab."""
@@ -6925,7 +6929,7 @@ class SchedulerConfig(Strict):
         "Longest timer; a longer one is refused (too_far)",
         unit="s",
         ge=10,
-        le=604800,
+        le=TIMER_MAX_CEILING_S,
         advanced=True,
     )
     missed_grace_s: int = param(

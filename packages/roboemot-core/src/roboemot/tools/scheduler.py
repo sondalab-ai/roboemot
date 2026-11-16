@@ -27,6 +27,7 @@ from datetime import time as ClockTime
 from pathlib import Path
 from typing import Any
 
+from .. import paths
 from ..bus import Bus
 from ..config.schema import SchedulerConfig
 from ..fileio import replace_file
@@ -44,7 +45,7 @@ def _number(item_id: str) -> int:
     """The number of an id ``t<n>`` or ``r<n>``; 0 for any other spelling (a hand edit), so
     the next id given is always above every stored one."""
     digits = item_id[1:]
-    return int(digits) if digits.isdigit() else 0
+    return int(digits) if digits.isascii() and digits.isdigit() else 0
 
 
 def _entries(raw: dict[str, Any], key: str) -> list[Any]:
@@ -56,7 +57,8 @@ def _entries(raw: dict[str, Any], key: str) -> list[Any]:
 
 class ScheduleError(ValueError):
     """A request the store refuses. ``code`` is one of ``full``, ``too_long``, ``in_past``,
-    ``too_far`` and ``bad_days``; the message is the code only, never a value."""
+    ``too_far``, ``bad_days`` and ``empty`` (a reminder with no text); the message is the code
+    only, never a value."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -138,6 +140,8 @@ class Scheduler:
         cfg, tz = self.cfg(), self.tz()
         if repeat not in REPEATS:
             raise ValueError("unknown repeat")
+        if not text.strip():
+            raise ScheduleError("empty")
         if len(text) > cfg.text_max_chars:
             raise ScheduleError("too_long")
         wanted: tuple[int, ...] = ()
@@ -247,6 +251,8 @@ class Scheduler:
             "items": [to_json(i) for i in sorted(items.values(), key=lambda i: (i.due, i.id))],
             "missed": [to_json(i) for i in missed],
         }
+        if not self.path.parent.exists():  # a fresh install: created private, as data_dir does
+            paths.data_dir(str(self.path.parent))
         replace_file(self.path, json.dumps(body, ensure_ascii=False, indent=1), FILE_MODE)
 
     def _read(self) -> dict[str, Any]:
@@ -282,6 +288,7 @@ class SchedulerRunner:
     def __init__(self, scheduler: Scheduler, bus: Bus, cfg: Callable[[], SchedulerConfig]) -> None:
         self._scheduler, self._bus, self._cfg = scheduler, bus, cfg
         self._consumer = False
+        self._failing = False  # the last tick raised: its warning is out already
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -325,11 +332,23 @@ class SchedulerRunner:
         if self._thread is not None:
             self._thread.join()
 
-    def _run(self) -> None:
-        """Tick every ``tick_s`` (read live) until closed; a failing tick is logged by type and
-        the next one runs, so one bad write never stops due items for the run."""
-        while not self._stop.wait(self._cfg().tick_s):
-            try:
-                self.tick()
-            except Exception as exc:
+    def guarded_tick(self) -> None:
+        """One :meth:`tick` that never raises. A failure (a write on a full disk) is logged by
+        type once per streak of failing ticks, not every tick for the whole outage; the next
+        tick that works ends the streak."""
+        try:
+            self.tick()
+        except Exception as exc:
+            if not self._failing:
                 log.warning("scheduler: tick failed: %s", type(exc).__name__)
+            self._failing = True
+        else:
+            if self._failing:
+                log.info("scheduler: ticks work again")
+            self._failing = False
+
+    def _run(self) -> None:
+        """Tick every ``tick_s`` (read live) until closed; a failing tick does not stop the
+        next one, so one bad write never stops due items for the run."""
+        while not self._stop.wait(self._cfg().tick_s):
+            self.guarded_tick()

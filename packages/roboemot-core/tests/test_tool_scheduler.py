@@ -151,6 +151,58 @@ def test_a_broken_file_starts_empty_without_logging_its_content(tmp_path, caplog
     assert "secret" not in caplog.text
 
 
+def test_the_first_write_creates_a_missing_data_folder_private(tmp_path):
+    folder = tmp_path / "fresh" / "data"
+    conf = SchedulerConfig()
+    s = Scheduler(folder / "tools_schedule.json", lambda: conf, Clock(), lambda: ROME)
+    s.load(T0)  # nothing there yet: empty, nothing written
+    s.add_timer(10, None)
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert stat.S_IMODE((folder / "tools_schedule.json").stat().st_mode) == 0o600
+
+
+def test_a_failed_write_changes_nothing(tmp_path, monkeypatch):
+    s, _ = make(tmp_path)
+    kept = s.add_timer(10, None)
+
+    def broken(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("roboemot.tools.scheduler.replace_file", broken)
+    with pytest.raises(OSError):
+        s.add_timer(20, None)
+    with pytest.raises(OSError):
+        s.cancel(kept.id)
+    assert s.items() == [kept]
+
+
+def test_a_failing_tick_warns_once_per_streak(tmp_path, monkeypatch, caplog):
+    s, clock = make(tmp_path)
+    s.add_timer(10, None)
+    clock.at = T0 + timedelta(seconds=10)
+    runner = SchedulerRunner(s, Bus(), lambda: s.cfg())
+
+    def broken(*args):
+        raise OSError("disk full")
+
+    def warnings():
+        return [r for r in caplog.records if "tick failed" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING):
+        monkeypatch.setattr("roboemot.tools.scheduler.replace_file", broken)
+        for _ in range(5):
+            runner.guarded_tick()
+        assert len(warnings()) == 1  # not once a second for the whole outage
+        monkeypatch.undo()
+        runner.guarded_tick()  # the write works again: the item fires, the streak ends
+        assert s.items() == []
+        s.add_timer(5, None)
+        clock.at += timedelta(seconds=5)
+        monkeypatch.setattr("roboemot.tools.scheduler.replace_file", broken)
+        runner.guarded_tick()
+        assert len(warnings()) == 2  # a new streak warns again
+
+
 def test_add_rejects_past_full_and_long_text(tmp_path):
     s, clock = make(tmp_path, max_items=2, text_max_chars=10, timer_max_s=100)
     s.add_timer(10, None)

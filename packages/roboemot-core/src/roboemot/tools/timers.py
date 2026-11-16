@@ -5,8 +5,9 @@ over ``ToolHost.scheduler``; each is unavailable while the run has no scheduler.
 descriptions carry the local date, weekday and time in ``circadian.timezone``, so the model
 resolves "tomorrow at six" itself. A result is JSON with the item's ``id``, ``kind`` and local
 ``due`` time; an error is ``{"error": code}``: the store's ``full``, ``too_long``, ``in_past``,
-``too_far``, ``bad_days``, and this module's ``bad_date``, ``bad_time`` and ``not_found``.
-Logs carry skill names, ids and codes only, never a label or a reminder text (SPEC 12).
+``too_far``, ``bad_days``, ``empty``, and this module's ``bad_date``, ``bad_time`` and
+``not_found``. Logs carry skill names, ids and codes only, never a label or a reminder text
+(SPEC 12).
 """
 
 from __future__ import annotations
@@ -17,9 +18,7 @@ import re
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from annotated_types import Le
-
-from ..config.schema import SchedulerConfig
+from ..config.schema import TIMER_MAX_CEILING_S
 from ..skills.host import ToolHost
 from ..skills.registry import SkillResult, skill
 from ..skills.schema import Desc, Range
@@ -28,17 +27,15 @@ from .scheduler import ScheduleError, Scheduler
 
 log = logging.getLogger(__name__)
 
-# The schema's own ceiling: the clamp never hides a too_far below the configured limit.
-TIMER_CEILING_S = next(
-    int(m.le) for m in SchedulerConfig.model_fields["timer_max_s"].metadata if isinstance(m, Le)
-)
-DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
-CLOCK_PATTERN = re.compile(r"(\d{1,2}):(\d{2})")
+# ASCII digits only: "²" or "٠٨" are digits to str.isdigit and int(), never to these patterns.
+DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+CLOCK_PATTERN = re.compile(r"([0-9]{1,2}):([0-9]{2})")
+DAY_PATTERN = re.compile(r"[0-9]+")
 DAYS_SEPARATOR = ","
 LOCAL_FORMAT = "%Y-%m-%dT%H:%M:%S"
 NOW_FORMAT = "%A %Y-%m-%d %H:%M"
 
-Seconds = Annotated[int, Range(1, TIMER_CEILING_S), Desc("Duration in seconds")]
+Seconds = Annotated[int, Range(1, TIMER_MAX_CEILING_S), Desc("Duration in seconds")]
 Label = Annotated[str, Desc("Optional short label, such as pasta")]
 Text = Annotated[str, Desc("What to remind, in the person's words")]
 Date = Annotated[str, Desc("Local date YYYY-MM-DD; omit for today")]
@@ -97,7 +94,7 @@ def parse_days(text: str | None) -> tuple[int, ...]:
     if not text or not text.strip():
         return ()
     parts = [p.strip() for p in text.split(DAYS_SEPARATOR)]
-    if not all(p.isdigit() for p in parts):
+    if not all(DAY_PATTERN.fullmatch(p) for p in parts):
         raise BadArgument("bad_days")
     days = tuple(int(p) for p in parts)
     if not set(days) <= ISO_DAYS:
