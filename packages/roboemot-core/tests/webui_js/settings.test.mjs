@@ -13,7 +13,7 @@ const submit = (window, form) =>
 function d(path, kind, extra = {}) {
   return {
     path, kind, nullable: false, value: null, default: null, source: "schema", ge: null, le: null, unit: null,
-    restart: false, admin_only: false, opt_in: false, conservative: null, description: "", choices: null,
+    restart: false, admin_only: false, opt_in: false, conservative: null, advanced: false, description: "", choices: null,
     item_kind: null, length: null, key: null, entry: null, secret: false, private: false, writable: true, removable: null, ...extra,
   };
 }
@@ -177,14 +177,15 @@ test("read-only, secret and identity rows have no editing control", async () => 
 test("a robot section appears as its own group, and is absent without one", async () => {
   const without = await settingsPage();
   assert.ok(!without.document.body.textContent.includes("Reachy Mini"));
-  assert.equal(without.document.querySelectorAll(".sl-nav__group").length, 1);
+  const purposes = ["settings_purpose_voice", "settings_purpose_behaviour", "settings_purpose_motion", "settings_purpose_models"];
+  assert.deepEqual([...without.document.querySelectorAll(".sl-nav__group")].map((g) => g.textContent), purposes);
 
   const nullRobot = await settingsPage({}, { fields: fields(), robot: null, pin_required: true });
   assert.equal(nullRobot.document.querySelector("#grp-robot"), null);
 
   const page = await settingsPage({}, { fields: fields(), robot: ROBOT, pin_required: true });
   const groups = [...page.document.querySelectorAll(".sl-nav__group")].map((g) => g.textContent);
-  assert.deepEqual(groups, ["settings_core", "Reachy Mini"]);
+  assert.deepEqual(groups, [...purposes, "Reachy Mini"]);
   assert.equal(page.document.querySelector("#settings-robot-actions").children.length, 0, "no action without robot.actions");
   assert.equal(page.document.querySelector("#settings-restart"), null, "no restart button without the action");
   assert.equal(without.document.querySelector("#settings-robot-actions"), null);
@@ -1604,4 +1605,146 @@ test("a language save that changed nothing does not redraw the shell", async () 
   await answerPin(page);
   await settle();
   assert.equal(page.calls.filter((c) => c.path === "/api/strings").length, 1, "strings loaded once, at boot");
+});
+
+// ---------------------------------------------------------------- Advanced fold and purpose groups
+
+function foldFields() {
+  return [
+    d("voice.enabled", "bool", { value: true, default: true }),
+    d("voice.vad.threshold", "number", { value: 0.5, default: 0.5, ge: 0, le: 1, advanced: true, description: "Speech probability" }),
+    d("voice.vad.end_silence_ms", "number", { value: 500, default: 500, ge: 0, le: 3000, advanced: true }),
+  ];
+}
+const fold = (page, id) => page.document.querySelector(`[data-advanced="${id}"]`);
+const foldToggle = (page, id) => fold(page, id).querySelector(".sl-disclosure");
+const foldBody = (page, id) => fold(page, id).querySelector(".nested");
+const paths = (node) => [...node.querySelectorAll(".setting")].map((r) => r.dataset.path);
+
+test("advanced rows sit in a closed Advanced fold that opens and closes by hand", async () => {
+  const page = await settingsPage({}, { fields: foldFields(), pin_required: true });
+  await open(page, "core-voice");
+  assert.deepEqual([...body(page, "core-voice").children].filter((k) => k.matches(".setting")).map((r) => r.dataset.path), ["voice.enabled"]);
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "false");
+  assert.ok(foldToggle(page, "core-voice").textContent.startsWith("settings_advanced"));
+  assert.equal(foldBody(page, "core-voice").hidden, true);
+  assert.equal(row(page, "voice.vad.threshold"), null, "a closed fold builds no rows");
+  foldToggle(page, "core-voice").click();
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.equal(page.document.activeElement, foldToggle(page, "core-voice"), "the focus stays on the toggle");
+  assert.deepEqual(paths(foldBody(page, "core-voice")), ["voice.vad.threshold", "voice.vad.end_silence_ms"]);
+  foldToggle(page, "core-voice").click();
+  assert.equal(foldBody(page, "core-voice").hidden, true);
+});
+
+test("a group with no advanced row has no fold", async () => {
+  const page = await settingsPage();
+  await open(page, "core-voice");
+  assert.equal(fold(page, "core-voice"), null);
+});
+
+test("a search that hits an advanced row opens its fold, and only the hits show", async () => {
+  const page = await settingsPage({}, { fields: foldFields(), pin_required: true });
+  await typeQuery(page, "speech probability");
+  assert.equal(group(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.deepEqual(paths(body(page, "core-voice")), ["voice.vad.threshold"]);
+  await typeQuery(page, "voice.enabled");
+  assert.equal(fold(page, "core-voice"), null, "no advanced hit, no fold");
+});
+
+test("the changed-only and only-null filters reach advanced rows", async () => {
+  const fields = foldFields();
+  fields[2] = { ...fields[2], value: 800, source: "runtime" };
+  fields.push(d("voice.vad.max_ms", "number", { value: null, default: null, nullable: true, advanced: true }));
+  const page = await settingsPage({}, { fields, pin_required: true });
+  page.document.querySelector("#settings-changed").click();
+  await settle();
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.deepEqual(paths(body(page, "core-voice")), ["voice.vad.end_silence_ms"]);
+  page.document.querySelector("#settings-changed").click();
+  page.document.querySelector("#settings-null").click();
+  await settle();
+  assert.deepEqual(paths(body(page, "core-voice")), ["voice.vad.max_ms"]);
+});
+
+test("a changed advanced row opens its fold without a filter, and a hand close wins", async () => {
+  const fields = foldFields();
+  fields[1] = { ...fields[1], value: 0.7, source: "runtime" };
+  const page = await settingsPage({}, { fields, pin_required: true });
+  await open(page, "core-voice");
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "true");
+  assert.ok(row(page, "voice.vad.threshold"));
+  foldToggle(page, "core-voice").click();
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "false");
+});
+
+test("an advanced container folds with its entries", async () => {
+  const fields = [
+    d("appraisal.idle_after_s", "number", { value: 30, default: 30 }),
+    d("appraisal.rules", "keyed_list", { value: ["0"], key: "event", writable: false, advanced: true, entry: [d("event", "text", { value: "", advanced: true })] }),
+    d("appraisal.rules.0.event", "text", { value: "user.greeted", default: "user.greeted", advanced: true }),
+  ];
+  const page = await settingsPage({}, { fields, pin_required: true });
+  await open(page, "core-appraisal");
+  assert.equal(row(page, "appraisal.rules"), null);
+  foldToggle(page, "core-appraisal").click();
+  assert.ok(foldBody(page, "core-appraisal").querySelector('[data-path="appraisal.rules"]'));
+  assert.equal(fold(page, "core-appraisal").querySelector(".sl-nav__count").textContent, "1", "one top-level row");
+});
+
+test("core sections follow the purpose groups, and a section no group lists goes last", async () => {
+  const fields = [
+    d("zeta_new.flag", "bool", { value: false }),
+    d("webui.port", "int", { value: 8080 }),
+    d("safety.watchdog_ms", "number", { value: 250 }),
+    d("vision.objects_enabled", "bool", { value: true }),
+    d("privacy.realtime_audio", "bool", { value: false, opt_in: true }),
+    d("persona.prompt", "text", { value: "p" }),
+    d("conversation.language", "text", { value: "en" }),
+    d("voice.enabled", "bool", { value: true }),
+    d("alpha_new.flag", "bool", { value: false }),
+  ];
+  const page = await settingsPage({}, { fields, pin_required: true });
+  const order = [...page.document.querySelectorAll("#settings-groups .settings-group .sl-disclosure > .sl-code")].map((c) => c.textContent);
+  assert.deepEqual(order, ["voice", "conversation", "persona", "vision", "safety", "privacy", "webui", "zeta_new", "alpha_new"]);
+  const nav = [...page.document.querySelector("nav.sl-nav").children].map((n) => (n.classList.contains("sl-nav__group") ? "#" + n.textContent : n.dataset.group));
+  assert.deepEqual(nav, [
+    "#settings_purpose_voice", "core-voice", "core-conversation",
+    "#settings_purpose_behaviour", "core-persona",
+    "#settings_purpose_perception", "core-vision",
+    "#settings_purpose_motion", "core-safety",
+    "#settings_purpose_models", "core-privacy",
+    "#settings_purpose_system", "core-webui",
+    "#settings_purpose_other", "core-zeta_new", "core-alpha_new",
+  ]);
+  await open(page, "core-voice");
+  assert.ok(row(page, "voice.enabled"), "ids and paths do not change");
+});
+
+test("fixed Literal[True] rows are hidden, and the add form still sends their value", async () => {
+  const entry = [d("curve", "text", { value: "linear" }), d("additive", "enum", { value: true, choices: [true] })];
+  const fields = [
+    d("voice.enabled", "bool", { value: true }),
+    d("voice.moods", "dict_of_model", { value: ["calm"], entry, writable: false, removable: [] }),
+    d("voice.moods.calm.curve", "text", { value: "linear" }),
+    d("voice.moods.calm.additive", "enum", { value: true, default: true, choices: [true] }),
+    d("voice.mode", "enum", { value: "a", choices: ["a"] }),
+  ];
+  const page = await settingsPage({ "POST /api/settings/entry": { path: "voice.moods", changed: true, layer: "runtime", restart_required: false, persisted: true } },
+    { fields, pin_required: true });
+  await open(page, "core-voice");
+  const box = row(page, "voice.moods");
+  [...box.querySelectorAll(".sl-disclosure")].find((b) => b.textContent.startsWith("calm")).click();
+  assert.ok(row(page, "voice.moods.calm.curve"));
+  assert.equal(row(page, "voice.moods.calm.additive"), null);
+  assert.ok(row(page, "voice.mode"), "a one-choice enum that is not [true] stays");
+  [...box.querySelectorAll(".sl-disclosure")].find((b) => b.textContent === "settings_add_entry").click();
+  const adder = [...box.querySelectorAll(".nested")].pop();
+  assert.ok(!adder.textContent.includes("additive"));
+  adder.querySelector('input[type="text"]').value = "angry";
+  button(adder, "settings_add_entry").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/entry")[0].body.value, { curve: "linear", additive: true });
 });

@@ -76,6 +76,13 @@ What this means in practice:
    and are saved in `webui_settings.json`. A privacy opt-in, a safety loosening and prompt text also
    need the admin confirmation (SPEC 11A, Guardrails). A safety loosening is the one edit that the
    web UI writes into `app.yaml` instead.
+   The groups come in purpose order: **Voice and conversation**, **Behaviour and emotions**,
+   **Perception**, **Motion**, **Models and privacy**, **System**, then the robot's own section.
+   Each group shows the settings an owner usually changes first. Tuning settings (timeouts, rates,
+   thresholds, buffer sizes) sit under a closed **Advanced** fold (**Avanzate**) at the end of the
+   group. A search, **Changed only** or **Only without a value (null)** still finds them and opens the fold, and so
+   does a tuning setting you already changed in the web UI. Safety, privacy and opt-in settings are
+   never folded. The fold changes only the page: every key, path and saved value stays the same.
 2. **Installer flags** (`python scripts/install_on_robot.py ...`). They set only the installer's own
    keys in `app.yaml`: `voice.enabled`, the dev content (`--dev`) and the cloud-voice profile
    (`--cloud-voice`). A reinstall with the opposite flag removes exactly those keys. Add
@@ -237,6 +244,8 @@ A lost session reconnects in the background. The reconnect waits longer after ea
 (backoff, `connectivity.network.*`). The status clears without waiting for the next utterance.
 
 ### Advanced: transport and decoding
+
+On the Settings tab these keys sit under the voice group's **Advanced** fold.
 
 | Key | Default | Unit, range | What it does |
 | --- | --- | --- | --- |

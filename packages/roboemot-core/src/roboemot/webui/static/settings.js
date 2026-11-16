@@ -15,6 +15,19 @@ const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
 const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 const SETTING_LANGUAGE = "conversation.language"; // the page language (webui/api.py `_language`)
+const SETTING_ADVANCED = "adv:"; // open/collapsed key prefix of a group's Advanced fold
+// Purpose groups of the core sections, in page order (SPEC 11A); the nav heading of each is
+// `settings_purpose_<id>`. A section no group lists goes last, under "Other", so a new schema
+// section is never hidden.
+const SETTING_PURPOSES = [
+  { id: "voice", sections: ["voice", "conversation"] },
+  { id: "behaviour", sections: ["personality", "persona", "affect", "appraisal", "register", "expression", "circadian", "soothe"] },
+  { id: "perception", sections: ["vision", "attention", "world", "identity", "enrollment", "music", "light", "catalogue"] },
+  { id: "motion", sections: ["safety", "motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map", "mirror"] },
+  { id: "models", sections: ["llm_routes", "llm_check", "privacy"] },
+  { id: "system", sections: ["webui", "connectivity", "runtime", "data_dir", "schema_version"] },
+];
+const SETTING_OTHER_PURPOSE = "other";
 
 const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
@@ -52,10 +65,15 @@ function mergeRevealed(fields) {
   return [...merged.values()];
 }
 
+// A `Literal[True]` field (the `*.additive` keys): one choice, fixed in code, so the page does not
+// show it. It stays in the schema and the catalogue, because robot manifests set it.
+const settingFixed = (row) => row.kind === "enum" && !row.nullable && Array.isArray(row.choices) &&
+  row.choices.length === 1 && row.choices[0] === true;
+
 // Nodes in a tree: a row sits under the nearest container that is a path prefix of it.
-// Returns the top-level nodes in schema order.
+// Returns the top-level nodes in schema order. Fixed rows (`settingFixed`) are left out.
 function settingsTree(fields) {
-  const rows = mergeRevealed(fields);
+  const rows = mergeRevealed(fields).filter((row) => !settingFixed(row));
   const nodes = new Map(rows.map((row) => [row.path, { row, kids: [], parent: null }]));
   const top = [];
   for (const node of nodes.values()) {
@@ -82,11 +100,26 @@ function settingsSections(top, scope, robot) {
     if (!by.has(name)) { by.set(name, []); order.push(name); }
     by.get(name).push(node);
   }
-  return order.map((name) => ({ id: scope + "-" + name, scope, title: name, nodes: by.get(name) }));
+  const sections = order.map((name) => ({ id: scope + "-" + name, scope, title: name, nodes: by.get(name), purpose: null }));
+  return scope === "core" ? byPurpose(sections) : sections;
+}
+
+// Core sections in purpose-group order (`SETTING_PURPOSES`), each with its `purpose` id. Sections
+// no group lists follow in schema order under `SETTING_OTHER_PURPOSE`. Paths and ids do not change.
+function byPurpose(sections) {
+  const rank = (section) => {
+    const at = SETTING_PURPOSES.findIndex((p) => p.sections.includes(section.title));
+    return at < 0 ? [SETTING_PURPOSES.length, 0] : [at, SETTING_PURPOSES[at].sections.indexOf(section.title)];
+  };
+  return sections
+    .map((section, n) => ({ section, n, rank: rank(section) }))
+    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.n - b.n)
+    .map(({ section, rank: [at] }) => ({ ...section, purpose: at < SETTING_PURPOSES.length ? SETTING_PURPOSES[at].id : SETTING_OTHER_PURPOSE }));
 }
 
 const nodeText = (node) => (node.row.path + " " + (node.row.description || "")).toLowerCase();
 const leafChanged = (row) => row.source === "runtime" || JSON.stringify(row.value) !== JSON.stringify(row.default);
+const nodeChanged = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? node.kids.some(nodeChanged) : leafChanged(node.row));
 
 // Without a filter, the search words hit the node or one of its kids. With "changed only" or
 // "only null" on, the words and every filter that is on must hold on the same leaf (a leaf's path
@@ -894,8 +927,8 @@ function addEntryForm(node) {
   const name = keyed ? null : free
     ? keySelect(free, "", { id: id + "-name", required: true })
     : el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
-  const fixed = (row.entry || []).filter((e) => e.kind === "json" && !e.secret);
-  const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !SETTING_CONTAINERS.includes(e.kind))
+  const fixed = (row.entry || []).filter((e) => (e.kind === "json" && !e.secret) || settingFixed(e));
+  const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !settingFixed(e) && !SETTING_CONTAINERS.includes(e.kind))
     .map((e) => ({ desc: e, ctl: buildControl(e, id + "-" + settingsState.serial++, { label: e.path }) }));
   const show = (code) => { failure.hidden = !code; failure.textContent = code ? t("err_" + code) : ""; };
   const submit = () => guarded(async () => {
@@ -1048,9 +1081,15 @@ function refreshGroup(g) {
   g.toggle.setAttribute("aria-expanded", String(open));
   g.body.hidden = !open;
   if (!open) return hits.length;
-  const capped = !manual && !g.showAll && hits.length > SETTING_AUTO_OPEN_MAX;
-  const shown = capped ? hits.slice(0, SETTING_AUTO_OPEN_MAX) : hits;
-  const key = shown.map((n) => n.row.path).join("|") + (capped ? "+" : "");
+  const basic = hits.filter((n) => !n.row.advanced);
+  const advanced = hits.filter((n) => n.row.advanced);
+  const ordered = [...basic, ...advanced];
+  const capped = !manual && !g.showAll && ordered.length > SETTING_AUTO_OPEN_MAX;
+  const shown = capped ? ordered.slice(0, SETTING_AUTO_OPEN_MAX) : ordered;
+  const shownBasic = shown.filter((n) => !n.row.advanced);
+  const shownAdvanced = shown.filter((n) => n.row.advanced);
+  const foldOpen = advancedOpen(g, advanced, auto);
+  const key = shown.map((n) => n.row.path).join("|") + (capped ? "+" : "") + (foldOpen ? "^" : "");
   if (g.shown !== key) {
     g.shown = key;
     const more = capped
@@ -1058,9 +1097,39 @@ function refreshGroup(g) {
         { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
       : [];
     const lead = g.id === VOICE_SWITCH_GROUP && settingsState.voice ? [voiceSwitchRow(settingsState.voice), el("hr", { class: "sl-rule" })] : [];
-    g.body.replaceChildren(...lead, ...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
+    const rows = (nodes) => nodes.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat();
+    const fold = shownAdvanced.length
+      ? [shownBasic.length ? el("hr", { class: "sl-rule" }) : [], advancedFold(g, advanced.length, foldOpen, () => rows(shownAdvanced))]
+      : [];
+    g.body.replaceChildren(...lead, ...rows(shownBasic), ...fold, ...more);
   }
   return hits.length;
+}
+
+// Whether the Advanced fold of `g` is open: opened by hand, or by a search or filter that hits an
+// advanced row (`auto`), or because an advanced row holds a changed value; closed by hand wins.
+function advancedOpen(g, advanced, auto) {
+  const id = SETTING_ADVANCED + g.id;
+  if (!advanced.length || settingsState.collapsed.has(id)) return false;
+  return settingsState.open.has(id) || auto || advanced.some(nodeChanged);
+}
+
+// The closed-by-default disclosure that holds a group's advanced rows. `fill()` builds the rows
+// only while it is open; a toggle records the choice and redraws the group.
+function advancedFold(g, count, open, fill) {
+  const id = "adv-" + g.id;
+  const toggle = el("button", { type: "button", class: "sl-disclosure", id: id + "-toggle", "aria-expanded": String(open), "aria-controls": id },
+    t("settings_advanced"), el("span", { class: "sl-nav__count" }, String(count)));
+  toggle.addEventListener("click", () => {
+    const key = SETTING_ADVANCED + g.id;
+    if (open) { settingsState.open.delete(key); settingsState.collapsed.add(key); }
+    else { settingsState.open.add(key); settingsState.collapsed.delete(key); }
+    refreshGroup(g);
+    const again = document.getElementById(id + "-toggle");
+    if (again) again.focus();
+  });
+  const body = el("div", { class: "stack nested", id, hidden: !open }, open ? fill() : []);
+  return el("div", { class: "stack", "data-advanced": g.id }, el("h4", { class: "setting-entry" }, toggle), body);
 }
 
 function refreshSettings() {
@@ -1083,7 +1152,7 @@ function settingsGroup(section) {
   const toggle = el("button", { type: "button", class: "sl-disclosure", id, "aria-expanded": "false", "aria-controls": id + "-body" },
     el("code", { class: "sl-code" }, section.title), count);
   const navItem = el("button", { type: "button", class: "sl-nav__item", "data-group": section.id }, section.title, navCount);
-  const g = { id: section.id, title: section.title, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
+  const g = { id: section.id, title: section.title, scope: section.scope, purpose: section.purpose, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
     section: el("section", { class: "sl-card settings-group" }, el("h3", { class: "setting-group" }, toggle), body) };
   toggle.addEventListener("click", () => {
     const on = toggle.getAttribute("aria-expanded") !== "true";
@@ -1158,8 +1227,10 @@ async function settingsView() {
   }
   const coreGroups = settingsState.groups.filter((g) => g.scope === "core");
   const robotGroups = settingsState.groups.filter((g) => g.scope === "robot");
+  const purposes = [...new Set(coreGroups.map((g) => g.purpose))];
   const nav = el("nav", { class: "sl-nav settings-nav", "aria-label": t("settings_nav") },
-    el("div", { class: "sl-nav__group" }, t("settings_core")), coreGroups.map((g) => g.navItem),
+    purposes.map((p) => [el("div", { class: "sl-nav__group" }, t("settings_purpose_" + p)),
+      coreGroups.filter((g) => g.purpose === p).map((g) => g.navItem)]),
     robot ? [el("div", { class: "sl-nav__group" }, robot.title), robotGroups.map((g) => g.navItem)] : []);
   const groups = el("div", { class: "stack", id: "settings-groups" }, settingsState.groups.map((g) => g.section));
   const robotActions = robot ? el("div", { class: "row", id: "settings-robot-actions" }) : [];

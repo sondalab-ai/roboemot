@@ -29,8 +29,9 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
 - ``source``: layer that decides the value (``ConfigStack.source_of``): ``runtime``, ``derived``,
   ``app``, ``preset``, ``manifest``, ``defaults`` or ``schema``.
 - ``gt`` / ``ge`` / ``le`` (numeric limits; ``gt`` is exclusive), ``unit``, ``restart``,
-  ``admin_only``, ``opt_in``, ``conservative``, ``description``: from the schema
-  (``field_meta`` for the flags).
+  ``admin_only``, ``opt_in``, ``conservative``, ``advanced``, ``description``: from the schema
+  (``field_meta`` for the flags). ``advanced``: a tuning field the settings page folds under
+  "Advanced"; a flag on a container covers its entries.
 - ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
   when absent) and the field is never writable from the web, except a route ``base_url`` (see
@@ -212,6 +213,7 @@ class FieldDescriptor(TypedDict):
     admin_only: bool
     opt_in: bool
     conservative: str | None
+    advanced: bool
     description: str
     choices: list[Any] | None
     item_kind: str | None
@@ -266,6 +268,7 @@ def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldD
         "admin_only": False,
         "opt_in": False,
         "conservative": None,
+        "advanced": False,
         "description": "",
         "choices": None,
         "item_kind": None,
@@ -489,6 +492,7 @@ class _Walker:
             admin_only=bool(meta.get("admin_only")),
             opt_in=bool(meta.get("opt_in")),
             conservative=meta.get("conservative"),
+            advanced=bool(meta.get("advanced")),
             description=info.description or "",
             **_limits(info),
         )
