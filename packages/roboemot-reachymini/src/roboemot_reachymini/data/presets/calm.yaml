@@ -7,5 +7,3 @@ affect:
   half_life_s: 12
 voice:
   expressivity: 0.4
-motion:
-  idle: {gaze_shift_amplitude: 0.08}

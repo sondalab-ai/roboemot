@@ -16,9 +16,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `apply_to_register`, `ExpressionRenderer` scales by it every tick (SPEC 7, Expression map;
       `test_expression.py`, `test_app_expression.py`, and the M2 exit test). The reflex path is
       deliberately left out: reflexes do not read the register or the persona (SPEC 10).
-- [ ] Scale `motion.idle.gaze_shift_interval_s` by `idle_period_x` once gaze shifts run (only
+- [ ] Scale the idle gaze-shift interval by `idle_period_x` once gaze shifts run (only
       breathing and the scan interval use it today). Blocked: idle gaze shifts are not implemented;
-      `motion.idle.gaze_shift_*` is read by nothing (CV-16, 2026-11-03).
+      their unread `motion.idle.gaze_shift_*` settings were dropped on 2026-11-16 (CV-16).
 - [x] Create the app's `Router` and run `apply_llm_traits` at startup and on every
       `config.changed` (trait source `llm`). Done: `TraitsWorker` (`roboemot.persona.llm_traits`)
       runs it on its own thread and event loop, woken by `persona.*` or `llm_routes` changes

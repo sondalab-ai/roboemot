@@ -175,7 +175,7 @@ def test_settings_page_hides_exactly_the_additive_rows():
         ("llm_routes._.first_token_timeout_s", True),
         ("appraisal.rules._.valence", True),
         ("motion.idle.breathing_amplitude", False),  # owner decision 2026-11-16
-        ("motion.idle.gaze_shift_amplitude", True),
+        ("motion.arbiter.crossfade_ms", True),
         ("voice.moods._.volume_db", False),
         ("voice.moods._.pitch_st", True),
     ],

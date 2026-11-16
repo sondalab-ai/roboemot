@@ -1149,21 +1149,12 @@ class ArbiterConfig(Strict):
     crossfade_ms: float = param(
         150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
     )
-    source_timeout_ms: float = param(
-        250.0, "A streamed source is dropped after this silence", unit="ms", ge=10, le=5000
-    )
 
 
 class IdleConfig(Strict):
     breathing_period_s: float = param(4.0, "Breathing motion period", unit="s", ge=1, le=20)
     breathing_amplitude: float = param(
         0.02, "Breathing amplitude on head pitch", unit="rad", ge=0, le=0.2
-    )
-    gaze_shift_interval_s: tuple[float, float] = param(
-        (3.0, 8.0), "Random interval between gaze shifts", advanced=True
-    )
-    gaze_shift_amplitude: float = param(
-        0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1, advanced=True
     )
 
 
@@ -1746,9 +1737,6 @@ PSEUDONYM_LABEL = "{label}"
 
 
 class PrivacyConfig(Strict):
-    multimodal_frames: bool = param(
-        False, "Allow single-frame image questions to LLM routes", opt_in=True
-    )
     pseudonyms_to_cloud: bool = param(
         False,
         "Send neutral aliases instead of registry names to routes that are not local, and "
@@ -1763,8 +1751,6 @@ class PrivacyConfig(Strict):
         "word). The language is the one of the turn in which a name is first aliased (SPEC 12)",
         admin_only=True,
     )
-    keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
-    debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
     realtime_audio: bool = param(
         False,
         "Allow addressed microphone audio to leave the robot to the realtime route. It is the "
@@ -5950,7 +5936,7 @@ class EnergyEffects(Strict):
     )
     idle_period_x: Curve = param(
         [(0, 1.25), (0.5, 1.0), (1, 0.8)],
-        "Multiplies motion.idle breathing_period_s and gaze_shift_interval_s",
+        "Multiplies motion.idle breathing_period_s",
     )
     voice_rate_x: Curve = param([(0, 0.9), (0.5, 1.0), (1, 1.1)], "Multiplies voice.base.rate")
     interest_decay_x: Curve = param(
@@ -6092,7 +6078,6 @@ class LLMRoute(Strict):
         le=2_000_000,
         advanced=True,
     )
-    supports_images: bool = param(False, "Route accepts image_url parts", advanced=True)
     kind: Literal["chat", "realtime"] = param(
         "chat",
         "chat: an OpenAI Chat Completions route (the conversation and the speech backend). "
@@ -6265,32 +6250,6 @@ class LLMCheckConfig(Strict):
             "l",
         ],
         "Words that mark a text as Italian (lower case, no English homographs)",
-    )
-
-
-class MirrorConfig(Strict):
-    keypoint_confidence_min: float = param(
-        0.5,
-        "Below this a keypoint holds its last value",
-        ge=0,
-        le=1,
-        advanced=True,
-    )
-    hold_decay_s: float = param(
-        1.0, "Decay to home after holding this long", unit="s", ge=0, le=10, advanced=True
-    )
-    filter_min_cutoff_hz: float = param(
-        1.0,
-        "One Euro filter min cutoff",
-        unit="Hz",
-        ge=0.01,
-        le=20,
-        advanced=True,
-    )
-    filter_beta: float = param(0.05, "One Euro filter beta", ge=0, le=5, advanced=True)
-    mirror_image: bool = param(True, "Mirror like a reflection")
-    record_max_s: float = param(
-        10.0, "Max demonstration length", unit="s", ge=1, le=60, advanced=True
     )
 
 
@@ -6961,7 +6920,6 @@ with warnings.catch_warnings():
         enrollment: EnrollmentConfig = param({}, "SPEC 6", advanced=True)
         vision: VisionConfig = param({}, "SPEC 5, 13")
         world: WorldConfig = param({}, "SPEC 5A")
-        mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
         music: MusicConfig = param({}, "SPEC 8: music in the room, the wake word over it")
         speech_motion: SpeechMotionConfig = param(

@@ -8,7 +8,5 @@ affect:
 appraisal:
   rules:            # merged with the default rules by `event` (and `when`); overrides the default stranger rule
     - {event: person.unknown_appears, valence: 0.2, arousal: 0.4, label: curiosity, cooldown_s: 30}
-motion:
-  idle: {gaze_shift_interval_s: [2, 6]}
 circadian:
   quiet_hours: ["22:30", "07:00"]

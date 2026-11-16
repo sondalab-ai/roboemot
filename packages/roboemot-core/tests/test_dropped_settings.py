@@ -433,3 +433,75 @@ def test_an_old_web_ui_file_with_the_age_model_settings_restores_the_rest(tmp_pa
     }
     for path in ("vision.attribute_crops", "identity.estimate_frames_min"):
         assert path in caplog.text, path
+
+
+# ---------------------------------------------- owner decision 2026-11-16: fields no code read
+
+NO_READER_YAML = """\
+motion:
+  arbiter: {source_timeout_ms: 300, crossfade_ms: 200}
+  idle: {gaze_shift_interval_s: [2, 6], gaze_shift_amplitude: 0.1, breathing_period_s: 5}
+mirror: {mirror_image: false, record_max_s: 8}
+llm_routes:
+  - {name: lan, base_url: https://lan.example/v1, model: m, supports_images: true}
+privacy:
+  multimodal_frames: true
+  keep_enrollment_images: true
+  debug_recording: true
+  pseudonyms_to_cloud: true
+"""
+NO_READER_PATHS = (
+    "motion.arbiter.source_timeout_ms", "motion.idle.gaze_shift_interval_s",
+    "motion.idle.gaze_shift_amplitude", "mirror", "llm_routes.*.supports_images",
+    "privacy.multimodal_frames", "privacy.keep_enrollment_images", "privacy.debug_recording",
+)  # fmt: skip
+
+
+def test_no_field_without_a_reader_is_left_in_the_schema():
+    assert all(not schema_has(p) for p in NO_READER_PATHS)
+    assert set(NO_READER_PATHS) <= set(DROPPED_SETTINGS)
+
+
+@pytest.mark.parametrize("section", ["mirror: {}\n", "mirror: null\n", "mirror:\n  enabled: 1\n"])
+def test_any_mirror_section_in_an_app_config_is_ignored(tmp_path, section):
+    app = tmp_path / "app.yaml"
+    app.write_text(section)
+    assert "mirror" not in ConfigStack.from_files(app=app).effective().model_dump()
+
+
+def test_an_app_config_with_the_fields_no_code_read_loads_and_logs_each_path(tmp_path, caplog):
+    app = tmp_path / "app.yaml"
+    app.write_text(NO_READER_YAML)
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    for path in (*(p for p in NO_READER_PATHS if "*" not in p), "llm_routes.0.supports_images"):
+        assert caplog.text.count(f"setting {path} ignored") == 1, path
+    assert cfg.motion.arbiter.crossfade_ms == 200 and cfg.motion.idle.breathing_period_s == 5
+    assert cfg.privacy.pseudonyms_to_cloud and [r.name for r in cfg.llm_routes] == ["lan"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "kept"),
+    [
+        ("mirror.mirror_image", False, None),
+        ("mirror.enabled", True, None),
+        ("mirror", {"mirror_image": False}, None),
+        ("motion.idle", {"gaze_shift_amplitude": 0.1, "breathing_period_s": 5.0},
+         {"breathing_period_s": 5.0}),
+        ("privacy", {"debug_recording": True, "realtime_audio": True}, {"realtime_audio": True}),
+        ('llm_routes[{"name":"v"}].supports_images', True, None),
+        (
+            'llm_routes[{"name":"v"}]',
+            {"name": "v", "model": "m", "supports_images": True},
+            {"name": "v", "model": "m"},
+        ),
+    ],
+    ids=["mirror_leaf", "mirror_unknown", "mirror_section", "idle_section", "privacy_section",
+         "route_field", "added_route"],
+)  # fmt: skip
+def test_web_keys_lose_only_the_fields_no_code_read(key, value, kept, caplog):
+    with caplog.at_level("WARNING"):
+        out, stripped = settings_module._migrated({key: value}, "overrides-file")
+    assert out == ({} if kept is None else {key: kept})
+    assert stripped is (kept is not None)
+    assert "overrides-file" in caplog.text and "no longer acceptable" not in caplog.text
