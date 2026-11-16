@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,13 +19,18 @@ import pytest
 import roboemot.install as inst
 import yaml
 from roboemot import paths
+from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.config.stack import get_path
 from roboemot.diagnostics import Target
-from roboemot.install import Options, Ui, WizardError
+from roboemot.install import Options, Ui, WizardError, web_voice
 from roboemot.install import run as run_mod
 from roboemot.install.build import with_extras
 from roboemot.install.caches import cache_path, clear_caches
 from roboemot.install.piper_lock import lock_name
+from roboemot.redact import origin
+from roboemot.webui import voice_switch as vs
+from roboemot.webui.settings import FILE_MODE, SettingsEditor
 from roboemot_reachymini import daemon as daemon_mod
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
@@ -66,6 +72,7 @@ class FakeRobot:
         self.deps = {"scipy": "1.18.1"}  # what installing the app adds
         self.conflict: dict[str, str] = {}  # upgrades the app needs (fails while pinned)
         self.files: dict[str, str] = {}
+        self.modes: dict[str, int] = {}  # files written through the atomic write
         self.tmp_dirs: set[str] = set()
         self.stray: dict[str, list[str]] = {}  # module -> leftover paths
         self.commands: list[str] = []
@@ -259,7 +266,11 @@ class FakeRobot:
             return self.files.get(shlex.split(command)[1], "")
         if command.startswith("umask 077 && mkdir -p ") and "&& mv" in command:
             t = shlex.split(command)
-            assert t[4] == "-p" and t[-1] == APP_YAML and "printf" not in t, command
+            assert t[4] == "-p" and t[-1] in (APP_YAML, SETTINGS) and "printf" not in t, command
+            tmp = f"{t[-1]}.tmp"
+            fresh = command.index(f"rm -f {tmp}") < command.index(f"cat > {tmp}")
+            private = f"chmod 600 {tmp} && sync && mv" in command
+            self.modes[t[-1]] = 0o600 if fresh and private else 0o644  # a leftover tmp's mode
             self.files[t[-1]] = stdin or ""
             return ""
         if command.startswith("printf %s") and "&& mv" in command:
@@ -3756,7 +3767,11 @@ def saved_settings(robot, **overrides) -> None:
         ({"voice.facing.enabled": False}, True, "voice.facing.enabled"),
         ({"voice.direction.enabled": False}, True, "voice.direction.enabled"),
         ({"voice.realtime_route.route": "other"}, True, "voice.realtime_route.route"),
-        ({"llm_routes.pollen.base_url": "https://x.example"}, True, "llm_routes.pollen.base_url"),
+        (
+            {'llm_routes[{"name":"pollen"}].base_url': "https://x.example"},
+            True,
+            'llm_routes[{"name":"pollen"}].base_url',
+        ),
     ],
 )
 def test_saved_web_ui_settings_against_the_privacy_choice_stop_the_install_unchanged(
@@ -3955,3 +3970,479 @@ def test_tab_completes_a_zone_from_what_was_typed():
         assert read is not None
         assert [complete("europe/r", i) for i in range(3)] == ["Europe/Riga", "Europe/Rome", None]
     assert readline.get_completer() is before
+
+
+# ---------------------------------------------------------------- the voice chosen in the web UI
+#
+# A reinstall keeps the voice provider chosen in the web UI (SPEC 4A, Installer; SPEC 8, 12). The
+# robot is set up the way the frozen compat fixtures of roboemot-core say: a cloud-voice install
+# (fixture cloud_voice), then the web UI's two-step switch to Gemini (fixture gemini_switch: only
+# mode and route saved, the rest read from app.yaml).
+
+COMPAT_DIR = ROOT / "packages" / "roboemot-core" / "tests" / "compat"
+GEMINI = "route:gemini"
+PLATFORM = web_voice.platform_choice("pollen")
+KEPT = "Kept the voice provider the gemini route (chosen in the web UI)"
+
+
+def fixture_file(name: str, file: str) -> str:
+    """The text of ``file`` in the frozen compat fixture ``name`` (read only, never edited)."""
+    return (COMPAT_DIR / name / file).read_text()
+
+
+def gemini_robot(monkeypatch, robot) -> None:
+    """The robot of fixture ``gemini_switch``: a real ``--cloud-voice`` install (its record lists
+    the profile keys), whose ``app.yaml`` is fixture ``cloud_voice``'s, then the web switch."""
+    key_prompts(monkeypatch, HF_TOKEN)
+    cloud_install()
+    frozen = yaml.safe_load(fixture_file("cloud_voice", "app.yaml"))
+    assert yaml.safe_load(robot.app_yaml) == frozen
+    assert json.loads(robot.files[RECORD])["app_config_keys"]
+    robot.files[SETTINGS] = fixture_file("gemini_switch", "webui_settings.json")
+
+
+def voice_of(robot) -> web_voice.RobotVoice:
+    """The voice choice of the fake robot's ``app.yaml`` and web settings, as the installer
+    reads it (``web_voice.robot_voice``, checked against the app's start path in core)."""
+    found = web_voice.robot_voice(
+        ROOT, RID, yaml.safe_load(robot.app_yaml), json.loads(robot.files[SETTINGS])
+    )
+    assert found is not None
+    return found
+
+
+def effective_voice_keys(app: str, settings: str) -> dict:
+    """The switch keys of the configuration the app starts with from these two files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app_path, store = Path(tmp) / "app.yaml", Path(tmp) / "webui_settings.json"
+        app_path.write_text(app)
+        store.write_text(settings)
+        store.chmod(FILE_MODE)
+        stack = ConfigStack.from_files(
+            app=app_path, preset="default", preset_dirs=[ROOT / "configs" / "presets"]
+        )
+        SettingsEditor(stack, store=store).restore()
+        cfg = stack.effective()
+    return {key: get_path(cfg, key) for key in vs.profiles().keys}
+
+
+def terminal_install(ui: Ui, **kw) -> None:
+    """An install through ``ui`` with no Piper, no models and no other secret asked."""
+    opts = Options(**{**FULL, **kw}, start=False, startup=False, secrets=[])
+    inst.run_install(opts, ui, ROOT)
+
+
+def test_yes_without_the_flag_keeps_gemini_and_changes_neither_file(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    files, record = (robot.app_yaml, robot.files[SETTINGS]), robot.files[RECORD]
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=True, read=answers())
+    terminal_install(ui, cloud_voice=None)
+    out = flat(capsys.readouterr().out)
+    assert KEPT in out and "Turned cloud voice off" not in out
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+    assert (
+        json.loads(robot.files[RECORD])["app_config_keys"] == json.loads(record)["app_config_keys"]
+    )
+    assert voice_of(robot).current == GEMINI
+
+
+def test_cloud_voice_with_yes_keeps_gemini_without_asking(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    capsys.readouterr()
+    cloud_install()
+    captured = capsys.readouterr()
+    assert "Switch the voice back" not in captured.err
+    assert f"{KEPT}; -y keeps it, the web UI switches it" in flat(captured.out)
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+    assert voice_of(robot).current == GEMINI
+
+
+def test_cloud_voice_answered_no_keeps_gemini(offline, robot, daemon, monkeypatch, capsys):
+    gemini_robot(monkeypatch, robot)
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    capsys.readouterr()
+    terminal_install(typed("\n", "\n"), cloud_voice=True)  # switch back: no; PIN: keep
+    captured = capsys.readouterr()
+    assert "Switch the voice back to Pollen's server (Hugging Face)? [y/N]" in captured.err
+    assert KEPT in flat(captured.out)
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+    assert voice_of(robot).current == GEMINI
+
+
+def test_cloud_voice_answered_yes_drops_only_the_switch_keys(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    before = json.loads(robot.files[SETTINGS])
+    capsys.readouterr()
+    terminal_install(typed("y\n", "\n"), cloud_voice=True)  # switch back: yes; PIN: keep
+    out = flat(capsys.readouterr().out)
+    dropped = "voice.realtime_route.mode, voice.realtime_route.route"
+    assert f"removes these saved settings from {SETTINGS}: {dropped}." in out
+    assert f"✓ Removed web UI settings {SETTINGS}: {dropped}" in out
+    assert robot.modes[SETTINGS] == robot.modes[APP_YAML] == 0o600
+    after = json.loads(robot.files[SETTINGS])
+    gone = {"voice.realtime_route.mode", "voice.realtime_route.route"}
+    assert set(before["overrides"]) - set(after["overrides"]) == gone
+    assert {k: v for k, v in before["overrides"].items() if k not in gone} == after["overrides"]
+    assert (after["acks"], after["keys"], after["v"]) == (before["acks"], before["keys"], 1)
+    assert "direct" not in robot.files[SETTINGS] and "Kore" in robot.files[SETTINGS]
+    frozen = (
+        fixture_file("cloud_voice", "app.yaml"),
+        fixture_file("cloud_voice", "webui_settings.json"),
+    )
+    assert effective_voice_keys(robot.app_yaml, robot.files[SETTINGS]) == effective_voice_keys(
+        *frozen
+    )
+    assert voice_of(robot).current == PLATFORM
+
+
+def test_the_dry_run_of_a_switch_back_writes_nothing(offline, robot, daemon, monkeypatch, capsys):
+    gemini_robot(monkeypatch, robot)
+    files = dict(robot.files)
+    capsys.readouterr()
+    terminal_install(typed("y\n", "\n"), cloud_voice=True, dry_run=True)
+    out = flat(capsys.readouterr().out)
+    assert f"○ Remove web UI settings {SETTINGS}: voice.realtime_route.mode," in out
+    assert robot.files == files
+
+
+def test_no_cloud_voice_keeps_gemini_without_a_stop(offline, robot, daemon, monkeypatch, capsys):
+    gemini_robot(monkeypatch, robot)
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    keys = json.loads(robot.files[RECORD])["app_config_keys"]
+    capsys.readouterr()
+    install(cloud_voice=False, piper=False)
+    out = flat(capsys.readouterr().out)
+    assert (
+        f"! {KEPT}: audio still leaves the robot for generativelanguage.googleapis.com; "
+        "the web UI's voice switch turns it local"
+    ) in out
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == keys
+    assert voice_of(robot).current == GEMINI
+
+
+def test_a_web_switch_with_the_opt_ins_saved_is_kept_without_the_flag(
+    offline, robot, daemon, monkeypatch
+):
+    gemini_robot(monkeypatch, robot)
+    saved = json.loads(robot.files[SETTINGS])
+    saved["overrides"]["privacy.realtime_audio"] = True  # what a switch from the web UI saves
+    robot.files[SETTINGS] = json.dumps(saved)
+    install(cloud_voice=False, piper=False)  # before S3 it named the key and stopped
+    assert voice_of(robot).current == GEMINI
+
+
+def test_a_local_voice_chosen_in_the_web_ui_keeps_piper_and_the_tts_voices(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    local = next(c for c in vs.choices(RoboEmotConfig(), None) if c.id == vs.LOCAL)
+    robot.files[SETTINGS] = json.dumps({"v": 1, "overrides": local.values})
+    dropped: list[bool] = []
+    monkeypatch.setattr(inst, "drop_local_voice", lambda *a, **k: dropped.append(True))
+    capsys.readouterr()
+    cloud_install()
+    out = flat(capsys.readouterr().out)
+    assert "✓ Kept the voice provider local voice (chosen in the web UI)" in out
+    assert dropped == []
+    assert voice_of(robot).current == vs.LOCAL
+
+
+def test_a_reinstall_of_the_cloud_voice_fixture_leaves_it_as_it_is(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    cloud_install()
+    robot.files[SETTINGS] = fixture_file("cloud_voice", "webui_settings.json")
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    capsys.readouterr()
+    cloud_install()
+    assert "Kept the voice provider" not in capsys.readouterr().out
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+
+
+def test_a_reinstall_of_the_local_voice_fixture_leaves_it_as_it_is(offline, robot, daemon, capsys):
+    install(piper=False)
+    assert yaml.safe_load(robot.app_yaml) == yaml.safe_load(fixture_file("local_voice", "app.yaml"))
+    robot.files[SETTINGS] = fixture_file("local_voice", "webui_settings.json")
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    capsys.readouterr()
+    install(piper=False)
+    assert "Kept the voice provider" not in capsys.readouterr().out
+    assert (robot.app_yaml, robot.files[SETTINGS]) == files
+
+
+def test_uninstall_after_a_kept_provider_removes_only_what_was_recorded(
+    offline, robot, daemon, monkeypatch
+):
+    before = snapshot(robot, daemon)
+    gemini_robot(monkeypatch, robot)
+    robot.secrets["gemini_key"] = "theirs"  # stored from the web UI, not by the installer
+    cloud_install()
+    assert json.loads(robot.files[RECORD])["secrets"] == ["hf_token"]
+    uninstall()
+    assert robot.secrets == {"gemini_key": "theirs"}
+    robot.secrets.pop("gemini_key")
+    assert snapshot(robot, daemon) == before
+    assert APP_YAML not in robot.files and SETTINGS not in robot.files
+
+
+OTHER_ROUTE = {
+    "name": "other",
+    "kind": "realtime",
+    "base_url": "https://speech.example.com/v1",
+    "model": "m",
+    "locality": "cloud",
+}
+
+
+def web_edits(robot, edit) -> None:
+    """Run ``edit(editor)`` on a ``SettingsEditor`` over a copy of the fake robot's ``app.yaml``
+    and web settings file, the way the page writes, then put the file back on the robot."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app_path, store = Path(tmp) / "app.yaml", Path(tmp) / "webui_settings.json"
+        app_path.write_text(robot.app_yaml)
+        if SETTINGS in robot.files:
+            store.write_text(robot.files[SETTINGS])
+            store.chmod(FILE_MODE)
+        stack = ConfigStack.from_files(
+            app=app_path, preset="default", preset_dirs=[ROOT / "configs" / "presets"]
+        )
+        secrets = ["hf_token", "gemini_key"]
+        editor = SettingsEditor(stack, store=store, known_secrets=lambda: secrets)
+        editor.restore()
+        edit(editor)
+        robot.files[SETTINGS] = store.read_text()
+
+
+def routes_added_from_the_web(robot, *routes: tuple[dict, str | None]) -> None:
+    """The fake robot's web settings after ``SettingsEditor.add_route`` of each ``(entry,
+    secret)``, the way the page adds a route (a key needs the acknowledged origin of the
+    route's ``base_url``)."""
+
+    def add(editor: SettingsEditor) -> None:
+        for entry, secret in routes:
+            editor.add_route(entry, secret, origin(entry["base_url"]) if secret else None)
+
+    web_edits(robot, add)
+
+
+def platform_entry_from_the_web() -> tuple[dict, str]:
+    """The platform route entry as the web UI's add form writes it: no key in the entry, the
+    key chosen from the secret store."""
+    route = ReachyMiniWireless.cloud_voice
+    return {k: v for k, v in route.entry().items() if k != "api_key"}, route.secret
+
+
+def local_voice_robot(monkeypatch, robot) -> None:
+    """The robot of fixture ``local_voice``: a plain install, its ``app.yaml`` checked."""
+    key_prompts(monkeypatch, HF_TOKEN)
+    install(piper=False)
+    frozen = yaml.safe_load(fixture_file("local_voice", "app.yaml"))
+    assert yaml.safe_load(robot.app_yaml) == frozen
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"locality": "cloud", "connect_timeout_s": None}],  # a form that sends the defaults too
+)
+def test_a_web_copy_of_the_platform_route_equal_to_the_installer_entry_is_removed(
+    offline, robot, daemon, monkeypatch, capsys, extra
+):
+    local_voice_robot(monkeypatch, robot)
+    entry, secret = platform_entry_from_the_web()
+    routes_added_from_the_web(robot, ({**entry, **extra}, secret), (OTHER_ROUTE, None))
+    saved = json.loads(robot.files[SETTINGS])
+    assert saved["keys"] == {"pollen": "${secret:hf_token}"} and saved["acks"]
+    capsys.readouterr()
+    cloud_install()
+    out = flat(capsys.readouterr().out)
+    copy_key = 'llm_routes[{"name":"pollen"}]'
+    assert f"✓ Removed web UI settings {SETTINGS}: {copy_key}" in out
+    after = json.loads(robot.files[SETTINGS])
+    assert list(after["overrides"]) == ['llm_routes[{"name":"other"}]']  # another name stays
+    assert "keys" not in after and "acks" not in after
+    assert written_route(yaml.safe_load(robot.app_yaml)) == ReachyMiniWireless.cloud_voice.entry()
+    assert voice_of(robot).current == PLATFORM
+
+
+def test_a_web_copy_of_the_platform_route_that_differs_at_its_origin_is_kept_with_a_warning(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    local_voice_robot(monkeypatch, robot)
+    entry, secret = platform_entry_from_the_web()
+    routes_added_from_the_web(robot, ({**entry, "model": "s2s-beta"}, secret))
+    saved = robot.files[SETTINGS]
+    capsys.readouterr()
+    cloud_install()
+    out = flat(capsys.readouterr().out)
+    assert (
+        f"! Web UI route edit {SETTINGS} changes model of llm_routes[pollen], which win over "
+        "app.yaml; kept"
+    ) in out
+    assert "s2s-beta" not in out
+    assert robot.files[SETTINGS] == saved
+
+
+def test_a_web_copy_of_the_platform_route_at_another_origin_stops_the_install(
+    offline, robot, daemon, monkeypatch
+):
+    local_voice_robot(monkeypatch, robot)
+    entry, secret = platform_entry_from_the_web()
+    moved = {**entry, "base_url": "https://audio.example.com/session"}
+    routes_added_from_the_web(robot, (moved, secret))
+    files = dict(robot.files)
+    with pytest.raises(WizardError, match="contradict cloud voice") as err:
+        cloud_install()
+    assert 'llm_routes[{"name":"pollen"}]' in str(err.value)
+    assert "audio.example.com" not in str(err.value)
+    assert robot.files == files
+
+
+def test_without_cloud_voice_a_web_copy_of_the_platform_route_is_left_alone(
+    offline, robot, daemon, monkeypatch
+):
+    local_voice_robot(monkeypatch, robot)
+    routes_added_from_the_web(robot, platform_entry_from_the_web())
+    files = dict(robot.files)
+    install(piper=False)
+    assert robot.files[SETTINGS] == files[SETTINGS]
+
+
+GEMINI_ENTRY = {
+    k: v
+    for k, v in json.loads(fixture_file("gemini_switch", "webui_settings.json"))["overrides"][
+        'llm_routes[{"name":"gemini"}]'
+    ].items()
+}
+
+
+def s2_gemini_robot(monkeypatch, robot) -> None:
+    """Fixture ``cloud_voice`` switched by the S2 voice switch to local, then to Gemini (the
+    Gemini route added from the web): each switch is one batch save, so the web file now also
+    holds voice keys whose value equals the platform's (the opt-ins, the realtime route on)."""
+    key_prompts(monkeypatch, HF_TOKEN)
+    cloud_install()
+
+    def switch(editor: SettingsEditor) -> None:
+        editor.add_route(GEMINI_ENTRY, "gemini_key", origin(GEMINI_ENTRY["base_url"]))
+        for choice_id in (vs.LOCAL, GEMINI):
+            choices = editor.voice_switch()["choices"]
+            editor.change_many(next(c for c in choices if c["id"] == choice_id)["changes"])
+
+    web_edits(robot, switch)
+    saved = json.loads(robot.files[SETTINGS])["overrides"]
+    assert {"privacy.realtime_audio", "voice.realtime_route.enabled"} <= set(saved)
+    assert voice_of(robot).current == GEMINI
+
+
+def test_a_switch_back_over_an_s2_switch_hands_every_voice_key_back_to_app_yaml(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    s2_gemini_robot(monkeypatch, robot)
+    terminal_install(typed("y\n", "\n"), cloud_voice=True)  # switch back: yes; PIN: keep
+    out = flat(capsys.readouterr().out)
+    assert "Web UI overrides" not in out
+    left = json.loads(robot.files[SETTINGS])["overrides"]
+    assert list(left) == ['llm_routes[{"name":"gemini"}]']
+    assert voice_of(robot).current == PLATFORM
+    install(cloud_voice=False, piper=False)  # the opt-ins are the installer's again: no stop
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert "privacy" not in cfg and "realtime_route" not in cfg["voice"]
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == []
+    assert voice_of(robot).current == vs.LOCAL
+
+
+def test_a_kept_provider_still_stops_on_a_platform_route_moved_to_another_origin(
+    offline, robot, daemon, monkeypatch
+):
+    gemini_robot(monkeypatch, robot)
+    saved = json.loads(robot.files[SETTINGS])
+    saved["overrides"]['llm_routes[{"name":"pollen"}].base_url'] = "https://audio.example.com/x"
+    robot.files[SETTINGS] = json.dumps(saved)
+    files = dict(robot.files)
+    with pytest.raises(WizardError, match="contradict cloud voice") as err:
+        cloud_install()
+    assert 'llm_routes[{"name":"pollen"}].base_url' in str(err.value)
+    assert "audio.example.com" not in str(err.value)
+    assert robot.files == files
+
+
+def test_a_web_save_between_the_read_and_the_switch_back_is_never_reverted(
+    offline, robot, daemon, monkeypatch
+):
+    gemini_robot(monkeypatch, robot)
+    real = inst.stop_own_app
+
+    def saved_meanwhile(*args, **kwargs):
+        saved = json.loads(robot.files[SETTINGS])
+        saved["overrides"]["voice.wake_word_policy"] = "unless_enrolled_in_view"
+        robot.files[SETTINGS] = json.dumps(saved)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(inst, "stop_own_app", saved_meanwhile)
+    with pytest.raises(WizardError, match="Web UI settings changed during the install"):
+        terminal_install(typed("y\n", "\n"), cloud_voice=True)
+    assert "unless_enrolled_in_view" in robot.files[SETTINGS]
+    assert "direct" in robot.files[SETTINGS]
+
+
+def test_the_atomic_write_gives_a_fresh_private_file(offline, robot, daemon, monkeypatch):
+    key_prompts(monkeypatch, HF_TOKEN)
+    robot.files[f"{APP_YAML}.tmp"] = "a leftover, 0644"
+    cloud_install()
+    assert robot.modes[APP_YAML] == 0o600
+
+
+def test_a_robot_the_pc_cannot_judge_keeps_the_older_checks(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    saved = json.loads(robot.files[SETTINGS])
+    saved["overrides"]["privacy.realtime_audio"] = True
+    robot.files[SETTINGS] = json.dumps(saved)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("plugin data error")
+
+    monkeypatch.setattr(vs, "choices", broken)
+    assert voice_of_or_none(robot) is None
+    capsys.readouterr()
+    with pytest.raises(WizardError, match="keep audio leaving the robot"):
+        install(cloud_voice=False, piper=False)
+    assert f"! Voice provider not judged {SETTINGS}" in flat(capsys.readouterr().out)
+
+
+def voice_of_or_none(robot) -> web_voice.RobotVoice | None:
+    """``web_voice.robot_voice`` on the fake robot's files, None included."""
+    return web_voice.robot_voice(
+        ROOT, RID, yaml.safe_load(robot.app_yaml), json.loads(robot.files[SETTINGS])
+    )
+
+
+def test_cloud_voice_on_a_terminal_asks_and_keeps_a_local_voice(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    gemini_robot(monkeypatch, robot)
+    local = next(c for c in vs.choices(RoboEmotConfig(), None) if c.id == vs.LOCAL)
+    robot.files[SETTINGS] = json.dumps({"v": 1, "overrides": local.values})
+    dropped: list[bool] = []
+    monkeypatch.setattr(inst, "drop_local_voice", lambda *a, **k: dropped.append(True))
+    files = (robot.app_yaml, robot.files[SETTINGS])
+    capsys.readouterr()
+    terminal_install(typed("\n", "\n"), cloud_voice=True)  # switch back: no; PIN: keep
+    captured = capsys.readouterr()
+    assert "Switch the voice back to Pollen's server (Hugging Face)? [y/N]" in captured.err
+    out = flat(captured.out)
+    assert "privacy.realtime_audio, privacy.realtime_audio_unaddressed" in out  # listed first
+    assert "✓ Kept the voice provider local voice (chosen in the web UI)" in out
+    assert dropped == [] and (robot.app_yaml, robot.files[SETTINGS]) == files
+    assert voice_of(robot).current == vs.LOCAL

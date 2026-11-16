@@ -20,7 +20,10 @@ changes anything when the robot has none (no token: it stops with nothing change
 `--secret hf_token` replaces an expired one), and removes Piper and its voice files (SPEC 4A,
 Installer). Settings saved in the web UI win over `app.yaml`: the installer stops when one would
 widen what leaves the robot (for example the facing check off) and names it; reset it in the
-web UI and run again. Read its privacy text before you answer: the audio of every utterance
+web UI and run again. A voice provider chosen in the web UI (for example Gemini) is kept by a
+reinstall in every mode, `-y` included; only `--cloud-voice` asks `Switch the voice back to
+Pollen's server (Hugging Face)?` (default no), and a yes removes only the voice switch's saved
+settings, which it lists first. Read its privacy text before you answer: the audio of every utterance
 spoken while a person faces the robot and looks at it leaves the robot for Pollen's server,
 phone calls included. `-y` does not turn it on. A reinstall with `--no-cloud-voice` removes
 exactly these keys; local voice then needs Piper again (`--piper`). Then start RoboEmot (step 5)
