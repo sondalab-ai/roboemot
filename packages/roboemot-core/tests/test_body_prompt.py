@@ -98,6 +98,14 @@ def test_manifest_body_prompt_passes_the_manifest_guard_and_owner_edits_need_the
         stack.set("persona.body_prompt", "You have wings.")
 
 
+def test_manifest_body_prompt_over_the_cap_is_refused_at_load():
+    too_long = "x" * (PersonaConfig().body_prompt_max_chars + 1)
+    with pytest.raises(ConfigError, match="persona.body_prompt has"):
+        ConfigStack().set_manifest_behaviour(
+            {"persona": {"body_prompt": too_long}}, (), body_yaw=None
+        )
+
+
 def test_manifest_body_prompt_must_be_text():
     with pytest.raises(ConfigError, match="body_prompt"):
         ConfigStack().set_manifest_behaviour({"persona": {"body_prompt": 3}}, (), body_yaw=None)
