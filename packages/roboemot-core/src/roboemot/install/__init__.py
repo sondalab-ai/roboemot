@@ -33,8 +33,9 @@ store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it a
 The cloud-voice profile (``--cloud-voice``, an admin opt-in: SPEC 12) answers by voice through
 the platform's realtime speech route (``Platform.cloud_voice``, SPEC 8): it writes that route and
 the settings that use it into ``app.yaml`` (keys recorded, so ``--no-cloud-voice`` on a reinstall
-removes exactly them), asks for the route's key when the store has none, skips Piper and its
-voices and removes a recorded Piper virtualenv. ``-y`` does not turn it on; an unattended run
+removes exactly them, unless a voice provider chosen in the web UI is kept), asks for the
+route's key when the store has none, skips Piper and its voices and removes a recorded Piper
+virtualenv. ``-y`` does not turn it on; an unattended run
 names ``--cloud-voice`` or ``--no-cloud-voice``.
 A voice provider chosen in the web UI's Settings switch is kept by a reinstall in every mode
 (``roboemot.install.web_voice``): its keys in ``app.yaml`` stay as they are, and only cloud voice
@@ -870,7 +871,7 @@ def drop_local_voice(
     voice manifest, with their markers) in the default voice models folder. Those files are in
     no record (the models folder or the data folder covers them), so nothing else is written;
     a reinstall with ``--no-cloud-voice`` fetches them again with the models step."""
-    why = "the server speaks; a reinstall with --no-cloud-voice brings Piper back"
+    why = "the server speaks; a reinstall with --no-cloud-voice and --piper brings Piper back"
     if remove_piper_venv(ui, remote, record, dry_run, why) and not dry_run:
         record.piper_venv = None
         write_record(remote, platform.record_path, record)
@@ -1507,13 +1508,14 @@ def profile_app_config(
 
 
 def write_remote_file(remote: Remote, path: str, text: str) -> None:
-    """Replace ``path`` on the robot with ``text`` atomically (a private temporary file next to
-    it, then a rename), its folder created private when missing. The content travels on the SSH
-    channel's standard input, never on a command line."""
-    tmp = f"{path}.tmp"
+    """Replace ``path`` on the robot with ``text`` atomically (a fresh temporary file next to
+    it, mode 0600 whatever a leftover had, flushed to disk, then a rename), its folder created
+    private when missing. The content travels on the SSH channel's standard input, never on a
+    command line."""
+    tmp = shlex.quote(f"{path}.tmp")
     remote.run(
-        f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && "
-        f"cat > {shlex.quote(tmp)} && mv {shlex.quote(tmp)} {shlex.quote(path)}",
+        f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && rm -f {tmp} && "
+        f"cat > {tmp} && chmod 600 {tmp} && sync && mv {tmp} {shlex.quote(path)}",
         stdin=text,
     )
 
@@ -1990,13 +1992,12 @@ class WebVoice:
 
 def privacy_conflicts(saved: dict, route: CloudVoiceRoute, on: bool) -> list[str]:
     """Saved web UI settings that would make the cloud-voice choice untrue for privacy (SPEC 12).
-    On: a check off that the opt-in text relies on (facing, voice-at-face), another realtime
-    route, or an edit of the profile's route entry (it could move the audio to another host).
-    Off: audio still leaving the robot (``privacy.realtime_audio``, the realtime route on, audio
-    input). Overrides of a keyed list are addressed by name (``llm_routes.<name>.<field>``)."""
+    On: a check off that the opt-in text relies on (facing, voice-at-face), or another realtime
+    route (a web copy of the profile's route entry is judged by ``web_route_copies``). Off:
+    audio still leaving the robot (``privacy.realtime_audio``, the realtime route on, audio
+    input)."""
     rt = "voice.realtime_route"
     if on:
-        own = f"{ROUTES_KEY}.{route.name}"
         bad = {
             "voice.facing.enabled": lambda v: v is not True,
             "voice.direction.enabled": lambda v: v is not True,
@@ -2004,7 +2005,6 @@ def privacy_conflicts(saved: dict, route: CloudVoiceRoute, on: bool) -> list[str
             f"{rt}.enabled": lambda v: v is not True,
         }
         hits = [k for k, test in bad.items() if k in saved and test(saved[k])]
-        hits += [k for k in saved if k == own or k.startswith(own + ".")]
     else:
         bad = {
             "privacy.realtime_audio": lambda v: v is True,
@@ -2032,20 +2032,18 @@ def check_saved_overrides(
         return WebVoice()
     web = web_voice_choice(ui, opts, platform, remote, root, path, raw)
     on = bool(opts.cloud_voice)
-    copied: tuple[str, ...] = ()
+    moved: tuple[str, ...] = ()
     if on:
-        web, copied = web_route_copies(ui, route, path, raw, web)
+        web, moved = web_route_copies(ui, route, path, raw, web)
+    moved = tuple(k for k in moved if k not in web.drop)
+    if moved:  # before a kept provider: the route and its key would go to another host
+        _stop_on_saved(path, list(moved), on)
     if web.kept:
         return web
     saved = {k: v for k, v in raw.get("overrides", {}).items() if k not in web.drop}
-    conflicts = privacy_conflicts(saved, route, on) + [k for k in copied if k not in web.drop]
+    conflicts = privacy_conflicts(saved, route, on)
     if conflicts:
-        what = "contradict cloud voice" if on else "keep audio leaving the robot"
-        raise WizardError(
-            f"Web UI settings {what}",
-            f"{path} sets {', '.join(conflicts)}, which win over app.yaml; nothing was changed",
-            "reset them in the web UI (Settings, with the PIN), then run the installer again",
-        )
+        _stop_on_saved(path, conflicts, on)
     if not on:
         return web
     dotted = [".".join(k) for k in cloud_voice_config(route) if k[0] != ROUTES_KEY]
@@ -2056,6 +2054,18 @@ def check_saved_overrides(
             f"{path} sets {', '.join(hit)}, which win over app.yaml; reset them in the web UI",
         )
     return web
+
+
+def _stop_on_saved(path: str, keys: list[str], on: bool) -> None:
+    """Stop the install, before anything changed, on saved web UI settings ``keys`` that
+    contradict this run's privacy choice (``on``: cloud voice), naming the keys and never a
+    value, with how to clear them."""
+    what = "contradict cloud voice" if on else "keep audio leaving the robot"
+    raise WizardError(
+        f"Web UI settings {what}",
+        f"{path} sets {', '.join(keys)}, which win over app.yaml; nothing was changed",
+        "reset them in the web UI (Settings, with the PIN), then run the installer again",
+    )
 
 
 def web_voice_choice(
@@ -2089,7 +2099,11 @@ def web_voice_choice(
     kept = WebVoice(found.label, found.local)
     platform_label = found.platform_label or route.name
     if not opts.cloud_voice:
-        ui.ok("Kept the voice provider", f"{found.label} (chosen in the web UI)")
+        ui.warn(
+            "Kept the voice provider",
+            f"{found.label} (chosen in the web UI): audio still leaves the robot for "
+            f"{found.audio_to or found.label}; the web UI's voice switch turns it local",
+        )
         return kept
     if ui.assume_yes or not ui.interactive:
         why = "-y keeps it" if ui.assume_yes else "no terminal to ask"
@@ -2098,17 +2112,17 @@ def web_voice_choice(
             f"{found.label} (chosen in the web UI); {why}, the web UI switches it",
         )
         return kept
+    saved = raw.get("overrides", {})
+    drop = (set(found.switch_back) | set(privacy_conflicts(saved, route, True))) & set(saved)
     ui.info(
         f"The web UI switched the voice to {found.label}. Switching back to {platform_label} "
-        f"removes only the saved settings that choose {found.label}."
+        f"removes these saved settings from {path}: {', '.join(sorted(drop))}."
     )
     if not ui.confirm_opt_in(
         f"Switch the voice back to {platform_label}?", False, flag=CLOUD_VOICE_FLAG
     ):
         ui.ok("Kept the voice provider", f"{found.label} (chosen in the web UI)")
         return kept
-    saved = raw.get("overrides", {})
-    drop = (set(found.switch_back) | set(privacy_conflicts(saved, route, True))) & set(saved)
     return WebVoice(drop=tuple(sorted(drop)), path=path, settings=raw)
 
 
@@ -2148,7 +2162,14 @@ def drop_web_settings(ui: Ui, remote: Remote, web: WebVoice, dry_run: bool) -> N
         return
     from . import web_voice
 
-    text = web_voice.settings_text(web_voice.without(web.settings, web.drop))
+    _, now = saved_overrides(ui, remote)
+    if now != web.settings:
+        raise WizardError(
+            "Web UI settings changed during the install",
+            f"{web.path} was saved again after the installer read it; it is left as it is",
+            "run the installer again",
+        )
+    text = web_voice.settings_text(web_voice.without(now, web.drop))
     write_remote_file(remote, web.path, text)
     ui.ok("Removed web UI settings", f"{web.path}: {names}")
 
@@ -2215,7 +2236,8 @@ def cloud_voice_text(route: CloudVoiceRoute) -> str:
         "meant for it (a television, people talking to each other), once server turns are "
         "switched on in Settings; the server then decides whether to answer. The skip tool only "
         "decides whether the robot answers: the audio is already at the server. The robot has "
-        "no local voice (Piper is removed); going back needs a reinstall with --no-cloud-voice."
+        "no local voice (Piper is removed); going back needs a reinstall with --no-cloud-voice "
+        "and --piper, or the web UI's voice switch once Piper is back."
     )
 
 

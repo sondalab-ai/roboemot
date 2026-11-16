@@ -33,7 +33,7 @@ from ..webui.settings import FILE_MODE, SettingsEditor, parse_okey
 from ..webui.strings import DEFAULT_LANGUAGE
 
 PRESET = "default"  # the preset the robot app starts with
-PRESET_DIRS = "configs/presets"  # in the checkout; the robot's package holds a synced copy
+PRESET_DIRS = Path("configs/presets")  # in the checkout; the robot's package holds a synced copy
 LOCAL_LABEL = "local voice"
 LOCAL = vs.LOCAL
 
@@ -42,8 +42,10 @@ LOCAL = vs.LOCAL
 class RobotVoice:
     """The robot's voice choice: ``current`` with the web settings (a choice id or ``custom``),
     ``app_only`` from ``app.yaml`` alone, the ``label`` of ``current``, whether it is local,
-    the platform route's label (``platform_label``, None without one) and ``switch_back``: the
-    saved setting keys to drop so the platform's choice comes back."""
+    the platform route's label (``platform_label``, None without one), ``switch_back``: the
+    saved setting keys to drop so the platform's choice comes back, and ``audio_to``: who
+    receives the audio of ``current`` (the plugin's label or the route's host; None for local
+    or custom)."""
 
     current: str
     app_only: str
@@ -51,6 +53,7 @@ class RobotVoice:
     local: bool
     platform_label: str | None
     switch_back: tuple[str, ...]
+    audio_to: str | None = None
 
     @property
     def from_web(self) -> bool:
@@ -80,8 +83,16 @@ def robot_voice(
             alone = stack.effective()
             SettingsEditor(stack, store=store, plugin=plugin).restore()
             cfg = stack.effective()
+            return _judged(plugin, alone, cfg, settings)
     except Exception:
         return None
+
+
+def _judged(plugin: Any, alone: Any, cfg: Any, settings: dict[str, Any]) -> RobotVoice:
+    """``robot_voice`` once both configurations are built: ``alone`` from ``app.yaml``, ``cfg``
+    with the saved settings replayed. Runs inside ``robot_voice``'s guard, so a plugin or data
+    error gives None there (the installer then keeps its older checks), never a crash of the
+    install."""
     profile = platform_voice(plugin, cfg, DEFAULT_LANGUAGE)
     options = vs.choices(cfg, profile)
     current = vs.current(cfg, options, revealed=True)
@@ -95,6 +106,7 @@ def robot_voice(
         choice is not None and choice.kind == vs.KIND_LOCAL,
         profile.label if profile else None,
         _switch_back(settings.get("overrides") or {}, profile),
+        choice.audio_to if choice is not None else None,
     )
 
 
@@ -209,15 +221,14 @@ def settings_text(settings: dict[str, Any]) -> str:
 
 
 def _switch_back(overrides: dict[str, Any], profile: VoiceProfile | None) -> tuple[str, ...]:
-    """The saved switch keys whose value is not the platform choice's (``voice_profiles.yaml``
-    keys with the plugin's values): dropping them gives those keys back to ``app.yaml``, where
-    the cloud-voice profile writes them. A saved key equal to the platform's value stays.
-    Empty without a platform route."""
+    """Every saved switch key (``voice_profiles.yaml`` ``keys``, whatever its value): dropping
+    them all gives the voice keys back to ``app.yaml``, where the cloud-voice profile writes and
+    records them, so a later ``--no-cloud-voice`` removes them too. A key left in the web file
+    would sit outside the record. Empty without a platform route."""
     if profile is None:
         return ()
-    data = vs.profiles()
-    values = vs.full(data.common, profile.keys, {vs.ROUTE_KEY: profile.route})
-    return tuple(sorted(k for k, v in overrides.items() if k in values and v != values[k]))
+    keys = set(vs.profiles().keys)
+    return tuple(sorted(k for k in overrides if k in keys))
 
 
 def _label(choice: vs.Choice | None, platform_label: str | None) -> str:

@@ -128,8 +128,9 @@ profile on. An unattended run must say `--cloud-voice` or `--no-cloud-voice`.
 A reinstall keeps a voice provider chosen in the Settings voice switch (local voice, Pollen or
 another realtime route such as Gemini), whatever the flags, `-y` included. It says `Kept the voice
 provider <choice> (chosen in the web UI)` and leaves the voice keys of `app.yaml` as they are. Only
-`--cloud-voice` on a terminal asks `Switch the voice back to <platform>?` (default no). A yes removes
-only the saved settings that choose the other provider from `webui_settings.json`.
+`--cloud-voice` on a terminal asks `Switch the voice back to <platform>?` (default no). It lists the
+saved settings first. A yes removes the voice switch's settings from `webui_settings.json`, so
+`app.yaml` decides the voice again. Other saved settings stay.
 
 The profile needs the voice pipeline, so it keeps `voice.enabled: true`, which the installer sets.
 The installer refuses `--cloud-voice` together with `--no-voice` or `--piper`, before it touches the
