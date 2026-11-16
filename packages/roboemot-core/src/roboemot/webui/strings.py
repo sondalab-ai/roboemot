@@ -783,6 +783,10 @@ EN: dict[str, str] = {
     "err_batch_empty": "There is nothing to save.",
     "err_batch_too_long": "Too many settings in one save.",
     "err_batch_duplicate": "The same setting appears twice in one save.",
+    "err_batch_endpoint_move": (
+        "Nothing was saved: one change moves a route with an API key to another address. Save "
+        "that address on its own."
+    ),
     "err_batch_loosens_safety": (
         "Nothing was saved: one change loosens a safety limit. Save that setting on its own."
     ),
@@ -1881,6 +1885,10 @@ IT: dict[str, str] = {
     "err_batch_empty": "Non c'è nulla da salvare.",
     "err_batch_too_long": "Troppe impostazioni in un solo salvataggio.",
     "err_batch_duplicate": "La stessa impostazione compare due volte in un salvataggio.",
+    "err_batch_endpoint_move": (
+        "Non è stato salvato nulla: una modifica sposta una route con chiave API a un altro "
+        "indirizzo. Salva quell'indirizzo da solo."
+    ),
     "err_batch_loosens_safety": (
         "Non è stato salvato nulla: una modifica allenta un limite di sicurezza. Salva quella "
         "impostazione da sola."

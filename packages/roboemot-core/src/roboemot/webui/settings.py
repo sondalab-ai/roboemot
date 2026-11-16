@@ -195,6 +195,20 @@ def batch_shape(changes: object) -> list[dict[str, Any]]:
     return changes
 
 
+def _entry_of(exc: GuardrailError, written: list[_Checked]) -> str | None:
+    """The path of the batch entry a stack refusal names (a violation at that leaf, or inside or
+    above it), so the page can mark the row; ``None`` when no entry matches."""
+    for c in written:
+        for v in exc.violations:
+            if (
+                v.path == c.path
+                or v.path.startswith(c.path + ".")
+                or c.path.startswith(v.path + ".")
+            ):
+                return c.path
+    return None
+
+
 def _exempt(moved: Move | None) -> frozenset[str]:
     """The violation path the secret check lets through for an acknowledged endpoint move: that
     route's ``api_key``, nothing else."""
@@ -245,7 +259,21 @@ def languages() -> frozenset[str]:
 
 
 class SettingNotAllowed(LookupError):
-    """The path is not a writable catalogue field (or entry container)."""
+    """The path is not a writable catalogue field (or entry container). ``path`` names the
+    refused entry of a batch (``SettingsEditor.change_many``), else ``None``."""
+
+    def __init__(self, field: str = "path", path: str | None = None) -> None:
+        super().__init__(field)
+        self.path = path
+
+
+class EntryGuardrailError(GuardrailError):
+    """A stack refusal of a batch that one entry caused: the same message and violations, plus
+    that entry's ``path`` (never its value), so the page can mark the row."""
+
+    def __init__(self, exc: GuardrailError, path: str) -> None:
+        super().__init__(str(exc), exc.violations)
+        self.path = path
 
 
 def _writable(path: str) -> bool:
@@ -537,23 +565,22 @@ class SettingsEditor:
                 result["persisted"] = self._persist()  # the app value replaced a runtime edit
             return self._applied(result, before)
 
-    def change_many(
-        self, changes: object, source: str = SOURCE, ack: object = None
-    ) -> dict[str, Any]:
+    def change_many(self, changes: object, source: str = SOURCE) -> dict[str, Any]:
         """Write several leaves as one all-or-nothing change (SPEC 11A). ``changes`` is a list of
         ``{"path", "value"}``; every entry passes the checks of ``change`` before anything is
-        written, the stack validates the final state once (a rule that spans fields does not
-        depend on their order) and the overrides file is written once. ``ack`` covers an endpoint
-        move of a route ``base_url`` in the batch, as for ``change``.
+        written, the stack validates the final state once and the overrides file is written once.
+        Each entry's cleaner judges it against the configuration before the batch; only the
+        stack's validation sees the effect of one entry on another (a rule that spans fields).
 
-        Raises like ``change`` (a ``ValidationError`` of one entry carries its ``path``), plus
-        ``batch_empty``, ``batch_too_long``, ``batch_duplicate`` and ``batch_loosens_safety``: a
-        safety loosening needs the app layer, which a batch never writes, so it is refused whole.
+        Raises like ``change``, with the failing entry's ``path`` in the error's ``extra``, plus
+        ``batch_empty``, ``batch_too_long``, ``batch_duplicate``, ``batch_endpoint_move`` (a
+        keyed route's endpoint moves only in a single save, with its confirmation) and
+        ``batch_loosens_safety`` (a loosening needs the app layer, which a batch never writes).
         The result has ``changed``, ``layer``, ``persisted``, ``applied`` and
         ``restart_required`` over the batch and the same per path in ``results``."""
         with self._lock:
             before = self._failures()
-            checked = self._check_batch(changes, ack)
+            checked = self._check_batch(changes)
             written = [c for c in checked if c.changed]
             if written:
                 try:
@@ -563,19 +590,17 @@ class SettingsEditor:
                         admin=True,
                         must_exist=True,
                         refuse=REFUSED_CHECKS,
-                        exempt=frozenset().union(*(_exempt(c.moved) for c in written)),
                     )
                 except GuardrailError as exc:
                     if loosening_only(exc):
                         raise ValidationError("batch_loosens_safety", "changes") from exc
-                    raise
+                    entry = _entry_of(exc, written)
+                    if entry is None:
+                        raise
+                    raise EntryGuardrailError(exc, entry) from exc
             for c in written:
-                self._note_move(c, source)
-                moved = c.moved
-                acked = {"origin": moved.new, "key": fingerprint(moved.api_key)} if moved else None
                 self._remember(c.okey, c.clean)
-                self._keep_ack(c.okey, c.clean, acked)
-                self._rebase_binding(c.path, acked)
+                self._keep_ack(c.okey, c.clean, None)
             persisted = self._persist() if written else True
             applied = self._failures() == before
             results = [
@@ -599,29 +624,40 @@ class SettingsEditor:
                 "results": results,
             }
 
-    def preview_many(self, changes: object, ack: object = None) -> list[dict[str, Any]]:
+    def preview_many(self, changes: object) -> list[dict[str, Any]]:
         """The diff ``change_many`` would make, nothing written, no guardrail run: for each entry
-        whose value changes, ``path``, ``old`` and ``new`` (the effective values; a secret row's
-        as ``***``), ``restart`` and ``opt_in``. Raises like ``change_many``; ``ConfigError``
-        when the final state would be invalid."""
+        whose value changes, ``path``, ``old`` and ``new`` (the effective values, masked as
+        ``***`` for a secret or private row, as ``GET /api/settings`` shows them), ``restart``
+        and ``opt_in``. Raises like ``change_many``; ``ConfigError`` when the final state would
+        be invalid."""
         with self._lock:
-            written = [c for c in self._check_batch(changes, ack) if c.changed]
+            written = [c for c in self._check_batch(changes) if c.changed]
             cfg = self.stack.preview({c.path: c.clean for c in written})
             return [
                 {
                     "path": c.path,
-                    "old": REDACTED if c.row["secret"] else self._shown(c.old),
-                    "new": REDACTED if c.row["secret"] else self._shown(get_path(cfg, c.path)),
+                    "old": self._masked(c.row, c.old),
+                    "new": self._masked(c.row, get_path(cfg, c.path)),
                     "restart": self._restart(c.row),
                     "opt_in": c.row["opt_in"],
                 }
                 for c in written
             ]
 
-    def _check_batch(self, changes: object, ack: object) -> list[_Checked]:
+    def _masked(self, row: FieldDescriptor, value: Any) -> Any:
+        """``value`` as the settings list shows it for ``row``: ``***`` for a secret row, and for
+        a private one unless it is ``None`` (``hidden_private``); else ``_shown``."""
+        if row["secret"] or (row["private"] and value is not None):
+            return REDACTED
+        return self._shown(value)
+
+    def _check_batch(self, changes: object) -> list[_Checked]:
         """Every entry of a batch (``batch_shape``) checked against the current configuration,
-        under the lock. No leaf may appear twice, compared by its overrides-file key, so an index
-        and a name address of one keyed-list entry count as the same leaf."""
+        under the lock; a refusal names the entry's ``path`` in the error's ``extra``. An endpoint
+        move of a keyed route is refused (``batch_endpoint_move``): its acknowledgement exempts the
+        route's key from the secret check, which must not cover the other entries. Catalogue rows
+        are addressed by name only, so a leaf twice is the same path twice (``batch_duplicate``,
+        compared by overrides-file key)."""
         entries = batch_shape(changes)
         rows, cfg, tree = self._rows(), self.stack.effective(), self.stack.merged_tree()
         checked: list[_Checked] = []
@@ -629,10 +665,21 @@ class SettingsEditor:
         for change in entries:
             path = change["path"]
             try:
-                one = self._check(path, change["value"], rows, cfg, ack)
+                one = self._check(path, change["value"], rows, cfg)
             except ValidationError as exc:
+                if exc.code == "endpoint_ack_required":
+                    raise ValidationError("batch_endpoint_move", "changes", {"path": path}) from exc
                 exc.extra = {**exc.extra, "path": path}
                 raise
+            except SettingNotAllowed as exc:
+                named = path if isinstance(path, str) else None
+                raise SettingNotAllowed(str(exc), named) from exc
+            except GuardrailError as exc:
+                if not isinstance(path, str):
+                    raise
+                raise EntryGuardrailError(exc, path) from exc
+            if one.moved is not None:
+                raise ValidationError("batch_endpoint_move", "changes", {"path": path})
             key = okey(tree, one.path)
             if key in seen:
                 raise ValidationError("batch_duplicate", "changes", {"path": one.path})

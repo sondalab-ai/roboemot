@@ -8,7 +8,7 @@ import copy
 import json
 
 import pytest
-from roboemot.config.stack import ConfigError, ConfigStack
+from roboemot.config.stack import ConfigError, ConfigStack, get_path
 from roboemot.webui.api import WebApi
 from roboemot.webui.settings import MAX_BATCH_CHANGES, SettingNotAllowed, SettingsEditor
 from roboemot.webui.validation import ValidationError
@@ -210,18 +210,49 @@ def test_a_malformed_batch_is_refused_whole(editor, stack, tmp_path, changes, co
     assert stack.audit == [] and not (tmp_path / FILE).exists()
 
 
-def test_an_endpoint_move_in_a_batch_needs_the_ack(editor, stack, tmp_path):
-    url, target = "https://moved.example/session", "https://moved.example"
-    batch = [{"path": "llm_routes.platform.base_url", "value": url}]
-    with pytest.raises(ValidationError) as caught:
-        editor.change_many(batch)
-    assert caught.value.code == "endpoint_ack_required"
-    assert caught.value.extra == {"endpoint": target, "path": "llm_routes.platform.base_url"}
-    out = editor.change_many(batch, ack=target)
-    assert out["results"][0]["value"] == url
-    assert stack.effective().llm_routes[0].base_url == url
-    assert any(a.key == "llm_routes.platform.endpoint" for a in stack.audit)
-    assert json.loads((tmp_path / FILE).read_text())["acks"]
+MOVE = "llm_routes.platform.base_url"
+
+
+@pytest.mark.parametrize(
+    "batch",
+    [
+        [{"path": MOVE, "value": "https://moved.example/session"}],
+        [
+            {"path": MOVE, "value": "https://moved.example/session"},
+            {"path": "llm_routes.platform.kind", "value": "chat"},
+            {"path": MODE, "value": "direct"},
+        ],
+        [
+            {"path": MOVE, "value": "wss://moved.example/ws"},
+            {"path": "llm_routes.platform.protocol", "value": "gemini_live"},
+            {"path": MODE, "value": "direct"},
+        ],
+    ],
+    ids=["alone", "with_kind", "with_protocol"],
+)
+def test_a_batch_never_moves_a_keyed_route_endpoint(editor, stack, tmp_path, batch):
+    """Regression: an acknowledged move exempted the route's key from the secret check for the
+    whole final state, so a batch could also change its kind or protocol past that check."""
+    editor.change("affect.half_life_s", 9.0)
+    before = snapshot(stack, tmp_path)
+    for call in (editor.change_many, editor.preview_many):
+        with pytest.raises(ValidationError) as caught:
+            call(batch)
+        assert caught.value.code == "batch_endpoint_move"
+        assert caught.value.extra == {"path": MOVE}
+    assert snapshot(stack, tmp_path) == before
+    assert stack.effective().llm_routes[0].base_url == PLATFORM_URL
+
+
+def test_a_file_that_cannot_be_written_keeps_the_edit_live(editor, stack, monkeypatch):
+    def fail(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(editor._file, "save", fail)
+    out = editor.change_many(TO_GEMINI)
+    assert out["persisted"] is False and all(r["persisted"] is False for r in out["results"])
+    assert stack.effective().voice.realtime_route.route == "gemini"
+    assert editor._overrides == {MODE: "direct", ROUTE: "gemini"}
 
 
 # ------------------------------------------------------------------ preview
@@ -239,16 +270,31 @@ def test_preview_lists_the_diff_and_never_writes(editor, stack, tmp_path):
     assert not (tmp_path / FILE).exists()
 
 
-def test_preview_shows_a_route_move_and_names_opt_ins(editor):
-    diff = editor.preview_many(
-        [
-            {"path": "llm_routes.platform.base_url", "value": "https://moved.example/session"},
-            {"path": "privacy.realtime_audio", "value": False},
-        ],
-        ack="https://moved.example",
+def test_preview_masks_private_values_and_names_opt_ins(editor):
+    diff = editor.preview_many([{"path": "privacy.realtime_audio", "value": False}])
+    assert diff == [
+        {
+            "path": "privacy.realtime_audio",
+            "old": "***",
+            "new": "***",
+            "restart": diff[0]["restart"],
+            "opt_in": True,
+        }
+    ]
+
+
+def test_preview_masks_a_credential_holding_route_url(tmp_path):
+    app = copy.deepcopy(CLOUD_VOICE)
+    app["llm_routes"].append(
+        {"name": "lan", "base_url": "https://user:pass@lan.example/v1", "model": "m"}
     )
-    assert (diff[0]["old"], diff[0]["new"]) == (PLATFORM_URL, "https://moved.example/session")
-    assert diff[1]["opt_in"] is True
+    stack = ConfigStack(app=app, audit_path=tmp_path / "audit.jsonl")
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    diff = editor.preview_many(
+        [{"path": "llm_routes.lan.base_url", "value": "https://lan.example/v2"}]
+    )
+    assert (diff[0]["old"], diff[0]["new"]) == ("***", "***")
+    assert stack.effective().llm_routes[2].base_url == "https://user:pass@lan.example/v1"
 
 
 def test_preview_of_an_invalid_final_state_is_refused(editor):
@@ -310,8 +356,42 @@ def test_the_api_maps_batch_refusals_to_codes(served):
     }
     resp = post("/api/settings/batch", TO_GEMINI[1:])
     assert resp.status == 422 and resp.json["error"] == "setting_invalid"
-    resp = post("/api/settings/batch", [{"path": "nope.x", "value": 1}])
-    assert resp.status == 403 and resp.json["error"] == "setting_not_allowed"
+    resp = post("/api/settings/batch", [{"path": MOVE, "value": "https://moved.example/s"}])
+    assert resp.status == 422 and resp.json == {
+        "error": "batch_endpoint_move",
+        "field": "changes",
+        "path": MOVE,
+    }
+    assert served.request(
+        "POST", "/api/settings/batch", {"changes": TO_GEMINI, "pin": PIN, "ack_endpoint": "x"}
+    ).json == {"error": "unknown_field", "field": "ack_endpoint"}
+
+
+def test_an_entry_that_is_not_allowed_maps_to_403_and_writes_nothing(served, stack, tmp_path):
+    changes = [{"path": "affect.update_hz", "value": 25.0}, {"path": "nope.x", "value": 1}]
+    resp = served.request("POST", "/api/settings/batch", {"changes": changes, "pin": PIN})
+    assert resp.status == 403 and resp.json == {
+        "error": "setting_not_allowed",
+        "field": "path",
+        "path": "nope.x",
+    }
+    assert stack.effective().affect.update_hz == 20.0 and not (tmp_path / FILE).exists()
+
+
+def test_a_guardrail_refusal_names_the_entry_and_costs_no_pin_attempt(served, stack):
+    path = "reflexes.rules.withdraw-close.amplitude_deg"
+    wider = get_path(stack.effective(), path) + 5
+    changes = [{"path": "affect.update_hz", "value": 25.0}, {"path": path, "value": wider}]
+    for _ in range(4):  # more than webui.pin_max_attempts
+        resp = served.request("POST", "/api/settings/batch", {"changes": changes, "pin": PIN})
+        assert resp.status == 403 and resp.json == {
+            "error": "setting_guardrail",
+            "field": "value",
+            "path": path,
+        }
+    assert stack.effective().affect.update_hz == 20.0
+    resp = served.request("POST", "/api/settings/batch", {"changes": TO_GEMINI, "pin": PIN})
+    assert resp.status == 200
 
 
 def test_the_preview_api_returns_the_diff(served, stack):
