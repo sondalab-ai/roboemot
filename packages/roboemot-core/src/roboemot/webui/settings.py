@@ -121,6 +121,7 @@ LANGUAGE_DICTS = frozenset(
     }
 )
 REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
+MAX_BATCH_CHANGES = 64  # bounds one batch save; a voice-provider switch is well under it
 APP_FILE = "app"
 NO_KEY_REF = "none"  # the api_key of a route without a key
 
@@ -162,6 +163,42 @@ class Move:
     new: str
     route: str
     api_key: str
+
+
+@dataclass(frozen=True)
+class _Checked:
+    """One leaf write that passed every check of ``SettingsEditor._check``: the cleaned value,
+    the current one, the overrides-file key and the acknowledged endpoint move, if any."""
+
+    path: str
+    row: FieldDescriptor
+    old: Any
+    clean: Any
+    okey: str
+    moved: Move | None
+    changed: bool = True
+
+
+def batch_shape(changes: object) -> list[dict[str, Any]]:
+    """``changes`` when it is a list of 1 to ``MAX_BATCH_CHANGES`` objects with exactly ``path``
+    and ``value``; else ``ValidationError``. The API runs it before the PIN check, so a
+    malformed body never costs a PIN attempt; ``SettingsEditor`` runs it again for any caller.
+    """
+    if not isinstance(changes, list):
+        raise ValidationError("value_type", "changes")
+    if not changes:
+        raise ValidationError("batch_empty", "changes")
+    if len(changes) > MAX_BATCH_CHANGES:
+        raise ValidationError("batch_too_long", "changes")
+    if not all(isinstance(c, dict) and set(c) == {"path", "value"} for c in changes):
+        raise ValidationError("value_type", "changes")
+    return changes
+
+
+def _exempt(moved: Move | None) -> frozenset[str]:
+    """The violation path the secret check lets through for an acknowledged endpoint move: that
+    route's ``api_key``, nothing else."""
+    return frozenset({f"llm_routes.{moved.route}.api_key"}) if moved else frozenset()
 
 
 def fingerprint(api_key: str) -> str:
@@ -499,6 +536,109 @@ class SettingsEditor:
                 self._acks.pop(key, None)
                 result["persisted"] = self._persist()  # the app value replaced a runtime edit
             return self._applied(result, before)
+
+    def change_many(
+        self, changes: object, source: str = SOURCE, ack: object = None
+    ) -> dict[str, Any]:
+        """Write several leaves as one all-or-nothing change (SPEC 11A). ``changes`` is a list of
+        ``{"path", "value"}``; every entry passes the checks of ``change`` before anything is
+        written, the stack validates the final state once (a rule that spans fields does not
+        depend on their order) and the overrides file is written once. ``ack`` covers an endpoint
+        move of a route ``base_url`` in the batch, as for ``change``.
+
+        Raises like ``change`` (a ``ValidationError`` of one entry carries its ``path``), plus
+        ``batch_empty``, ``batch_too_long``, ``batch_duplicate`` and ``batch_loosens_safety``: a
+        safety loosening needs the app layer, which a batch never writes, so it is refused whole.
+        The result has ``changed``, ``layer``, ``persisted``, ``applied`` and
+        ``restart_required`` over the batch and the same per path in ``results``."""
+        with self._lock:
+            before = self._failures()
+            checked = self._check_batch(changes, ack)
+            written = [c for c in checked if c.changed]
+            if written:
+                try:
+                    self.stack.set_many(
+                        {c.path: c.clean for c in written},
+                        source=source,
+                        admin=True,
+                        must_exist=True,
+                        refuse=REFUSED_CHECKS,
+                        exempt=frozenset().union(*(_exempt(c.moved) for c in written)),
+                    )
+                except GuardrailError as exc:
+                    if loosening_only(exc):
+                        raise ValidationError("batch_loosens_safety", "changes") from exc
+                    raise
+            for c in written:
+                self._note_move(c, source)
+                moved = c.moved
+                acked = {"origin": moved.new, "key": fingerprint(moved.api_key)} if moved else None
+                self._remember(c.okey, c.clean)
+                self._keep_ack(c.okey, c.clean, acked)
+                self._rebase_binding(c.path, acked)
+            persisted = self._persist() if written else True
+            applied = self._failures() == before
+            results = [
+                {
+                    "path": c.path,
+                    "changed": c.changed,
+                    "value": REDACTED if c.row["secret"] else self._shown(c.clean),
+                    "layer": "runtime",
+                    "restart_required": c.changed and self._restart(c.row),
+                    "persisted": persisted,
+                    "applied": applied,
+                }
+                for c in checked
+            ]
+            return {
+                "changed": bool(written),
+                "layer": "runtime",
+                "persisted": persisted,
+                "applied": applied,
+                "restart_required": any(r["restart_required"] for r in results),
+                "results": results,
+            }
+
+    def preview_many(self, changes: object, ack: object = None) -> list[dict[str, Any]]:
+        """The diff ``change_many`` would make, nothing written, no guardrail run: for each entry
+        whose value changes, ``path``, ``old`` and ``new`` (the effective values; a secret row's
+        as ``***``), ``restart`` and ``opt_in``. Raises like ``change_many``; ``ConfigError``
+        when the final state would be invalid."""
+        with self._lock:
+            written = [c for c in self._check_batch(changes, ack) if c.changed]
+            cfg = self.stack.preview({c.path: c.clean for c in written})
+            return [
+                {
+                    "path": c.path,
+                    "old": REDACTED if c.row["secret"] else self._shown(c.old),
+                    "new": REDACTED if c.row["secret"] else self._shown(get_path(cfg, c.path)),
+                    "restart": self._restart(c.row),
+                    "opt_in": c.row["opt_in"],
+                }
+                for c in written
+            ]
+
+    def _check_batch(self, changes: object, ack: object) -> list[_Checked]:
+        """Every entry of a batch (``batch_shape``) checked against the current configuration,
+        under the lock. No leaf may appear twice, compared by its overrides-file key, so an index
+        and a name address of one keyed-list entry count as the same leaf."""
+        entries = batch_shape(changes)
+        rows, cfg, tree = self._rows(), self.stack.effective(), self.stack.merged_tree()
+        checked: list[_Checked] = []
+        seen: set[str] = set()
+        for change in entries:
+            path = change["path"]
+            try:
+                one = self._check(path, change["value"], rows, cfg, ack)
+            except ValidationError as exc:
+                exc.extra = {**exc.extra, "path": path}
+                raise
+            key = okey(tree, one.path)
+            if key in seen:
+                raise ValidationError("batch_duplicate", "changes", {"path": one.path})
+            seen.add(key)
+            checked.append(one)
+        return checked
 
     def add_entry(
         self, path: object, key: object, value: object, source: str = SOURCE
@@ -907,6 +1047,40 @@ class SettingsEditor:
         cfg: RoboEmotConfig,
         ack: object = None,
     ) -> dict[str, Any]:
+        checked = self._check(path, value, rows, cfg, ack)
+        if not checked.changed:
+            return {"path": checked.path, "changed": False, "value": checked.old}
+        moved = checked.moved
+        layer = self._write(
+            checked.path,
+            checked.clean,
+            source,
+            retry_app=self._added_parent(checked.okey) is None,
+            exempt=_exempt(moved),
+        )
+        self._note_move(checked, source)
+        return {
+            "path": checked.path,
+            "changed": True,
+            "value": checked.clean,
+            "layer": layer,
+            "restart_required": self._restart(checked.row),
+            "okey": checked.okey,
+            "acked": {"origin": moved.new, "key": fingerprint(moved.api_key)} if moved else None,
+        }
+
+    def _check(
+        self,
+        path: object,
+        value: object,
+        rows: dict[str, FieldDescriptor],
+        cfg: RoboEmotConfig,
+        ack: object = None,
+    ) -> _Checked:
+        """Every check of one leaf write, nothing written: a writable leaf, no credential-shaped
+        value, the field's cleaner, a route URL rule, a language a new key may name, a dict that
+        keeps its keys and an acknowledged endpoint move. Raises like ``change``; the result says
+        whether the cleaned value differs from the current one."""
         row = rows.get(path) if isinstance(path, str) else None
         if row is None or not isinstance(path, str) or not self._leaf_writable(rows, row):
             raise SettingNotAllowed("path")
@@ -916,7 +1090,7 @@ class SettingsEditor:
         clean = clean_hooked(hook, path, value, cfg) if hook else clean_value(row, value, cfg)
         old = plain(get_path(cfg, path))
         if clean == old:
-            return {"path": path, "changed": False, "value": old}
+            return _Checked(path, row, old, clean, "", None, changed=False)
         if write_only(path):
             check_web_route_url(clean, old)
         if (
@@ -934,24 +1108,14 @@ class SettingsEditor:
         moved = self._moved_endpoint(
             path, old, clean, cfg, ack, (self._acks.get(stored), self._acks.get(bound))
         )
-        layer = self._write(
-            path,
-            clean,
-            source,
-            retry_app=self._added_parent(stored) is None,
-            exempt=frozenset({f"llm_routes.{moved.route}.api_key"}) if moved else frozenset(),
-        )
+        return _Checked(path, row, old, clean, stored, moved)
+
+    def _note_move(self, checked: _Checked, source: str) -> None:
+        """Audit the endpoint move of a written route ``base_url`` by host (old and new origin)."""
+        moved = checked.moved
         if moved and moved.old != moved.new:
-            self.stack.note(source, f"{path.rpartition('.')[0]}.endpoint", moved.old, moved.new)
-        return {
-            "path": path,
-            "changed": True,
-            "value": clean,
-            "layer": layer,
-            "restart_required": self._restart(row),
-            "okey": stored,
-            "acked": {"origin": moved.new, "key": fingerprint(moved.api_key)} if moved else None,
-        }
+            parent = checked.path.rpartition(".")[0]
+            self.stack.note(source, f"{parent}.endpoint", moved.old, moved.new)
 
     @staticmethod
     def _moved_endpoint(

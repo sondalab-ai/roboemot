@@ -49,7 +49,7 @@ from .guard import same_origin
 from .robot_section import PATH_ROOT
 from .routes import PreviewRate, RouteBusy
 from .secrets_admin import SecretInUse, secret_name, secret_value
-from .settings import SettingNotAllowed
+from .settings import SettingNotAllowed, batch_shape
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
@@ -151,6 +151,8 @@ class SettingsPort(Protocol):
     def change(
         self, path: object, value: object, source: str, ack: object = None
     ) -> dict[str, Any]: ...
+    def change_many(self, changes: object, source: str, ack: object = None) -> dict[str, Any]: ...
+    def preview_many(self, changes: object, ack: object = None) -> list[dict[str, Any]]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -498,6 +500,8 @@ class WebApi:
             ("POST", "/api/secrets/remove"): self._secret_remove,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
+            ("POST", "/api/settings/batch"): self._settings_batch,
+            ("POST", "/api/settings/batch/preview"): self._settings_batch_preview,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
             ("POST", "/api/robot/restart"): self._robot_restart,
             ("POST", "/api/settings/reset"): self._settings_reset,
@@ -986,6 +990,38 @@ class WebApi:
                 body["path"], body["value"], self._who(req), body.get("ack_endpoint")
             )
         )
+
+    def _settings_batch(self, req: Request) -> Response:
+        """Change several catalogue fields as one all-or-nothing save (SPEC 11A). Body:
+        ``changes`` (a list of ``{path, value}``), the re-entered ``pin`` (checked once for the
+        batch, after the shape check so a malformed body costs no attempt) and ``ack_endpoint``
+        as for one field. The response names ``layer``, ``persisted``, ``applied`` and
+        ``restart_required`` over the batch and per path in ``results``."""
+        port = self._settings_port()
+        body = self._batch_body(req)
+        return self._settings_call(
+            lambda: port.change_many(body["changes"], self._who(req), body.get("ack_endpoint"))
+        )
+
+    def _settings_batch_preview(self, req: Request) -> Response:
+        """The diff a batch save would make, nothing written (SPEC 11A): ``changes`` lists
+        ``{path, old, new, restart, opt_in}`` for each field whose value changes. Same body and
+        PIN check as ``/api/settings/batch``: old values may be private."""
+        port = self._settings_port()
+        body = self._batch_body(req)
+        return self._settings_call(
+            lambda: {"changes": port.preview_many(body["changes"], body.get("ack_endpoint"))}
+        )
+
+    def _batch_body(self, req: Request) -> dict[str, Any]:
+        """The body of a batch call with its shape checked (``batch_shape``), then the PIN."""
+        body = self._json_body(req)
+        v.only_keys(body, {"changes", "pin", "ack_endpoint"})
+        if "changes" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        batch_shape(body["changes"])
+        self._check_pin(req, body.get("pin"))
+        return body
 
     def _robot_restart(self, req: Request) -> Response:
         """Restart RoboEmot through the robot plugin (SPEC 4A, 12). Body: ``pin``. The plugin's

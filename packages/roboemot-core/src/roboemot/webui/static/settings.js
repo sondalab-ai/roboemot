@@ -577,6 +577,18 @@ function writeNotice(result, verbKey) {
   notice(parts.join(" "), result.persisted === false || result.applied === false);
 }
 
+// Saves `changes` ([{path, value}]) as one all-or-nothing batch behind one PIN dialog, then announces
+// it like a single save (layer, restart) and reloads the rows. A refusal leaves every path as it was.
+// Returns the response, or null when the dialog was cancelled.
+async function settingsBatchSave(message, changes, verbKey = "saved") {
+  const result = await pinnedCall(message, t("settings_save"),
+    (pin) => api("POST", "/api/settings/batch", { changes, pin }));
+  if (!result) return null;
+  writeNotice(result, verbKey);
+  await settingsReload(null);
+  return result;
+}
+
 function settingLeaf(node) {
   const row = node.row;
   const hidden = settingHidden(row);

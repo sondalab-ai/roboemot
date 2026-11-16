@@ -326,6 +326,22 @@ test("save: the PIN is asked, path/value/PIN are posted, and the response layer 
   assert.ok(!page.document.documentElement.outerHTML.includes(PIN));
 });
 
+test("batch save: one PIN dialog posts every change at once, then the restart is announced", async () => {
+  const changes = [{ path: "voice.flag", value: false }, { path: "voice.mode", value: "a" }];
+  const page = await settingsPage({
+    "POST /api/settings/batch": { changed: true, layer: "runtime", persisted: true, applied: true, restart_required: true, results: [] },
+  });
+  page.run(`window.batchDone = settingsBatchSave("switch", ${JSON.stringify(changes)})`);
+  await settle();
+  assert.equal(posts(page, "/api/settings/batch").length, 0, "nothing is sent before the PIN");
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch").map((c) => c.body), [{ changes, pin: PIN }]);
+  assert.equal(posts(page, "/api/settings").length, 0);
+  assert.ok((await page.run("window.batchDone")).changed);
+  const notice = page.document.querySelector("#notice").textContent;
+  assert.ok(notice.includes("settings_layer_runtime") && notice.includes("settings_restart_needed"));
+});
+
 test("save: each write asks again, and an unchanged value sends nothing", async () => {
   const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } });
   await open(page, "core-voice");

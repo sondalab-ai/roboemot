@@ -780,6 +780,12 @@ EN: dict[str, str] = {
     "err_setting_guardrail": "The change was refused: it would loosen a safety or privacy rule.",
     "err_setting_invalid": "The value is not valid for this setting.",
     "err_settings_unavailable": "Settings are not available.",
+    "err_batch_empty": "There is nothing to save.",
+    "err_batch_too_long": "Too many settings in one save.",
+    "err_batch_duplicate": "The same setting appears twice in one save.",
+    "err_batch_loosens_safety": (
+        "Nothing was saved: one change loosens a safety limit. Save that setting on its own."
+    ),
     "err_value_type": "The value has the wrong type.",
     "err_value_range": "The value is outside the allowed range.",
     "err_value_choice": "The value is not one of the allowed choices.",
@@ -1872,6 +1878,13 @@ IT: dict[str, str] = {
     "err_setting_guardrail": "Modifica rifiutata: allenterebbe una regola di sicurezza o privacy.",
     "err_setting_invalid": "Il valore non è valido per questa impostazione.",
     "err_settings_unavailable": "Le impostazioni non sono disponibili.",
+    "err_batch_empty": "Non c'è nulla da salvare.",
+    "err_batch_too_long": "Troppe impostazioni in un solo salvataggio.",
+    "err_batch_duplicate": "La stessa impostazione compare due volte in un salvataggio.",
+    "err_batch_loosens_safety": (
+        "Non è stato salvato nulla: una modifica allenta un limite di sicurezza. Salva quella "
+        "impostazione da sola."
+    ),
     "err_value_type": "Il valore ha il tipo sbagliato.",
     "err_value_range": "Il valore è fuori dall'intervallo ammesso.",
     "err_value_choice": "Il valore non è tra quelli ammessi.",
