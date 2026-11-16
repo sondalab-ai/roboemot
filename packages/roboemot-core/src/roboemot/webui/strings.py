@@ -332,6 +332,7 @@ EN: dict[str, str] = {
         "rule is saved to the app configuration file instead and survives a restart."
     ),
     "settings_core": "Core",
+    "settings_purpose_safety": "Safety",
     "settings_purpose_voice": "Voice and conversation",
     "settings_purpose_behaviour": "Behaviour and emotions",
     "settings_purpose_perception": "Perception",
@@ -1462,6 +1463,7 @@ IT: dict[str, str] = {
         "riavvio."
     ),
     "settings_core": "Nucleo",
+    "settings_purpose_safety": "Sicurezza",
     "settings_purpose_voice": "Voce e conversazione",
     "settings_purpose_behaviour": "Comportamento ed emozioni",
     "settings_purpose_perception": "Percezione",

@@ -177,7 +177,7 @@ test("read-only, secret and identity rows have no editing control", async () => 
 test("a robot section appears as its own group, and is absent without one", async () => {
   const without = await settingsPage();
   assert.ok(!without.document.body.textContent.includes("Reachy Mini"));
-  const purposes = ["settings_purpose_voice", "settings_purpose_behaviour", "settings_purpose_motion", "settings_purpose_models"];
+  const purposes = ["settings_purpose_safety", "settings_purpose_voice", "settings_purpose_behaviour", "settings_purpose_models"];
   assert.deepEqual([...without.document.querySelectorAll(".sl-nav__group")].map((g) => g.textContent), purposes);
 
   const nullRobot = await settingsPage({}, { fields: fields(), robot: null, pin_required: true });
@@ -1707,13 +1707,13 @@ test("core sections follow the purpose groups, and a section no group lists goes
   ];
   const page = await settingsPage({}, { fields, pin_required: true });
   const order = [...page.document.querySelectorAll("#settings-groups .settings-group .sl-disclosure > .sl-code")].map((c) => c.textContent);
-  assert.deepEqual(order, ["voice", "conversation", "persona", "vision", "safety", "privacy", "webui", "zeta_new", "alpha_new"]);
+  assert.deepEqual(order, ["safety", "voice", "conversation", "persona", "vision", "privacy", "webui", "zeta_new", "alpha_new"]);
   const nav = [...page.document.querySelector("nav.sl-nav").children].map((n) => (n.classList.contains("sl-nav__group") ? "#" + n.textContent : n.dataset.group));
   assert.deepEqual(nav, [
+    "#settings_purpose_safety", "core-safety",
     "#settings_purpose_voice", "core-voice", "core-conversation",
     "#settings_purpose_behaviour", "core-persona",
     "#settings_purpose_perception", "core-vision",
-    "#settings_purpose_motion", "core-safety",
     "#settings_purpose_models", "core-privacy",
     "#settings_purpose_system", "core-webui",
     "#settings_purpose_other", "core-zeta_new", "core-alpha_new",
@@ -1747,4 +1747,51 @@ test("fixed Literal[True] rows are hidden, and the add form still sends their va
   await settle();
   await answerPin(page);
   assert.deepEqual(posts(page, "/api/settings/entry")[0].body.value, { curve: "linear", additive: true });
+});
+
+test("a value from a preset or the manifest leaves the fold closed; only a runtime value opens it", async () => {
+  const fields = foldFields();
+  fields[1] = { ...fields[1], value: 0.7, default: 0.5, source: "preset" };
+  const page = await settingsPage({}, { fields, pin_required: true });
+  await open(page, "core-voice");
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "false");
+});
+
+test("an unsaved edit keeps its fold open, and a hand close marks the toggle as edited", async () => {
+  const page = await settingsPage({}, { fields: foldFields(), pin_required: true });
+  await typeQuery(page, "speech probability");
+  const input = row(page, "voice.vad.threshold").querySelector('input[type="number"]');
+  input.value = "0.9";
+  input.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+  await typeQuery(page, "");
+  await open(page, "core-voice");
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "true", "the draft stays in view");
+  assert.equal(row(page, "voice.vad.threshold").querySelector('input[type="number"]').value, "0.9");
+  assert.equal(fold(page, "core-voice").querySelector(":scope > .row [data-edited]"), null, "no marker while open");
+  foldToggle(page, "core-voice").click();
+  assert.equal(foldToggle(page, "core-voice").getAttribute("aria-expanded"), "false");
+  assert.ok(fold(page, "core-voice").querySelector(":scope > .row [data-edited]"), "the closed fold says it holds an edit");
+});
+
+test("the row cap counts basic rows only, and the fold is drawn whatever the basic count", async () => {
+  const bulk = Array.from({ length: 60 }, (_, n) => d("bulk.f" + n, "bool", { value: false, description: "needle " + n }));
+  const deep = [d("bulk.deep", "number", { value: 1, default: 1, advanced: true, description: "needle deep" })];
+  const page = await settingsPage({ "GET /api/strings": { language: "en", strings: { settings_show_all: "All {n}" } } }, { fields: [...bulk, ...deep], pin_required: true });
+  await typeQuery(page, "needle");
+  const shown = [...body(page, "core-bulk").children].filter((k) => k.matches(".setting"));
+  assert.equal(shown.length, 50);
+  assert.ok(button(body(page, "core-bulk"), "All 60"));
+  assert.equal(foldToggle(page, "core-bulk").getAttribute("aria-expanded"), "true");
+  assert.deepEqual(paths(foldBody(page, "core-bulk")), ["bulk.deep"]);
+});
+
+test("a nav heading hides while a search hides all its groups", async () => {
+  const page = await settingsPage();
+  const head = (text) => [...page.document.querySelectorAll(".sl-nav__group")].find((h) => h.textContent === text);
+  await typeQuery(page, "speech volume");
+  assert.equal(head("settings_purpose_voice").hidden, false);
+  assert.equal(head("settings_purpose_safety").hidden, true);
+  assert.equal(head("settings_purpose_models").hidden, true);
+  await typeQuery(page, "");
+  assert.equal(head("settings_purpose_safety").hidden, false);
 });

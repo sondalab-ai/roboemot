@@ -20,10 +20,11 @@ const SETTING_ADVANCED = "adv:"; // open/collapsed key prefix of a group's Advan
 // `settings_purpose_<id>`. A section no group lists goes last, under "Other", so a new schema
 // section is never hidden.
 const SETTING_PURPOSES = [
+  { id: "safety", sections: ["safety"] },
   { id: "voice", sections: ["voice", "conversation"] },
   { id: "behaviour", sections: ["personality", "persona", "affect", "appraisal", "register", "expression", "circadian", "soothe"] },
   { id: "perception", sections: ["vision", "attention", "world", "identity", "enrollment", "music", "light", "catalogue"] },
-  { id: "motion", sections: ["safety", "motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map", "mirror"] },
+  { id: "motion", sections: ["motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map", "mirror"] },
   { id: "models", sections: ["llm_routes", "llm_check", "privacy"] },
   { id: "system", sections: ["webui", "connectivity", "runtime", "data_dir", "schema_version"] },
 ];
@@ -35,6 +36,7 @@ const settingsState = {
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
   routes: null, // GET /api/routes for the voice rows (a promise), once per settings view
   voice: null, // GET /api/settings/voice: the voice-provider switch, read with the rows
+  navHeads: [], // nav headings with their groups: a heading hides when all its items do
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -43,7 +45,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null, voice: null,
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null, voice: null, navHeads: [],
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -119,7 +121,7 @@ function byPurpose(sections) {
 
 const nodeText = (node) => (node.row.path + " " + (node.row.description || "")).toLowerCase();
 const leafChanged = (row) => row.source === "runtime" || JSON.stringify(row.value) !== JSON.stringify(row.default);
-const nodeChanged = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? node.kids.some(nodeChanged) : leafChanged(node.row));
+const nodeRuntime = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? node.kids.some(nodeRuntime) : node.row.source === "runtime");
 
 // Without a filter, the search words hit the node or one of its kids. With "changed only" or
 // "only null" on, the words and every filter that is on must hold on the same leaf (a leaf's path
@@ -1081,59 +1083,75 @@ function refreshGroup(g) {
   g.toggle.setAttribute("aria-expanded", String(open));
   g.body.hidden = !open;
   if (!open) return hits.length;
+  // The cap applies to the basic rows only; the fold holds every advanced hit and builds its rows
+  // only while it is open.
   const basic = hits.filter((n) => !n.row.advanced);
   const advanced = hits.filter((n) => n.row.advanced);
-  const ordered = [...basic, ...advanced];
-  const capped = !manual && !g.showAll && ordered.length > SETTING_AUTO_OPEN_MAX;
-  const shown = capped ? ordered.slice(0, SETTING_AUTO_OPEN_MAX) : ordered;
-  const shownBasic = shown.filter((n) => !n.row.advanced);
-  const shownAdvanced = shown.filter((n) => n.row.advanced);
-  const foldOpen = advancedOpen(g, advanced, auto);
-  const key = shown.map((n) => n.row.path).join("|") + (capped ? "+" : "") + (foldOpen ? "^" : "");
+  const capped = !manual && !g.showAll && basic.length > SETTING_AUTO_OPEN_MAX;
+  const shownBasic = capped ? basic.slice(0, SETTING_AUTO_OPEN_MAX) : basic;
+  const dirty = advanced.some((n) => rowDirty(g, n));
+  const foldOpen = advancedOpen(g, advanced, auto, dirty);
+  const key = [...shownBasic, ...advanced].map((n) => n.row.path).join("|") + (capped ? "+" : "") +
+    (foldOpen ? "^" : "") + (dirty ? "*" : "");
   if (g.shown !== key) {
     g.shown = key;
     const more = capped
-      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
-        { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
+      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: basic.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
+        { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: basic.length }), g.title) } }))]
       : [];
     const lead = g.id === VOICE_SWITCH_GROUP && settingsState.voice ? [voiceSwitchRow(settingsState.voice), el("hr", { class: "sl-rule" })] : [];
     const rows = (nodes) => nodes.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat();
-    const fold = shownAdvanced.length
-      ? [shownBasic.length ? el("hr", { class: "sl-rule" }) : [], advancedFold(g, advanced.length, foldOpen, () => rows(shownAdvanced))]
+    const fold = advanced.length
+      ? [shownBasic.length ? el("hr", { class: "sl-rule" }) : [], advancedFold(g, advanced.length, foldOpen, dirty, () => rows(advanced))]
       : [];
-    g.body.replaceChildren(...lead, ...rows(shownBasic), ...fold, ...more);
+    g.body.replaceChildren(...lead, ...rows(shownBasic), ...more, ...fold);
   }
   return hits.length;
 }
 
-// Whether the Advanced fold of `g` is open: opened by hand, or by a search or filter that hits an
-// advanced row (`auto`), or because an advanced row holds a changed value; closed by hand wins.
-function advancedOpen(g, advanced, auto) {
+// A row of `g` built earlier that holds an unsaved edit (`editedMarker` sets data-dirty).
+function rowDirty(g, node) {
+  const built = g.cache.get(node.row.path);
+  return Boolean(built && (built.hasAttribute("data-dirty") || built.querySelector("[data-dirty]")));
+}
+
+// Whether the Advanced fold of `g` is open: opened by hand, by a search or filter that hits an
+// advanced row (`auto`), by an advanced row with a runtime value, or while one of its rows holds an
+// unsaved edit (`dirty`). Closed by hand wins; the toggle then marks the unsaved edit.
+function advancedOpen(g, advanced, auto, dirty) {
   const id = SETTING_ADVANCED + g.id;
   if (!advanced.length || settingsState.collapsed.has(id)) return false;
-  return settingsState.open.has(id) || auto || advanced.some(nodeChanged);
+  return settingsState.open.has(id) || auto || dirty || advanced.some(nodeRuntime);
+}
+
+// Records a hand open or close of the Advanced fold of `g`; a later filter change clears a close.
+function setFold(g, on) {
+  const id = SETTING_ADVANCED + g.id;
+  if (on) { settingsState.open.add(id); settingsState.collapsed.delete(id); }
+  else { settingsState.open.delete(id); settingsState.collapsed.add(id); }
 }
 
 // The closed-by-default disclosure that holds a group's advanced rows. `fill()` builds the rows
-// only while it is open; a toggle records the choice and redraws the group.
-function advancedFold(g, count, open, fill) {
+// only while it is open; a closed fold with an unsaved edit inside shows the edited tag. A toggle
+// records the choice and redraws the group.
+function advancedFold(g, count, open, dirty, fill) {
   const id = "adv-" + g.id;
   const toggle = el("button", { type: "button", class: "sl-disclosure", id: id + "-toggle", "aria-expanded": String(open), "aria-controls": id },
     t("settings_advanced"), el("span", { class: "sl-nav__count" }, String(count)));
+  const edited = dirty && !open ? el("span", { class: "sl-tag", "data-edited": "1" }, t("settings_edited")) : [];
   toggle.addEventListener("click", () => {
-    const key = SETTING_ADVANCED + g.id;
-    if (open) { settingsState.open.delete(key); settingsState.collapsed.add(key); }
-    else { settingsState.open.add(key); settingsState.collapsed.delete(key); }
+    setFold(g, !open);
     refreshGroup(g);
     const again = document.getElementById(id + "-toggle");
     if (again) again.focus();
   });
   const body = el("div", { class: "stack nested", id, hidden: !open }, open ? fill() : []);
-  return el("div", { class: "stack", "data-advanced": g.id }, el("h4", { class: "setting-entry" }, toggle), body);
+  return el("div", { class: "stack", "data-advanced": g.id }, el("div", { class: "row" }, el("h4", { class: "setting-entry" }, toggle), edited), body);
 }
 
 function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
+  for (const head of settingsState.navHeads) head.node.hidden = head.groups.every((g) => g.navItem.hidden);
   const status = document.getElementById("settings-count");
   if (status) status.textContent = tn("settings_matches", total);
   const actions = document.getElementById("settings-robot-actions");
@@ -1228,10 +1246,11 @@ async function settingsView() {
   const coreGroups = settingsState.groups.filter((g) => g.scope === "core");
   const robotGroups = settingsState.groups.filter((g) => g.scope === "robot");
   const purposes = [...new Set(coreGroups.map((g) => g.purpose))];
+  const heads = purposes.map((p) => ({ node: el("div", { class: "sl-nav__group" }, t("settings_purpose_" + p)), groups: coreGroups.filter((g) => g.purpose === p) }));
+  if (robot) heads.push({ node: el("div", { class: "sl-nav__group" }, robot.title), groups: robotGroups });
+  settingsState.navHeads = heads;
   const nav = el("nav", { class: "sl-nav settings-nav", "aria-label": t("settings_nav") },
-    purposes.map((p) => [el("div", { class: "sl-nav__group" }, t("settings_purpose_" + p)),
-      coreGroups.filter((g) => g.purpose === p).map((g) => g.navItem)]),
-    robot ? [el("div", { class: "sl-nav__group" }, robot.title), robotGroups.map((g) => g.navItem)] : []);
+    heads.map((h) => [h.node, h.groups.map((g) => g.navItem)]));
   const groups = el("div", { class: "stack", id: "settings-groups" }, settingsState.groups.map((g) => g.section));
   const robotActions = robot ? el("div", { class: "row", id: "settings-robot-actions" }) : [];
   view.append(intro, robotActions, el("div", { class: "settings-layout" }, nav, groups));

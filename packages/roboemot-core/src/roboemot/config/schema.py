@@ -1160,9 +1160,11 @@ class IdleConfig(Strict):
         0.02, "Breathing amplitude on head pitch", unit="rad", ge=0, le=0.2
     )
     gaze_shift_interval_s: tuple[float, float] = param(
-        (3.0, 8.0), "Random interval between gaze shifts"
+        (3.0, 8.0), "Random interval between gaze shifts", advanced=True
     )
-    gaze_shift_amplitude: float = param(0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1)
+    gaze_shift_amplitude: float = param(
+        0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1, advanced=True
+    )
 
 
 class ExternalControlConfig(Strict):
@@ -1306,20 +1308,21 @@ class ExternalControlConfig(Strict):
 
 
 class MotionConfig(Strict):
-    arbiter: ArbiterConfig = param({}, "Arbiter parameters")
+    arbiter: ArbiterConfig = param({}, "Arbiter parameters", advanced=True)
     idle: IdleConfig = param({}, "Idle motion parameters")
     app_tick_hz: float = param(
         20.0,
         "Rate of the app's behaviour tick: affect, idle, circadian, scan, expression and "
         "responder commands are recomputed and fed to the arbiter this often (the arbiter itself "
         "runs at arbiter.loop_hz)",
-        unit="Hz", ge=1, le=100,
+        unit="Hz", ge=1, le=100, advanced=True,
     )  # fmt: skip
     ramp_app_commands: bool = param(
         True,
         "Ramp each app tick's command over one app tick on the motor loop, so a high acceleration "
         "cap does not turn slow moves into stop and go; delays those moves by at most one app "
         "tick. Reflexes and safety commands are never ramped",
+        advanced=True,
     )
     platform_move_grace_s: float = param(
         5.0,
@@ -1331,9 +1334,11 @@ class MotionConfig(Strict):
         "motor status latency (a 1 s status period plus the time to build it, and the state "
         "queue's age), less the min-jerk tail in which the pose already reads as still, so the "
         "motors-off is seen before any target is streamed again (SPEC 12A)",
-        unit="s", ge=0, le=30,
+        unit="s", ge=0, le=30, advanced=True,
     )  # fmt: skip
-    external: ExternalControlConfig = param({}, "Detection of external control of the robot")
+    external: ExternalControlConfig = param(
+        {}, "Detection of external control of the robot", advanced=True
+    )
 
 
 # --------------------------------------------------------------------------- reflexes (SPEC 10)
@@ -3413,12 +3418,14 @@ class WorldConfig(Strict):
 
 class Prosody(Strict):
     rate: float = param(0.0, "Speech rate delta (additive to 1.0)", ge=-1, le=1)
-    pitch_st: float = param(0.0, "Pitch delta", unit="semitones", ge=-12, le=12)
+    pitch_st: float = param(0.0, "Pitch delta", unit="semitones", ge=-12, le=12, advanced=True)
     volume_db: float = param(0.0, "Volume delta", unit="dB", ge=-24, le=12)
-    variability: float = param(0.0, "Variability delta", ge=-1, le=1)
-    pause_scale: float = param(1.0, "Pause length multiplier", ge=0.2, le=4)
-    instructions: str = param("", "Delivery instructions for instructable remote TTS")
-    sounds: list[str] = param([], "Non-verbal sounds allowed in this mood")
+    variability: float = param(0.0, "Variability delta", ge=-1, le=1, advanced=True)
+    pause_scale: float = param(1.0, "Pause length multiplier", ge=0.2, le=4, advanced=True)
+    instructions: str = param(
+        "", "Delivery instructions for instructable remote TTS", advanced=True
+    )
+    sounds: list[str] = param([], "Non-verbal sounds allowed in this mood", advanced=True)
 
 
 class VoiceBase(Strict):
@@ -4867,7 +4874,6 @@ class CueConfig(Strict):
         unit="dB",
         ge=-40,
         le=0,
-        advanced=True,
     )
 
 
@@ -5008,7 +5014,6 @@ class VoiceConfig(Strict):
             },
         },
         "Per-mood prosody deltas, at full weight; one per affect label",
-        advanced=True,
     )
     variation: VoiceVariation = param(
         {},
@@ -6949,7 +6954,7 @@ with warnings.catch_warnings():
         )
         light: LightConfig = param({}, "SPEC 7A", advanced=True)
         soothe: SootheConfig = param({}, "SPEC 7B")
-        motion: MotionConfig = param({}, "SPEC 10", advanced=True)
+        motion: MotionConfig = param({}, "SPEC 10")
         reflexes: ReflexConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6", advanced=True)

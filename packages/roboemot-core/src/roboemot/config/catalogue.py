@@ -29,9 +29,10 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
 - ``source``: layer that decides the value (``ConfigStack.source_of``): ``runtime``, ``derived``,
   ``app``, ``preset``, ``manifest``, ``defaults`` or ``schema``.
 - ``gt`` / ``ge`` / ``le`` (numeric limits; ``gt`` is exclusive), ``unit``, ``restart``,
-  ``admin_only``, ``opt_in``, ``conservative``, ``advanced``, ``description``: from the schema
-  (``field_meta`` for the flags). ``advanced``: a tuning field the settings page folds under
-  "Advanced"; a flag on a container covers its entries.
+  ``admin_only``, ``opt_in``, ``conservative``, ``description``: from the schema
+  (``field_meta`` for the flags).
+- ``advanced``: display only, not a guard. A tuning field the settings page folds under
+  "Advanced"; set on a container, it covers its entries (``field_meta``).
 - ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
   when absent) and the field is never writable from the web, except a route ``base_url`` (see

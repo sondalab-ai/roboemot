@@ -12,9 +12,13 @@ from pathlib import Path
 from typing import get_args, get_origin
 
 import pytest
+from roboemot.affect.clips import load_clip_library
+from roboemot.config import stack as stack_module
 from roboemot.config.catalogue import build_catalogue
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.config.stack import ConfigStack, field_meta, strip_optional
+from roboemot.config.stack import ConfigStack, field_meta, guarded_leaves, strip_optional
+from roboemot.manifest import load_manifest
+from roboemot.robot_platform import load_robot_platform
 from roboemot.webui.settings import SettingsEditor
 from roboemot.webui.strings import STRINGS
 from test_webui_settings import serve
@@ -22,6 +26,7 @@ from test_webui_settings import serve
 SETTINGS_JS = (
     Path(__file__).resolve().parents[1] / "src" / "roboemot" / "webui" / "static" / "settings.js"
 )
+MANIFEST = Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
 ENTRY = "_"  # one path element for a dict key or a list index (field_meta skips it)
 NEVER_ADVANCED = ("safety", "privacy")
 # Sections with no basic field on purpose: tuning only, or shipped by the robot manifest.
@@ -38,8 +43,27 @@ WHOLLY_ADVANCED = {
     "identity",
     "light",
     "llm_check",
-    "motion",
     "speech_motion_map",
+}
+# Guard-protected leaves in the fold (SPEC 11A): hardening knobs, still reachable by search and
+# the filters, and still guarded. Admin-only ones by path; conservative ones counted by section.
+ADVANCED_ADMIN_ONLY = {
+    "voice.piper.python",
+    "voice.barge_in.duck.confirm_ms",
+    "voice.realtime_route.audio_gate",
+    "voice.realtime_route.turns",
+    "voice.realtime_route.server_gates",
+    "webui.frame_ancestors",
+}
+ADVANCED_CONSERVATIVE = {
+    "catalogue": 6,
+    "motion": 9,
+    "reflexes": 20,
+    "register": 1,
+    "runtime": 1,
+    "voice": 3,
+    "webui": 19,
+    "world": 2,
 }
 
 
@@ -93,6 +117,51 @@ def test_every_section_keeps_a_basic_field_or_is_wholly_advanced_on_purpose():
     assert {s for s, n in basic.items() if n == 0} == WHOLLY_ADVANCED
 
 
+def test_the_guarded_leaves_in_the_fold_are_the_intended_ones():
+    folded = {p: m for p, m in LEAVES.items() if m.get("advanced")}
+    assert {p for p, m in folded.items() if m.get("admin_only")} == ADVANCED_ADMIN_ONLY
+    counts: dict[str, int] = {}
+    for path, meta in folded.items():
+        if meta.get("conservative"):
+            counts[path.split(".")[0]] = counts.get(path.split(".")[0], 0) + 1
+    assert counts == ADVANCED_CONSERVATIVE
+
+
+def test_the_flag_changes_no_guarded_leaf(monkeypatch):
+    cfg = ConfigStack().effective()
+    flagged = guarded_leaves(cfg)
+    real = stack_module._field_step
+
+    def unflagged(model, name):
+        extra, keyed, sub = real(model, name)
+        return {k: v for k, v in extra.items() if k != "advanced"}, keyed, sub
+
+    monkeypatch.setattr(stack_module, "_field_step", unflagged)
+    plain = guarded_leaves(cfg)
+    assert set(flagged) == set(plain)
+    for path, (value, meta) in flagged.items():
+        assert (value, {k: v for k, v in meta.items() if k != "advanced"}) == plain[path], path
+
+
+def test_settings_page_hides_exactly_the_additive_rows():
+    stack = ConfigStack()
+    manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
+    body_yaw = load_robot_platform(manifest.robot.id).gaze_map().body_yaw
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=body_yaw
+    )
+    rows = build_catalogue(stack)
+    entries = [e for r in rows for e in (r["entry"] or [])]
+
+    def fixed(row) -> bool:  # settingFixed in settings.js
+        return row["kind"] == "enum" and not row["nullable"] and row["choices"] == [True]
+
+    hidden = {r["path"] for r in rows if fixed(r)}
+    assert hidden == {r["path"] for r in rows if r["path"].endswith(".additive")}
+    assert len(hidden) == 22  # the Reachy manifest's expression, gesture and motion maps
+    assert {e["path"] for e in entries if fixed(e)} == {"additive"}
+
+
 @pytest.mark.parametrize(
     ("path", "advanced"),
     [
@@ -105,6 +174,10 @@ def test_every_section_keeps_a_basic_field_or_is_wholly_advanced_on_purpose():
         ("llm_routes._.name", False),
         ("llm_routes._.first_token_timeout_s", True),
         ("appraisal.rules._.valence", True),
+        ("motion.idle.breathing_amplitude", False),  # owner decision 2026-11-16
+        ("motion.idle.gaze_shift_amplitude", True),
+        ("voice.moods._.volume_db", False),
+        ("voice.moods._.pitch_st", True),
     ],
 )
 def test_field_meta_reads_the_flag(path, advanced):
@@ -146,7 +219,7 @@ def test_every_schema_section_is_in_one_purpose_group_and_each_has_its_heading()
     purposes = page_purposes()
     listed = [s for _, names in purposes for s in names]
     assert [p for p, _ in purposes] == [
-        "voice", "behaviour", "perception", "motion", "models", "system"
+        "safety", "voice", "behaviour", "perception", "motion", "models", "system"
     ]  # fmt: skip
     assert sorted(listed) == sorted(RoboEmotConfig.model_fields), "each section once, none unknown"
     for lang in STRINGS:
