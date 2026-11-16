@@ -76,6 +76,12 @@ class WakeGate:
         with self._lock:
             self._policy, self._window, self._max = policy, window_s, max_s
 
+    def close_window(self) -> None:
+        """Close the open follow-up window now: the next utterance needs the wake word wherever
+        the policy requires it (a requested nap started, SPEC 7A). The policy is unchanged."""
+        with self._lock:
+            self._until = -math.inf
+
     def decide(
         self,
         *,

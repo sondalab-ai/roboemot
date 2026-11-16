@@ -259,6 +259,18 @@ class Env:
         self.reg = default_skills(self.env)
 
 
+def test_the_default_llm_skills_are_the_five_and_the_voice_tools():
+    """SPEC 11: the voice tools add their skills to the default conversation.llm_skills."""
+    assert RoboEmotConfig().conversation.llm_skills == [
+        "play",
+        "look_at",
+        "express_emotion",
+        "remember_preference",
+        "stop_talking",
+        "go_to_sleep",
+    ]
+
+
 def test_the_default_skills_are_the_five_of_the_spec_and_all_visible():
     reg = Env().reg
     assert reg.names() == [

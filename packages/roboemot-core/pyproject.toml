@@ -47,5 +47,9 @@ dev = [
 [project.scripts]
 roboemot = "roboemot.cli:main"
 
+# Core's voice tools (SPEC 11, Voice tools): factories (ToolHost) -> list of @skill functions.
+[project.entry-points."roboemot.skills"]
+sleep = "roboemot.tools.sleep:skills"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot"]

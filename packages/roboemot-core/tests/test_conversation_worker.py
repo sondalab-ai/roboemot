@@ -123,6 +123,9 @@ class FakeSpeech:
     def ended_at(self, job_id):
         return self.ends.get(job_id, 0.0)
 
+    def speaking_at(self, now):
+        return False
+
     def texts(self) -> list[str]:
         return [s["text"] for s in self.said]
 

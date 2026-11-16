@@ -147,6 +147,7 @@ SECONDS_PER_MIN = 60.0
 MS_PER_S = 1000.0
 JOIN_TIMEOUT_S = 2.0
 READY_TIMEOUT_S = 5.0
+AFTER_TURN_POLL_S = 0.05  # how often an after-turn wait looks whether the reply audio ended
 INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (history, SPEC 8)
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 # ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
@@ -164,6 +165,7 @@ class Speech(Protocol):
     def first_audio_at(self, utterance: int) -> float | None: ...
     def played(self, job_id: int) -> bool: ...
     def ended_at(self, job_id: int) -> float | None: ...
+    def speaking_at(self, now: float) -> bool: ...
 
     @property
     def backend(self) -> Any:
@@ -238,6 +240,8 @@ class _Turn:
     rt_hold: bool = False  # it holds the audio input (from its first response.create)
     # its history entry, once written (_finish)
     messages: list[dict[str, Any]] | None = field(default=None, repr=False)
+    # one-shot callbacks run once its last reply audio has ended (after_turn)
+    after: list[Callable[[], None]] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -370,6 +374,7 @@ class ConversationWorker:
         # what _serve took off the queue and has not finished yet (a turn in service, before
         # it sets _active_turn): a server response then is refused as one while a turn runs
         self._serving: Any = None
+        self._after_tasks: set[asyncio.Task] = set()  # after_turn waits (kept from the GC)
         if realtime is not None:
             realtime.base_instructions = self._base_instructions
             realtime.server_turn = self._server_response
@@ -502,6 +507,69 @@ class ConversationWorker:
         second end is ignored by the cues)."""
         if utterance.realtime is not None:
             self.cues.listening_end(utterance.start_stamp)
+
+    def after_turn(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` once, after the open turn's last reply audio has ended, or at once
+        when no turn is open. A skill uses it to act after the robot said what it says about it
+        (``go_to_sleep``: the nap starts after the good night, SPEC 7A, 11). It waits for any
+        turn queued meanwhile too. A turn that raises or is cancelled still runs them once
+        (:meth:`_abandon`). Safe from any thread."""
+        with self._lock:
+            turn = self._active_turn
+            if turn is not None and not turn.done:
+                turn.after.append(callback)
+                return
+        self._run_after(callback)
+
+    def _abandon(self, turn: _Turn, *, cancelled: bool) -> None:
+        """A turn that raised or was cancelled before :meth:`_finish`: it is over, it is no
+        longer the open turn, and its ``after_turn`` callbacks still run once (an armed nap
+        still starts): after the reply audio, or at once when the worker itself is being
+        cancelled (its loop ends)."""
+        with self._lock:
+            if turn.done:
+                return
+            turn.done = True
+            after, turn.after = turn.after, []
+            if self._active_turn is turn:
+                self._active_turn = None
+        if not after:
+            return
+        log.info("conversation: turn ended early, %d after-turn callback(s) kept", len(after))
+        if cancelled or self._closed:
+            for callback in after:
+                self._run_after(callback)
+        else:
+            self._wait_after(after)
+
+    def _wait_after(self, callbacks: list[Callable[[], None]]) -> None:
+        """Start :meth:`_after_audio` for ``callbacks`` on the running loop, keeping the task."""
+        task = asyncio.get_running_loop().create_task(self._after_audio(callbacks))
+        self._after_tasks.add(task)
+        task.add_done_callback(self._after_tasks.discard)
+
+    async def _after_audio(self, callbacks: list[Callable[[], None]]) -> None:
+        """Wait until no reply audio is queued or playing and no other turn is being served,
+        then run ``callbacks`` (an ended turn's ``after_turn``) on the worker's loop."""
+        while not self._closed:
+            with self._lock:
+                busy = self._serving is not None or bool(self._pending)
+            if not busy and not self.speech.speaking_at(self.clock()):
+                break
+            await asyncio.sleep(AFTER_TURN_POLL_S)
+        else:
+            return
+        for callback in callbacks:
+            self._run_after(callback)
+
+    @staticmethod
+    def _run_after(callback: Callable[[], None]) -> None:
+        """Run one after-turn callback; one that raises is logged by type and never ends the
+        worker."""
+        try:
+            callback()
+        except Exception as exc:
+            log.warning("conversation: after-turn callback failed (%s)", type(exc).__name__)
 
     def _no_voice(self) -> bool:
         """Whether there is no local voice: the speech output was built with ``voice.backend:
@@ -819,6 +887,9 @@ class ConversationWorker:
                 turn.outcome = "not_heard"
             else:
                 await self._respond(turn, router, now)
+        except BaseException as exc:
+            self._abandon(turn, cancelled=isinstance(exc, asyncio.CancelledError))
+            raise
         finally:
             self._inner = None
             self.phase.end_thinking()
@@ -1414,12 +1485,13 @@ class ConversationWorker:
         server and its items go."""
         try:
             await self._answer_server_turn(st)
+        except BaseException as exc:
+            if st.turn is not None:  # it failed before _finish: no turn runs now
+                self._abandon(st.turn, cancelled=isinstance(exc, asyncio.CancelledError))
+            raise
         finally:
             if not st.adopted:
                 self.realtime.release(st.offer.request)
-            with self._lock:
-                if st.turn is not None and self._active_turn is st.turn and not st.turn.done:
-                    self._active_turn = None  # it failed before _finish: no turn runs now
 
     async def _answer_server_turn(self, st: _ServerTurn) -> None:
         offer, now = st.offer, self.clock()
@@ -2293,6 +2365,7 @@ class ConversationWorker:
             self._cut_realtime(turn)
         with self._lock:
             turn.done = True
+            after, turn.after = turn.after, []
             cut = turn.stopped or turn.cut
             items = turn.queued[turn.exchange_spoken :]
             texts = turn.spoken[turn.exchange_spoken :]
@@ -2376,6 +2449,8 @@ class ConversationWorker:
             )
         # counted last: a reader that waits on ``turns`` then finds the turn's record published
         self._counts["turns"] += 1
+        if after:
+            self._wait_after(after)
 
     # ----------------------------------------------------------------- report
 

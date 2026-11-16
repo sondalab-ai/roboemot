@@ -173,7 +173,7 @@ def start_voice_output(
         speaker=p.conv_speaker,
         names=p.names,
         name_source=host.name_source,  # one alias per name with traits and route checks
-        skills=skill_registry(stack, p, registry),
+        skills=skill_registry(stack, p, registry, host),
         preferences=(
             RegistryPreferences(
                 registry,
@@ -201,11 +201,15 @@ def start_voice_output(
         bind_barge_in(bargein, output, conv, listener, cut_own)
 
 
-def skill_registry(stack: ConfigStack, p: Pipeline, registry: Any) -> SkillRegistry:
+def skill_registry(
+    stack: ConfigStack, p: Pipeline, registry: Any, runtime: RuntimeHost
+) -> SkillRegistry:
     """The conversation's skills (SPEC 11): the default skills over the robot's pipeline plus
-    every ``roboemot.skills`` plugin, each plugin loaded once. Warns once when the merged
+    every ``roboemot.skills`` plugin, each plugin loaded once. The tools' host gets the run's
+    parts (``nap``: ``runtime.request_nap``, SPEC 7A). Warns once when the merged
     ``conversation.llm_skills`` hides one of core's own voice tools."""
     host = tool_host(stack.effective, p.bus)
+    host.nap = runtime.request_nap
     plugins = load_plugin_skill_sets(host)
     warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
     env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(

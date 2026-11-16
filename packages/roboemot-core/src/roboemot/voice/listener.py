@@ -477,6 +477,11 @@ class VoiceListener:
     def paused(self) -> bool:
         return self._paused.is_set()
 
+    def close_follow_up(self) -> None:
+        """Close the wake gate's follow-up window: a requested nap started (SPEC 7A), so only the
+        robot's name or a wake phrase addresses the robot until a new one opens it."""
+        self._gate.close_window()
+
     def snapshot(self) -> dict[str, Any]:
         """Counters and fast-path latencies for the debug report: numbers only, no content."""
         with self._lock:
