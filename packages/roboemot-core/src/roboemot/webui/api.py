@@ -31,7 +31,13 @@ from typing import Any, NoReturn, Protocol
 from urllib.parse import parse_qsl
 
 from roboemot.config.catalogue import FieldDescriptor
-from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
+from roboemot.config.schema import (
+    CONNECT_TIMEOUT_MAX_S,
+    CONNECT_TIMEOUT_MIN_S,
+    ROUTE_NAME_MAX_CHARS,
+    RoboEmotConfig,
+    WebUIConfig,
+)
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import (
     RouteBudgetExhausted,
@@ -79,7 +85,9 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind", "protocol", "voice"})
+ROUTE_FIELDS = frozenset(
+    {"name", "base_url", "model", "locality", "kind", "protocol", "voice", "connect_timeout_s"}
+)
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 # a server voice name the preview may ask for: empty (the route's default), or at most 64
 # characters that start with a letter, digit or underscore (never only spaces, a dot or a dash)
@@ -154,6 +162,7 @@ class SettingsPort(Protocol):
     def change_many(self, changes: object, source: str) -> dict[str, Any]: ...
     def preview_many(self, changes: object) -> list[dict[str, Any]]: ...
     def voice_switch(self, revealed: bool = False, language: str = "") -> dict[str, Any]: ...
+    def route_presets(self, language: str = "") -> list[dict[str, Any]]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -1168,23 +1177,29 @@ class WebApi:
     def _routes(self, req: Request) -> Response:
         """Routes by name, model and host, with the last conformance report and ``removable``
         (only the runtime layer holds the route, so the page may remove it), and the host
-        suffixes the realtime session provider declares (``realtime_key_hosts``)."""
+        suffixes the realtime session provider declares (``realtime_key_hosts``), the presets
+        of the add card (``presets``: id, label, fields, secret name; none whose route exists)
+        and the range of a route's ``connect_timeout_s``."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
         hosts = self.settings.realtime_key_hosts() if self.settings else []
+        presets = self.settings.route_presets(self._language()) if self.settings else []
         return Response(
             HTTPStatus.OK,
             {
                 "routes": [{**r, "removable": r["name"] in removable} for r in rows],
                 "realtime_key_hosts": hosts,  # where a realtime route's key may also go
                 "voices": {p: list(names) for p, names in KNOWN_VOICES.items()},
+                "presets": presets,
+                "connect_timeout_s": {"min": CONNECT_TIMEOUT_MIN_S, "max": CONNECT_TIMEOUT_MAX_S},
             },
         )
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
         ``locality``, ``kind`` (``chat`` or ``realtime``), ``protocol`` (``openai_realtime`` or
-        ``gemini_live``), ``voice`` (a realtime route's server voice), ``secret`` (a name in the
+        ``gemini_live``), ``voice`` (a realtime route's server voice), ``connect_timeout_s`` (a
+        realtime route's own connect timeout), ``secret`` (a name in the
         secret store; omitted or null for no key), ``ack_endpoint`` (required with a key: the
         endpoint the server names in ``endpoint_ack_required``) and ``pin``. A key typed into any
         field is refused."""

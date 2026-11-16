@@ -604,3 +604,109 @@ test("the Edit toggle says whether the route form is open and which form it open
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
   assert.equal(form.hidden, true);
 });
+
+// ---------------------------------------------------------------- presets and the connect timeout
+
+const GEMINI_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const GEMINI = {
+  id: "gemini_live", label: "Gemini Live (Google)", secret: "cloud_key",
+  fields: { name: "gemini", kind: "realtime", protocol: "gemini_live", base_url: GEMINI_URL, model: "gemini-3.8-live", locality: "cloud", connect_timeout_s: 15 },
+};
+const PLATFORM = {
+  id: "platform", label: "Platform server", secret: "hf_token",
+  fields: { name: "platform", kind: "realtime", base_url: "https://alloc.example/session", model: "s2s" },
+};
+
+async function presetsPage(presets, extra = {}) {
+  return routesPage({
+    "GET /api/strings": { language: "en", strings: { route_key_message: "Key to {host}", route_preset_key_missing: "Store {name} first." } },
+    "GET /api/routes": { routes: [], name_max_chars: 32, presets, connect_timeout_s: { min: 1, max: 30 } },
+    ...extra,
+  });
+}
+
+const presetButton = (page, id) => page.document.querySelector(`[data-preset="${id}"]`);
+
+test("presets: a preset fills the add form and picks its stored key", async () => {
+  let seen = null;
+  const page = await presetsPage([GEMINI], { "POST /api/routes/add": (b) => { seen = b; return { changed: true }; } });
+  presetButton(page, "gemini_live").click();
+  assert.equal(sel(page, "route-new-name").value, "gemini");
+  assert.equal(sel(page, "route-new-kind").value, "realtime");
+  assert.equal(sel(page, "route-new-protocol").value, "gemini_live");
+  assert.equal(sel(page, "route-new-timeout").value, "15");
+  assert.equal(sel(page, "route-new-timeout").closest(".sl-field").hidden, false, "shown for a realtime route");
+  assert.equal(sel(page, "route-new-key").value, "cloud_key", "the stored secret of the preset");
+  assert.equal(sel(page, "route-new-preset-key").textContent, "");
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(seen, {
+    name: "gemini", base_url: GEMINI_URL, model: "gemini-3.8-live", locality: "cloud", kind: "realtime",
+    protocol: "gemini_live", connect_timeout_s: 15, secret: "cloud_key", pin: PIN,
+    ack_endpoint: "wss://generativelanguage.googleapis.com",
+  });
+});
+
+test("presets: a preset whose key is not stored names it and fills the key name of the API keys card", async () => {
+  const page = await presetsPage([PLATFORM]);
+  presetButton(page, "platform").click();
+  assert.equal(sel(page, "route-new-key").value, "", "no key until it is stored");
+  assert.equal(sel(page, "route-new-preset-key").textContent, "Store hf_token first.");
+  assert.equal(sel(page, "secret-name").value, "hf_token");
+  assert.equal(sel(page, "secret-value").value, "", "never a value");
+  await page.run("routesView()");
+  assert.equal(sel(page, "route-new-name").value, "platform", "the redraw after the key is stored keeps the preset");
+});
+
+test("presets: a second preset resets what the first filled and it does not name", async () => {
+  let seen = null;
+  const page = await presetsPage([GEMINI, PLATFORM], { "POST /api/routes/add": (b) => { seen = b; return { changed: true }; } });
+  presetButton(page, "gemini_live").click();
+  presetButton(page, "platform").click();
+  assert.equal(sel(page, "route-new-protocol").value, "openai_realtime");
+  assert.equal(sel(page, "route-new-timeout").value, "");
+  assert.equal(sel(page, "route-new-key").value, "");
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(seen, {
+    name: "platform", base_url: "https://alloc.example/session", model: "s2s", locality: "cloud", kind: "realtime",
+    secret: null, pin: PIN,
+  });
+});
+
+test("presets: no preset, no preset row; the timeout field takes the server's range", async () => {
+  const page = await presetsPage([]);
+  assert.equal(page.document.querySelector("[data-preset]"), null);
+  assert.equal(sel(page, "route-new-preset-key"), null);
+  assert.equal(sel(page, "route-new-timeout").getAttribute("min"), "1");
+  assert.equal(sel(page, "route-new-timeout").getAttribute("max"), "30");
+});
+
+test("route edit: the connect timeout of a realtime route is set and cleared by path", async () => {
+  const RT = { ...ROUTE, name: "voice", kind: "realtime", connect_timeout_s: 15 };
+  const sent = [];
+  const page = await formsPage([RT], { "POST /api/settings": (b) => { sent.push([b.path, b.value]); return { changed: true }; } });
+  assert.equal(sel(page, "route-voice-timeout").value, "15");
+  sel(page, "route-voice-timeout").value = "20";
+  submit(page.window, sel(page, "route-voice-model").closest("form"));
+  await settle();
+  await answerPin(page);
+  sel(page, "route-voice-timeout").value = "";
+  submit(page.window, sel(page, "route-voice-model").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(sent, [["llm_routes.voice.connect_timeout_s", 20], ["llm_routes.voice.connect_timeout_s", null]]);
+});
+
+test("route edit: a chat route sends no connect timeout", async () => {
+  const sent = [];
+  const page = await formsPage([ROUTE], { "POST /api/settings": (b) => { sent.push(b.path); return { changed: true }; } });
+  assert.equal(sel(page, "route-lan-timeout").closest(".sl-field").hidden, true);
+  sel(page, "route-lan-model").value = "m2";
+  submit(page.window, sel(page, "route-lan-model").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(sent, ["llm_routes.lan.model"]);
+});

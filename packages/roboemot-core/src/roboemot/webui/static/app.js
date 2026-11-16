@@ -908,8 +908,9 @@ const ROUTE_PROTOCOL_DEFAULT = "openai_realtime";
 const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
 
 // One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
-// names, never typed. `save(values, form)` runs the PIN dialog and the calls.
-function routeForm(route, secrets, nameMax, save) {
+// names, never typed. `save(values, form)` runs the PIN dialog and the calls. A new route's form
+// offers `presets` (GET /api/routes `presets`) as buttons that fill it in.
+function routeForm(route, secrets, nameMax, save, presets = []) {
   const id = (k) => "route-" + (route ? route.name : "new") + "-" + k;
   const name = route ? null : textInput(id("name"), { required: true, maxlength: String(nameMax), autocomplete: "off", spellcheck: "false" });
   const url = textInput(id("url"), { type: "url", required: !route, autocomplete: "off", spellcheck: "false", placeholder: t(route ? "route_url_keep" : "route_url_placeholder") });
@@ -926,6 +927,12 @@ function routeForm(route, secrets, nameMax, save) {
   const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", list: id("voices"), value: route ? route.voice || "" : "" });
   const voices = voiceList(id("voices"), route ? route.protocol : protocol.value);
   if (protocol) protocol.addEventListener("change", () => fillVoices(voices, protocol.value));
+  const range = state.routeTimeout || {};
+  const timeout = textInput(id("timeout"), {
+    type: "number", step: "any", inputmode: "decimal", autocomplete: "off",
+    ...(range.min !== undefined ? { min: String(range.min) } : {}), ...(range.max !== undefined ? { max: String(range.max) } : {}),
+    value: route && route.connect_timeout_s != null ? String(route.connect_timeout_s) : "",
+  });
   // protocol and voice apply to a realtime route only: shown for that kind alone; a stored route
   // can preview the voice typed or picked
   const isRealtime = () => (route ? route.kind : kind.value) === "realtime";
@@ -933,6 +940,7 @@ function routeForm(route, secrets, nameMax, save) {
     protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : null,
     el("div", { class: "stack" }, field(id("voice"), t("route_voice"), voice, t("route_voice_hint")), voices,
       route ? voicePreview(route.name, () => voice.value.trim(), id("voice")) : []),
+    field(id("timeout"), t("route_timeout"), timeout, t("route_timeout_hint")),
   ].filter(Boolean);
   const showRealtime = () => { for (const f of realtimeOnly) f.hidden = !isRealtime(); };
   if (kind) kind.addEventListener("change", showRealtime);
@@ -944,19 +952,52 @@ function routeForm(route, secrets, nameMax, save) {
   for (const n of names) keys.push([n, n]);
   const key = el("select", { id: id("key"), class: "sl-field__input" }, keys.map(([v, label]) => el("option", { value: v }, label)));
   key.value = current;
+  // A preset sets every field it fills and resets the others to the form's defaults, so a second
+  // preset never keeps a field of the first. Its key is chosen when stored; else the API keys card
+  // gets its name and the form says to store it first. The choice survives a redraw of the tab.
+  const keyHint = el("p", { class: "hint", id: id("preset-key"), role: "status" });
+  const applyPreset = (p) => {
+    const f = p.fields;
+    name.value = f.name || "";
+    kind.value = f.kind || "chat";
+    protocol.value = f.protocol || ROUTE_PROTOCOL_DEFAULT;
+    fillVoices(voices, protocol.value);
+    url.value = f.base_url || "";
+    model.value = f.model || "";
+    locality.value = f.locality || "cloud";
+    timeout.value = f.connect_timeout_s != null ? String(f.connect_timeout_s) : "";
+    voice.value = "";
+    const stored = names.includes(p.secret);
+    key.value = stored ? p.secret : "";
+    keyHint.textContent = stored ? "" : t("route_preset_key_missing", { name: p.secret });
+    const secretName = document.getElementById("secret-name");
+    if (!stored && secretName) secretName.value = p.secret;
+    state.routePreset = p.id;
+    showRealtime();
+  };
+  const presetRow = route || !presets.length ? [] : el("div", { class: "stack" },
+    markedEyebrow("p", t("route_presets")),
+    el("p", { class: "hint" }, t("route_presets_hint")),
+    el("div", { class: "row" }, presets.map((p) => button(p.label, "plain", () => applyPreset(p),
+      { small: true, attrs: { "data-preset": p.id, "aria-describedby": id("preset-key") } }))),
+    keyHint);
   const send = submitButton(t(route ? "route_save" : "route_add"));
   const form = el("form", {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
       const rt = isRealtime();
+      const typed = timeout.value.trim();
+      const kept = route && route.connect_timeout_s != null ? route.connect_timeout_s : null;
       whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
         locality: locality.value, key: key.value, voice: rt ? voice.value.trim() : (route ? route.voice || "" : ""),
+        connect_timeout_s: rt ? (typed === "" ? null : Number(typed)) : kept,
         ...(kind ? { kind: kind.value } : {}), ...(protocol && rt ? { protocol: protocol.value } : {}),
       })));
     },
   },
+  presetRow,
   name ? field(id("name"), t("route_name"), name) : [],
   field(id("url"), t("route_url"), url, route ? t("route_url_hint_edit") : null),
   field(id("model"), t("route_model"), model),
@@ -966,6 +1007,8 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, send));
   showRealtime();
+  const chosen = route ? null : presets.find((p) => p.id === state.routePreset);
+  if (chosen) applyPreset(chosen);
   return form;
 }
 
@@ -1096,6 +1139,7 @@ async function saveRoute(route, v) {
       name: v.name, base_url: v.base_url, model: v.model, locality: v.locality, kind: v.kind || "chat",
       ...(v.protocol && v.protocol !== ROUTE_PROTOCOL_DEFAULT ? { protocol: v.protocol } : {}),
       ...(v.voice ? { voice: v.voice } : {}),
+      ...(v.connect_timeout_s != null ? { connect_timeout_s: v.connect_timeout_s } : {}),
       secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
     }))]);
@@ -1113,6 +1157,8 @@ async function saveRoute(route, v) {
     if (v.locality !== route.locality && !toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
     if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
     if (v.voice !== (route.voice || "")) steps.push([t("route_voice"), set("voice", v.voice)]);
+    const keptTimeout = route.connect_timeout_s != null ? route.connect_timeout_s : null;
+    if (v.connect_timeout_s !== keptTimeout) steps.push([t("route_timeout"), set("connect_timeout_s", v.connect_timeout_s)]);
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
@@ -1213,6 +1259,9 @@ async function routesView() {
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
   state.routeVoices = data.voices || {};
+  state.routeTimeout = data.connect_timeout_s || {};
+  const presets = data.presets || [];
+  if (!presets.some((p) => p.id === state.routePreset)) state.routePreset = null;
   let secrets = null;
   let secretsError = null;
   try {
@@ -1276,7 +1325,7 @@ async function routesView() {
     return routeCard;
   });
   const addCard = card(t("tab_routes"), t("route_add_title"), el("p", { class: "hint" }, t("route_add_intro")),
-    routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v)));
+    routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v), presets));
   // Names kept as typed (admin PIN, one request): shown here only until the view is redrawn.
   const refusedBox = el("div", { role: "status" });
   const showRefused = async () => {

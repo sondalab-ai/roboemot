@@ -68,7 +68,11 @@ the shell use SSH.
 
 ## 3. Add the `pollen` route
 
-**Routes** tab, **Add a route** card (**Aggiungi un modello**):
+An install with `--cloud-voice` has written this route already: skip this step. Otherwise go to
+the **Routes** tab, **Add a route** card (**Aggiungi un modello**), and press **Pollen's server
+(Hugging Face)** under **Start from a preset**. The robot's settings plugin offers this preset,
+and only while no route named `pollen` exists. It fills in these fields, and the key when
+`hf_token` is stored:
 
 | Field | Value |
 | --- | --- |
@@ -191,7 +195,8 @@ card works too. The robot sends the key only in the `x-goog-api-key` header, nev
 
 ### 2. Add the `gemini` route
 
-**Routes** tab, **Add a route** card:
+**Routes** tab (**Modelli**), **Add a route** card: press **Gemini Live (Google)** under **Start
+from a preset**. The preset fills in every field below except the voice:
 
 | Field | Value |
 | --- | --- |
@@ -199,9 +204,18 @@ card works too. The robot sends the key only in the `x-goog-api-key` header, nev
 | Kind | Realtime speech (`realtime`) |
 | Realtime protocol | Gemini Live (`gemini_live`) |
 | Base URL | `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` |
-| Key | `gemini_key` |
 | Model | `gemini-3.8-live` |
-| Voice | pick one from the list, for example `Kore` (listen first: below) |
+| Locality | Cloud |
+| Connect timeout (s) | `15` |
+| Key | `gemini_key`, when it is stored |
+
+- When `gemini_key` is not stored yet, the card says so and fills the name `gemini_key` into the
+  **API keys** card below. Type the key there and save it. The add card keeps the preset; press
+  **Add route**.
+- The preset is not offered while a route named `gemini` exists. A route that the installer or
+  `app.yaml` wrote stays the one in use.
+- The PIN dialog names the host the key goes to (`wss://generativelanguage.googleapis.com`).
+- Pick the voice after the add, on the route's own card (below).
 
 The same route in `app.yaml`:
 
@@ -229,8 +243,9 @@ llm_routes:
   `daily_token_budget`. Save the route to keep the voice. A preview while the conversation's
   session is up opens a second session, which the free tier may refuse (1008): try again later.
 - `connect_timeout_s`: the route's own connect budget. Some first connects took 10.6 s until
-  Gemini confirmed the session, more than the shared 5 s. The web UI form has no field for it: set
-  it in `app.yaml`, or search `llm_routes` in the **Settings** tab.
+  Gemini confirmed the session, more than the shared 5 s. The preset sets 15. The route form's
+  **Connect timeout (s)** field changes it (1 to 30 s); empty uses the shared
+  `voice.realtime_route.connect_timeout_s`.
 - The base URL has no query: the web UI refuses one.
 
 ### 3. Check the route

@@ -536,6 +536,20 @@ EN: dict[str, str] = {
         "(wss://) and needs direct mode and robot turns. Changing it later means changing the "
         "address with it, so it needs the configuration file."
     ),
+    "route_presets": "Start from a preset",
+    "route_presets_hint": (
+        "A preset fills in the form below. Its key is stored in the API keys card under the name "
+        "it shows. After the add, pick the voice on the route's own card, where it can be played."
+    ),
+    "route_preset_key_missing": (
+        "Store the key {name} first in the API keys card below: its name is filled in there. "
+        "This form keeps the preset."
+    ),
+    "route_timeout": "Connect timeout (s)",
+    "route_timeout_hint": (
+        "Only for a realtime speech route: how long its session may take to connect. Empty uses "
+        "the shared realtime setting."
+    ),
     "route_voice": "Voice",
     "route_voice_hint": (
         "Only for a realtime speech route: the server's voice name. Pick a known voice or type "
@@ -1647,6 +1661,21 @@ IT: dict[str, str] = {
         "Solo per un modello voce in tempo reale. Gemini Live si collega all'indirizzo così com'è "
         "(wss://) e richiede la modalità diretta e i turni decisi dal robot. Cambiarlo dopo "
         "significa cambiare anche l'indirizzo, quindi richiede il file di configurazione."
+    ),
+    "route_presets": "Parti da una configurazione pronta",
+    "route_presets_hint": (
+        "Una configurazione pronta compila il modulo qui sotto. La sua chiave si salva nella "
+        "scheda chiavi API con il nome che mostra. Dopo l'aggiunta, scegli la voce nella scheda "
+        "del modello, dove si può ascoltare."
+    ),
+    "route_preset_key_missing": (
+        "Salva prima la chiave {name} nella scheda chiavi API qui sotto: il nome è già compilato. "
+        "Questo modulo tiene la configurazione scelta."
+    ),
+    "route_timeout": "Tempo massimo di connessione (s)",
+    "route_timeout_hint": (
+        "Solo per un modello voce in tempo reale: quanto può durare la connessione della sua "
+        "sessione. Vuoto usa l'impostazione condivisa del tempo reale."
     ),
     "route_voice": "Voce",
     "route_voice_hint": (
