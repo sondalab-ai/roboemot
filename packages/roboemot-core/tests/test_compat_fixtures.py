@@ -31,7 +31,8 @@ from roboemot import install, paths
 from roboemot.affect.clips import load_clip_library
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.config.stack import DROPPED_SETTINGS, MIGRATED_SETTINGS
+from roboemot.config.stack import DROPPED_SETTINGS, MIGRATED_SETTINGS, get_path
+from roboemot.install import web_voice
 from roboemot.manifest import Manifest, load_manifest
 from roboemot.realtime.route import select_provider
 from roboemot.realtime.session import DirectSession
@@ -39,6 +40,7 @@ from roboemot.robot_platform import load_robot_platform
 from roboemot.runtime.host import RuntimeHost
 from roboemot.runtime.webui import WebAdmin, restore_settings
 from roboemot.secret_store import SecretStore
+from roboemot.webui import voice_switch as vs
 from roboemot.webui.settings import parse_okey
 
 REPO = Path(__file__).resolve().parents[3]
@@ -306,3 +308,62 @@ def test_every_fixture_key_is_a_setting_or_moved(name):
         if not schema_has(RoboEmotConfig, p.split(".")) and not moved(p)
     )
     assert unknown == [], "not in the schema and not in moved_settings.yaml dropped or migrated"
+
+
+# ------------------------------------------------------------------ reinstall keeps the voice (S3)
+
+
+def fixture_voice(name: str, settings: dict | None = None) -> web_voice.RobotVoice:
+    """The installer's reading of fixture ``name``: its ``app.yaml`` and its web settings file
+    (or ``settings`` in its place), built on the PC the way the installer builds it."""
+    src = COMPAT / name
+    app = yaml.safe_load((src / "app.yaml").read_text())
+    saved = settings or json.loads((src / "webui_settings.json").read_text())
+    robot_id = load_manifest(MANIFEST, allow_unmeasured_dynamics=True).robot.id
+    found = web_voice.robot_voice(REPO, robot_id, app, saved)
+    assert found is not None
+    return found
+
+
+def voice_keys(cfg: RoboEmotConfig) -> dict[str, Any]:
+    """Every key of the Settings voice switch with its value in ``cfg``."""
+    return {key: get_path(cfg, key) for key in vs.profiles().keys}
+
+
+@pytest.mark.parametrize(
+    ("name", "current", "from_web"),
+    [
+        ("cloud_voice", None, False),
+        ("gemini_switch", "route:gemini", True),
+        ("local_voice", vs.LOCAL, False),
+    ],
+)
+def test_the_installer_reads_the_choice_the_robot_starts_with(name, current, from_web):
+    found = fixture_voice(name)
+    platform = web_voice.platform_choice(platform_route())
+    assert found.current == (current or platform)
+    assert found.from_web is from_web
+    assert found.app_only == (vs.LOCAL if name == "local_voice" else platform)
+    robot_data(name)
+    admin, _, _ = start(app_stack())
+    assert admin is not None
+    assert admin.settings.voice_switch(revealed=True)["value"] == found.current
+
+
+def test_switching_the_gemini_robot_back_drops_only_the_two_switch_keys():
+    found = fixture_voice("gemini_switch")
+    assert found.label == "the gemini route"
+    assert found.switch_back == ("voice.realtime_route.mode", "voice.realtime_route.route")
+    saved = json.loads((COMPAT / "gemini_switch" / "webui_settings.json").read_text())
+    back = web_voice.without(saved, found.switch_back)
+    assert set(saved["overrides"]) - set(back["overrides"]) == set(found.switch_back)
+    assert back["acks"] == saved["acks"] and back["keys"] == saved["keys"]
+    data = robot_data("gemini_switch")
+    paths.settings_overrides_path(str(data)).write_text(web_voice.settings_text(back))
+    admin, switched, _ = start(app_stack())
+    assert admin is not None
+    robot_data("cloud_voice")
+    _, installed, _ = start(app_stack())
+    assert voice_keys(switched) == voice_keys(installed)
+    platform = web_voice.platform_choice(platform_route())
+    assert fixture_voice("gemini_switch", back).current == platform

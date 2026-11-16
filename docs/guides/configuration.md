@@ -125,6 +125,12 @@ The cloud voice is off by default. Audio leaving the robot is an admin opt-in (S
 Passing `--cloud-voice` accepts the `privacy.realtime_audio` opt-in, and with it `privacy.realtime_audio_unaddressed`: once `voice.realtime_route.turns` is `server`, every speech segment the robot hears while awake can stream to the server, not only speech meant for the robot. The profile does not set `turns`. `-y` alone never turns the
 profile on. An unattended run must say `--cloud-voice` or `--no-cloud-voice`.
 
+A reinstall keeps a voice provider chosen in the Settings voice switch (local voice, Pollen or
+another realtime route such as Gemini), whatever the flags, `-y` included. It says `Kept the voice
+provider <choice> (chosen in the web UI)` and leaves the voice keys of `app.yaml` as they are. Only
+`--cloud-voice` on a terminal asks `Switch the voice back to <platform>?` (default no). A yes removes
+only the saved settings that choose the other provider from `webui_settings.json`.
+
 The profile needs the voice pipeline, so it keeps `voice.enabled: true`, which the installer sets.
 The installer refuses `--cloud-voice` together with `--no-voice` or `--piper`, before it touches the
 robot.
