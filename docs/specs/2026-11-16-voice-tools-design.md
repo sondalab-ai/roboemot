@@ -74,13 +74,13 @@ Owner picked approach 1 on 2026-11-16.
 
 - New entry-point group `roboemot.skills`, registered in `plugins.GROUPS` with a contract: a factory `(ToolHost) -> list[skill functions]`. `ToolHost` is a narrow core protocol that gives a tool what it may use: the scheduler, the media player, the nap request, the config reader, the clock, the secret store reader.
 - Core's own tools are registered through the same group from `roboemot-core`'s `pyproject.toml`.
-- A tool from a plugin is offered to the model only when its name is in `conversation.llm_skills`. The five new tools are added to the default list. A tool whose own `tools.<name>.enabled` is false is not offered.
+- A tool from a plugin is offered to the model only when its name is in `conversation.llm_skills`. Every skill of the five new tools is added to the default list: `go_to_sleep`, the five timer and reminder skills, `weather`, `radio_play`, `radio_stop` and `radio_volume`. Sleep and timers have no `enabled` switch: `conversation.llm_skills` is their switch. Weather and radio have `tools.weather.enabled` and `tools.radio.enabled`, and a skill's `available` check hides them until the admin turns them on, so turning them on in the Tools tab needs no list edit.
 - Each tool group may have several skills (for example `timer_set`, `timer_list`, `timer_cancel`). Builder's call on the exact split; fewer skills with an `action` `Literal` is acceptable if the schemas stay clear.
 
 ### 2. Sleep tool
 
 - `go_to_sleep()` starts a **requested nap** now, with the same posture, affect, voice and vision rates as a nap that came from idle time (SPEC 7A).
-- Wake rules (owner decision 2026-11-16): for `circadian.requested_nap_min_s` after it starts, only the robot's name or a due timer/reminder wakes it; a visible face, motion, light, loud sound and unaddressed speech do not. After that time the usual day-nap wake rules apply. This is a small new state in the circadian nap logic, not a thin call. "Wake up" needs no tool: the name already wakes the robot.
+- Wake rules (owner decision 2026-11-16): for `circadian.requested_nap_min_s` after it starts, only the wake word (the robot's name or a generic wake phrase, through the same wake-word branch) or a due timer/reminder wakes it; a visible face, motion, light, loud sound and unaddressed speech do not. After that time the usual day-nap wake rules apply. This is a small new state in the circadian nap logic, not a thin call. "Wake up" needs no tool: the name already wakes the robot.
 - During quiet hours the tool still works (the robot is already resting; the result says so).
 - Fire-and-forget after the reply: the model says a short good-night, then the nap starts. The nap must start after the reply has finished playing, not during it.
 
@@ -104,7 +104,7 @@ Owner picked approach 1 on 2026-11-16.
 ### 4. Weather tool
 
 - Provider: Open-Meteo (no API key). Only the configured location (latitude, longitude) and the requested days leave the robot.
-- Location: the existing private `circadian.location` (lat, lon) plus a display name `tools.weather.place_name`, set in the Tools tab (with a place search through Open-Meteo's geocoding API, called only from the web UI by the admin). No second coordinate pair (my call, 2026-11-16).
+- Location: the existing private `circadian.location` (lat, lon) plus a display name `tools.weather.place_name`, set in the Tools tab (with a place search through Open-Meteo's geocoding API, called only from the web UI by the admin, at most `tools.weather.geocode_results` results, default 5, range 1 to 10). No second coordinate pair (my call, 2026-11-16).
 - Result to the model: current conditions and a daily forecast for up to `tools.weather.forecast_days`, in metric units, as structured data; the model phrases it.
 - Short cache (`tools.weather.cache_s`) so a follow-up question costs no extra call.
 - Off by default; the admin turns it on (`tools.weather.enabled`).
@@ -115,7 +115,7 @@ Owner picked approach 1 on 2026-11-16.
 - **Sharing the speaker (owner decision 2026-11-16: pause now, mixer later).** Today one speaker queue carries all robot audio, so true ducking needs a new real-time mixer. In this epic the radio **pauses**: it stops pushing audio while the robot speaks (TTS, cue, announcement) and while a person addresses the robot (from the wake word to the end of the reply), then rejoins the live stream after `tools.media.resume_after_s` of silence (the buffered backlog is dropped). A mixer with ducking is a later opt-in slice after robot tests.
 - **Self-hearing.** The player publishes "the robot is playing music" on the bus.
   - Dance (owner decision 2026-11-16): the existing microphone detector keeps running on the robot's own music and may start the dance, with its tempo and beat from the microphone as today. Behaviour flag `tools.radio.dance` (default on) lets the admin turn this off; off, the detector ignores music while the player plays. Beat drift from echo and playback latency is a known risk for the robot test.
-  - Lyrics: during playback the listener keeps the wake word and addressed speech working; speech that is not addressed is never answered, whatever the conversation policy, while the flag is set.
+  - Lyrics: during playback only the wake word (the robot's name or a generic wake phrase) addresses the robot. The follow-up window, a face in view and the conversation policy do not count, because the follow-up window would answer lyrics.
 - **Stations.** A list in config (`tools.radio.stations`: name, URL, genres, language), edited in the Tools tab. The model gets the station names and genres as `choices` (snapshotted per request, SPEC 10). Only listed URLs are ever played: the model cannot pass a URL.
 - **Tools.** `radio_play(station)`, `radio_stop()`, `radio_volume(change)`. A stream that fails to start or drops is reported to the model as an error result; a drop during play stops the player and logs the station name only.
 - **Limits.** `tools.radio.max_play_s` (auto stop), stop on nap and on platform sleep.
