@@ -448,6 +448,9 @@ EN: dict[str, str] = {
     ),
     "voice_switch_confirm": "Switch",
     "voice_switch_same": "The voice already uses this choice.",
+    "voice_switch_unrevealed": (
+        "The privacy opt-ins are private: this choice ignores them until you use Show with PIN."
+    ),
     "settings_edited": "Edited",
     "settings_add": "Add entry",
     "settings_remove": "Remove",
@@ -1542,6 +1545,9 @@ IT: dict[str, str] = {
     ),
     "voice_switch_confirm": "Cambia",
     "voice_switch_same": "La voce usa già questa scelta.",
+    "voice_switch_unrevealed": (
+        "I consensi privacy sono privati: questa scelta li ignora finché non usi Mostra con il PIN."
+    ),
     "settings_edited": "Modificata",
     "settings_add": "Aggiungi voce",
     "settings_remove": "Rimuovi",

@@ -626,7 +626,8 @@ function voiceSwitchRow(data) {
     select.value = data.value;
     if (choice) await voiceSwitch(choice);
   });
-  return el("div", { class: "stack", "data-path": id }, field(id, t("voice_switch"), select, t("voice_switch_hint")));
+  return el("div", { class: "stack", "data-path": id }, field(id, t("voice_switch"), select,
+    t("voice_switch_hint") + (data.revealed ? "" : " " + t("voice_switch_unrevealed"))));
 }
 
 // Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
@@ -912,11 +913,17 @@ const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? sett
 
 // ---------------------------------------------------------------- reveal and reload
 
+// The same PIN also reads the voice switch matched on the privacy opt-ins (private, SPEC 12).
 async function revealSettings() {
-  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"),
-    (pin) => api("POST", "/api/settings/reveal", { pin }));
+  let voice = null;
+  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"), async (pin) => {
+    const fields = await api("POST", "/api/settings/reveal", { pin });
+    if (settingsState.voice) voice = await api("POST", "/api/settings/voice", { pin }).catch(() => null);
+    return fields;
+  });
   if (!result) return;
   revealedSettings = new Map(result.fields.map((f) => [f.path, f]));
+  if (voice) settingsState.voice = voice;
   settingsApplyModel(settingsState.data);
   refreshSettings();
 }

@@ -190,7 +190,8 @@ Every choice writes the same 17 keys: `voice.enabled`, `voice.realtime_route.ena
 It matches a choice on `voice.enabled`, `voice.realtime_route.enabled`, `voice.backend`,
 `voice.fallback_backend` and the two privacy opt-ins, plus `route` and `mode` when the choice
 turns the realtime route on. A tuned timeout or wake policy keeps the choice; the next switch writes
-it again.
+it again. The opt-ins are private: until you use **Show with PIN** the row ignores them, so a local robot
+with an opt-in left on shows Local, and Custom after the PIN.
 
 Picking a choice asks for the PIN once, lists every setting that changes with its old and new value
 and names the privacy opt-ins, then saves all of them or none (SPEC 11A, Batch settings save).

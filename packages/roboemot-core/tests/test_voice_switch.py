@@ -268,7 +268,7 @@ def served_cloud(tmp_path):
 def test_the_api_lists_the_switch_and_the_preview_shows_its_diff(served_cloud):
     client, editor = served_cloud
     data = client.request("GET", "/api/settings/voice").json
-    assert set(data) == {"value", "choices"} and data["value"] == GEMINI
+    assert set(data) == {"value", "revealed", "choices"} and data["value"] == GEMINI
     keys = {"id", "kind", "route", "protocol", "label", "available", "reason", "secret", "changes"}
     assert all(set(c) == keys for c in data["choices"])
     local = next(c for c in data["choices"] if c["id"] == vs.LOCAL)
@@ -288,3 +288,48 @@ def test_every_reason_kind_and_custom_is_worded():
     assert {f"voice_reason_{r}" for r in (vs.SECRET_MISSING, vs.MODELS_MISSING)} <= set(words)
     kinds = (vs.KIND_LOCAL, vs.KIND_PLATFORM, vs.KIND_DIRECT, vs.CUSTOM)
     assert {f"voice_choice_{k}" for k in kinds} <= set(words)
+
+
+# ------------------------------------------------------------------ private opt-ins (SPEC 12)
+
+OPT_INS = ("privacy.realtime_audio", "privacy.realtime_audio_unaddressed")
+
+
+def without_pin(name: str, opt_ins: bool) -> dict:
+    """Fixture ``name`` with both privacy opt-ins set to ``opt_ins`` (as runtime edits), read
+    the way the page reads it without the PIN."""
+    editor, _ = started(name)
+    editor.change_many([{"path": p, "value": opt_ins} for p in OPT_INS])
+    return editor.voice_switch()
+
+
+@pytest.mark.parametrize("name", ["cloud_voice", "local_voice"])
+def test_without_the_pin_the_answer_does_not_depend_on_the_opt_ins(name):
+    assert without_pin(name, True) == without_pin(name, False)
+
+
+def test_the_changes_are_the_choice_values_not_the_robot_state():
+    cloud, local = without_pin("cloud_voice", True), without_pin("local_voice", False)
+    assert cloud["choices"][0]["changes"] == local["choices"][0]["changes"]  # Local on both
+    on, off = without_pin("gemini_switch", True), without_pin("gemini_switch", False)
+    assert [c["changes"] for c in on["choices"]] == [c["changes"] for c in off["choices"]]
+
+
+def test_the_pin_path_matches_on_the_opt_ins_too():
+    editor, _ = started("local_voice")
+    editor.change("privacy.realtime_audio", True)
+    assert editor.voice_switch()["value"] == vs.LOCAL
+    assert editor.voice_switch(revealed=True) == {
+        **editor.voice_switch(),
+        "value": vs.CUSTOM,
+        "revealed": True,
+    }
+
+
+def test_the_revealed_switch_needs_the_pin(served_cloud):
+    client, _ = served_cloud
+    assert client.request("GET", "/api/settings/voice").json["revealed"] is False
+    shown = client.request("POST", "/api/settings/voice", {"pin": PIN}).json
+    assert shown["revealed"] is True and shown["value"] == GEMINI
+    refused = client.request("POST", "/api/settings/voice", {"pin": "000000"})
+    assert refused.status == 401 and refused.json == {"error": "bad_pin"}

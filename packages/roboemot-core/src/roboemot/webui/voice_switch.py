@@ -23,6 +23,7 @@ import yaml
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import get_path
+from roboemot.redact import is_private
 from roboemot.secret_store import SECRET_REF
 
 from .robot_section import VoiceProfile
@@ -142,21 +143,24 @@ def choices(cfg: RoboEmotConfig, platform: VoiceProfile | None) -> list[Choice]:
     return out
 
 
-def matches(cfg: RoboEmotConfig, choice: Choice) -> bool:
+def matches(cfg: RoboEmotConfig, choice: Choice, revealed: bool = True) -> bool:
     """Whether the effective ``cfg`` is ``choice``: every ``match`` key equal, and with the
     realtime route on in the choice every ``match_realtime`` key too. The tuning keys (timeouts,
-    tools, wake policy, sound direction, turns) do not decide it."""
+    tools, wake policy, sound direction, turns) do not decide it. Without ``revealed`` (no PIN)
+    the private keys (the privacy opt-ins) are not compared, so the answer never shows them."""
     data = profiles()
     keys = list(data.match)
     if choice.values[REALTIME_ON]:
         keys += data.match_realtime
+    if not revealed:
+        keys = [k for k in keys if not is_private(k)]
     return all(get_path(cfg, key) == choice.values[key] for key in keys)
 
 
-def current(cfg: RoboEmotConfig, options: list[Choice]) -> str:
-    """The id of the choice ``cfg`` is (``matches``), else ``custom``. Two choices never both
-    match: they differ in the realtime switch or the route name."""
-    return next((c.id for c in options if matches(cfg, c)), CUSTOM)
+def current(cfg: RoboEmotConfig, options: list[Choice], revealed: bool = True) -> str:
+    """The id of the first choice ``cfg`` is (``matches``), else ``custom``. Two choices never
+    both match: they differ in the realtime switch or the route name."""
+    return next((c.id for c in options if matches(cfg, c, revealed)), CUSTOM)
 
 
 def judged(
@@ -186,14 +190,17 @@ def voice_switch(
     platform: VoiceProfile | None,
     known: set[str] | None,
     local_ready: bool,
+    revealed: bool = False,
 ) -> dict[str, Any]:
-    """The switch as ``GET /api/settings/voice`` sends it: ``value`` (a choice id or ``custom``)
-    and ``choices``, each with ``id``, ``kind``, ``route``, ``protocol``, ``label``,
-    ``available``, ``reason``, ``secret`` and ``changes`` (every key as ``{path, value}``, the
-    body of the batch preview and save). Nothing in it is a key or a private value."""
+    """The switch as the API sends it: ``value`` (a choice id or ``custom``), ``revealed`` and
+    ``choices``, each with ``id``, ``kind``, ``route``, ``protocol``, ``label``, ``available``,
+    ``reason``, ``secret`` and ``changes`` (every key as ``{path, value}``, the body of the batch
+    preview and save: the choice's own values, the same on every robot, never the current ones).
+    Without ``revealed`` (no PIN) ``value`` is matched without the private keys (``matches``)."""
     options = choices(cfg, platform)
     return {
-        "value": current(cfg, options),
+        "value": current(cfg, options, revealed),
+        "revealed": revealed,
         "choices": [
             {
                 "id": c.id,

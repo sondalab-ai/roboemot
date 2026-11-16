@@ -464,6 +464,22 @@ test("voice switch: a choice already in place saves nothing", async () => {
   assert.ok(page.document.querySelector("#notice").textContent.includes("voice_switch_same"));
 });
 
+test("voice switch: Show with PIN reads the switch matched on the private opt-ins with the same PIN", async () => {
+  const page = await voicePage({
+    "POST /api/settings/reveal": { fields: [] },
+    "POST /api/settings/voice": { ...VOICE, value: "custom", revealed: true },
+  }, { ...VOICE, revealed: false });
+  assert.ok(row(page, "voice-switch").textContent.includes("voice_switch_unrevealed"));
+  page.run("revealSettings()");
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/voice").map((c) => c.body), [{ pin: PIN }]);
+  assert.equal(page.document.querySelectorAll("dialog").length, 0, "one PIN dialog for both");
+  const shown = row(page, "voice-switch");
+  assert.equal(shown.querySelector("select").value, "custom");
+  assert.ok(!shown.textContent.includes("voice_switch_unrevealed"));
+});
+
 test("voice switch: without the switch endpoint the voice group has no switch row", async () => {
   const page = await settingsPage();
   await open(page, "core-voice");
