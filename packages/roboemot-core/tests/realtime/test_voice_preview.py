@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from fake_server import REPLY_TEXT, FakeServer
 from gemini_server import OUTPUT_RATE_HZ, REFUSAL, REPLY
-from realtime_helpers import KEY
+from realtime_helpers import KEY, wait_until
 from roboemot.config.schema import LLMRoute, RoboEmotConfig
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
 from roboemot.llm.prompt import preview_line
@@ -87,9 +87,12 @@ def line_sent(srv) -> str:
     return turns[0][-1]["parts"][0]["text"]
 
 
-def test_a_gemini_preview_is_a_24k_wav_in_the_chosen_voice_and_closes_its_session(gemini, caplog):
+@pytest.mark.parametrize("close_record_delay_s", [0.0, 0.3])
+def test_a_gemini_preview_is_a_24k_wav_in_the_chosen_voice_and_closes_its_session(
+    gemini, caplog, close_record_delay_s
+):
     caplog.set_level(logging.DEBUG)
-    srv = gemini([["audio"]], chunks=4)
+    srv = gemini([["audio"]], chunks=4, close_record_delay_s=close_record_delay_s)
     cfg = make_cfg(gemini_route(srv.base_url()))
     router = make_router(cfg)
     stored = cfg.llm_routes[0].model_dump()
@@ -101,7 +104,7 @@ def test_a_gemini_preview_is_a_24k_wav_in_the_chosen_voice_and_closes_its_sessio
     speech = srv.setups[0]["generationConfig"]["speechConfig"]
     assert speech["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] == "Kore"
     assert cfg.llm_routes[0].model_dump() == stored  # the override is a copy
-    assert srv.client_closes == [1000]
+    assert wait_until(lambda: srv.client_closes == [1000]), srv.client_closes  # recorded late
     assert router.used("gemini") > 0  # the estimate is charged; no wait for the late total
     assert "text" not in json.dumps([m for m in srv.received if "realtimeInput" in m])
     text = caplog.text
