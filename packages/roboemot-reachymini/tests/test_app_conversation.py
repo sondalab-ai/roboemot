@@ -273,7 +273,8 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
         assert skills.get("timer_set").is_available() and app.scheduler is not None
         assert app.scheduler_runner is not None and app.scheduler_runner.alive
-        assert not app.scheduler_runner.consumer_attached
+        # the announcer consumes tools.due (SPEC 11, Due items): the runner no longer fires items
+        assert app.scheduler_runner.consumer_attached and app.announcer is not None
         gestures = skills.get("play").resolved_choices()["gesture"]
         assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None

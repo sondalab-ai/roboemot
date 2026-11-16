@@ -746,7 +746,7 @@ function liveAudioReset(box) {
 }
 
 function liveTurnRow(turn) {
-  const who = turn.who === "robot" ? "robot" : "user";
+  const who = turn.who === "robot" || turn.who === "event" ? turn.who : "user";
   const stamp = when(turn.t * 1000, true);
   const label = stamp + " " + t("live_transcript_" + who);
   const parts = [el("span", { class: "sl-eyebrow" }, label), " ", turn.text];

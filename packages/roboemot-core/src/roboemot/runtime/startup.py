@@ -34,6 +34,7 @@ from roboemot.skills.plugins import (
 )
 from roboemot.skills.registry import SkillRegistry
 from roboemot.soothe import SootheRunner
+from roboemot.tools.announce import Announcer
 from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
@@ -198,6 +199,7 @@ def start_voice_output(
         bind_realtime_input(host, realtime, listener, cleanup, p.sleep, cues)
     cleanup.callback(conv.close)
     conv.start()
+    start_announcer(host, stack, p, cleanup)
     if realtime is not None:
         realtime.start()
     if bargein is not None:
@@ -248,6 +250,24 @@ def start_scheduler(
     cleanup.callback(runner.close)
     runner.start()
     return scheduler
+
+
+def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:
+    """The announcer of due timers and reminders (SPEC 11, Voice tools; SPEC 8, robot-initiated
+    turn), once the conversation runs: it attaches to the scheduler runner (which then stops
+    marking items fired itself) and is closed before the conversation. Sets
+    ``host.announcer``; nothing without a scheduler or a conversation."""
+    if host.scheduler is None or host.conversation is None:
+        return
+    announcer = host.announcer = Announcer(
+        host.scheduler,
+        host.conversation,
+        host,
+        stack.effective,
+        asleep=lambda: p.sleep.asleep,
+    )
+    cleanup.callback(announcer.close)  # before the conversation it hands turns to
+    announcer.start()
 
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:

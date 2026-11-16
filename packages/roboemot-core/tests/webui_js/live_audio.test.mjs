@@ -42,6 +42,7 @@ const STRINGS = {
   live_transcript_empty: "Nothing said yet.",
   live_transcript_user: "Heard",
   live_transcript_robot: "Said",
+  live_transcript_event: "Event",
   live_transcript_cut: "cut off",
   live_transcript_clear: "Clear",
 };
@@ -122,6 +123,15 @@ test("the transcript lists turns oldest first, newest last, with who said it", a
   assert.ok(rows[0].textContent.includes("hello") && rows[0].textContent.includes("Heard"));
   assert.ok(rows[1].textContent.includes("hi there") && rows[1].textContent.includes("Said"));
   assert.ok(rows[0].classList.contains("live-turn--user") && rows[1].classList.contains("live-turn--robot"));
+});
+
+test("a robot-initiated turn's event is its own kind", async (t) => {
+  const audio = { ...AUDIO, transcript: block([turn(1, "event", "A timer is due."), turn(2, "robot", "Pasta!")]) };
+  const page = await livePage(t, audio);
+  await openLive(page);
+  const rows = turns(page);
+  assert.ok(rows[0].classList.contains("live-turn--event") && rows[0].textContent.includes("Event"));
+  assert.ok(rows[1].classList.contains("live-turn--robot"));
 });
 
 test("an interrupted reply is marked", async (t) => {
