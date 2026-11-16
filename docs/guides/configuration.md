@@ -417,6 +417,13 @@ voice; chat requests never use it. When no route answers, the robot says
 
 By default the list is empty. Add routes in `app.yaml` or on the web UI **Routes** tab.
 
+The **Add a route** card offers presets under **Start from a preset**: Gemini Live, and the robot
+platform's own realtime route when its settings plugin has one (Reachy Mini: Pollen's server). A
+preset fills in the form and picks its key when the key is stored. When the key is missing, the card
+names it and fills the name into the **API keys** card. A preset is hidden while a route of its name
+exists, so a route written by the installer or `app.yaml` stays the one in use. The presets live
+in `roboemot/webui/route_presets.yaml`.
+
 ```yaml
 llm_routes:
   - name: cloud
@@ -439,6 +446,7 @@ llm_routes:
 | `llm_routes[].max_tokens` | `300` | tokens, 16 to 8192 | Reply token cap. |
 | `llm_routes[].daily_token_budget` | `200000` | tokens per day, at least 0 | Daily token cap. Past it, the route is skipped until the next day. |
 | `llm_routes[].context_budget_tokens` | `8192` | tokens, 256 to 2000000 | Prompt budget per request, at 4 characters per token. The oldest turns are dropped to fit. |
+| `llm_routes[].connect_timeout_s` | `null` | s, 1 to 30 | A realtime route's own `voice.realtime_route.connect_timeout_s`. `null` uses the shared value. The route form's **Connect timeout (s)** field sets it. |
 | `llm_routes[].supports_images` | `false` | on/off | The route accepts images (`image_url` parts). |
 | `conversation.turn_reserve_tokens` | `256` | tokens, 16 to 8192 | Room every route's context budget must leave beyond the system prompt, for the newest turn. It is checked when the configuration loads. |
 

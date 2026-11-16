@@ -85,10 +85,12 @@ from .robot_section import (
     build_section,
     claimed,
     load_settings_plugin,
+    platform_presets,
     platform_voice,
     restart_hook,
     vet_claims,
 )
+from .route_presets import route_presets
 from .setting_clean import (
     clean_hooked,
     clean_key,
@@ -561,6 +563,16 @@ class SettingsEditor:
             local_problem = PIPER_MISSING
         platform = platform_voice(self._plugin, cfg, language or cfg.conversation.language)
         return voice_switch(cfg, platform, known, local_problem, revealed=revealed)
+
+    def route_presets(self, language: str = "") -> list[dict[str, Any]]:
+        """The presets of the Models tab's add card (``route_presets``, SPEC 8, 11A): the robot
+        plugin's own route first, then core's. A preset whose route name the effective config
+        already has, on any layer, is left out, so an installed route is never copied over.
+        ``language`` is the page's (default: the configured one). Nothing is written."""
+        cfg = self.stack.effective()
+        language = language or cfg.conversation.language
+        names = {r.name for r in cfg.llm_routes}
+        return route_presets(names, platform_presets(self._plugin, language), language)
 
     # ------------------------------------------------------------------ writing
 

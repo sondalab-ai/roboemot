@@ -30,7 +30,7 @@ from roboemot.config.catalogue import FieldDescriptor, descriptor
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import Manifest
 from roboemot.realtime.session import route_origin
-from roboemot.webui.robot_section import PATH_ROOT, RobotSection, VoiceProfile
+from roboemot.webui.robot_section import PATH_ROOT, RobotSection, RoutePreset, VoiceProfile
 from roboemot.webui.settings import StackPort
 from roboemot.webui.strings import DEFAULT_LANGUAGE, language_for
 
@@ -170,6 +170,15 @@ class ReachySettings:
         }
         label = texts(language)["voice_label"]
         return VoiceProfile(CLOUD_VOICE.name, label, keys, CLOUD_VOICE.base_url)
+
+    def route_presets(self, language: str) -> list[RoutePreset]:
+        """The cloud-voice route as a preset of the Models tab's add card: the installer's
+        ``llm_routes`` entry (``CLOUD_VOICE.entry()``) without its key, which the owner stores
+        under ``CLOUD_VOICE.secret``. Core hides it while a route of that name exists, so the
+        route the installer wrote stays the one in use. Labelled in ``language``."""
+        fields = {k: v for k, v in CLOUD_VOICE.entry().items() if k != "api_key"}
+        label = texts(language)["voice_label"]
+        return [RoutePreset(CLOUD_VOICE.name, label, fields, CLOUD_VOICE.secret)]
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of

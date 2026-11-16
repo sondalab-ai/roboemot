@@ -19,7 +19,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Target
 from roboemot.manifest import load_manifest
-from roboemot.webui.robot_section import claimed
+from roboemot.webui.robot_section import RoutePresetted, claimed
 from roboemot.webui.settings import SettingsEditor
 from roboemot_reachymini import app as app_module
 from roboemot_reachymini import daemon as daemon_module
@@ -383,6 +383,26 @@ def test_the_voice_profile_is_the_installer_cloud_voice_profile():
         profile = plugin.voice_profile(cfg, lang)  # the page language, not the configured one
         assert (profile.route, profile.keys) == (CLOUD_VOICE.name, wanted)
         assert (profile.label, profile.base_url) == (label, CLOUD_VOICE.base_url)
+
+
+def test_the_route_preset_is_the_installer_route_entry_without_its_key():
+    wanted = {k: v for k, v in CLOUD_VOICE.entry().items() if k != "api_key"}
+    for lang, label in (("en", CLOUD_VOICE.provider), ("it", "Server di Pollen (Hugging Face)")):
+        (preset,) = plugin.route_presets(lang)
+        assert (preset.id, preset.label, preset.secret) == (CLOUD_VOICE.name, label, "hf_token")
+        assert preset.fields == wanted
+    assert isinstance(plugin, RoutePresetted)
+
+
+def test_the_route_preset_is_offered_until_the_route_exists(tmp_path):
+    bare = ConfigStack(app={}, audit_path=tmp_path / "a.jsonl")
+    editor = SettingsEditor(bare, store=tmp_path / "a.json", manifest=MANIFEST)
+    assert [p["id"] for p in editor.route_presets("en")] == [CLOUD_VOICE.name, "gemini_live"]
+    installed = ConfigStack(
+        app={"llm_routes": [CLOUD_VOICE.entry()]}, audit_path=tmp_path / "b.jsonl"
+    )
+    editor = SettingsEditor(installed, store=tmp_path / "b.json", manifest=MANIFEST)
+    assert [p["id"] for p in editor.route_presets("en")] == ["gemini_live"]
 
 
 def test_the_web_ui_plugin_does_not_load_the_installer():

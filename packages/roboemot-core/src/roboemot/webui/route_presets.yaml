@@ -1,0 +1,23 @@
+# Route presets of the Models tab's add card (SPEC 8, 11A, 12; roboemot.webui.route_presets).
+#
+# A preset fills in the add form; the owner still stores the key (under `secret`) and adds the
+# route, so nothing here is ever a key. A preset is not offered while a route of its name exists:
+# a route the installer wrote stays the one in use. The robot platform's own route comes from the
+# robot's settings plugin (`route_presets`), not from this file. `label` has one entry per page
+# language.
+presets:
+  - id: gemini_live
+    # the same in both languages on purpose: a product name, not translated
+    label:
+      en: Gemini Live (Google)
+      it: Gemini Live (Google)
+    secret: gemini_key
+    # docs/realtime-voice-setup.md, Gemini Live: the owner's tested setup (2026-11-16)
+    fields:
+      name: gemini
+      kind: realtime
+      protocol: gemini_live
+      base_url: wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
+      model: gemini-3.8-live
+      locality: cloud
+      connect_timeout_s: 15.0
