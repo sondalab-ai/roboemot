@@ -50,6 +50,14 @@ dropped:
   identity.estimate_confidence_min: no age or gender estimate (SPEC 5, 2026-10-23)
   identity.estimate_frames_min: no age or gender estimate (SPEC 5, 2026-10-23)
   register.gender_affects_params: no gender, declared or estimated (SPEC 7, 2026-10-23)
+  motion.arbiter.source_timeout_ms: no code read it; a command ends at its own expiry or when cleared (SPEC 10, 2026-11-16)
+  motion.idle.gaze_shift_interval_s: no idle gaze shifts; no code read it (SPEC 10, 2026-11-16)
+  motion.idle.gaze_shift_amplitude: no idle gaze shifts; no code read it (SPEC 10, 2026-11-16)
+  mirror: no mirror module runs; no code read the section (SPEC 9, 2026-11-16)
+  llm_routes.*.supports_images: no image path to a route; no code read it (SPEC 8, 2026-11-16)
+  privacy.multimodal_frames: no image path to a route; no code read the opt-in (SPEC 8, 12, 2026-11-16)
+  privacy.keep_enrollment_images: enrollment never keeps face crops; no code read the opt-in (SPEC 6, 12, 2026-11-16)
+  privacy.debug_recording: no debug recording; no code read the opt-in (SPEC 12, 2026-11-16)
 dropped_entries:
   appraisal.rules:
     person.known_child: one person.known event for everyone (SPEC 7, 2026-10-23)

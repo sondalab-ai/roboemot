@@ -68,6 +68,14 @@ What this means in practice:
   entry below it replaces that entry. Other routes stay.
 - The data folder is `~/.local/share/roboemot`, or `$ROBOEMOT_DATA_DIR` when that is set. `app.yaml`
   is always read from there. The `data_dir` setting cannot move it.
+- A setting that no longer exists does not stop the robot. It is listed under `dropped` in
+  `config/moved_settings.yaml`, and the robot ignores it in `app.yaml`, a preset and
+  `webui_settings.json`. The log says `setting <path> ignored: removed from the configuration`,
+  once per file. On 2026-11-16 these settings went, because no code read them:
+  `motion.arbiter.source_timeout_ms`, `motion.idle.gaze_shift_interval_s`,
+  `motion.idle.gaze_shift_amplitude`, the whole `mirror` section, `llm_routes[].supports_images`,
+  `privacy.multimodal_frames`, `privacy.keep_enrollment_images` and `privacy.debug_recording`
+  (SPEC 11A, Renamed and removed settings).
 
 ### Three ways to change a value
 
@@ -463,7 +471,6 @@ llm_routes:
 | `llm_routes[].daily_token_budget` | `200000` | tokens per day, at least 0 | Daily token cap. Past it, the route is skipped until the next day. |
 | `llm_routes[].context_budget_tokens` | `8192` | tokens, 256 to 2000000 | Prompt budget per request, at 4 characters per token. The oldest turns are dropped to fit. |
 | `llm_routes[].connect_timeout_s` | `null` | s, 1 to 30 | A realtime route's own `voice.realtime_route.connect_timeout_s`. `null` uses the shared value. The route form's **Connect timeout (s)** field sets it. |
-| `llm_routes[].supports_images` | `false` | on/off | The route accepts images (`image_url` parts). |
 | `conversation.turn_reserve_tokens` | `256` | tokens, 16 to 8192 | Room every route's context budget must leave beyond the system prompt, for the newest turn. It is checked when the configuration loads. |
 
 ### Secrets and locality guardrails
@@ -610,9 +617,6 @@ the PIN.
 | `privacy.realtime_audio_unaddressed` | `false` | on/off | Opt-in. With `voice.realtime_route.turns: server`, lets every speech segment the robot hears while awake stream to the realtime route, not only speech meant for the robot; `server_gates` can narrow it. Without it `turns: server` runs as `robot`. The installer's `--cloud-voice` turns it on. |
 | `privacy.realtime_platform_id` | `false` | on/off | Opt-in. Lets the platform's session provider send the robot's stable platform identifier with each session request (platform mode only). The server can then link all sessions of this robot. |
 | `privacy.pseudonyms_to_cloud` | `false` | on/off | Sends pseudonyms instead of registry names to cloud routes, and puts the names back in the answer. A remote speech voice still hears the names it speaks. It blocks a cloud realtime route. Its safe direction is on: turning it off again needs the admin confirmation. |
-| `privacy.multimodal_frames` | `false` | on/off | Opt-in. Allows single camera frames to be sent to LLM routes for image questions. |
-| `privacy.keep_enrollment_images` | `false` | on/off | Opt-in. Keeps the face crops taken at enrollment. |
-| `privacy.debug_recording` | `false` | on/off | Opt-in. Allows time-limited debug recording. |
 | `webui.live.enabled` | `false` | on/off | Opt-in. Serves the Live tab: mood, who is in view by name, conversation phase. |
 | `webui.live.transcript` | `false` | on/off | Opt-in. Keeps the recent conversation, as text, in memory for the Live tab. It is never saved, logged or reported. |
 | `webui.live.video` | `false` | on/off | Opt-in. Serves a live camera preview to the Live tab. It needs `webui.live.enabled`. Every open page shows a banner while someone watches. |

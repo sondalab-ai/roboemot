@@ -475,7 +475,7 @@ def test_a_language_removed_between_expand_and_set_is_not_recreated():
 
 PRIVATE_SAMPLES = {
     "circadian.location": {"lat": 45.4642, "lon": 9.19},
-    "privacy.multimodal_frames": True,
+    "privacy.realtime_audio": True,
     "privacy.pseudonym_templates": {"person": "CANARY-{label}"},
 }
 
