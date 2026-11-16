@@ -21,11 +21,13 @@ from ..config.schema import RoboEmotConfig
 class ToolHost:
     """The parts a tool may use. ``config`` reads the live merged config; ``wall_now`` is the
     tz-aware wall-clock time in ``circadian.timezone``; ``bus`` is the run's message bus. Later
-    tools add their parts as fields that default to None."""
+    tools add their parts as fields that default to None. ``nap`` asks for a requested nap and
+    returns its status at once (``RuntimeHost.request_nap``, SPEC 7A); runtime startup sets it."""
 
     config: Callable[[], RoboEmotConfig]
     wall_now: Callable[[], datetime]
     bus: Bus
+    nap: Callable[[], str] | None = None
 
 
 def tool_host(config: Callable[[], RoboEmotConfig], bus: Bus) -> ToolHost:

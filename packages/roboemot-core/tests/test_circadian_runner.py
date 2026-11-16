@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import test_circadian_nap as napkit
 from roboemot.affect.clips import load_clip_library
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
@@ -1097,3 +1098,92 @@ def test_unaddressed_speech_neither_shows_presence_nor_wakes(cfg):
     bus.publish("percept.utterance", tv, clock.t)
     run_for(r, clock, 20)
     assert not r.present() and r.model.state == "resting"
+
+
+# ---- requested nap (SPEC 7A, Requested nap; SPEC 11, Voice tools)
+
+
+def two_faces(x) -> None:
+    """A confirmed face: two sightings from different frames."""
+    napkit.face(x, x.clock.t)
+    napkit.face(x, x.clock.t + 0.1)
+
+
+def test_requested_nap_ignores_face_motion_and_speech_inside_the_window():
+    x = napkit.rig()
+    assert x.r.request_nap(x.clock.t) == "ok"
+    napkit.run(x, napkit.STEP)
+    assert (x.r.model.state, x.r.model.reason) == ("resting", "nap")
+    napkit.run(x, 20.0)  # t = 30
+    two_faces(x)
+    napkit.motion(x)
+    napkit.loud(x)
+    napkit.say(x, addressed=True, wake_word=False)
+    napkit.say(x, addressed=False, wake_word=False)
+    assert set(napkit.run(x, napkit.STEP)) == {"resting"}
+    assert x.r.snapshot()["nap"]["napping"] is True
+    napkit.say(x, addressed=True, wake_word=True)
+    napkit.run(x, napkit.STEP)
+    assert x.r.model.state == "awake"
+    assert x.r.snapshot()["nap"]["napping"] is False
+
+
+def test_requested_nap_uses_normal_rules_after_the_window():
+    x = napkit.rig(requested_nap_min_s=600.0)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    assert set(napkit.run(x, 601.0)) == {"resting"}
+    two_faces(x)
+    napkit.run(x, napkit.STEP)
+    assert x.r.model.state == "awake" and x.events[-1] == ("nap", "face")
+
+
+def test_requested_nap_refused_while_asleep():
+    x = napkit.rig()
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    assert x.r.request_nap(x.clock.t) == "asleep"
+    assert "resting" not in napkit.run(x, 3 * napkit.STEP)
+
+
+def test_requested_nap_status_while_disabled_or_already_resting():
+    assert napkit.rig(enabled=False).r.request_nap(0.0) == "disabled"
+    night = napkit.rig(hour=23.5)
+    assert night.r.request_nap(night.clock.t) == "already_resting"
+    assert not night.r.nap.requested(night.clock.t)
+    x = napkit.rig()
+    x.r.hold("resting", 5)
+    napkit.run(x, napkit.STEP)
+    assert x.r.nap_status() == "already_resting"
+    assert x.r.request_nap(x.clock.t) == "already_resting"
+
+
+def test_requested_nap_beats_the_wake_hold_of_the_request():
+    """'Reachy, go to sleep' carries the wake word, which holds the robot awake."""
+    x = napkit.rig()
+    x.r.wake()
+    napkit.run(x, napkit.STEP)
+    assert x.r.nap_status() == "ok"
+    assert x.r.request_nap(x.clock.t) == "ok"
+    napkit.run(x, napkit.STEP)
+    assert (x.r.model.state, x.r.model.reason) == ("resting", "nap")
+    assert ("nap", "start") in x.events
+
+
+def test_requested_nap_works_with_idle_naps_off_inside_its_window():
+    x = napkit.rig(nap_after_s=None)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    assert set(napkit.run(x, x.cfg.circadian.requested_nap_min_s - napkit.STEP)) == {"resting"}
+
+
+def test_a_conversation_inside_the_window_does_not_wake_it():
+    talking = [False]
+    x = napkit.rig(conversing=lambda: talking[0])
+    x.r.request_nap(x.clock.t)
+    talking[0] = True
+    assert set(napkit.run(x, 3 * napkit.STEP)) == {"resting"}
+
+
+def test_requested_nap_min_s_default_and_range():
+    assert napkit.config().circadian.requested_nap_min_s == 600.0
+    for bad in (59.0, 7201.0):
+        with pytest.raises(ConfigError):
+            napkit.config(requested_nap_min_s=bad)

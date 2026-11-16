@@ -148,6 +148,32 @@ class RuntimeHost:
             raise RuntimeError("the runtime is not running")
         runner.wake()
 
+    def request_nap(self) -> str:
+        """The ``go_to_sleep`` tool's nap (SPEC 7A, Requested nap; SPEC 11): the circadian
+        runner's status now, and when it is ``ok`` the nap is armed and this returns at once.
+        The nap starts after the calling turn's last reply audio (``after_turn``), and its start
+        closes the listener's follow-up window. ``disabled`` while the runtime is not running."""
+        runner = self.circadian_runner
+        if runner is None:
+            return "disabled"
+        status = runner.nap_status()
+        if status != "ok":
+            return status
+
+        def start() -> None:
+            if runner.request_nap(runner.clock.monotonic()) != "ok":
+                return  # the state changed during the good night (quiet hours, a sleep)
+            listener = self.voice_listener
+            if listener is not None:
+                listener.close_follow_up()
+
+        conversation = self.conversation
+        if conversation is None:
+            start()
+        else:
+            conversation.after_turn(start)
+        return status
+
     def detection_period(self) -> float:
         """Seconds between face-stage runs now (infinite while vision is off)."""
         pipeline = self.perception.pipeline if self.perception is not None else None

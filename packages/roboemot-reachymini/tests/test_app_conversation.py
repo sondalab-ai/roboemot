@@ -266,7 +266,9 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         skills = app.conversation.skills
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
+            "go_to_sleep",
         ]  # fmt: skip
+        assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
         gestures = skills.get("play").resolved_choices()["gesture"]
         assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None

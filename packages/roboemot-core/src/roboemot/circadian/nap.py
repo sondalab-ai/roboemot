@@ -24,6 +24,12 @@ quiet hours and naps off end the pending resume too, so the next day starts with
 time, and so do the end of a platform sleep and a rest of the rhythm's own (the caller's
 :meth:`disarm`). Presence and attention on a person hold a due resumed nap off but keep the resume
 armed (owner decision 2026-11-05). ``resumes`` counts the naps started this way.
+
+A requested nap (SPEC 7A, Requested nap; owner decision 2026-11-16) is a day nap the person asked
+for (:meth:`start_requested`): for ``circadian.requested_nap_min_s`` after its start
+(:meth:`requested`) the caller ignores activity and stimuli, so only a wake from outside (the wake
+word, a due timer or reminder) ends it, and idle naps being off does not end it either. After that
+window it is an ordinary day nap.
 """
 
 from __future__ import annotations
@@ -44,6 +50,22 @@ class DayNap:
         self.resuming = False  # the last wake was a stimulus and no person has followed
         self._last: float | None = None  # last counted time; None while paused or not started
         self._face: tuple[float, float] | None = None  # (clock time, frame stamp) of a face
+        self.requested_until: float | None = None  # end of a requested nap's window
+
+    def start_requested(self, t: float, min_s: float) -> None:
+        """The person asked for a nap at ``t``: it starts now, and for ``min_s`` only a wake from
+        outside ends it (:meth:`requested`). It counts as a nap, and a person was there, so a
+        pending resume is dropped."""
+        self.napping = True
+        self.naps += 1
+        self.started = t
+        self.resuming = False
+        self.requested_until = t + min_s
+
+    def requested(self, t: float) -> bool:
+        """Whether a requested nap is in progress at ``t`` and still inside its window, in which
+        activity and stimuli do not wake it."""
+        return self.napping and self.requested_until is not None and t < self.requested_until
 
     def restart(self, t: float) -> None:
         """The idle clock starts again from zero at ``t``."""
@@ -61,6 +83,7 @@ class DayNap:
         wakes the robot); that wake is counted under ``reason``."""
         self.restart(t)
         self.resuming = False
+        self.requested_until = None
         woke, self.napping = self.napping, False
         if woke:
             self.wakes[reason] += 1
@@ -83,6 +106,7 @@ class DayNap:
     def cancel(self, t: float) -> None:
         """A wake or a hold from outside (the app, the web UI): no nap, the clock restarts."""
         self.napping = self.resuming = False
+        self.requested_until = None
         self.restart(t)
 
     def step(
@@ -104,8 +128,9 @@ class DayNap:
         if quiet or after_s is None:
             self.resuming = False  # the night or naps off: the next nap needs after_s again
         if self.napping:
-            if quiet or after_s is None:
+            if quiet or (after_s is None and not self.requested(t)):
                 self.napping = False  # quiet hours rest the robot anyway; null: naps off now
+                self.requested_until = None
                 self.restart(t)
             return False
         if after_s is None or blocked:

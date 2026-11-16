@@ -740,6 +740,16 @@ class CircadianConfig(Strict):
         le=3600,
         advanced=True,
     )
+    requested_nap_min_s: float = param(
+        600.0,
+        "A nap the person asked for (the go_to_sleep voice tool): for this long after it starts "
+        "only the wake word or a due timer or reminder wakes the robot; a face, speech without "
+        "the wake word, light, motion and a loud sound do not. After it, the day-nap rules apply",
+        unit="s",
+        ge=60,
+        le=7200,
+        advanced=True,
+    )
     nap_wake_on_light: bool = param(
         True,
         "A day nap ends when the confirmed room light rises (dark to dim or bright, dim to "
@@ -5776,7 +5786,14 @@ class ConversationConfig(Strict):
         advanced=True,
     )
     llm_skills: list[str] = param(
-        ["play", "look_at", "express_emotion", "remember_preference", "stop_talking"],
+        [
+            "play",
+            "look_at",
+            "express_emotion",
+            "remember_preference",
+            "stop_talking",
+            "go_to_sleep",
+        ],
         "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
         "llm_visible in code; this list can only narrow the set. Empty: no tools",
     )

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
+from roboemot.circadian.nap import DayNap
 from roboemot.circadian.replay import RecordingSink, ReplayClock
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.reflex.engine import SoundLoud
@@ -814,3 +815,32 @@ def test_attention_on_a_person_keeps_a_pending_resume_armed():
     assert set(run(x, c.nap_resume_after_s - 3 * STEP)) == {"awake"}
     run(x, 5 * STEP)
     assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
+
+
+# ---- requested nap (SPEC 7A, Requested nap)
+
+
+def test_a_requested_nap_naps_now_and_holds_its_window():
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    assert nap.napping and nap.started == 100.0 and nap.naps == 1
+    assert nap.requested(100.0) and nap.requested(699.0)
+    assert not nap.requested(700.0)
+
+
+@pytest.mark.parametrize(
+    "end",
+    [lambda n: n.activity(150.0, "speech"), lambda n: n.cancel(150.0)],
+)
+def test_a_requested_nap_that_ends_drops_its_window(end):
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    end(nap)
+    assert not nap.napping and not nap.requested(200.0)
+
+
+def test_quiet_hours_end_a_requested_nap_and_its_window():
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    nap.step(150.0, after_s=1800.0, resume_after_s=180.0, quiet=True, blocked=False, held=False)
+    assert not nap.napping and not nap.requested(200.0)

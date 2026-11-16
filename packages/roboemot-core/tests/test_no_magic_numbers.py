@@ -71,6 +71,7 @@ BEHAVIOUR_MODULES = [
     "skills/bridge.py",
     "skills/host.py",
     "skills/plugins.py",
+    "tools/sleep.py",
     "runtime/assembly.py",
     "runtime/diagnostics.py",
     "runtime/host.py",
