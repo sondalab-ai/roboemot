@@ -511,14 +511,42 @@ class ConversationWorker:
     def after_turn(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` once, after the open turn's last reply audio has ended, or at once
         when no turn is open. A skill uses it to act after the robot said what it says about it
-        (``go_to_sleep``: the nap starts after the good night, SPEC 7A, 11). Safe from any
-        thread; a turn that fails before it ends drops its callbacks."""
+        (``go_to_sleep``: the nap starts after the good night, SPEC 7A, 11). It waits for any
+        turn queued meanwhile too. A turn that raises or is cancelled still runs them once
+        (:meth:`_abandon`). Safe from any thread."""
         with self._lock:
             turn = self._active_turn
             if turn is not None and not turn.done:
                 turn.after.append(callback)
                 return
         self._run_after(callback)
+
+    def _abandon(self, turn: _Turn, *, cancelled: bool) -> None:
+        """A turn that raised or was cancelled before :meth:`_finish`: it is over, it is no
+        longer the open turn, and its ``after_turn`` callbacks still run once (an armed nap
+        still starts): after the reply audio, or at once when the worker itself is being
+        cancelled (its loop ends)."""
+        with self._lock:
+            if turn.done:
+                return
+            turn.done = True
+            after, turn.after = turn.after, []
+            if self._active_turn is turn:
+                self._active_turn = None
+        if not after:
+            return
+        log.info("conversation: turn ended early, %d after-turn callback(s) kept", len(after))
+        if cancelled or self._closed:
+            for callback in after:
+                self._run_after(callback)
+        else:
+            self._wait_after(after)
+
+    def _wait_after(self, callbacks: list[Callable[[], None]]) -> None:
+        """Start :meth:`_after_audio` for ``callbacks`` on the running loop, keeping the task."""
+        task = asyncio.get_running_loop().create_task(self._after_audio(callbacks))
+        self._after_tasks.add(task)
+        task.add_done_callback(self._after_tasks.discard)
 
     async def _after_audio(self, callbacks: list[Callable[[], None]]) -> None:
         """Wait until no reply audio is queued or playing and no other turn is being served,
@@ -859,6 +887,9 @@ class ConversationWorker:
                 turn.outcome = "not_heard"
             else:
                 await self._respond(turn, router, now)
+        except BaseException as exc:
+            self._abandon(turn, cancelled=isinstance(exc, asyncio.CancelledError))
+            raise
         finally:
             self._inner = None
             self.phase.end_thinking()
@@ -1454,12 +1485,13 @@ class ConversationWorker:
         server and its items go."""
         try:
             await self._answer_server_turn(st)
+        except BaseException as exc:
+            if st.turn is not None:  # it failed before _finish: no turn runs now
+                self._abandon(st.turn, cancelled=isinstance(exc, asyncio.CancelledError))
+            raise
         finally:
             if not st.adopted:
                 self.realtime.release(st.offer.request)
-            with self._lock:
-                if st.turn is not None and self._active_turn is st.turn and not st.turn.done:
-                    self._active_turn = None  # it failed before _finish: no turn runs now
 
     async def _answer_server_turn(self, st: _ServerTurn) -> None:
         offer, now = st.offer, self.clock()
@@ -2418,9 +2450,7 @@ class ConversationWorker:
         # counted last: a reader that waits on ``turns`` then finds the turn's record published
         self._counts["turns"] += 1
         if after:
-            task = asyncio.get_running_loop().create_task(self._after_audio(after))
-            self._after_tasks.add(task)
-            task.add_done_callback(self._after_tasks.discard)
+            self._wait_after(after)
 
     # ----------------------------------------------------------------- report
 

@@ -3,9 +3,12 @@ nap it arms after the calling turn's last reply audio, and the follow-up window 
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from types import SimpleNamespace
 
+import test_circadian_nap as napkit
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.runtime.host import RuntimeHost
@@ -138,3 +141,141 @@ def test_a_refused_start_keeps_the_follow_up_window():
     r.asr.script, r.asr.final_text = ["dimmi"], "dimmi di piu"
     r.say()
     assert r.utterances[-1].addressed
+
+
+# ---- fix round 1: failed turns, speech and barge-in during the good night
+
+
+def sleeping(rigs, *rounds):  # noqa: F811
+    """A worker whose model calls go_to_sleep, over a RuntimeHost with a FakeRunner; the reply
+    plays while the clock is in [0.5, 2)."""
+    rig = rigs()
+    srv = Scripted(rig, [C(0, "c1", "go_to_sleep", {})], *rounds)
+    rig.clock[0] = 0.0
+    rig.speech.speaking_at = lambda now: 0.5 <= now < 2.0
+    runner = FakeRunner(lambda: rig.clock[0])
+    h = RuntimeHost()
+    h.circadian_runner, h.conversation = runner, rig.worker
+    registry = Env().registry
+    for fn in sleep.skills(host_with(h.request_nap)):
+        registry.add(fn)
+    rig.worker.skills = registry
+    return rig, srv, runner
+
+
+def after_respond(rig, then):
+    """Wrap the worker's _respond: the real answer (the tool runs), then ``then()``."""
+    real = rig.worker._respond
+
+    async def respond(turn, router, now):
+        await real(turn, router, now)
+        await then()
+
+    rig.worker._respond = respond
+
+
+def test_a_turn_that_raises_still_starts_the_armed_nap_once(rigs):  # noqa: F811
+    rig, _, runner = sleeping(rigs, ["Buonanotte. "])
+
+    async def boom():
+        raise RuntimeError("late failure")
+
+    after_respond(rig, boom)
+    rig.clock[0] = 0.5  # the good night plays when the turn fails
+    rig.say("vai a dormire")
+    assert wait_for(lambda: rig.worker.snapshot().get("errors", 0) == 1)
+    assert rig.worker._active_turn is None  # no stale open turn
+    time.sleep(0.1)
+    assert runner.started == []  # it still waits for the reply audio
+    rig.clock[0] = 2.0
+    assert wait_for(lambda: runner.started == [2.0])
+    ran = []
+    rig.worker.after_turn(lambda: ran.append(1))  # a later caller sees no open turn
+    assert ran == [1]
+    rig.worker._respond = type(rig.worker)._respond.__get__(rig.worker)
+    rig.turn("ciao")  # the next turn runs normally
+    time.sleep(0.1)
+    assert runner.started == [2.0]
+
+
+def test_a_cancelled_turn_still_starts_the_armed_nap_once(rigs):  # noqa: F811
+    rig, _, runner = sleeping(rigs, ["Buonanotte. "])
+    reached = threading.Event()
+
+    async def hang():
+        reached.set()
+        await asyncio.sleep(3600)
+
+    after_respond(rig, hang)
+    rig.say("vai a dormire")
+    assert reached.wait(5)
+    rig.worker.close()  # cancels the turn in flight
+    assert runner.started == [0.0] and rig.worker._active_turn is None
+
+
+def test_speech_during_the_good_night_delays_the_nap_to_after_that_turn(rigs):  # noqa: F811
+    rig, srv, runner = sleeping(rigs, ["Buonanotte. ", GATE], ["Va bene. "])
+    hold = threading.Event()
+    real = rig.server.handler
+
+    async def handler(request):
+        if len(srv.bodies) >= 2:  # the next turn's request waits for the test
+            while not hold.is_set():
+                await asyncio.sleep(0.002)
+        return await real(request)
+
+    rig.server.handler = handler
+    first = rig.say("vai a dormire")
+    assert wait_for(lambda: runner.checked == 1)
+    rig.clock[0] = 0.5
+    second = rig.say("aspetta un attimo")  # queued while the good night plays
+    rig.server.gate.set()
+    assert rig.done(first)
+    rig.clock[0] = 2.5  # the good night ended; the next turn is being served
+    time.sleep(0.2)
+    assert runner.started == []
+    hold.set()
+    assert rig.done(second)
+    assert wait_for(lambda: runner.started == [2.5])
+    time.sleep(0.1)
+    assert runner.started == [2.5]  # never cancelled, started once
+
+
+def test_a_barge_in_during_the_good_night_still_starts_the_nap(rigs):  # noqa: F811
+    rig, _, runner = sleeping(rigs, ["Buonanotte. ", GATE])
+    n = rig.say("vai a dormire")
+    assert wait_for(lambda: runner.checked == 1)
+    rig.clock[0] = 0.5
+    assert rig.worker.interrupt()
+    assert rig.done(n)
+    rig.clock[0] = 2.0
+    assert wait_for(lambda: runner.started == [2.0])
+    time.sleep(0.1)
+    assert runner.started == [2.0]
+
+
+# ---- RuntimeHost.request_nap over a real CircadianRunner
+
+
+def runtime_over(x):
+    h = RuntimeHost()
+    h.circadian_runner = x.r
+    return h
+
+
+def test_the_runtime_host_reports_asleep_and_already_resting_from_the_runner():
+    x = napkit.rig()
+    x.bus.publish("robot.asleep", None, x.clock.t)
+    assert runtime_over(x).request_nap() == "asleep"
+    night = napkit.rig(hour=23.5)
+    assert runtime_over(night).request_nap() == "already_resting"
+    for y in (x, night):
+        assert not y.r.nap.requested(y.clock.t)
+
+
+def test_the_runtime_host_starts_the_nap_at_once_without_a_conversation():
+    x = napkit.rig()
+    assert runtime_over(x).request_nap() == "ok"
+    assert x.r.nap.requested(x.clock.t)
+    napkit.run(x, napkit.STEP)
+    assert (x.r.model.state, x.r.model.reason) == ("resting", "nap")

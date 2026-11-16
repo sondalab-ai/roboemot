@@ -152,7 +152,10 @@ class RuntimeHost:
         """The ``go_to_sleep`` tool's nap (SPEC 7A, Requested nap; SPEC 11): the circadian
         runner's status now, and when it is ``ok`` the nap is armed and this returns at once.
         The nap starts after the calling turn's last reply audio (``after_turn``), and its start
-        closes the listener's follow-up window. ``disabled`` while the runtime is not running."""
+        closes the listener's follow-up window. ``disabled`` while the runtime is not running.
+        An armed nap is never cancelled: speech addressed to the robot during the good night, or
+        a barge-in, only delays it until the open turn (and any queued one) has ended; the
+        robot's name wakes it again. Without a conversation worker it starts at once."""
         runner = self.circadian_runner
         if runner is None:
             return "disabled"
