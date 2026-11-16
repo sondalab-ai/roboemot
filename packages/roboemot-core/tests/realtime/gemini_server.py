@@ -26,6 +26,8 @@ binary frame.
   ``close_code`` (1008), as Gemini closes a session idle for about two minutes (S3 run
   2026-11-12).
 - ``usage_gate`` (a ``threading.Event``) holds every ``turnComplete`` until it is set.
+- ``close_record_delay_s``: wait that long before recording a client close in ``client_closes``,
+  as a loaded CI runner may, so a test that reads it must wait for it (``wait_until``).
 
 ``setups`` holds every ``setup`` (one per connection), ``received`` every client message,
 ``requests`` every handshake (path with its query, headers), ``tool_responses`` every
@@ -108,6 +110,7 @@ class GeminiServer:
         close_code: int = POLICY,
         usage_gate: threading.Event | None = None,
         setup_delay_s: float = 0.0,
+        close_record_delay_s: float = 0.0,
     ) -> None:
         self.tls_files = tls_files
         self.answers = answers or [["audio"]]
@@ -120,6 +123,7 @@ class GeminiServer:
         self.idle_close_s, self.close_code = idle_close_s, close_code
         self.usage_gate = usage_gate
         self.setup_delay_s = setup_delay_s
+        self.close_record_delay_s = close_record_delay_s
         self.client_closes: list[int] = []
         self.idle_closes = 0
         self.requests: list[dict[str, Any]] = []
@@ -191,6 +195,7 @@ class GeminiServer:
             await session.serve()
         except ConnectionClosed as exc:
             if exc.rcvd is not None:
+                await asyncio.sleep(self.close_record_delay_s)
                 self.client_closes.append(exc.rcvd.code)
         finally:
             session.stop()
