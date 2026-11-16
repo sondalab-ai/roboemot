@@ -1,0 +1,66 @@
+# The voice-provider switch of the Settings page (SPEC 8, 11A, 12; roboemot.webui.voice_switch).
+#
+# Every choice writes every key of `keys`, so the result never depends on what was set before. A
+# key a choice does not name takes its schema default. The robot platform's own route takes its
+# values from the robot's settings plugin (`voice_profile`, the installer's cloud-voice profile),
+# on top of `common`.
+#
+# The current choice is the one whose `match` keys all equal the effective config; with the
+# realtime route on in that choice, its `match_realtime` keys must equal too. The other keys are
+# tuning: a hand-tuned timeout or wake policy keeps the choice, and a switch writes them all again.
+keys:
+  - voice.enabled
+  - voice.realtime_route.enabled
+  - voice.realtime_route.route
+  - voice.realtime_route.mode
+  - voice.realtime_route.input
+  - voice.realtime_route.turns
+  - voice.realtime_route.audio_gate
+  - voice.realtime_route.transcript_timeout_s
+  - voice.realtime_route.skip_tool
+  - voice.realtime_route.tone_tool
+  - voice.backend
+  - voice.fallback_backend
+  - voice.wake_word_policy
+  - voice.direction.enabled
+  - voice.facing.enabled
+  - privacy.realtime_audio
+  - privacy.realtime_audio_unaddressed
+match:
+  - voice.enabled
+  - voice.realtime_route.enabled
+  - voice.backend
+  - voice.fallback_backend
+  - privacy.realtime_audio
+  - privacy.realtime_audio_unaddressed
+match_realtime:
+  - voice.realtime_route.route
+  - voice.realtime_route.mode
+common:
+  voice.enabled: true
+# Piper speaks and Vosk listens on the robot; nothing leaves it.
+local:
+  voice.realtime_route.enabled: false
+  voice.backend: piper
+  voice.fallback_backend: piper
+# Any other kind: realtime route, connected to its own URL. voice.realtime_route.route is the
+# route's name. The realtime and privacy keys are the cloud-voice profile's; the transcript
+# timeout is the one the two-step Gemini switch kept (docs/realtime-voice-setup.md).
+direct:
+  voice.realtime_route.enabled: true
+  voice.realtime_route.mode: direct
+  voice.realtime_route.input: audio
+  voice.realtime_route.transcript_timeout_s: 10.0
+  voice.realtime_route.skip_tool: true
+  voice.realtime_route.tone_tool: true
+  voice.backend: none
+  voice.fallback_backend: none
+  voice.wake_word_policy: never
+  voice.direction.enabled: true
+  voice.facing.enabled: true
+  privacy.realtime_audio: true
+  privacy.realtime_audio_unaddressed: true
+# On top of `direct`, per route protocol.
+protocols:
+  gemini_live:
+    voice.realtime_route.turns: robot

@@ -423,6 +423,31 @@ EN: dict[str, str] = {
     "err_key_duplicate": "Two rows use the same key.",
     "settings_default": "Default",
     "settings_save": "Save",
+    "voice_switch": "Voice provider",
+    "voice_switch_hint": (
+        "One choice sets every voice setting together. Custom: the voice settings match no "
+        "choice; picking one replaces them."
+    ),
+    "voice_choice_local": "Local voice (Piper and Vosk, on the robot)",
+    "voice_choice_platform": "{label} (route {route})",
+    "voice_choice_direct": "Route {route} (direct)",
+    "voice_choice_custom": "Custom",
+    "voice_choice_unavailable": "{choice}: {reason}",
+    "voice_reason_secret_missing": "needs the secret {secret}",
+    "voice_reason_models_missing": "the Piper and Vosk models are not installed",
+    "voice_switch_pin_title": "Switch the voice to {choice}",
+    "voice_switch_pin_message": (
+        "Enter the PIN to see what changes. Nothing is saved until you confirm."
+    ),
+    "voice_switch_show": "Show changes",
+    "voice_switch_diff": "These settings change together, in one save:",
+    "voice_switch_line": "{path}: {old} → {new}",
+    "voice_switch_opt_in": (
+        "Privacy opt-in (SPEC 12): {paths}. On, microphone audio leaves the robot for the "
+        "route's server, a child's voice included."
+    ),
+    "voice_switch_confirm": "Switch",
+    "voice_switch_same": "The voice already uses this choice.",
     "settings_edited": "Edited",
     "settings_add": "Add entry",
     "settings_remove": "Remove",
@@ -1492,6 +1517,31 @@ IT: dict[str, str] = {
     "err_key_duplicate": "Due righe usano la stessa chiave.",
     "settings_default": "Predefinito",
     "settings_save": "Salva",
+    "voice_switch": "Fornitore della voce",
+    "voice_switch_hint": (
+        "Una scelta imposta insieme tutte le impostazioni della voce. Personalizzata: le "
+        "impostazioni della voce non corrispondono a nessuna scelta; sceglierne una le sostituisce."
+    ),
+    "voice_choice_local": "Voce locale (Piper e Vosk, sul robot)",
+    "voice_choice_platform": "{label} (route {route})",
+    "voice_choice_direct": "Route {route} (diretta)",
+    "voice_choice_custom": "Personalizzata",
+    "voice_choice_unavailable": "{choice}: {reason}",
+    "voice_reason_secret_missing": "serve il segreto {secret}",
+    "voice_reason_models_missing": "i modelli di Piper e Vosk non sono installati",
+    "voice_switch_pin_title": "Passa la voce a {choice}",
+    "voice_switch_pin_message": (
+        "Inserisci il PIN per vedere cosa cambia. Non viene salvato nulla finché non confermi."
+    ),
+    "voice_switch_show": "Mostra le modifiche",
+    "voice_switch_diff": "Queste impostazioni cambiano insieme, in un solo salvataggio:",
+    "voice_switch_line": "{path}: {old} → {new}",
+    "voice_switch_opt_in": (
+        "Consenso privacy (SPEC 12): {paths}. Se attivo, l'audio del microfono lascia il robot "
+        "verso il server della route, voce di un bambino compresa."
+    ),
+    "voice_switch_confirm": "Cambia",
+    "voice_switch_same": "La voce usa già questa scelta.",
     "settings_edited": "Modificata",
     "settings_add": "Aggiungi voce",
     "settings_remove": "Rimuovi",

@@ -14,12 +14,13 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, runtime_checkable
 
 from roboemot.config.catalogue import CONTAINERS, DESCRIPTOR_KEYS, FieldDescriptor, seal
 from roboemot.redact import REDACTED
 
 if TYPE_CHECKING:
+    from roboemot.config.schema import RoboEmotConfig
     from roboemot.manifest import Manifest
 
     from .settings import StackPort
@@ -105,6 +106,54 @@ class Restartable(Protocol):
     def restart(self) -> None:
         """Ask the robot's supervisor to restart RoboEmot. May block, may raise."""
         ...
+
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    """The robot platform's own voice choice for the Settings voice switch (SPEC 8, 11A): the
+    ``kind: realtime`` route it answers through, the choice's label in the page language, and
+    the dotted config keys with the values the choice writes (the installer's cloud-voice
+    profile, without the route entry itself)."""
+
+    route: str
+    label: str
+    keys: dict[str, Any]
+
+
+@runtime_checkable
+class VoiceProfiled(Protocol):
+    """Optional: a plugin whose robot platform has its own realtime speech route. The voice
+    switch then offers that route with these keys instead of the core direct-mode profile."""
+
+    def voice_profile(self, cfg: RoboEmotConfig) -> VoiceProfile | None:
+        """The platform's voice choice for ``cfg`` (its language for the label), or ``None``."""
+        ...
+
+
+def platform_voice(plugin: SettingsPlugin | None, cfg: RoboEmotConfig) -> VoiceProfile | None:
+    """The plugin's ``voice_profile`` when it is ``VoiceProfiled``, else ``None``. A plugin that
+    raises or returns something that is not a ``VoiceProfile`` with a route name, a label and
+    string keys gives none (logged by type only, never a value)."""
+    if not isinstance(plugin, VoiceProfiled):
+        return None
+    try:
+        profile = plugin.voice_profile(cfg)
+    except Exception as exc:
+        log.warning("settings plugin voice profile: %s", type(exc).__name__)
+        return None
+    if profile is None:
+        return None
+    if not (
+        isinstance(profile, VoiceProfile)
+        and isinstance(profile.route, str)
+        and profile.route
+        and isinstance(profile.label, str)
+        and isinstance(profile.keys, dict)
+        and all(isinstance(k, str) for k in profile.keys)
+    ):
+        log.warning("settings plugin voice profile: not a VoiceProfile, ignored")
+        return None
+    return profile
 
 
 def load_settings_plugin(robot_id: str) -> SettingsPlugin | None:

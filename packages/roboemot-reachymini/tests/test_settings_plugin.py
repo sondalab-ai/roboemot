@@ -12,8 +12,10 @@ import pytest
 import yaml
 from roboemot.affect.clips import load_clip_library
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Target
+from roboemot.install import ROUTES_KEY, cloud_voice_config
 from roboemot.manifest import load_manifest
 from roboemot.webui.robot_section import claimed
 from roboemot.webui.settings import SettingsEditor
@@ -21,6 +23,7 @@ from roboemot_reachymini import app as app_module
 from roboemot_reachymini import daemon as daemon_module
 from roboemot_reachymini import settings as settings_module
 from roboemot_reachymini.daemon import APP_NAME, DaemonClient
+from roboemot_reachymini.install import CLOUD_VOICE
 from roboemot_reachymini.settings import CLAIMS, ReachySettings, plugin
 
 MANIFEST = load_manifest(
@@ -368,3 +371,13 @@ def test_the_rows_follow_the_page_language(language, word):
         for r in section.fields
         if ".constraints." in r["path"]
     )
+
+
+def test_the_voice_profile_is_the_installer_cloud_voice_profile():
+    installer = cloud_voice_config(CLOUD_VOICE)
+    wanted = {".".join(k): v for k, v in installer.items() if k[0] != ROUTES_KEY}
+    for lang, label in (("en", "Pollen's server"), ("it", "Server di Pollen")):
+        cfg = RoboEmotConfig.model_validate({"conversation": {"language": lang}})
+        profile = plugin.voice_profile(cfg)
+        assert (profile.route, profile.keys) == (CLOUD_VOICE.name, wanted)
+        assert profile.label.startswith(label)

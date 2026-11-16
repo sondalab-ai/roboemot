@@ -169,7 +169,36 @@ left the robot.
    confirmation. Open the **Live** tab. The status line should not say "Cloud voice down" /
    "Voce cloud non disponibile".
 
+### Switch the voice in the web UI: Voice provider
+
+The first row of the `voice` group on the Settings tab, **Voice provider** (**Fornitore della
+voce**), picks how the robot speaks in one save:
+
+- **Local voice**: Piper and Vosk on the robot; nothing leaves it. Greyed out while the Piper or
+  Vosk models of the page language are missing (a `--cloud-voice` install skips Piper).
+- **One choice per `kind: realtime` route.** The robot's own route (Reachy Mini: `pollen`) writes
+  the installer's cloud-voice keys. Any other route runs in direct mode; a `gemini_live` route also
+  with `turns: robot`. A route is greyed out while its `${secret:name}` key is missing from the
+  secret store.
+- **Custom**: the voice settings match no choice. Picking a choice replaces them.
+
+Every choice writes the same 17 keys: `voice.enabled`, `voice.realtime_route.enabled`, `route`,
+`mode`, `input`, `turns`, `audio_gate`, `transcript_timeout_s`, `skip_tool` and `tone_tool`,
+`voice.backend`, `voice.fallback_backend`, `voice.wake_word_policy`,
+`voice.direction.enabled`, `voice.facing.enabled`, `privacy.realtime_audio` and
+`privacy.realtime_audio_unaddressed`. The row adds no config key: its value is computed from these.
+It matches a choice on `voice.enabled`, `voice.realtime_route.enabled`, `voice.backend`,
+`voice.fallback_backend` and the two privacy opt-ins, plus `route` and `mode` when the choice
+turns the realtime route on. A tuned timeout or wake policy keeps the choice; the next switch writes
+it again.
+
+Picking a choice asks for the PIN once, lists every setting that changes with its old and new value
+and names the privacy opt-ins, then saves all of them or none (SPEC 11A, Batch settings save).
+Restart RoboEmot afterwards.
+
 ### Go back to local voice
+
+Pick **Local voice** in **Voice provider** (above), or:
 
 1. Run the installer again with `--no-cloud-voice`. It removes exactly the profile keys listed above
    and keeps every other key. Add `--piper` to install Piper again; the models step fetches the

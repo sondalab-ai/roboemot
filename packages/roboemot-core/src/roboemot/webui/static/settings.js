@@ -21,6 +21,7 @@ const settingsState = {
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
   routes: null, // GET /api/routes for the voice rows (a promise), once per settings view
+  voice: null, // GET /api/settings/voice: the voice-provider switch, read with the rows
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -29,7 +30,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null,
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null, voice: null,
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -584,9 +585,80 @@ async function settingsBatchSave(message, changes, verbKey = "saved") {
   const result = await pinnedCall(message, t("settings_save"),
     (pin) => api("POST", "/api/settings/batch", { changes, pin }));
   if (!result) return null;
+  await settingsBatchDone(result, verbKey);
+  return result;
+}
+
+// After a batch save: the notice (layer, restart) and the rows read again.
+async function settingsBatchDone(result, verbKey) {
   writeNotice(result, verbKey);
   await settingsReload(null);
-  return result;
+}
+
+// ---------------------------------------------------------------- voice provider switch
+
+const VOICE_SWITCH_GROUP = "core-voice";
+const VOICE_CUSTOM = "custom";
+
+// GET /api/settings/voice, or null on a failure (an older server, no editor): the row is then not shown.
+async function voiceSwitchFetch() {
+  try { return await api("GET", "/api/settings/voice"); } catch (e) { return null; }
+}
+
+// One choice's name in the page language: the robot plugin words its own platform route.
+function voiceChoiceText(choice) {
+  if (choice.kind === "local") return t("voice_choice_local");
+  if (choice.kind === "platform") return t("voice_choice_platform", { label: choice.label || choice.route, route: choice.route });
+  return t("voice_choice_direct", { route: choice.route });
+}
+
+// The row at the top of the voice group: the current choice (or Custom) and every choice, the ones
+// that cannot be picked now disabled with their reason. Picking one runs `voiceSwitch`.
+function voiceSwitchRow(data) {
+  const id = "voice-switch";
+  const select = el("select", { id, class: "sl-field__input" },
+    data.value === VOICE_CUSTOM ? el("option", { value: VOICE_CUSTOM, selected: true, disabled: true }, t("voice_choice_custom")) : [],
+    data.choices.map((c) => el("option", { value: c.id, selected: c.id === data.value, disabled: !c.available },
+      c.available ? voiceChoiceText(c)
+        : t("voice_choice_unavailable", { choice: voiceChoiceText(c), reason: t("voice_reason_" + c.reason, { secret: c.secret || "" }) }))));
+  select.addEventListener("change", async () => {
+    const choice = data.choices.find((c) => c.id === select.value);
+    select.value = data.value;
+    if (choice) await voiceSwitch(choice);
+  });
+  return el("div", { class: "stack", "data-path": id }, field(id, t("voice_switch"), select, t("voice_switch_hint")));
+}
+
+// Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
+// dialog lists what changes (the privacy opt-ins named, SPEC 12), and its confirm saves the batch with
+// the same PIN. The PIN lives only in this call. Returns the save's response, or null.
+async function voiceSwitch(choice) {
+  const title = t("voice_switch_pin_title", { choice: voiceChoiceText(choice) });
+  let held = null;
+  const diff = await pinnedCall(t("voice_switch_pin_message"), t("voice_switch_show"), async (pin) => {
+    const result = await api("POST", "/api/settings/batch/preview", { changes: choice.changes, pin });
+    held = pin;
+    return result;
+  }, null, title);
+  try {
+    if (!diff) return null;
+    if (!diff.changes.length) { notice(t("voice_switch_same")); return null; }
+    const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+    const items = diff.changes.map((c) => {
+      const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
+      return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
+    });
+    const optIns = diff.changes.filter((c) => c.opt_in).map((c) => c.path);
+    const message = t("voice_switch_diff") + (optIns.length ? " " + t("voice_switch_opt_in", { paths: optIns.join(", ") }) : "");
+    let result = null;
+    const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
+      run: async () => { result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held }); } });
+    if (!done || !result) return null;
+    await settingsBatchDone(result, "saved");
+    return result;
+  } finally {
+    held = null;
+  }
 }
 
 function settingLeaf(node) {
@@ -852,9 +924,10 @@ async function revealSettings() {
 async function settingsReload(changedPath) {
   const current = viewToken();
   if (changedPath) settingsState.leaves.delete(changedPath);
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return; // a new settings view or a logout replaced the groups this answer was for
   settingsState.data = data;
+  settingsState.voice = voice;
   settingsApplyModel(settingsState.data);
   refreshSettings();
   if (changedPath) settingsFocus(changedPath);
@@ -929,7 +1002,8 @@ function refreshGroup(g) {
       ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
         { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
       : [];
-    g.body.replaceChildren(...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
+    const lead = g.id === VOICE_SWITCH_GROUP && settingsState.voice ? [voiceSwitchRow(settingsState.voice), el("hr", { class: "sl-rule" })] : [];
+    g.body.replaceChildren(...lead, ...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
   }
   return hits.length;
 }
@@ -1009,10 +1083,11 @@ async function settingsView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   settingsState.routes = null; // the voice rows fetch the routes again, once for the view
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return;
   view.replaceChildren();
   settingsState.data = data;
+  settingsState.voice = voice;
   const robot = data.robot || null;
   const sections = [
     ...settingsSections(settingsTree(data.fields), "core", null),

@@ -84,6 +84,7 @@ from .robot_section import (
     build_section,
     claimed,
     load_settings_plugin,
+    platform_voice,
     restart_hook,
     vet_claims,
 )
@@ -95,6 +96,7 @@ from .setting_clean import (
     key_choice,
 )
 from .validation import ValidationError
+from .voice_switch import voice_switch
 
 if TYPE_CHECKING:
     from roboemot.manifest import Manifest
@@ -533,6 +535,16 @@ class SettingsEditor:
         """Only the private fields, with their real values (secrets stay redacted). The caller
         has verified the PIN."""
         return [f for f in self._catalogue(reveal_private=True) if f["private"]]
+
+    def voice_switch(self) -> dict[str, Any]:
+        """The voice-provider switch over the effective configuration (``voice_switch``,
+        SPEC 8, 11A): the current choice and every choice with its full key list. Local is
+        available when the voice models of the page language are installed; a route when its
+        key's secret is in the store. Nothing is written."""
+        cfg = self.stack.effective()
+        known = set(self._known_secrets()) if self._known_secrets is not None else None
+        local_ready = cfg.conversation.language in self._installed(cfg)
+        return voice_switch(cfg, platform_voice(self._plugin, cfg), known, local_ready)
 
     # ------------------------------------------------------------------ writing
 

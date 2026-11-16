@@ -153,6 +153,7 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def change_many(self, changes: object, source: str) -> dict[str, Any]: ...
     def preview_many(self, changes: object) -> list[dict[str, Any]]: ...
+    def voice_switch(self) -> dict[str, Any]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -511,6 +512,7 @@ class WebApi:
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/batch"): self._settings_batch,
             ("POST", "/api/settings/batch/preview"): self._settings_batch_preview,
+            ("GET", "/api/settings/voice"): self._settings_voice,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
             ("POST", "/api/robot/restart"): self._robot_restart,
             ("POST", "/api/settings/reset"): self._settings_reset,
@@ -1018,6 +1020,13 @@ class WebApi:
         port = self._settings_port()
         body = self._batch_body(req)
         return self._settings_call(lambda: {"changes": port.preview_many(body["changes"])})
+
+    def _settings_voice(self, req: Request) -> Response:
+        """The voice-provider switch (SPEC 8, 11A): ``value`` (the current choice id, or
+        ``custom``) and ``choices`` with each one's availability and full change list, which the
+        page sends to the batch preview and save. A read: the writes take the PIN there."""
+        port = self._settings_port()
+        return Response(HTTPStatus.OK, port.voice_switch())
 
     def _batch_body(self, req: Request) -> dict[str, Any]:
         """The body of a batch call with its shape checked (``batch_shape``), then the PIN."""

@@ -27,13 +27,15 @@ from typing import Any
 
 from roboemot.config.catalogue import FieldDescriptor, descriptor
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.install import ROUTES_KEY, cloud_voice_config
 from roboemot.manifest import Manifest
 from roboemot.realtime.session import route_origin
-from roboemot.webui.robot_section import PATH_ROOT, RobotSection
+from roboemot.webui.robot_section import PATH_ROOT, RobotSection, VoiceProfile
 from roboemot.webui.settings import StackPort
 from roboemot.webui.strings import DEFAULT_LANGUAGE, language_for
 
 from .daemon import STOP_TIMEOUT_S, DaemonClient, DaemonError
+from .install import CLOUD_VOICE
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "soft_stop": "What a soft stop does.",
         "hard_stop": "What a hard stop does.",
         "watchdog": "Ceiling for {ceiling}: the config value can only be lower.",
+        "voice_label": "Pollen's server (Hugging Face)",
     },
     "it": {
         "min": "Minimo hardware di {name}; un limite che nessuna impostazione può superare.",
@@ -84,6 +87,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "soft_stop": "Cosa fa un arresto morbido.",
         "hard_stop": "Cosa fa un arresto brusco.",
         "watchdog": "Limite per {ceiling}: il valore in configurazione può solo essere più basso.",
+        "voice_label": "Server di Pollen (Hugging Face)",
     },
 }
 
@@ -153,6 +157,19 @@ class ReachySettings:
                 cause,
                 "" if exc.status is None else f", HTTP {exc.status}",
             )
+
+    def voice_profile(self, cfg: RoboEmotConfig) -> VoiceProfile:
+        """The cloud-voice choice of the Settings voice switch: the keys the installer's
+        ``--cloud-voice`` writes (``cloud_voice_config`` of ``CLOUD_VOICE``, one source for both),
+        without the route entry, which the robot already has once the choice is offered. The
+        label is in the page language."""
+        keys = {
+            ".".join(path): value
+            for path, value in cloud_voice_config(CLOUD_VOICE).items()
+            if path[0] != ROUTES_KEY
+        }
+        label = texts(cfg.conversation.language)["voice_label"]
+        return VoiceProfile(CLOUD_VOICE.name, label, keys)
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of
