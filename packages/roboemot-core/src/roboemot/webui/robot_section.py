@@ -5,6 +5,8 @@ manifest ``robot.id`` (same pattern as ``roboemot.diagnostics`` and ``roboemot.w
 ``section(stack, manifest)`` returns a ``RobotSection``: read-only hardware rows it builds with
 ``config.catalogue.descriptor`` and the config paths it *claims*, which the web UI then lists under
 the robot instead of the core sections. Core stays robot-agnostic and never writes a plugin row.
+An optional ``voice_profile(cfg, language)`` (``VoiceProfiled``) gives the platform's own realtime
+route and its keys for the Settings voice-provider switch (``webui.voice_switch``).
 """
 
 from __future__ import annotations
@@ -113,11 +115,13 @@ class VoiceProfile:
     """The robot platform's own voice choice for the Settings voice switch (SPEC 8, 11A): the
     ``kind: realtime`` route it answers through, the choice's label in the page language, and
     the dotted config keys with the values the choice writes (the installer's cloud-voice
-    profile, without the route entry itself)."""
+    profile, without the route entry itself), and the route's ``base_url``: a route of that name
+    elsewhere is not the platform's."""
 
     route: str
     label: str
     keys: dict[str, Any]
+    base_url: str
 
 
 @runtime_checkable
@@ -125,19 +129,22 @@ class VoiceProfiled(Protocol):
     """Optional: a plugin whose robot platform has its own realtime speech route. The voice
     switch then offers that route with these keys instead of the core direct-mode profile."""
 
-    def voice_profile(self, cfg: RoboEmotConfig) -> VoiceProfile | None:
-        """The platform's voice choice for ``cfg`` (its language for the label), or ``None``."""
+    def voice_profile(self, cfg: RoboEmotConfig, language: str) -> VoiceProfile | None:
+        """The platform's voice choice for ``cfg``, labelled in ``language`` (the page's), or
+        ``None``."""
         ...
 
 
-def platform_voice(plugin: SettingsPlugin | None, cfg: RoboEmotConfig) -> VoiceProfile | None:
+def platform_voice(
+    plugin: SettingsPlugin | None, cfg: RoboEmotConfig, language: str
+) -> VoiceProfile | None:
     """The plugin's ``voice_profile`` when it is ``VoiceProfiled``, else ``None``. A plugin that
-    raises or returns something that is not a ``VoiceProfile`` with a route name, a label and
-    string keys gives none (logged by type only, never a value)."""
+    raises or returns something that is not a ``VoiceProfile`` with a route name, a label, a
+    base URL and string keys gives none (logged by type only, never a value)."""
     if not isinstance(plugin, VoiceProfiled):
         return None
     try:
-        profile = plugin.voice_profile(cfg)
+        profile = plugin.voice_profile(cfg, language)
     except Exception as exc:
         log.warning("settings plugin voice profile: %s", type(exc).__name__)
         return None
@@ -148,6 +155,7 @@ def platform_voice(plugin: SettingsPlugin | None, cfg: RoboEmotConfig) -> VoiceP
         and isinstance(profile.route, str)
         and profile.route
         and isinstance(profile.label, str)
+        and isinstance(profile.base_url, str)
         and isinstance(profile.keys, dict)
         and all(isinstance(k, str) for k in profile.keys)
     ):

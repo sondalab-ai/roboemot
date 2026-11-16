@@ -435,6 +435,7 @@ EN: dict[str, str] = {
     "voice_choice_unavailable": "{choice}: {reason}",
     "voice_reason_secret_missing": "needs the secret {secret}",
     "voice_reason_models_missing": "the Piper and Vosk models are not installed",
+    "voice_reason_piper_missing": "Piper is not installed (reinstall with --piper)",
     "voice_switch_pin_title": "Switch the voice to {choice}",
     "voice_switch_pin_message": (
         "Enter the PIN to see what changes. Nothing is saved until you confirm."
@@ -449,6 +450,12 @@ EN: dict[str, str] = {
     "voice_switch_opt_out": (
         "Privacy opt-in turned off (SPEC 12): {paths}. Microphone audio no longer leaves the "
         "robot for a route's server."
+    ),
+    "voice_switch_audio_to": "With the opt-in on, the utterances' audio goes to {provider}.",
+    "voice_switch_unaddressed": (
+        "The same consent lets the robot stream every speech segment it hears while it is awake, "
+        "not only speech meant for it (a television, people talking to each other), once server "
+        "turns are switched on."
     ),
     "voice_switch_confirm": "Switch",
     "voice_switch_same": "The voice already uses this choice.",
@@ -1536,6 +1543,7 @@ IT: dict[str, str] = {
     "voice_choice_unavailable": "{choice}: {reason}",
     "voice_reason_secret_missing": "serve il segreto {secret}",
     "voice_reason_models_missing": "i modelli di Piper e Vosk non sono installati",
+    "voice_reason_piper_missing": "Piper non è installato (reinstalla con --piper)",
     "voice_switch_pin_title": "Passa la voce a {choice}",
     "voice_switch_pin_message": (
         "Inserisci il PIN per vedere cosa cambia. Non viene salvato nulla finché non confermi."
@@ -1550,6 +1558,12 @@ IT: dict[str, str] = {
     "voice_switch_opt_out": (
         "Consenso privacy disattivato (SPEC 12): {paths}. L'audio del microfono non lascia più il "
         "robot verso il server di una route."
+    ),
+    "voice_switch_audio_to": "Con il consenso attivo, l'audio degli enunciati va a {provider}.",
+    "voice_switch_unaddressed": (
+        "Lo stesso consenso permette al robot di inviare ogni segmento di parlato che sente da "
+        "sveglio, non solo quello rivolto a lui (una televisione, persone che parlano tra loro), "
+        "una volta attivati i turni del server."
     ),
     "voice_switch_confirm": "Cambia",
     "voice_switch_same": "La voce usa già questa scelta.",

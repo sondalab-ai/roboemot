@@ -266,8 +266,11 @@ A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robo
 1. In **Voice provider**, the first row, pick `Route gemini (direct)`. The choice is greyed out,
    with the reason, while the `gemini_key` secret is missing.
 2. Enter the PIN. The page lists every setting the switch changes, with the old and the new
-   value, and names the privacy opt-ins `privacy.realtime_audio` and
-   `privacy.realtime_audio_unaddressed`: with them on, the utterances' audio goes to Google.
+   value. It names the privacy opt-ins the switch turns on or off, and, with
+   `privacy.realtime_audio` on, the server that receives the utterances' audio
+   (`generativelanguage.googleapis.com`), also when the opt-in was already on for Pollen. The
+   Gemini choice turns `privacy.realtime_audio_unaddressed` off: Gemini runs robot turns only, so
+   that consent can never act there.
 3. Confirm. Every setting is saved at once, or none is.
 4. Restart RoboEmot (section 5, Restart RoboEmot).
 

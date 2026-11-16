@@ -20,7 +20,7 @@ from roboemot.webui.robot_section import (
     load_settings_plugin,
     platform_voice,
 )
-from roboemot.webui.settings import SettingsEditor
+from roboemot.webui.settings import SettingsEditor, piper_installed
 from roboemot.webui.strings import DEFAULT_LANGUAGE, STRINGS
 from test_compat_fixtures import COMPAT, MANIFEST, app_stack, platform_route, robot_data, start
 from test_webui import PIN
@@ -144,7 +144,8 @@ def test_gemini_runs_direct_with_robot_turns_and_another_route_direct():
     assert (g["voice.realtime_route.mode"], g["voice.realtime_route.turns"]) == ("direct", "robot")
     assert (g["voice.realtime_route.route"], o["voice.realtime_route.route"]) == ("g", "o")
     assert o["voice.realtime_route.mode"] == "direct"
-    assert g["privacy.realtime_audio"] and g["privacy.realtime_audio_unaddressed"]
+    assert g["privacy.realtime_audio"] and not g["privacy.realtime_audio_unaddressed"]
+    assert o["privacy.realtime_audio"] and o["privacy.realtime_audio_unaddressed"]
 
 
 def test_local_takes_the_schema_defaults():
@@ -201,14 +202,31 @@ def test_a_route_whose_secret_is_missing_cannot_be_picked():
     assert by_id[platform_choice()]["available"]
 
 
-def test_local_needs_the_voice_models(tmp_path):
-    stack = ConfigStack(app={"voice": {"enabled": True}}, audit_path=tmp_path / "audit.jsonl")
-    missing = SettingsEditor(stack, installed=lambda cfg: [])
-    local = missing.voice_switch()["choices"][0]
-    assert (local["available"], local["reason"]) == (False, vs.MODELS_MISSING)
+def local_choice(stack, models: bool, piper: bool) -> dict:
+    """The Local choice of an editor whose voice models and Piper interpreter are as given."""
     lang = stack.effective().conversation.language
-    present = SettingsEditor(stack, installed=lambda cfg: [lang])
-    assert present.voice_switch()["choices"][0]["available"]
+    editor = SettingsEditor(
+        stack, installed=lambda cfg: [lang] if models else [], piper_ready=lambda cfg: piper
+    )
+    return editor.voice_switch()["choices"][0]
+
+
+def test_local_needs_the_voice_models_and_the_piper_interpreter(tmp_path):
+    stack = ConfigStack(app={"voice": {"enabled": True}}, audit_path=tmp_path / "audit.jsonl")
+    missing = local_choice(stack, models=False, piper=True)
+    assert (missing["available"], missing["reason"]) == (False, vs.MODELS_MISSING)
+    no_piper = local_choice(stack, models=True, piper=False)
+    assert (no_piper["available"], no_piper["reason"]) == (False, vs.PIPER_MISSING)
+    assert local_choice(stack, models=True, piper=True)["available"]
+
+
+def test_the_piper_check_is_the_interpreter_local_voice_runs(tmp_path):
+    python = tmp_path / "piper" / "bin" / "python"
+    cfg = RoboEmotConfig.model_validate({"voice": {"piper": {"python": str(python)}}})
+    assert not piper_installed(cfg)
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    assert piper_installed(cfg)
 
 
 # ------------------------------------------------------------------ plugin contract
@@ -218,7 +236,7 @@ def test_the_robot_plugin_gives_the_platform_profile():
     robot_id = load_manifest(MANIFEST, allow_unmeasured_dynamics=True).robot.id
     plugin = load_settings_plugin(robot_id)
     assert isinstance(plugin, VoiceProfiled)
-    profile = platform_voice(plugin, RoboEmotConfig())
+    profile = platform_voice(plugin, RoboEmotConfig(), "en")
     assert profile is not None and profile.route == platform_route()
     assert set(profile.keys) <= set(SWITCH_KEYS)
 
@@ -227,27 +245,38 @@ class Raising:
     def section(self, stack, manifest):
         raise AssertionError
 
-    def voice_profile(self, cfg):
+    def voice_profile(self, cfg, language):
         raise RuntimeError("boom")
 
 
 class Wrong(Raising):
-    def voice_profile(self, cfg):
+    def voice_profile(self, cfg, language):
         return {"route": "x"}
 
 
 @pytest.mark.parametrize("plugin", [Raising(), Wrong(), None, object()])
 def test_a_broken_or_missing_plugin_profile_gives_none(plugin):
-    assert platform_voice(plugin, RoboEmotConfig()) is None
+    assert platform_voice(plugin, RoboEmotConfig(), "en") is None
 
 
 def test_a_plugin_key_outside_the_list_is_not_written():
     cfg = RoboEmotConfig.model_validate(
         {"llm_routes": [{"name": "p", "kind": "realtime", "base_url": "https://p", "model": "m"}]}
     )
-    profile = VoiceProfile("p", "P", {"voice.realtime_route.mode": "platform", "safety.x": 1})
+    keys = {"voice.realtime_route.mode": "platform", "safety.x": 1}
+    profile = VoiceProfile("p", "P", keys, "https://p/session")
     values = vs.choices(cfg, profile)[1].values
     assert list(values) == list(SWITCH_KEYS) and values["voice.realtime_route.mode"] == "platform"
+
+
+def test_a_route_that_borrows_the_platform_name_runs_direct():
+    cfg = RoboEmotConfig.model_validate(
+        {"llm_routes": [{"name": "p", "kind": "realtime", "base_url": "https://x", "model": "m"}]}
+    )
+    profile = VoiceProfile("p", "Platform", {"voice.realtime_route.mode": "platform"}, "https://p")
+    choice = vs.choices(cfg, profile)[1]
+    assert (choice.kind, choice.label, choice.audio_to) == (vs.KIND_DIRECT, None, "x")
+    assert choice.values["voice.realtime_route.mode"] == "direct"
 
 
 # ------------------------------------------------------------------ API
@@ -269,7 +298,8 @@ def test_the_api_lists_the_switch_and_the_preview_shows_its_diff(served_cloud):
     client, editor = served_cloud
     data = client.request("GET", "/api/settings/voice").json
     assert set(data) == {"value", "revealed", "choices"} and data["value"] == GEMINI
-    keys = {"id", "kind", "route", "protocol", "label", "available", "reason", "secret", "changes"}
+    keys = {"id", "kind", "route", "protocol", "label", "audio_to", "available", "reason"}
+    keys |= {"secret", "private_match", "changes"}
     assert all(set(c) == keys for c in data["choices"])
     local = next(c for c in data["choices"] if c["id"] == vs.LOCAL)
     body = {"changes": local["changes"], "pin": PIN}
@@ -333,3 +363,66 @@ def test_the_revealed_switch_needs_the_pin(served_cloud):
     assert shown["revealed"] is True and shown["value"] == GEMINI
     refused = client.request("POST", "/api/settings/voice", {"pin": "000000"})
     assert refused.status == 401 and refused.json == {"error": "bad_pin"}
+
+
+# ------------------------------------------------------------------ review round
+
+
+def test_a_text_input_on_the_route_is_custom():
+    editor, _ = started("gemini_switch")
+    editor.change("voice.realtime_route.input", "text")
+    assert editor.voice_switch(revealed=True)["value"] == vs.CUSTOM
+    assert editor.voice_switch()["value"] == vs.CUSTOM
+
+
+def test_gemini_writes_the_unaddressed_opt_in_off_and_an_old_switch_still_reads_gemini():
+    editor, cfg = started("gemini_switch")
+    assert cfg.privacy.realtime_audio_unaddressed  # the two-step switch kept it on
+    assert editor.voice_switch(revealed=True)["value"] == GEMINI
+    gemini = next(c for c in editor.voice_switch()["choices"] if c["id"] == GEMINI)
+    diff = {d["path"]: d for d in editor.preview_many(gemini["changes"])}
+    assert diff["privacy.realtime_audio_unaddressed"]["opt_in"]
+    assert gemini["private_match"] == ["privacy.realtime_audio"]
+    switch_to(editor, GEMINI)
+    assert not editor.stack.effective().privacy.realtime_audio_unaddressed
+    assert editor.voice_switch(revealed=True)["value"] == GEMINI
+
+
+def test_a_switch_between_routes_with_the_opt_in_on_names_the_receiver():
+    editor, _ = started("gemini_switch")
+    switch_to(editor, platform_choice())
+    gemini = next(c for c in editor.voice_switch()["choices"] if c["id"] == GEMINI)
+    diff = {d["path"] for d in editor.preview_many(gemini["changes"])}
+    assert "voice.realtime_route.route" in diff
+    assert "privacy.realtime_audio" not in diff  # on before and after: no opt-in flips
+    assert gemini["audio_to"] == "generativelanguage.googleapis.com"
+    mine = next(c for c in editor.voice_switch()["choices"] if c["id"] == platform_choice())
+    assert mine["audio_to"] == mine["label"]
+
+
+def test_an_openai_realtime_route_switch_passes_the_validators(tmp_path):
+    robot_data("cloud_voice")
+    app = paths.app_config_path()
+    config = yaml.safe_load(app.read_text())
+    other = {
+        "name": "other",
+        "kind": "realtime",
+        "base_url": "https://realtime.example.com/v1",
+        "model": "m",
+        "api_key": "${secret:hf_token}",
+    }
+    app.write_text(yaml.safe_dump({**config, "llm_routes": [*config["llm_routes"], other]}))
+    admin, _, _ = start(app_stack())
+    editor = admin.settings
+    switch_to(editor, "route:other")
+    rt = editor.stack.effective().voice.realtime_route
+    assert (rt.route, rt.mode, rt.enabled) == ("other", "direct", True)
+    assert editor.voice_switch(revealed=True)["value"] == "route:other"
+
+
+@pytest.mark.parametrize("lang", sorted(set(STRINGS) - {DEFAULT_LANGUAGE}))
+def test_every_voice_string_has_its_translation(lang):
+    mine = {k for k in STRINGS[DEFAULT_LANGUAGE] if k.startswith(("voice_switch", "voice_choice"))}
+    mine |= {k for k in STRINGS[DEFAULT_LANGUAGE] if k.startswith("voice_reason_")}
+    assert mine <= set(STRINGS[lang])
+    assert f"voice_reason_{vs.PIPER_MISSING}" in mine

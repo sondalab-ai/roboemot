@@ -61,7 +61,7 @@ section number in commit messages that implement or change behaviour.
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 - **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's
   `section(stack, manifest)` returns read-only `robot.<id>.*` rows and the config paths it claims; an optional
-  `voice_profile(cfg)` gives the platform route's keys for the Settings voice-provider switch. Core never writes a plugin row.
+  `voice_profile(cfg, language)` gives the platform route's keys for the Settings voice-provider switch. Core never writes a plugin row.
 - **Installer (SPEC 4A, Installer):** same pattern, entry-point group `roboemot.installers`. It
   must leave the robot clean: record only its own changes, pin existing versions, `--no-cache-dir`
   on every pip call, and the dry run never writes.

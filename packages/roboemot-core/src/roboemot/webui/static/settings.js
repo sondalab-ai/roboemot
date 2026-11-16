@@ -589,8 +589,12 @@ async function settingsBatchSave(message, changes, verbKey = "saved") {
   return result;
 }
 
-// After a batch save: the notice (layer, restart) and the rows read again.
+// After a batch save: the revealed private values it changed kept current, the notice (layer,
+// restart) and the rows read again.
 async function settingsBatchDone(result, verbKey) {
+  for (const r of result.results || []) {
+    if (r.changed && revealedSettings.has(r.path)) revealedSettings.set(r.path, { ...revealedSettings.get(r.path), value: r.value });
+  }
   writeNotice(result, verbKey);
   await settingsReload(null);
 }
@@ -603,6 +607,41 @@ const VOICE_CUSTOM = "custom";
 // GET /api/settings/voice, or null on a failure (an older server, no editor): the row is then not shown.
 async function voiceSwitchFetch() {
   try { return await api("GET", "/api/settings/voice"); } catch (e) { return null; }
+}
+
+// The answer of the unrevealed GET as the page shows it once the private fields are revealed: the
+// matched choice holds only while its private keys (`private_match`) equal the revealed values, which
+// every save keeps current. So a reload after a save never mixes a revealed page with an unrevealed
+// voice value. Without revealed values it is returned as it is.
+function voiceRevealed(voice) {
+  if (!voice || voice.revealed) return voice;
+  const choice = voice.choices.find((c) => c.id === voice.value);
+  const keys = choice ? choice.private_match || [] : [];
+  if (!choice || !revealedSettings.size || !keys.every((p) => revealedSettings.has(p))) return voice;
+  const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+  const same = keys.every((p) => revealedSettings.get(p).value === wanted.get(p));
+  return { ...voice, revealed: true, value: same ? voice.value : VOICE_CUSTOM };
+}
+
+// The confirmation text of a switch to `choice` over `diff`: the opt-ins it turns on or off, who
+// receives the audio when the opt-in is on and the receiving route changes (even with no opt-in
+// change), and the unaddressed audio when that consent turns on (SPEC 12).
+function voiceSwitchMessage(choice, diff, wanted) {
+  const changed = new Set(diff.changes.map((c) => c.path));
+  const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
+  const parts = [t("voice_switch_diff")];
+  for (const [on, key] of [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]) {
+    const paths = optIns(on);
+    if (paths.length) parts.push(t(key, { paths: paths.join(", ") }));
+  }
+  const audioOn = wanted.get("privacy.realtime_audio") === true;
+  if (audioOn && choice.audio_to && (changed.has("voice.realtime_route.route") || changed.has("voice.realtime_route.enabled"))) {
+    parts.push(t("voice_switch_audio_to", { provider: choice.audio_to }));
+  }
+  if (wanted.get("privacy.realtime_audio_unaddressed") === true && changed.has("privacy.realtime_audio_unaddressed")) {
+    parts.push(t("voice_switch_unaddressed"));
+  }
+  return parts.join(" ");
 }
 
 // One choice's name in the page language: the robot plugin words its own platform route.
@@ -632,7 +671,8 @@ function voiceSwitchRow(data) {
 
 // Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
 // dialog lists what changes (the privacy opt-ins named, SPEC 12), and its confirm saves the batch with
-// the same PIN. The PIN lives only in this call. Returns the save's response, or null.
+// the same PIN. The PIN lives only in this call; a save refused for the PIN starts again at the PIN
+// dialog. Returns the save's response, or null.
 async function voiceSwitch(choice) {
   const title = t("voice_switch_pin_title", { choice: voiceChoiceText(choice) });
   let held = null;
@@ -649,14 +689,19 @@ async function voiceSwitch(choice) {
       const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
       return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
     });
-    const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
-    const named = [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]
-      .map(([on, key]) => [optIns(on), key]).filter(([paths]) => paths.length)
-      .map(([paths, key]) => " " + t(key, { paths: paths.join(", ") }));
-    const message = t("voice_switch_diff") + named.join("");
+    const message = voiceSwitchMessage(choice, diff, wanted);
     let result = null;
+    let again = false;
     const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
-      run: async () => { result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held }); } });
+      run: async () => {
+        try {
+          result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held });
+        } catch (err) {
+          if (err.message !== "bad_pin") throw err;
+          again = true;
+        }
+      } });
+    if (again) { held = null; return voiceSwitch(choice); }
     if (!done || !result) return null;
     await settingsBatchDone(result, "saved");
     return result;
@@ -937,7 +982,7 @@ async function settingsReload(changedPath) {
   const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return; // a new settings view or a logout replaced the groups this answer was for
   settingsState.data = data;
-  settingsState.voice = voice;
+  settingsState.voice = voiceRevealed(voice);
   settingsApplyModel(settingsState.data);
   refreshSettings();
   if (changedPath) settingsFocus(changedPath);
@@ -1097,7 +1142,7 @@ async function settingsView() {
   if (!current()) return;
   view.replaceChildren();
   settingsState.data = data;
-  settingsState.voice = voice;
+  settingsState.voice = voiceRevealed(voice);
   const robot = data.robot || null;
   const sections = [
     ...settingsSections(settingsTree(data.fields), "core", null),

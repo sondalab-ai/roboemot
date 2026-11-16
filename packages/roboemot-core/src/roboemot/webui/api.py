@@ -153,7 +153,7 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def change_many(self, changes: object, source: str) -> dict[str, Any]: ...
     def preview_many(self, changes: object) -> list[dict[str, Any]]: ...
-    def voice_switch(self, revealed: bool = False) -> dict[str, Any]: ...
+    def voice_switch(self, revealed: bool = False, language: str = "") -> dict[str, Any]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -1028,7 +1028,7 @@ class WebApi:
         page sends to the batch preview and save. Without the PIN the privacy opt-ins (private
         fields) do not decide ``value`` (``revealed: false``); the writes take the PIN there."""
         port = self._settings_port()
-        return Response(HTTPStatus.OK, port.voice_switch())
+        return Response(HTTPStatus.OK, port.voice_switch(language=self._language()))
 
     def _settings_voice_reveal(self, req: Request) -> Response:
         """The voice-provider switch with ``value`` matched on the private keys too
@@ -1038,7 +1038,7 @@ class WebApi:
         body = self._json_body(req)
         v.only_keys(body, {"pin"})
         self._check_pin(req, body.get("pin"))
-        return Response(HTTPStatus.OK, port.voice_switch(revealed=True))
+        return Response(HTTPStatus.OK, port.voice_switch(revealed=True, language=self._language()))
 
     def _batch_body(self, req: Request) -> dict[str, Any]:
         """The body of a batch call with its shape checked (``batch_shape``), then the PIN."""
