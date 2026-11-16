@@ -29,6 +29,8 @@ PRESETS_FILE = Path(__file__).with_name("route_presets.yaml")
 PRESET_FIELDS = frozenset(
     {"name", "kind", "protocol", "base_url", "model", "locality", "connect_timeout_s"}
 )
+SCALARS = (str, int, float, bool)  # with None: the JSON scalars a preset field may hold
+REALTIME = "realtime"
 
 
 @cache
@@ -41,14 +43,22 @@ def core_presets() -> tuple[dict[str, Any], ...]:
 
 
 def preset_ok(preset: RoutePreset) -> bool:
-    """Whether ``preset`` can be offered: its fields are add-card fields only (no key), its
+    """Whether ``preset`` can be offered: its fields are add-card fields only (no key) with
+    JSON scalar values and a text ``name``, ``connect_timeout_s`` only on a realtime route, its
     secret is a valid secret name and the fields with that key make a valid ``LLMRoute``. A
     preset that fails is dropped with a log line that names its id only."""
-    if not set(preset.fields) <= PRESET_FIELDS or SECRET_NAME.fullmatch(preset.secret) is None:
+    fields = preset.fields
+    if (
+        not set(fields) <= PRESET_FIELDS
+        or not all(v is None or isinstance(v, SCALARS) for v in fields.values())
+        or not isinstance(fields.get("name"), str)
+        or ("connect_timeout_s" in fields and fields.get("kind") != REALTIME)
+        or SECRET_NAME.fullmatch(preset.secret) is None
+    ):
         log.warning("route preset %s dropped: not add-card fields", preset.id)
         return False
     try:
-        LLMRoute.model_validate({**preset.fields, "api_key": f"${{secret:{preset.secret}}}"})
+        LLMRoute.model_validate({**fields, "api_key": f"${{secret:{preset.secret}}}"})
     except ValidationError:
         log.warning("route preset %s dropped: not a valid route", preset.id)
         return False
@@ -75,12 +85,22 @@ def route_presets(
     reserved = {p.id for p in core}
     ids: set[str] = set()
     names = set(configured)
-    for preset in [*(p for p in platform if p.id not in reserved), *core]:
-        name = preset.fields.get("name")
-        if preset.id in ids or name in names or not preset_ok(preset):
+    candidates = [(p, False) for p in platform] + [(p, True) for p in core]
+    for preset, own in candidates:
+        try:
+            offered = (
+                preset.id not in ids
+                and (own or preset.id not in reserved)
+                and preset_ok(preset)
+                and preset.fields["name"] not in names
+            )
+        except Exception as exc:  # one malformed plugin preset must never fail the list
+            log.warning("route preset dropped: %s", type(exc).__name__)
+            continue
+        if not offered:
             continue
         ids.add(preset.id)
-        names.add(name)
+        names.add(preset.fields["name"])
         out.append(
             {
                 "id": preset.id,

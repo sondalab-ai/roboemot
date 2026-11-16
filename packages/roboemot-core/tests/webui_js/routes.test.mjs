@@ -657,6 +657,46 @@ test("presets: a preset whose key is not stored names it and fills the key name 
   assert.equal(sel(page, "secret-value").value, "", "never a value");
   await page.run("routesView()");
   assert.equal(sel(page, "route-new-name").value, "platform", "the redraw after the key is stored keeps the preset");
+  assert.equal(sel(page, "secret-name").value, "hf_token", "the redrawn API keys card gets the name too");
+});
+
+test("presets: a successful add forgets the preset, so the next add form starts empty", async () => {
+  const page = await presetsPage([GEMINI], { "POST /api/routes/add": () => ({ changed: true }) });
+  presetButton(page, "gemini_live").click();
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  await answerPin(page);
+  await settle();
+  assert.equal(sel(page, "route-new-name").value, "");
+  assert.equal(sel(page, "route-new-url").value, "");
+});
+
+test("presets: a name typed by hand forgets the preset on the next redraw", async () => {
+  const page = await presetsPage([GEMINI]);
+  presetButton(page, "gemini_live").click();
+  const name = sel(page, "route-new-name");
+  name.value = "g2";
+  name.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+  await page.run("routesView()");
+  assert.equal(sel(page, "route-new-name").value, "");
+  assert.equal(sel(page, "route-new-model").value, "");
+});
+
+test("route edit: text the timeout field cannot read is refused, never cleared to the shared value", async () => {
+  const RT = { ...ROUTE, name: "voice", kind: "realtime", connect_timeout_s: 15 };
+  const sent = [];
+  const page = await formsPage([RT], {
+    "GET /api/strings": { language: "en", strings: { route_timeout_invalid: "Not a number." } },
+    "POST /api/settings": (b) => { sent.push(b.path); return { changed: true }; },
+  });
+  const timeout = sel(page, "route-voice-timeout");
+  Object.defineProperty(timeout, "validity", { value: { badInput: true } });
+  timeout.value = "";
+  submit(page.window, sel(page, "route-voice-model").closest("form"));
+  await settle();
+  assert.equal(page.document.querySelector("dialog[open]"), null, "no PIN dialog");
+  assert.deepEqual(sent, []);
+  assert.match(page.document.body.textContent, /Not a number\./);
 });
 
 test("presets: a second preset resets what the first filled and it does not name", async () => {

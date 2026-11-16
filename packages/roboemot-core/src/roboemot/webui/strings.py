@@ -542,9 +542,10 @@ EN: dict[str, str] = {
         "it shows. After the add, pick the voice on the route's own card, where it can be played."
     ),
     "route_preset_key_missing": (
-        "Store the key {name} first in the API keys card below: its name is filled in there. "
-        "This form keeps the preset."
+        "Store the key {name} first in the API keys card below, under that name. This form keeps "
+        "the preset."
     ),
+    "route_timeout_invalid": "The connect timeout is not a number. Correct it or leave it empty.",
     "route_timeout": "Connect timeout (s)",
     "route_timeout_hint": (
         "Only for a realtime speech route: how long its session may take to connect. Empty uses "
@@ -1669,8 +1670,11 @@ IT: dict[str, str] = {
         "del modello, dove si può ascoltare."
     ),
     "route_preset_key_missing": (
-        "Salva prima la chiave {name} nella scheda chiavi API qui sotto: il nome è già compilato. "
-        "Questo modulo tiene la configurazione scelta."
+        "Salva prima la chiave {name} nella scheda chiavi API qui sotto, con quel nome. Questo "
+        "modulo tiene la configurazione scelta."
+    ),
+    "route_timeout_invalid": (
+        "Il tempo massimo di connessione non è un numero. Correggilo o lascialo vuoto."
     ),
     "route_timeout": "Tempo massimo di connessione (s)",
     "route_timeout_hint": (

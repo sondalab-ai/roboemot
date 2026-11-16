@@ -970,11 +970,12 @@ function routeForm(route, secrets, nameMax, save, presets = []) {
     const stored = names.includes(p.secret);
     key.value = stored ? p.secret : "";
     keyHint.textContent = stored ? "" : t("route_preset_key_missing", { name: p.secret });
-    const secretName = document.getElementById("secret-name");
-    if (!stored && secretName) secretName.value = p.secret;
+    fillSecretName(p, secrets);
     state.routePreset = p.id;
     showRealtime();
   };
+  // a name typed by hand is the owner's route, not the preset's: a redraw no longer refills it
+  if (name) name.addEventListener("input", () => { state.routePreset = null; });
   const presetRow = route || !presets.length ? [] : el("div", { class: "stack" },
     markedEyebrow("p", t("route_presets")),
     el("p", { class: "hint" }, t("route_presets_hint")),
@@ -987,6 +988,8 @@ function routeForm(route, secrets, nameMax, save, presets = []) {
     onsubmit: (ev) => {
       ev.preventDefault();
       const rt = isRealtime();
+      // text the number field cannot read is refused, never sent as "empty" (the shared value)
+      if (rt && timeout.validity && timeout.validity.badInput) { notice(t("route_timeout_invalid"), true); return; }
       const typed = timeout.value.trim();
       const kept = route && route.connect_timeout_s != null ? route.connect_timeout_s : null;
       whileBusy(send, () => guarded(() => save({
@@ -1010,6 +1013,14 @@ function routeForm(route, secrets, nameMax, save, presets = []) {
   const chosen = route ? null : presets.find((p) => p.id === state.routePreset);
   if (chosen) applyPreset(chosen);
   return form;
+}
+
+// The API keys card's name field gets a preset's secret name while that secret is not stored,
+// so the owner only types the key. Nothing happens when the card is not in the page (yet).
+function fillSecretName(preset, secrets) {
+  const field = document.getElementById("secret-name");
+  const stored = secrets.some((s) => s.set && s.name === preset.secret);
+  if (field && !stored) field.value = preset.secret;
 }
 
 // The voices known for a route protocol (GET /api/routes `voices`), as the datalist of a voice
@@ -1188,6 +1199,7 @@ async function saveRoute(route, v) {
     return {};
   });
   if (ran) {
+    if (!route) state.routePreset = null;
     const done = t(route ? "route_saved" : "route_added", { name: route ? route.name : v.name });
     notice(notApplied ? done + " " + t("settings_not_applied") : done, notApplied);
   }
@@ -1346,6 +1358,8 @@ async function routesView() {
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
   view.append(staleNote("routes-stale", ["routes-cards"]), grid);
+  const kept = presets.find((p) => p.id === state.routePreset);
+  if (kept) fillSecretName(kept, secretList); // the API keys card is in the page only now
   if (before) pollRecovered(before);
   pollGood(grid);
   focusBack();

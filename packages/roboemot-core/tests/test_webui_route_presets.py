@@ -44,10 +44,18 @@ def stack(tmp_path):
 
 @pytest.fixture
 def web(tmp_path, stack):
+    srv, client = serve(tmp_path, stack)
+    yield client
+    srv.stop()
+
+
+def serve(tmp_path, stack, plugin=None):
+    """The web UI over ``stack`` with ``gemini_key`` stored and ``plugin`` as the robot's
+    settings plugin, logged in. Returns the server (stop it) and the client."""
     SecretStore.for_data_dir(stack.effective().data_dir).set("gemini_key", KEY)
     admin = SecretsAdmin(stack.effective)
     editor = SettingsEditor(
-        stack, store=tmp_path / "webui_settings.json", known_secrets=admin.names
+        stack, store=tmp_path / "webui_settings.json", known_secrets=admin.names, plugin=plugin
     )
     srv = make_server(
         FakeService(),
@@ -62,8 +70,7 @@ def web(tmp_path, stack):
     srv.start()
     client = Client(srv.port)
     assert client.login().status == 200
-    yield client
-    srv.stop()
+    return srv, client
 
 
 def post(client, path, body, pin=PIN):
@@ -253,6 +260,16 @@ def test_the_platform_preset_comes_first_and_a_broken_plugin_gives_none(caplog):
         RoutePreset("u", "Bad URL", {**PLATFORM.fields, "base_url": "ftp://x"}, "platform_token"),
         RoutePreset("s", "Bad secret", dict(PLATFORM.fields), "../etc"),
         RoutePreset(GEMINI, "Same id", {**PLATFORM.fields, "name": "other"}, "platform_token"),
+        RoutePreset("n", "List name", {**PLATFORM.fields, "name": ["a"]}, "platform_token"),
+        RoutePreset("m", "No name", {"kind": "realtime", "model": "m"}, "platform_token"),
+        RoutePreset("d", "Dict value", {**PLATFORM.fields, "model": {"k": KEY}}, "platform_token"),
+        RoutePreset(
+            "t",
+            "Chat timeout",
+            {**PLATFORM.fields, "kind": "chat", "connect_timeout_s": 5.0},
+            "platform_token",
+        ),
+        RoutePreset(["unhashable"], "Bad id", dict(PLATFORM.fields), "platform_token"),  # type: ignore[arg-type]
     ],
 )
 def test_a_preset_with_a_key_an_invalid_route_or_a_taken_id_is_dropped(bad, caplog):
@@ -260,3 +277,37 @@ def test_a_preset_with_a_key_an_invalid_route_or_a_taken_id_is_dropped(bad, capl
     offered = rp.route_presets(set(), [bad], "en")
     assert [(p["id"], p["fields"]["name"]) for p in offered] == [(GEMINI, "gemini")]
     assert KEY not in caplog.text
+
+
+def test_a_malformed_plugin_preset_still_lists_the_core_preset(tmp_path, stack, caplog):
+    caplog.set_level(logging.WARNING)
+    bad = RoutePreset("bad", "Bad", {**PLATFORM.fields, "name": ["a"]}, "platform_token")
+    srv, client = serve(tmp_path, stack, plugin=Offers([bad]))
+    try:
+        reply = client.request("GET", "/api/routes")
+    finally:
+        srv.stop()
+    assert reply.status == 200
+    assert [p["id"] for p in reply.json["presets"]] == [GEMINI]
+
+
+@pytest.mark.parametrize("installed", ["pollen", "gemini"])
+def test_an_add_from_a_stale_page_never_shadows_a_route_of_the_config(tmp_path, installed):
+    route = {**gemini_fields(), "name": installed}
+    stack = ConfigStack(
+        app={
+            "data_dir": str(tmp_path / "data"),
+            "webui": {"bind": "127.0.0.1", "port": 0, "pin_max_attempts": 3},
+            "llm_routes": [route],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    srv, client = serve(tmp_path, stack)
+    try:
+        refused = post(client, "/api/routes/add", {**gemini_fields(), "name": installed})
+    finally:
+        srv.stop()
+    assert refused.json == {"error": "entry_exists", "field": "value"}, refused.json
+    assert refused.status == 422
+    (kept,) = [r for r in stack.effective().llm_routes if r.name == installed]
+    assert kept.model_dump(include=set(route)) == route

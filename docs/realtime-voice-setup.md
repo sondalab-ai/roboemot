@@ -216,6 +216,8 @@ from a preset**. The preset fills in every field below except the voice:
   `app.yaml` wrote stays the one in use.
 - The PIN dialog names the host the key goes to (`wss://generativelanguage.googleapis.com`).
 - Pick the voice after the add, on the route's own card (below).
+- Adding the route does not turn the Gemini voice on. The robot keeps speaking as before until
+  you pick Gemini in the **Voice provider** row of the **Settings** tab (step 4).
 
 The same route in `app.yaml`:
 
