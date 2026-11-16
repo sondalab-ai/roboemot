@@ -268,6 +268,15 @@ def test_the_default_llm_skills_are_the_five_and_the_voice_tools():
         "remember_preference",
         "stop_talking",
         "go_to_sleep",
+        "timer_set",
+        "timer_cancel",
+        "reminder_set",
+        "reminder_cancel",
+        "schedule_list",
+        "weather",
+        "radio_play",
+        "radio_stop",
+        "radio_volume",
     ]
 
 

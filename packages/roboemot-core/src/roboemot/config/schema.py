@@ -5793,6 +5793,15 @@ class ConversationConfig(Strict):
             "remember_preference",
             "stop_talking",
             "go_to_sleep",
+            "timer_set",
+            "timer_cancel",
+            "reminder_set",
+            "reminder_cancel",
+            "schedule_list",
+            "weather",
+            "radio_play",
+            "radio_stop",
+            "radio_volume",
         ],
         "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
         "llm_visible in code; this list can only narrow the set. Empty: no tools",
@@ -6892,9 +6901,93 @@ class WebUIConfig(Strict):
 # --------------------------------------------------------------------------- tools (SPEC 11)
 
 
+class SchedulerConfig(Strict):
+    """Timers and reminders (SPEC 11, Voice tools: Scheduler store, Limits, Missed items, Due
+    items, Fallback, Repeat; 11A). The limits sit under the Advanced fold of the Tools tab."""
+
+    max_items: int = param(
+        20,
+        "Most timers and reminders active at once; one more is refused (full)",
+        ge=1,
+        le=200,
+        advanced=True,
+    )
+    text_max_chars: int = param(
+        200,
+        "Longest timer label or reminder text, in characters; a longer one is refused (too_long)",
+        unit="chars",
+        ge=10,
+        le=1000,
+        advanced=True,
+    )
+    timer_max_s: int = param(
+        86400,
+        "Longest timer; a longer one is refused (too_far)",
+        unit="s",
+        ge=10,
+        le=604800,
+        advanced=True,
+    )
+    missed_grace_s: int = param(
+        900,
+        "A timer or reminder that became due while RoboEmot was not running is still announced "
+        "at start when it is late by less than this; an older one is dropped and listed as "
+        "missed. Only across a restart: while RoboEmot runs a due item never expires",
+        unit="s",
+        ge=0,
+        le=86400,
+        advanced=True,
+    )
+    tick_s: float = param(
+        1.0,
+        "How often the scheduler checks for due items and publishes them again until announced",
+        unit="s",
+        ge=0.2,
+        le=10,
+        advanced=True,
+    )
+    announce_timeout_s: float = param(
+        8.0,
+        "When no LLM route answers an announcement within this long, the robot says a fixed "
+        "sentence with the local voice (or plays the fallback cue). Above the realtime connect "
+        "timeout",
+        unit="s",
+        ge=1,
+        le=60,
+        advanced=True,
+    )
+    announce_max_wait_s: float = param(
+        60.0,
+        "An announcement waits for the conversation to be idle at most this long; then it waits "
+        "only for the robot's current sentence to end",
+        unit="s",
+        ge=0,
+        le=600,
+        advanced=True,
+    )
+    repeat_after_s: float = param(
+        30.0,
+        "A timer announcement repeats when nobody speaks to the robot within this long after it "
+        "(a reminder does not repeat)",
+        unit="s",
+        ge=5,
+        le=600,
+        advanced=True,
+    )
+    repeat_max: int = param(
+        2,
+        "Most times a timer announcement repeats",
+        ge=0,
+        le=10,
+        advanced=True,
+    )
+
+
 class ToolsConfig(Strict):
     """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
     tool adds its own sub-section."""
+
+    scheduler: SchedulerConfig = param({}, "SPEC 11, 11A: timers and reminders")
 
 
 # --------------------------------------------------------------------------- root

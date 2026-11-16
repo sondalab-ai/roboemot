@@ -266,9 +266,14 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         skills = app.conversation.skills
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
-            "go_to_sleep",
+            "go_to_sleep", "timer_set", "timer_cancel", "reminder_set", "reminder_cancel",
+            "schedule_list",
         ]  # fmt: skip
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
+        # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
+        assert skills.get("timer_set").is_available() and app.scheduler is not None
+        assert app.scheduler_runner is not None and app.scheduler_runner.alive
+        assert not app.scheduler_runner.consumer_attached
         gestures = skills.get("play").resolved_choices()["gesture"]
         assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None

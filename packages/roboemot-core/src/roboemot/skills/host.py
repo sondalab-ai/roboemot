@@ -11,10 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from .. import timezones
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
+
+if TYPE_CHECKING:
+    from ..tools.scheduler import Scheduler
 
 
 @dataclass
@@ -22,12 +26,15 @@ class ToolHost:
     """The parts a tool may use. ``config`` reads the live merged config; ``wall_now`` is the
     tz-aware wall-clock time in ``circadian.timezone``; ``bus`` is the run's message bus. Later
     tools add their parts as fields that default to None. ``nap`` asks for a requested nap and
-    returns its status at once (``RuntimeHost.request_nap``, SPEC 7A); runtime startup sets it."""
+    returns its status at once (``RuntimeHost.request_nap``, SPEC 7A); runtime startup sets it.
+    ``scheduler`` is the run's timers and reminders store (SPEC 11, Voice tools), set by runtime
+    startup."""
 
     config: Callable[[], RoboEmotConfig]
     wall_now: Callable[[], datetime]
     bus: Bus
     nap: Callable[[], str] | None = None
+    scheduler: Scheduler | None = None
 
 
 def tool_host(config: Callable[[], RoboEmotConfig], bus: Bus) -> ToolHost:

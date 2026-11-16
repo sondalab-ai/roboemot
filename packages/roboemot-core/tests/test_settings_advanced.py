@@ -44,6 +44,7 @@ WHOLLY_ADVANCED = {
     "light",
     "llm_check",
     "speech_motion_map",
+    "tools",  # only the scheduler limits so far (SPEC 11A: Advanced fold); weather adds a switch
 }
 # Guard-protected leaves in the fold (SPEC 11A): hardening knobs, still reachable by search and
 # the filters, and still guarded. Admin-only ones by path; conservative ones counted by section.
