@@ -1,7 +1,7 @@
 # Voice tools: design
 
 Date: 2026-11-16. Status: draft, waiting for owner approval.
-SPEC sections touched: 7A (circadian, day nap), 8 (LLM router, Realtime speech route, Conversation state), 10 (LLM tools), 11A (configuration), 12 (privacy, secrets, web UI), 4A (installer: new dependencies).
+SPEC sections touched: 7A (circadian, day nap), 8 (LLM router, Realtime speech route, Conversation state), 11 (LLM tools), 11A (configuration), 12 (privacy, secrets, web UI), 4A (installer: new dependencies).
 
 ## Intent
 
@@ -14,7 +14,7 @@ Why (owner, 2026-11-16): two goals of equal weight.
 
 ## Goals
 
-- Five tools, each reachable by free speech in Italian and English through the LLM tool calls that already exist (SPEC 10, LLM tools):
+- Five tools, each reachable by free speech in Italian and English through the LLM tool calls that already exist (SPEC 11, LLM tools):
   - **sleep**: the robot takes a day nap on request.
   - **timer**: set, list and cancel countdown timers.
   - **reminder**: set, list and cancel reminders at a clock time, one-shot or with simple repetition (daily, weekdays, a set of weekdays).
@@ -46,7 +46,7 @@ Why (owner, 2026-11-16): two goals of equal weight.
 - SPEC 12: no frames, audio or embeddings in logs; keys only from the secret store; outbound calls are admin opt-ins.
 - SPEC 4A / robot hierarchy: the tools are robot-agnostic and live in core. Core never names a robot. `tests/test_robot_hierarchy.py` baseline may not grow.
 - SPEC 8: chat routes use only the common OpenAI subset (`tools`, `tool_choice="auto"`).
-- SPEC 10: tool arguments use the existing strict validation (`str`, `int`, `float`, `bool`, `Literal`, `Annotated` with `Range`/`MaxLen`/`Desc`).
+- SPEC 11: tool arguments use the existing strict validation (`str`, `int`, `float`, `bool`, `Literal`, `Annotated` with `Range`/`MaxLen`/`Desc`).
 - One process owns the SDK media (SPEC 4A). The radio player plays through the same speaker path as TTS and cues.
 - Raspberry Pi CM4 CPU budget: stream decoding must fit next to the listener thread (SPEC 8, Listener real-time budget).
 - Replies in Italian and English. Tool descriptions are in English (the model reads them); fallback sentences exist per language.
@@ -81,23 +81,24 @@ Owner picked approach 1 on 2026-11-16.
 
 - `go_to_sleep()` starts a **requested nap** now, with the same posture, affect, voice and vision rates as a nap that came from idle time (SPEC 7A).
 - Wake rules (owner decision 2026-11-16): for `circadian.requested_nap_min_s` after it starts, only the wake word (the robot's name or a generic wake phrase, through the same wake-word branch) or a due timer/reminder wakes it; a visible face, motion, light, loud sound and unaddressed speech do not. After that time the usual day-nap wake rules apply. This is a small new state in the circadian nap logic, not a thin call. "Wake up" needs no tool: the name already wakes the robot.
-- During quiet hours the tool still works (the robot is already resting; the result says so).
+- During quiet hours or any other circadian rest the tool returns `already_resting` and starts no requested-nap window. The robot is already resting.
 - Fire-and-forget after the reply: the model says a short good-night, then the nap starts. The nap must start after the reply has finished playing, not during it.
 
 ### 3. Scheduler and robot-initiated turns
 
 - **Store.** Timers and reminders are kept in one file in the app data folder (`~/.local/share/roboemot/`), written atomically on every change, read on start. A timer stores its due time as wall-clock time so that a restart keeps it.
 - **Items.** Timer: label (optional), due time. Reminder: text, due time, repetition (`once`, `daily`, `weekdays`, or a set of weekdays), time zone `circadian.timezone`.
-- **Limits.** Maximum active items, maximum text length, maximum timer duration: config fields.
+- **Limits.** Maximum active items, maximum text length, maximum timer duration: config fields. Error codes: `full`, `too_long`, `too_far`, `in_past`, `bad_days`, `bad_date`, `bad_time`.
 - **Missed items.** An item that became due while RoboEmot was not running is announced at start if it is late by less than `tools.scheduler.missed_grace_s`; older ones are dropped and listed as missed in the Tools tab. The grace applies only across a process restart: an item that waited during platform sleep always fires when the robot is awake again, however late (builder check, my call).
-- **Busy robot.** A due item waits until the conversation is idle: nobody mid-utterance, the robot not speaking, no tool round open. After `tools.scheduler.announce_max_wait_s` it starts its turn anyway, at the next point between two robot sentences. The radio ducks during the announcement (my call).
+- **Busy robot.** A due item waits until the conversation is idle: nobody mid-utterance, the robot not speaking, no tool round open. After `tools.scheduler.announce_max_wait_s` it waits only for the robot's current sentence to end. It does not wait for the person to stop talking, and it never cuts the robot mid-sentence. The radio pauses during the announcement (section 5).
+- **Due ids.** The scheduler republishes a due item every tick until it is marked fired. There is no defer. The announcer drops an id that it already holds in flight.
 - **Firing.** A due item:
   1. wakes the robot from a nap (not from platform sleep: with the motors off, the item waits and fires when the robot is awake again);
-  2. ignores quiet hours, because the owner set it;
+  2. ignores quiet hours, because the owner set it, and waits until the circadian state has left `resting`, because no gesture plays while resting;
   3. plays the `nod` gesture ("yes" gesture) when the announcement starts (owner decision 2026-11-16);
   4. starts a **robot-initiated turn**.
 - **Robot-initiated turn.** A new conversation input kind, "event", next to user utterances. Core sends the model a short system-authored message ("A timer the person set is due: <label>" or "A reminder is due: <text>") and the model phrases it in the persona's words and language. The person can reply, so the turn opens a normal conversation window. It works on chat routes and on realtime routes (`conversation.item.create` with text, then `response.create`; Gemini Live: a client text turn).
-- **Fallback.** If no route answers within `tools.scheduler.announce_timeout_s`, the robot says a fixed sentence per language through the local voice when one is available, plus the cue sound; otherwise the cue and the gesture only. An item is marked done only after an announcement was played.
+- **Fallback.** If no route answers within `tools.scheduler.announce_timeout_s`, the robot says a fixed sentence per language through the local voice when one is available, plus the cue sound; otherwise the cue and the gesture only. An item is marked fired only after its announcement audio has ended. `tools.scheduler.announce_timeout_s` must be greater than the realtime route's connect timeout (`connect_timeout_s`), checked at load.
 - **Repeat.** If nobody reacts (no addressed speech before `tools.scheduler.repeat_after_s`), a timer announcement repeats up to `tools.scheduler.repeat_max` times. Reminders do not repeat (builder's call to revisit after robot tests).
 - Event text sent to the model is the person's own reminder text: it counts as conversation text for SPEC 12 (it may reach an off-board route, like any transcript).
 
@@ -116,7 +117,7 @@ Owner picked approach 1 on 2026-11-16.
 - **Self-hearing.** The player publishes "the robot is playing music" on the bus.
   - Dance (owner decision 2026-11-16): the existing microphone detector keeps running on the robot's own music and may start the dance, with its tempo and beat from the microphone as today. Behaviour flag `tools.radio.dance` (default on) lets the admin turn this off; off, the detector ignores music while the player plays. Beat drift from echo and playback latency is a known risk for the robot test.
   - Lyrics: during playback only the wake word (the robot's name or a generic wake phrase) addresses the robot. The follow-up window, a face in view and the conversation policy do not count, because the follow-up window would answer lyrics.
-- **Stations.** A list in config (`tools.radio.stations`: name, URL, genres, language), edited in the Tools tab. The model gets the station names and genres as `choices` (snapshotted per request, SPEC 10). Only listed URLs are ever played: the model cannot pass a URL.
+- **Stations.** A list in config (`tools.radio.stations`: name, URL, genres, language), edited in the Tools tab. The model gets the station names and genres as `choices` (snapshotted per request, SPEC 11). Only listed URLs are ever played: the model cannot pass a URL.
 - **Tools.** `radio_play(station)`, `radio_stop()`, `radio_volume(change)`. A stream that fails to start or drops is reported to the model as an error result; a drop during play stops the player and logs the station name only.
 - **Limits.** `tools.radio.max_play_s` (auto stop), stop on nap and on platform sleep.
 - Off by default; the admin turns it on (`tools.radio.enabled`).
@@ -148,7 +149,7 @@ One integration branch, `epic/voice-tools`, with short slice PRs; full CI on eac
 | T3 | Scheduler store and timer/reminder tools (no announcement yet: items fire to the log and bus) | T1 |
 | T4 | Robot-initiated turn on chat and realtime routes; announcement, nod, fallback, repeat | T3 |
 | T5 | Weather tool | T1 |
-| T6 | Media player, ducking, self-hearing signal, radio tool | T1 |
+| T6 | Media player, pause on speech, self-hearing signal, radio tool | T1 |
 | T7 | Tools tab | T2–T6 |
 
 Estimate: 8 slices, about 18 agents (one Opus author and one Sonnet reviewer per slice; Opus reviewer for T5 and T6, which add outbound network calls). T4 and T6 carry the most risk.
