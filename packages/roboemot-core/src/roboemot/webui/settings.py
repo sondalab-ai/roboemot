@@ -551,7 +551,9 @@ class SettingsEditor:
         else:
             target, stored, written = self._list_add(box, entry, tree, cfg)
             if bind is not None and bind[0] != NO_KEY_REF:
-                self._check_endpoint_ack(entry.get("base_url"), bind[1], entry.get("kind"))
+                self._check_endpoint_ack(
+                    entry.get("base_url"), bind[1], entry.get("kind"), entry.get("protocol")
+                )
                 written = [{**entry, "api_key": bind[0]}]
                 exempt = frozenset({f"llm_routes.{entry['name']}.api_key"})
         self.stack.set(
@@ -645,7 +647,7 @@ class SettingsEditor:
                 return {"name": route.name, "changed": False}
             path = f"llm_routes.{route.name}.api_key"
             if ref != NO_KEY_REF:
-                self._check_endpoint_ack(route.base_url, ack, route.kind)
+                self._check_endpoint_ack(route.base_url, ack, route.kind, route.protocol)
             before = self._failures()
             self.stack.set(
                 path,
@@ -698,16 +700,20 @@ class SettingsEditor:
             raise ValidationError("secret_unknown", "secret")
         return f"${{secret:{secret}}}"
 
-    def _check_endpoint_ack(self, base_url: object, ack: object, kind: object = None) -> None:
+    def _check_endpoint_ack(
+        self, base_url: object, ack: object, kind: object = None, protocol: object = None
+    ) -> None:
         """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin. For a
         realtime route the refusal also names the provider's ``key_hosts``, where the key may
-        go too."""
+        go too; not for a ``gemini_live`` route, which runs in direct mode only (its key goes to
+        its own origin alone)."""
         target = origin(base_url) if isinstance(base_url, str) else ""
         if not target:
             raise ValidationError("value_type", "value")
         if ack != target:
             detail: dict[str, Any] = {"endpoint": target}
-            if kind == "realtime" and (hosts := self.realtime_key_hosts()):
+            direct = protocol == "gemini_live"
+            if kind == "realtime" and not direct and (hosts := self.realtime_key_hosts()):
                 detail["key_hosts"] = hosts
             raise ValidationError("endpoint_ack_required", "value", detail)
 

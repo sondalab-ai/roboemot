@@ -265,6 +265,92 @@ test("routes: a realtime check report shows the hosts and the outcomes, never a 
   assert.doesNotMatch(text, /\/session|\/realtime/);
 });
 
+test("routes: a Gemini check shows its protocol facts, the close code only, and the running session", async () => {
+  const report = {
+    kind: "realtime", protocol: "gemini_live", ok: false, error: "", checked_at: "2026-11-12T10:00:00+00:00",
+    mode: "direct", allocator_host: null, connect_host: "generativelanguage.googleapis.com",
+    header_to_connect_host: "sent", platform_id_sent: false, update_seen: false, setup_ms: null,
+    first_audio_ms: null, item_delete: "not_run", tools_sent: 7, charged: 0, usage_reported: null,
+    failure: "connect_failed", close_code: 1008, server_error_code: null, server_error_about: null,
+    checks: [{ name: "realtime_connect", status: "fail", reason: "connect_failed" }],
+  };
+  const session = {
+    state: "closed", reason: "server_refused", idle_closes: 2, go_aways: 1, usage_reports: 4,
+    items_delete_emulated: 3, wire_session: {}, wire_total: { calls_skipped: 1 },
+  };
+  const RT = { ...ADDED, name: "gemini", kind: "realtime", protocol: "gemini_live", last_check: report, session };
+  const strings = { language: "en", strings: { rt_close_1008: "1008: refused", route_protocol_gemini_live: "Gemini Live" } };
+  const page = await formsPage([RT], { "GET /api/strings": strings });
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "gemini");
+  const text = card.textContent;
+  assert.match(text, /rt_protocol: Gemini Live/);
+  assert.match(text, /rt_close_code: 1008: refused/);
+  assert.match(text, /rt_tools_sent: 7/);
+  assert.doesNotMatch(text, /rt_allocator_host/, "the allocator is a platform-mode fact");
+  assert.match(text, /route_session/);
+  assert.match(text, /rt_s_reason: server_refused/);
+  assert.match(text, /rt_s_idle_closes: 2/);
+  assert.match(text, /rt_s_wire_total: calls_skipped 1/);
+  assert.match(text, /rt_s_wire_session: live_none/);
+});
+
+const GEMINI_REPORT = {
+  kind: "realtime", protocol: "gemini_live", ok: true, error: "", checked_at: "2026-11-12T10:00:00+00:00",
+  mode: "direct", allocator_host: null, connect_host: "generativelanguage.googleapis.com",
+  header_to_connect_host: "sent", platform_id_sent: false, update_seen: true, setup_ms: 669.1,
+  first_audio_ms: 1191.3, item_delete: "emulated", tools_sent: 7, charged: 1633, usage_reported: 1633,
+  failure: null, close_code: 1011, server_error_code: null, server_error_about: null, checks: [],
+};
+
+const cardText = (page, name) =>
+  [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === name).textContent;
+
+test("routes: another close code is shown as it is, the late total too, and no session when null", async () => {
+  const RT = { ...ADDED, name: "gemini", kind: "realtime", protocol: "gemini_live", last_check: GEMINI_REPORT, session: null };
+  const text = cardText(await formsPage([RT]), "gemini");
+  assert.match(text, /rt_close_code: 1011/);
+  assert.match(text, /rt_usage_reported: 1633/);
+  assert.match(text, /rt_item_delete: emulated/);
+  assert.doesNotMatch(text, /route_session/);
+});
+
+test("routes: a report kept from before the new facts shows only the facts it has", async () => {
+  const old = { ...GEMINI_REPORT };
+  for (const k of ["protocol", "setup_ms", "close_code", "tools_sent", "usage_reported"]) delete old[k];
+  const RT = { ...ADDED, name: "voice", kind: "realtime", last_check: old };
+  const text = cardText(await formsPage([RT]), "voice");
+  assert.match(text, /rt_connect_host: generativelanguage\.googleapis\.com/);
+  assert.doesNotMatch(text, /rt_protocol|rt_setup_ms|rt_close_code|rt_tools_sent|rt_usage_reported/);
+});
+
+test("routes: a Pollen route that runs shows its session too", async () => {
+  const session = {
+    state: "connected", reason: null, idle_closes: 0, go_aways: 0, usage_reports: 0,
+    items_delete_emulated: 0, wire_session: {}, wire_total: {},
+  };
+  const RT = { ...ADDED, name: "pollen", kind: "realtime", last_check: null, session };
+  const text = cardText(await formsPage([RT]), "pollen");
+  assert.match(text, /route_session/);
+  assert.match(text, /rt_s_state: connected/);
+  assert.match(text, /rt_s_reason: live_none/);
+});
+
+test("routes: a Pollen check report hides the Gemini-only facts", async () => {
+  const report = {
+    kind: "realtime", protocol: "openai_realtime", ok: true, error: "", checked_at: "2026-11-12T10:00:00+00:00",
+    mode: "platform", allocator_host: "alloc.example.org", connect_host: "connect.example.net",
+    header_to_connect_host: "sent", platform_id_sent: false, update_seen: true, setup_ms: 120,
+    first_audio_ms: 300, item_delete: "accepted", tools_sent: 0, charged: 42, usage_reported: null,
+    failure: null, close_code: null, server_error_code: null, server_error_about: null, checks: [],
+  };
+  const RT = { ...ADDED, name: "voice", kind: "realtime", last_check: report, session: null };
+  const page = await formsPage([RT]);
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "voice");
+  const text = card.textContent;
+  assert.match(text, /rt_allocator_host: alloc\.example\.org/);
+  assert.doesNotMatch(text, /rt_tools_sent|rt_usage_reported|route_session/);
+});
+
 test("route form: only a route added here can be removed", async () => {
   const page = await formsPage([ROUTE, ADDED]);
   const cards = [...page.document.querySelectorAll("section.sl-card")].filter((c) => /lan|cloud/.test(c.querySelector("h2").textContent));

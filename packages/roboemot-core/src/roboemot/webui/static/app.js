@@ -903,6 +903,8 @@ function secretsCard(data, reload) {
 
 const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
 const ROUTE_KINDS = ["chat", "realtime"]; // chosen when a route is added; shown read-only after
+const ROUTE_PROTOCOLS = ["openai_realtime", "gemini_live"]; // likewise; a realtime route's wire
+const ROUTE_PROTOCOL_DEFAULT = "openai_realtime";
 const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
 
 // One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
@@ -918,6 +920,22 @@ function routeForm(route, secrets, nameMax, save) {
   const kind = route ? null : el("select", { id: id("kind"), class: "sl-field__input" },
     ROUTE_KINDS.map((k) => el("option", { value: k }, t("route_kind_" + k))));
   if (kind) kind.value = "chat";
+  const protocol = route ? null : el("select", { id: id("protocol"), class: "sl-field__input" },
+    ROUTE_PROTOCOLS.map((p) => el("option", { value: p }, t("route_protocol_" + p))));
+  if (protocol) protocol.value = ROUTE_PROTOCOL_DEFAULT;
+  const voice = textInput(id("voice"), { autocomplete: "off", spellcheck: "false", list: id("voices"), value: route ? route.voice || "" : "" });
+  const voices = voiceList(id("voices"), route ? route.protocol : protocol.value);
+  if (protocol) protocol.addEventListener("change", () => fillVoices(voices, protocol.value));
+  // protocol and voice apply to a realtime route only: shown for that kind alone; a stored route
+  // can preview the voice typed or picked
+  const isRealtime = () => (route ? route.kind : kind.value) === "realtime";
+  const realtimeOnly = [
+    protocol ? field(id("protocol"), t("route_protocol"), protocol, t("route_protocol_hint")) : null,
+    el("div", { class: "stack" }, field(id("voice"), t("route_voice"), voice, t("route_voice_hint")), voices,
+      route ? voicePreview(route.name, () => voice.value.trim(), id("voice")) : []),
+  ].filter(Boolean);
+  const showRealtime = () => { for (const f of realtimeOnly) f.hidden = !isRealtime(); };
+  if (kind) kind.addEventListener("change", showRealtime);
   const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
   const names = secrets.filter((s) => s.set).map((s) => s.name);
   const keys = [["", t("route_key_none")]];
@@ -931,9 +949,11 @@ function routeForm(route, secrets, nameMax, save) {
     class: "stack", autocomplete: "off",
     onsubmit: (ev) => {
       ev.preventDefault();
+      const rt = isRealtime();
       whileBusy(send, () => guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
-        locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
+        locality: locality.value, key: key.value, voice: rt ? voice.value.trim() : (route ? route.voice || "" : ""),
+        ...(kind ? { kind: kind.value } : {}), ...(protocol && rt ? { protocol: protocol.value } : {}),
       })));
     },
   },
@@ -942,9 +962,92 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("model"), t("route_model"), model),
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
   kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
+  realtimeOnly,
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, send));
+  showRealtime();
   return form;
+}
+
+// The voices known for a route protocol (GET /api/routes `voices`), as the datalist of a voice
+// input: a picker that still takes any typed name.
+function voiceList(id, protocol) {
+  return fillVoices(el("datalist", { id }), protocol);
+}
+
+function fillVoices(list, protocol) {
+  const names = (state.routeVoices || {})[protocol || ROUTE_PROTOCOL_DEFAULT] || [];
+  list.replaceChildren(...names.map((n) => el("option", { value: n })));
+  return list;
+}
+
+// A play button for the voice `voiceOf()` names on route `name`, with its status line: busy while
+// the preview runs, a worded code when it fails. Nothing plays until the button is pressed.
+function voicePreview(name, voiceOf, idBase) {
+  const status = el("p", { class: "hint", id: idBase + "-preview", role: "status" });
+  const play = button(t("voice_preview_play"), "plain", () => whileBusy(play, () => playVoicePreview(name, voiceOf(), status)),
+    { small: true, attrs: { "aria-label": rowName(t("voice_preview_play"), name), "aria-describedby": status.id } });
+  return el("div", { class: "stack" }, el("div", { class: "row" }, play), status);
+}
+
+// One preview (POST /api/routes/voice_preview): the WAV is decoded and played with Web Audio (the
+// page's CSP has no media source for a blob URL). A failure is worded from its code only.
+async function playVoicePreview(name, voice, status) {
+  status.textContent = t("voice_preview_busy");
+  try {
+    const resp = await request("/api/routes/voice_preview", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(state.csrf ? { "X-CSRF-Token": state.csrf } : {}) },
+      body: JSON.stringify({ route: name, voice }),
+    });
+    if (!resp.ok) {
+      let data = {};
+      try { data = await resp.json(); } catch (e) { data = {}; }
+      if (resp.status === 401 && data.error === "unauthorized") { await boot(); return; }
+      status.textContent = previewError(data, resp);
+      return;
+    }
+    const buffer = await resp.arrayBuffer();
+    try {
+      await playWav(buffer);
+    } catch (err) {
+      status.textContent = t("voice_preview_err_decode");
+      return;
+    }
+    status.textContent = t("voice_preview_played", { voice: voice || t("voice_preview_default") });
+  } catch (err) {
+    status.textContent = explain(err);
+  }
+}
+
+// What a failed preview says: its code worded (a 1008 close as a refusal that can be transient),
+// else the API's error code as every call words it (with the wait a 429 names).
+function previewError(data, resp) {
+  if (data.error !== "preview_failed") {
+    const err = new Error(data.error || "generic");
+    err.status = resp.status;
+    err.retryAfter = Number(resp.headers.get("Retry-After"));
+    return explain(err);
+  }
+  if (data.close_code === 1008) return t("voice_preview_err_1008");
+  return state.strings["voice_preview_err_" + data.code] || t("voice_preview_failed", { code: data.code });
+}
+
+// One AudioContext for the page, made on the first play (a user gesture); a new preview stops the
+// one still playing.
+const voicePlayer = { ctx: null, source: null };
+
+async function playWav(buffer) {
+  if (!voicePlayer.ctx) voicePlayer.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (voicePlayer.ctx.state === "suspended") await voicePlayer.ctx.resume();
+  const decoded = await voicePlayer.ctx.decodeAudioData(buffer);
+  if (voicePlayer.source) {
+    try { voicePlayer.source.stop(); } catch (e) { /* already ended (InvalidStateError) */ }
+  }
+  voicePlayer.source = voicePlayer.ctx.createBufferSource();
+  voicePlayer.source.buffer = decoded;
+  voicePlayer.source.connect(voicePlayer.ctx.destination);
+  voicePlayer.source.start();
 }
 
 // A key sent over http to a host that is not this machine crosses the network unencrypted.
@@ -991,6 +1094,8 @@ async function saveRoute(route, v) {
   if (!route) {
     steps.push([v.name, (pin) => mapAck(() => api("POST", "/api/routes/add", {
       name: v.name, base_url: v.base_url, model: v.model, locality: v.locality, kind: v.kind || "chat",
+      ...(v.protocol && v.protocol !== ROUTE_PROTOCOL_DEFAULT ? { protocol: v.protocol } : {}),
+      ...(v.voice ? { voice: v.voice } : {}),
       secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
     }))]);
@@ -1007,11 +1112,13 @@ async function saveRoute(route, v) {
     if (keyChanged && keyed) steps.push([t("route_key"), bindKey(v.key)]);
     if (v.locality !== route.locality && !toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
     if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
+    if (v.voice !== (route.voice || "")) steps.push([t("route_voice"), set("voice", v.voice)]);
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
   const realtime = (route ? route.kind : v.kind) === "realtime";
-  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const direct = (route ? route.protocol : v.protocol) === "gemini_live"; // direct mode only: no provider hosts
+  const extraHosts = realtime && !direct ? (state.realtimeKeyHosts || []) : [];
   const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
     (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
@@ -1042,12 +1149,40 @@ async function saveRoute(route, v) {
 }
 
 const REALTIME_FACTS = [
-  "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
-  "update_seen", "first_audio_ms", "item_delete", "charged", "failure",
+  "protocol", "mode", "allocator_host", "connect_host", "header_to_connect_host",
+  "platform_id_sent", "update_seen", "setup_ms", "first_audio_ms", "item_delete",
+  "tools_sent", "charged", "usage_reported", "failure", "close_code",
   "server_error_code", "server_error_about",
 ];
 
-const REALTIME_WORDS = { mode: "rt_mode_", header_to_connect_host: "rt_header_", item_delete: "rt_item_", failure: "live_code_" };
+const REALTIME_WORDS = {
+  protocol: "route_protocol_", mode: "rt_mode_", header_to_connect_host: "rt_header_", item_delete: "rt_item_",
+  failure: "live_code_", close_code: "rt_close_",
+};
+
+// Facts shown only where they apply: the allocator in platform mode, a Gemini setup's tools and
+// its late token totals on a gemini_live route; a report from before a fact has none of it.
+const REALTIME_SHOWN = {
+  allocator_host: (r) => r.mode === "platform",
+  tools_sent: (r) => r.protocol === "gemini_live",
+  usage_reported: (r) => r.protocol === "gemini_live",
+};
+
+// What the Routes tab shows of the running session of the active realtime route (SPEC 8, 12A).
+const SESSION_FACTS = [
+  "state", "reason", "idle_closes", "go_aways", "usage_reports", "items_delete_emulated",
+  "wire_session", "wire_total",
+];
+
+// One fact of the running session: a state or reason worded, codec counts as "name n", or a count.
+function sessionFact(name, value) {
+  if (name === "state" || name === "reason") return value === null || value === undefined ? t("live_none") : word("live_code_", value);
+  if (value && typeof value === "object") {
+    const counts = Object.entries(value);
+    return counts.length ? counts.map(([k, n]) => k + " " + n).join(", ") : t("live_none");
+  }
+  return realtimeFact(name, value);
+}
 
 // One fact of a realtime check: yes / no, a worded code, or a host or server code as it is.
 function realtimeFact(name, value) {
@@ -1077,6 +1212,7 @@ async function routesView() {
   const data = await api("GET", "/api/routes");
   if (!current()) return;
   state.realtimeKeyHosts = data.realtime_key_hosts || [];
+  state.routeVoices = data.voices || {};
   let secrets = null;
   let secretsError = null;
   try {
@@ -1095,7 +1231,10 @@ async function routesView() {
   // A realtime check names hosts and outcome codes only (SPEC 8, 12): codes are worded, hosts
   // and the server's own error codes are shown as they come.
   const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
-    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + realtimeFact(f, report[f]))))];
+    [el("ul", {}, REALTIME_FACTS.filter((f) => f in report && (!REALTIME_SHOWN[f] || REALTIME_SHOWN[f](report)))
+      .map((f) => el("li", {}, t("rt_" + f) + ": " + realtimeFact(f, report[f]))))];
+  const sessionFacts = (s) => !s ? [] : [markedEyebrow("p", t("route_session")),
+    el("ul", {}, SESSION_FACTS.map((f) => el("li", {}, t("rt_s_" + f) + ": " + sessionFact(f, s[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
@@ -1128,10 +1267,11 @@ async function routesView() {
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }), { attrs: { "aria-label": rowName(t("route_remove"), r.name) } });
     const routeCard = busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat")) +
+        (r.protocol && r.protocol !== ROUTE_PROTOCOL_DEFAULT ? ", " + t("route_protocol_" + r.protocol) : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
-      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
+      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, sessionFacts(r.session), edit), r.running);
     routeCard.dataset.row = r.name;
     return routeCard;
   });

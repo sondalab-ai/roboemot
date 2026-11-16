@@ -451,11 +451,14 @@ def test_config_checks_the_catalogue_against_the_web_limits():
         )
 
 
-def test_the_import_budget_is_capped_by_half_the_request_deadline(tmp_path):
+def test_the_import_budget_is_capped_by_the_work_share_of_the_request_deadline(tmp_path):
     from roboemot.webui.catalogue import open_catalogue
 
     reg = Registry(FileStore(tmp_path / "reg", allow_plaintext=True), IdentityConfig())
-    cfg = RoboEmotConfig(webui={"request_deadline_s": 4}, catalogue={"import_budget_s": 30})
+    cfg = RoboEmotConfig(
+        webui={"request_deadline_s": 4, "request_work_share": 0.5},
+        catalogue={"import_budget_s": 30},
+    )
     service = open_catalogue(reg, lambda: cfg)
     assert service._budget_cap() == 2.0 and service.cfg.import_budget_s == 30
 

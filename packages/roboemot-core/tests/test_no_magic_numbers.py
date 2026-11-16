@@ -164,6 +164,9 @@ BEHAVIOUR_MODULES = [
     "realtime/turn.py",
     "realtime/input.py",
     "realtime/check.py",
+    "realtime/preview.py",
+    "realtime/wire.py",
+    "realtime/gemini_wire.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 

@@ -36,6 +36,7 @@ LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 SKIP_PROMPT = "ignore_utterance"  # prompts/ignore_utterance.<language>.txt (the skip tool)
 TONE_PROMPT = "note_tone"  # prompts/note_tone.<language>.txt (the tone tool)
+PREVIEW_PROMPT = "voice_preview"  # prompts/voice_preview.<language>.txt (the web UI's preview)
 SKIP_PROMPT_FALLBACK = "en"  # the rule's language when neither the turn's nor the default has one
 # The conversation state of a realtime turn with the skip tool (SPEC 8, Conversation start):
 # ``none`` gets the strict start rule; ``in_progress`` and ``addressed`` (the wake word or the
@@ -121,6 +122,18 @@ def tone_prompts() -> dict[str, str]:
     """The tone tool's instruction per language, from ``prompts/note_tone.<lang>.txt``
     (SPEC 8, Tone tool): call it once per utterance, beside the spoken reply."""
     return _prompt_files(TONE_PROMPT)
+
+
+def preview_line(cfg: RoboEmotConfig) -> tuple[str, str]:
+    """The voice preview's sentence and its language (SPEC 8, Voice preview), from
+    ``prompts/voice_preview.<lang>.txt``: ``conversation.language``'s, else English's, as
+    ``_in_language`` falls back. The language is the file's, so the server is never asked
+    to say an English line in another language."""
+    texts = _prompt_files(PREVIEW_PROMPT)
+    lang = cfg.conversation.language
+    if not texts.get(lang):
+        lang = SKIP_PROMPT_FALLBACK
+    return lang, texts.get(lang, "")
 
 
 def start_prompts() -> dict[str, str]:

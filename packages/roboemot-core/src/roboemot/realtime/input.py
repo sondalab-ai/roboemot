@@ -91,7 +91,7 @@ from typing import Any
 import numpy as np
 
 from .. import shutdown
-from ..config.schema import RoboEmotConfig
+from ..config.schema import RoboEmotConfig, active_realtime_route, realtime_connect_timeout_s
 from ..voice.asr import to_int16
 from . import protocol
 from .route import (
@@ -301,6 +301,13 @@ class Claim:
     verdict: str
     job: Any = field(default=None, repr=False)
     items: tuple[str, ...] = field(default=(), repr=False)
+
+
+def reopen_limit_s(cfg: RoboEmotConfig) -> float:
+    """How long an opening waits for the reconnect of a reset this input made: the active
+    route's connect budget (its own ``connect_timeout_s``, else the shared one), since that is
+    how long the reconnect itself may take."""
+    return realtime_connect_timeout_s(active_realtime_route(cfg), cfg.voice.realtime_route)
 
 
 class RealtimeInput:
@@ -721,7 +728,7 @@ class RealtimeInput:
                 burst.sent_ms = samples.size / job.rate_hz * MS_PER_S
                 self._streams.append(burst)  # before the send: its first event may come at once
 
-        self._await_reopen(job, rt.connect_timeout_s)
+        self._await_reopen(job, reopen_limit_s(cfg))
         instructions, tools = self.route.stream_session(job)  # what the server's own answer reads
         why = self.route.stream_audio(
             self._pcm(samples),

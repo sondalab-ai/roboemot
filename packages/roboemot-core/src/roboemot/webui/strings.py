@@ -184,6 +184,8 @@ EN: dict[str, str] = {
     "live_ev_session_connect_failed": "Cloud connection failed ({why})",
     "live_ev_session_lost": "Cloud session lost ({why})",
     "live_ev_session_server_error": "Cloud server error: {code}",
+    "live_ev_session_go_away": "Cloud session ending: reconnected once idle",
+    "live_ev_session_idle_close": "Idle cloud session closed by the server: next turn reconnects",
     "live_ev_audio_transcript_timeout": "No transcript from the cloud within {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Facing check skipped: CPU at {cpu_percent}% (limit {cpu_max_percent}%)"
@@ -438,6 +440,9 @@ EN: dict[str, str] = {
     "err_routes_unavailable": "Routes are not available.",
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
+    "err_preview_rate": (
+        "A voice sample of this route was asked for a moment ago. Wait a few seconds."
+    ),
     "err_route_budget": "The daily token budget of the route is spent.",
     "err_route_kind": "This kind of route cannot be checked.",
     "err_route_secret": "The route key is not available. Set it on the robot: roboemot secrets set",
@@ -484,6 +489,42 @@ EN: dict[str, str] = {
         "conversations do not use it as a chat model. Changing it later on a route with a key "
         "needs the configuration file."
     ),
+    "route_protocol": "Realtime protocol",
+    "route_protocol_openai_realtime": "OpenAI realtime",
+    "route_protocol_gemini_live": "Gemini Live",
+    "route_protocol_hint": (
+        "Only for a realtime speech route. Gemini Live connects to the address as written "
+        "(wss://) and needs direct mode and robot turns. Changing it later means changing the "
+        "address with it, so it needs the configuration file."
+    ),
+    "route_voice": "Voice",
+    "route_voice_hint": (
+        "Only for a realtime speech route: the server's voice name. Pick a known voice or type "
+        "any other name. Empty uses the shared realtime voice setting."
+    ),
+    "voice_preview_play": "Play voice",
+    "voice_preview_busy": "Asking the server to say the sample sentence…",
+    "voice_preview_played": "Playing {voice}. Save the route to keep this voice.",
+    "voice_preview_default": "the default voice",
+    "voice_preview_failed": "No sample: the preview failed ({code}).",
+    "voice_preview_err_1008": (
+        "No sample: the server refused the session (1008). A free key may allow only one "
+        "session at a time; try again in a moment."
+    ),
+    "voice_preview_err_timeout": "No sample: the server took too long. Try again.",
+    "voice_preview_err_connect_timeout": "No sample: the connection took too long. Try again.",
+    "voice_preview_err_no_audio": "No sample: the server sent no audio.",
+    "voice_preview_err_audio_cap": "No sample: the reply was longer than the preview allows.",
+    "voice_preview_err_tool_rounds_exceeded": "No sample: the server kept calling tools.",
+    "voice_preview_err_offline": "No sample: the robot is offline.",
+    "voice_preview_err_pseudonyms": (
+        "No sample: pseudonyms are on, so a cloud route gets nothing."
+    ),
+    "voice_preview_err_setup_unready": "No sample: the session setup could not be built.",
+    "voice_preview_err_provider": "No sample: no session provider for this route.",
+    "voice_preview_err_no_extra": "No sample: the realtime extra is not installed.",
+    "voice_preview_err_failed": "No sample: the preview failed.",
+    "voice_preview_err_decode": "The sample arrived but the browser could not play it.",
     "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
@@ -558,6 +599,7 @@ EN: dict[str, str] = {
     "check_realtime_connect": "Connect and session.updated",
     "check_realtime_first_audio": "First audio of a text turn",
     "check_realtime_item_delete": "Delete of an item the robot named",
+    "check_realtime_tools": "Tools of the session",
     "rt_mode": "Mode",
     "rt_allocator_host": "Allocator host",
     "rt_connect_host": "Connect host",
@@ -570,6 +612,21 @@ EN: dict[str, str] = {
     "rt_failure": "Failure",
     "rt_server_error_code": "Server error code",
     "rt_server_error_about": "Server error about",
+    "rt_protocol": "Protocol",
+    "rt_setup_ms": "Setup (ms)",
+    "rt_close_code": "Server close code",
+    "rt_close_1008": "1008: refused by the server (can be transient: check again)",
+    "rt_tools_sent": "Tools in the setup",
+    "rt_usage_reported": "Tokens the server reported later",
+    "route_session": "Running session",
+    "rt_s_state": "State",
+    "rt_s_reason": "Reason",
+    "rt_s_idle_closes": "Closed by the server while idle",
+    "rt_s_go_aways": "Server end-of-session notices (goAway)",
+    "rt_s_usage_reports": "Token counts that came later",
+    "rt_s_items_delete_emulated": "Item deletes emulated by the client",
+    "rt_s_wire_session": "Codec counts, this session",
+    "rt_s_wire_total": "Codec counts, all sessions",
     "status_pass": "pass",
     "status_fail": "fail",
     "status_skip": "skipped",
@@ -817,6 +874,10 @@ EN: dict[str, str] = {
     "live_code_input_reset": "audio input reset",
     "live_code_pending_calls": "a tool call left open",
     "live_code_closed_by_server": "closed by the server",
+    "live_code_go_away": "the server ended the session",
+    "live_code_idle_close": "idle, closed by the server",
+    "live_code_server_refused": "refused by the server again (key, quota or access)",
+    "live_code_setup_unready": "the session setup was not ready",
     "live_code_connect_failed": "connection failed",
     "live_code_connect_timeout": "connection timed out",
     "live_code_connection_lost": "connection lost",
@@ -878,6 +939,9 @@ EN: dict[str, str] = {
     "check_reason_item_delete_accepted": "accepted",
     "check_reason_item_delete_refused": "refused",
     "check_reason_item_delete_unconfirmed": "not confirmed",
+    "check_reason_item_delete_emulated": "emulated by the client: the server has no item delete",
+    "check_reason_no_tools": "no tool: the robot could not skip or act",
+    "check_reason_tool_rounds_exceeded": "tool calls still open after {rounds} rounds",
     "check_why_http": "{detail}",
     "check_why_timeout": "timed out",
     "check_why_unreachable": "route unreachable",
@@ -895,6 +959,7 @@ EN: dict[str, str] = {
     "rt_item_accepted": "accepted",
     "rt_item_refused": "refused",
     "rt_item_unconfirmed": "not confirmed",
+    "rt_item_emulated": "emulated (no server confirmation)",
     # vision categories (registry.xmp.CATEGORIES)
     "category_bird": "bird",
     "category_cat": "cat",
@@ -1175,6 +1240,8 @@ IT: dict[str, str] = {
     "live_ev_session_connect_failed": "Collegamento al cloud fallito ({why})",
     "live_ev_session_lost": "Sessione cloud persa ({why})",
     "live_ev_session_server_error": "Errore del server cloud: {code}",
+    "live_ev_session_go_away": "Sessione cloud in chiusura: ricollegata appena libera",
+    "live_ev_session_idle_close": "Sessione cloud inattiva chiusa: il prossimo turno la ricollega",
     "live_ev_audio_transcript_timeout": "Nessuna trascrizione dal cloud entro {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Controllo dello sguardo saltato: CPU al {cpu_percent}% (limite {cpu_max_percent}%)"
@@ -1433,6 +1500,10 @@ IT: dict[str, str] = {
     "err_routes_unavailable": "I modelli non sono disponibili.",
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
+    "err_preview_rate": (
+        "Un campione della voce di questo modello è stato chiesto un attimo fa. Aspetta "
+        "qualche secondo."
+    ),
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
     "err_route_kind": "Questo tipo di modello non si può controllare.",
     "err_route_secret": "La chiave non è disponibile. Impostala sul robot: roboemot secrets set.",
@@ -1481,6 +1552,53 @@ IT: dict[str, str] = {
         "le conversazioni non lo usano come modello di chat. Cambiarlo dopo, su un modello con "
         "chiave, richiede il file di configurazione."
     ),
+    "route_protocol": "Protocollo in tempo reale",
+    "route_protocol_openai_realtime": "OpenAI realtime",
+    "route_protocol_gemini_live": "Gemini Live",
+    "route_protocol_hint": (
+        "Solo per un modello voce in tempo reale. Gemini Live si collega all'indirizzo così com'è "
+        "(wss://) e richiede la modalità diretta e i turni decisi dal robot. Cambiarlo dopo "
+        "significa cambiare anche l'indirizzo, quindi richiede il file di configurazione."
+    ),
+    "route_voice": "Voce",
+    "route_voice_hint": (
+        "Solo per un modello voce in tempo reale: il nome della voce del server. Scegli una "
+        "voce nota o scrivi un altro nome. Vuoto usa l'impostazione condivisa della voce in "
+        "tempo reale."
+    ),
+    "voice_preview_play": "Ascolta la voce",
+    "voice_preview_busy": "Chiedo al server di dire la frase di prova…",
+    "voice_preview_played": "Riproduco {voice}. Salva il modello per tenere questa voce.",
+    "voice_preview_default": "la voce predefinita",
+    "voice_preview_failed": "Nessun campione: l'anteprima non è riuscita ({code}).",
+    "voice_preview_err_1008": (
+        "Nessun campione: il server ha rifiutato la sessione (1008). Una chiave gratuita può "
+        "permettere una sola sessione alla volta; riprova tra poco."
+    ),
+    "voice_preview_err_timeout": "Nessun campione: il server ci ha messo troppo. Riprova.",
+    "voice_preview_err_connect_timeout": (
+        "Nessun campione: la connessione ci ha messo troppo. Riprova."
+    ),
+    "voice_preview_err_no_audio": "Nessun campione: il server non ha mandato audio.",
+    "voice_preview_err_audio_cap": (
+        "Nessun campione: la risposta era più lunga di quanto l'anteprima permette."
+    ),
+    "voice_preview_err_tool_rounds_exceeded": (
+        "Nessun campione: il server continuava a chiamare strumenti."
+    ),
+    "voice_preview_err_offline": "Nessun campione: il robot non è in rete.",
+    "voice_preview_err_pseudonyms": (
+        "Nessun campione: gli pseudonimi sono attivi, quindi un modello cloud non riceve nulla."
+    ),
+    "voice_preview_err_setup_unready": (
+        "Nessun campione: non è stato possibile preparare la sessione."
+    ),
+    "voice_preview_err_provider": (
+        "Nessun campione: nessun fornitore di sessione per questo modello."
+    ),
+    "voice_preview_err_no_extra": "Nessun campione: l'extra realtime non è installato.",
+    "voice_preview_err_failed": "Nessun campione: l'anteprima non è riuscita.",
+    "voice_preview_err_decode": "Il campione è arrivato ma il browser non riesce a riprodurlo.",
     "route_key_hosts": (
         "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
     ),
@@ -1567,6 +1685,7 @@ IT: dict[str, str] = {
     "check_realtime_connect": "Connessione e session.updated",
     "check_realtime_first_audio": "Primo audio di un turno di testo",
     "check_realtime_item_delete": "Cancellazione di un elemento con id scelto dal robot",
+    "check_realtime_tools": "Strumenti della sessione",
     "rt_mode": "Modalità",
     "rt_allocator_host": "Host dell'allocatore",
     "rt_connect_host": "Host di connessione",
@@ -1579,6 +1698,21 @@ IT: dict[str, str] = {
     "rt_failure": "Errore",
     "rt_server_error_code": "Codice dell'errore del server",
     "rt_server_error_about": "Evento a cui si riferisce l'errore",
+    "rt_protocol": "Protocollo",
+    "rt_setup_ms": "Configurazione (ms)",
+    "rt_close_code": "Codice di chiusura del server",
+    "rt_close_1008": "1008: rifiutata dal server (può essere temporaneo: ripeti il controllo)",
+    "rt_tools_sent": "Strumenti nella configurazione",
+    "rt_usage_reported": "Token comunicati in seguito dal server",
+    "route_session": "Sessione in corso",
+    "rt_s_state": "Stato",
+    "rt_s_reason": "Motivo",
+    "rt_s_idle_closes": "Chiusure del server per inattività",
+    "rt_s_go_aways": "Avvisi di fine sessione del server (goAway)",
+    "rt_s_usage_reports": "Conteggi di token arrivati dopo",
+    "rt_s_items_delete_emulated": "Cancellazioni di elementi emulate dal client",
+    "rt_s_wire_session": "Conteggi del codec, questa sessione",
+    "rt_s_wire_total": "Conteggi del codec, tutte le sessioni",
     "status_pass": "ok",
     "status_fail": "errore",
     "status_skip": "saltato",
@@ -1829,6 +1963,10 @@ IT: dict[str, str] = {
     "live_code_input_reset": "ingresso audio azzerato",
     "live_code_pending_calls": "una chiamata a uno strumento rimasta aperta",
     "live_code_closed_by_server": "chiusa dal server",
+    "live_code_go_away": "il server ha chiuso la sessione",
+    "live_code_idle_close": "inattiva, chiusa dal server",
+    "live_code_server_refused": "rifiutata di nuovo dal server (chiave, quota o accesso)",
+    "live_code_setup_unready": "la configurazione della sessione non era pronta",
     "live_code_connect_failed": "connessione fallita",
     "live_code_connect_timeout": "connessione scaduta",
     "live_code_connection_lost": "connessione persa",
@@ -1893,6 +2031,9 @@ IT: dict[str, str] = {
     "check_reason_item_delete_accepted": "accettata",
     "check_reason_item_delete_refused": "rifiutata",
     "check_reason_item_delete_unconfirmed": "non confermata",
+    "check_reason_item_delete_emulated": "emulata dal client: il server non ha la cancellazione",
+    "check_reason_no_tools": "nessuno strumento: il robot non può ignorare né agire",
+    "check_reason_tool_rounds_exceeded": "chiamate di strumenti ancora aperte dopo {rounds} giri",
     "check_why_http": "{detail}",
     "check_why_timeout": "tempo scaduto",
     "check_why_unreachable": "route non raggiungibile",
@@ -1910,6 +2051,7 @@ IT: dict[str, str] = {
     "rt_item_accepted": "accettata",
     "rt_item_refused": "rifiutata",
     "rt_item_unconfirmed": "non confermata",
+    "rt_item_emulated": "emulata (nessuna conferma del server)",
     "category_bird": "uccello",
     "category_cat": "gatto",
     "category_dog": "cane",
