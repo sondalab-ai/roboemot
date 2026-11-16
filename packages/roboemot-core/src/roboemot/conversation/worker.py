@@ -834,24 +834,48 @@ class ConversationWorker:
             inner.cancel()
 
     def _trim_tail(self) -> bool:
+        """A barge-in after the latest turn's stream ended: cut its history entry back to what
+        was heard. An entry left empty (an event turn's only reply, none of it heard) leaves
+        the history, and its realtime server items are deleted with it."""
+        orphans: list[list[dict[str, Any]]] = []
         with self._lock:
-            tail = self._tail
-            if tail is None or tail.cut or not any(tail.messages is m for m in self._turns):
-                return False
-            tail.cut = True
-            if tail.rt is not None:
-                return self._trim_realtime_tail(tail)
-            played = [text for job, text in tail.queued if self.speech.played(job)]
-            if len(played) == len(tail.queued):
-                return False
-            if played:
-                tail.messages[-1].update(content=" ".join(played), interrupted=True)
-            else:
-                tail.messages.pop()
-            self._counts["history_trimmed"] += 1
+            trimmed = self._trim_tail_locked(orphans)
+        self._delete_items(orphans)
+        return trimmed
+
+    def _trim_tail_locked(self, orphans: list[list[dict[str, Any]]]) -> bool:
+        """``_trim_tail`` with the lock held; an emptied entry goes to ``orphans``."""
+        tail = self._tail
+        if tail is None or tail.cut or not any(tail.messages is m for m in self._turns):
+            return False
+        tail.cut = True
+        if tail.rt is not None:
+            return self._trim_realtime_tail(tail, orphans)
+        played = [text for job, text in tail.queued if self.speech.played(job)]
+        if len(played) == len(tail.queued):
+            return False
+        if played:
+            tail.messages[-1].update(content=" ".join(played), interrupted=True)
+        else:
+            self._pop_reply(tail, orphans)
+        self._counts["history_trimmed"] += 1
         return True
 
-    def _trim_realtime_tail(self, tail: _Tail) -> bool:
+    def _pop_reply(self, tail: _Tail, orphans: list[list[dict[str, Any]]]) -> None:
+        """Drop the tail's reply message (none of it was heard; lock held). When that leaves
+        the entry empty (an event turn keeps no user line), the entry leaves the history, so it
+        takes no ``history_turns`` slot, and its ``rt`` mark, which sat on that message, goes
+        to ``orphans`` so its server items are deleted."""
+        mark = tail.messages[0].get("rt")
+        tail.messages.pop()
+        if tail.messages:
+            return
+        self._turns = collections.deque(t for t in self._turns if t is not tail.messages)
+        self._tail = None
+        if mark:
+            orphans.append([{"rt": mark}])
+
+    def _trim_realtime_tail(self, tail: _Tail, orphans: list[list[dict[str, Any]]]) -> bool:
         """``_trim_tail`` for a realtime reply still playing after its response ended: the
         server's items are truncated at what played (when its session is still the same) and
         the history keeps the words heard (lock held)."""
@@ -874,7 +898,7 @@ class ConversationWorker:
         if kept:
             tail.messages[-1].update(content=" ".join(kept), interrupted=True)
         else:
-            tail.messages.pop()
+            self._pop_reply(tail, orphans)
         self._counts["history_trimmed"] += 1
         return True
 
@@ -1976,7 +2000,10 @@ class ConversationWorker:
         router = self.hub.sync(cfg)
         self.expire(now)
         with self._lock:
-            speaker = self._session.speaker if self._session is not None else None
+            session = self._session
+        # the open session's person (never a speaker change); with none open, the person in
+        # view, as for an utterance, so that person's reply continues it (SPEC 8)
+        speaker = session.speaker if session is not None else self._who()
         self._touch(now, speaker)
         quiet = Prosody(0.0, None, None, 0.0)
         utterance = Utterance(ev.text, ev.language, now, now, now, False, False, frozenset(), quiet)

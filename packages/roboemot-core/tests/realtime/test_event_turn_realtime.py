@@ -90,6 +90,23 @@ def test_a_slow_connect_inside_its_timeout_is_no_fallback(gemini, rigs):
     assert rig.chat_hosts() == []
 
 
+def test_a_realtime_reply_later_than_the_timeout_is_false_and_never_plays(gemini, rigs):
+    """The session is open at once and the answer is held 2.5 s, past announce_timeout_s 1: the
+    turn is False, cancelled, and its late audio never reaches the speaker, nor does a chat
+    route answer it (SPEC 11, Fallback)."""
+    srv = gemini([["audio"]], delay_s=2.5)
+    app = {"tools": {"scheduler": {"announce_timeout_s": 1}}}
+    rig = gemini_rig(rigs, srv, app=app)
+    assert rig.route.ready()
+    started = time.monotonic()
+    assert rig.worker.event_turn(EVENT, "en").result(10.0) is False
+    assert 1.0 <= time.monotonic() - started < 2.5
+    assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) == 1, 10.0)
+    time.sleep(2.5)  # the held answer has come by now
+    assert not rig.sink.pushed and rig.chat_hosts() == []
+    assert rig.worker.snapshot().get("event_timeouts") == 1
+
+
 def test_a_connect_failure_is_the_fallback(gemini, rigs):
     srv = gemini([["audio"]], refuse=100)
     rig = gemini_rig(rigs, srv)

@@ -18,9 +18,13 @@ item in order:
 7. Once the announcement audio has ended it marks the item fired. An answered announcement
    opens the follow-up window.
 
-A timer announcement repeats after ``repeat_after_s`` with no addressed utterance since it
-ended, at most ``repeat_max`` times; a reminder does not repeat. Repeats run from a snapshot of
-the item, which the store has already moved on.
+A timer announcement repeats ``repeat_after_s`` after it ended when no addressed utterance came
+since it started (an "ok, thanks" over it counts), at most ``repeat_max`` times; a reminder does
+not repeat. Repeats run from a snapshot of the item, which the store has already moved on.
+
+An announcement that raises is logged once. Once its turn was asked for (audio may have
+played) the item is marked fired; before that it is held for the run, never queued again, and a
+restart announces it. So a broken part never re-announces an item on every tick.
 
 Logs carry ids, kinds and counts only, never a label or a reminder text (SPEC 12). The event
 text reaches the model like any conversation text.
@@ -63,12 +67,13 @@ JOIN_TIMEOUT_S = 2.0
 
 @dataclass
 class _Repeat:
-    """A timer announcement to say again at ``at`` unless someone spoke to the robot after
-    ``ended`` (its last announcement's end); ``left`` repeats remain after this one."""
+    """A timer announcement to say again at ``at`` unless someone spoke to the robot since
+    ``started`` (its last announcement's start: an "ok, thanks" over it counts); ``left``
+    repeats remain after this one."""
 
     item: Item
     at: float
-    ended: float
+    started: float
     left: int
 
 
@@ -99,6 +104,10 @@ class Announcer:
         self._queue: queue.Queue[str] = queue.Queue()
         self._lock = threading.Lock()
         self._held: set[str] = set()  # ids queued or being announced (dropped when repeated)
+        # ids whose announcement raised before its turn started: never queued again this run
+        # (a restart announces them), so a broken part costs one try, not one per tick
+        self._failed: set[str] = set()
+        self._spoke = False  # the current announcement's turn was asked for (audio may play)
         self._repeats: list[_Repeat] = []
         self._addressed_at = -float("inf")  # the last addressed utterance (this clock)
         self._unsubscribe: list[Callable[[], None]] = []
@@ -143,7 +152,7 @@ class Announcer:
         """``tools.due`` (the runner's thread): queue each id not already held; never waits."""
         for item_id in msg.payload or ():
             with self._lock:
-                if item_id in self._held:
+                if item_id in self._held or item_id in self._failed:
                     continue
                 self._held.add(item_id)
             self._queue.put(item_id)
@@ -167,7 +176,7 @@ class Announcer:
                 if item_id is not None:
                     self.handle(item_id)
                 self.run_repeats()
-            except Exception as exc:
+            except Exception as exc:  # handle and run_repeats log their own; a store failure
                 log.warning("announcer: failed: %s", type(exc).__name__)
             finally:
                 if item_id is not None:
@@ -181,15 +190,39 @@ class Announcer:
         item = self.scheduler.get(item_id)
         if item is None or item.due > self.scheduler.now():
             return False
-        ended = self._announce(item)
-        if ended is None:
+        try:
+            times = self._announce(item)
+        except Exception as exc:
+            return self._failure(item, exc)
+        if times is None:
             return False
         self.scheduler.fired(item.id)
         self.counts["announced"] += 1
         left = self.cfg().tools.scheduler.repeat_max
         if item.kind == "timer" and left > 0:
-            self._schedule_repeat(item, ended, left)
+            self._schedule_repeat(item, *times, left)
         return True
+
+    def _failure(self, item: Item, exc: Exception) -> bool:
+        """An announcement raised (logged once, by type). Once its turn was asked for, its
+        audio may have played: the item is marked fired, so no tick announces it again
+        (True). Before that it is held for the run, never queued again, and stays in the
+        store for a restart (False)."""
+        spoke = self._spoke
+        log.warning(
+            "announcer: %s %s failed (%s): %s",
+            item.kind,
+            item.id,
+            type(exc).__name__,
+            "marked fired" if spoke else "held until a restart",
+        )
+        if spoke:
+            self.scheduler.fired(item.id)
+            self.counts["announced"] += 1
+            return True
+        with self._lock:
+            self._failed.add(item.id)
+        return False
 
     def run_repeats(self) -> None:
         """Say each due repeat whose timer nobody answered since its last announcement; one
@@ -198,26 +231,34 @@ class Announcer:
         due = [r for r in self._repeats if r.at <= now]
         self._repeats = [r for r in self._repeats if r.at > now]
         for repeat in due:
-            if self._addressed_at > repeat.ended or self.asleep():
+            if self._addressed_at >= repeat.started or self.asleep():
                 continue
-            ended = self._announce(repeat.item)
-            if ended is None:
+            try:
+                times = self._announce(repeat.item)
+            except Exception as exc:  # a repeat is dropped: the item is fired already
+                log.warning("announcer: %s %s repeat failed (%s)", repeat.item.kind,
+                            repeat.item.id, type(exc).__name__)  # fmt: skip
+                continue
+            if times is None:
                 return
             self.counts["repeats"] += 1
             log.info("announcer: %s %s repeated", repeat.item.kind, repeat.item.id)
             if repeat.left > 1:
-                self._schedule_repeat(repeat.item, ended, repeat.left - 1)
+                self._schedule_repeat(repeat.item, *times, repeat.left - 1)
 
-    def _schedule_repeat(self, item: Item, ended: float, left: int) -> None:
-        """Say ``item`` again ``repeat_after_s`` after ``ended``, with ``left`` repeats left."""
+    def _schedule_repeat(self, item: Item, started: float, ended: float, left: int) -> None:
+        """Say ``item`` again ``repeat_after_s`` after ``ended`` unless someone spoke to the
+        robot since ``started``, with ``left`` repeats left."""
         after = self.cfg().tools.scheduler.repeat_after_s
-        self._repeats.append(_Repeat(item, ended + after, ended, left))
+        self._repeats.append(_Repeat(item, ended + after, started, left))
 
     # ----------------------------------------------------------------- one announcement
 
-    def _announce(self, item: Item) -> float | None:
-        """Steps 1 to 7 of the module docstring for ``item``; when its audio ended (this
-        clock), or None when the announcer closed first."""
+    def _announce(self, item: Item) -> tuple[float, float] | None:
+        """Steps 1 to 7 of the module docstring for ``item``; when the announcement started
+        (its nod) and when its audio ended (this clock), or None when the announcer closed
+        first."""
+        self._spoke = False
         if not self._ready():
             return None
         if not self._wait_idle():
@@ -229,9 +270,11 @@ class Announcer:
             return None
         cfg = self.cfg()
         language = cfg.conversation.language
+        started = self.clock()
         expression = self.host.expression
         if expression is not None:
             expression.request(NOD)
+        self._spoke = True
         answered = self._result(self.worker.event_turn(event_text(item), language))
         if answered is None:
             return None
@@ -253,11 +296,13 @@ class Announcer:
         if answered and listener is not None:
             listener.open_follow_up()
         log.info("announcer: %s %s announced", item.kind, item.id)
-        return self.clock()
+        return started, self.clock()
 
     def _ready(self) -> bool:
         """Wait until the platform is awake and the robot no longer rests (it wakes it from a
-        nap or rest, the quiet hours included); False when the announcer closed first."""
+        nap or rest, the quiet hours included, with one ``wake`` per wait); False when the
+        announcer closed first."""
+        woken = False
         while not self._stop.is_set():
             if self.asleep():
                 if self.wait(POLL_S):
@@ -268,7 +313,9 @@ class Announcer:
                 return True
             if runner.model.state != RESTING:
                 return True
-            runner.wake()  # awake for circadian.wake_hold_s; the state follows next tick
+            if not woken:  # awake for circadian.wake_hold_s; the state follows next tick
+                runner.wake()
+                woken = True
             if self.wait(POLL_S):
                 return False
         return False

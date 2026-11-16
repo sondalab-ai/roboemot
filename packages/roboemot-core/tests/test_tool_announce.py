@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from roboemot.bus import Bus
 from roboemot.config import ConfigStack
 from roboemot.conversation.phase import ConversationPhase
@@ -19,6 +20,18 @@ from roboemot.voice.listener import UtteranceInfo
 from roboemot.voice.wake import WakeGate
 
 START = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+MADE: list[Announcer] = []  # every announcer a test builds: closed at its teardown
+
+
+@pytest.fixture(autouse=True)
+def _close_announcers():
+    """No announcer thread or bus subscription outlives its test (a leaked daemon thread
+    would log into another test's ``caplog``)."""
+    yield
+    while MADE:
+        announcer = MADE.pop()
+        announcer.close()
+        assert announcer._thread is None or not announcer._thread.is_alive()
 
 
 class Clock:
@@ -172,6 +185,7 @@ class Rig:
             wait=self.clock.wait,
             asleep=asleep or (lambda: False),
         )
+        MADE.append(self.announcer)
 
     def timer(self, label="pasta"):
         item = self.scheduler.add_timer(60, label)
@@ -267,7 +281,7 @@ def test_napping_robot_is_woken(tmp_path):
     rig.host.expression.circadian = circadian
     item = rig.timer()
     assert rig.announcer.handle(item.id)
-    assert circadian.wakes >= 1
+    assert circadian.wakes == 1  # once, then it polls until the state left resting
     assert rig.worker.turns and rig.fired == [item.id]
 
 
@@ -319,6 +333,69 @@ def test_timer_repeats_until_answered_at_most_repeat_max(tmp_path):
         rig.announcer.run_repeats()
     assert len(rig.worker.turns) == 3  # the announcement and two repeats
     assert rig.fired == [item.id]  # fired once, after the first
+
+
+ADDRESSED = UtteranceInfo("en", 9, 2, 0.0, 0.0, 0.0, True, False, -20.0, None, None)
+
+
+def test_an_ok_thanks_during_the_announcement_means_no_repeat(tmp_path):
+    """The person answers while the robot still speaks (a barge-in, then the robot's reply):
+    the utterance is published before the announcement's audio ended (SPEC 11, Repeat)."""
+    rig = Rig(tmp_path)
+    rig.announcer.attach()
+    item = rig.timer()
+    answer = rig.worker.event_turn
+
+    def answered_during(text, language):
+        future = answer(text, language)
+        rig.clock.t += 1  # "ok, thanks" one second into the announcement
+        rig.host.bus.publish("percept.utterance", ADDRESSED, rig.clock.t)
+        rig.clock.t += 4  # the cut, then the robot's own reply to it, end later
+        return future
+
+    rig.worker.event_turn = answered_during
+    rig.announcer.handle(item.id)
+    rig.clock.t += 60
+    rig.announcer.run_repeats()
+    assert len(rig.worker.turns) == 1
+
+
+def test_an_exception_after_the_audio_fires_the_item_once_and_never_reannounces(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    rig.announcer.attach()
+
+    def broken(callback):
+        raise RuntimeError("after_turn broke")
+
+    rig.worker.after_turn = broken  # the event turn played, then the wait for its end raised
+    item = rig.timer()
+    caplog.set_level("WARNING")
+    assert rig.announcer.handle(item.id)
+    assert rig.fired == [item.id] and rig.scheduler.get(item.id) is None
+    rig.host.bus.publish(DUE_TOPIC, [item.id], 0.0)  # a racing tick republishes it
+    assert not rig.announcer.handle(item.id)
+    assert len(rig.worker.turns) == 1
+    failures = [r for r in caplog.records if "failed" in r.getMessage()]
+    assert len(failures) == 1 and "pasta" not in caplog.text
+
+
+def test_an_exception_before_the_turn_holds_the_item_for_the_run_and_logs_once(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    rig.announcer.attach()
+
+    def broken(label, now=None):
+        raise RuntimeError("no gesture")
+
+    rig.host.expression.request = broken
+    item = rig.timer()
+    caplog.set_level("WARNING")
+    assert not rig.announcer.handle(item.id)
+    assert rig.fired == [] and rig.scheduler.get(item.id) is not None  # a restart retries it
+    for _ in range(3):  # the next ticks republish it: it is not queued again
+        rig.host.bus.publish(DUE_TOPIC, [item.id], 0.0)
+    assert rig.announcer._queue.empty()
+    assert rig.worker.turns == []
+    assert len([r for r in caplog.records if "failed" in r.getMessage()]) == 1
 
 
 def test_an_addressed_utterance_stops_the_repeats(tmp_path):
@@ -378,6 +455,7 @@ def test_the_due_handler_never_waits_and_drops_ids_in_flight(tmp_path):
         asleep=lambda: False,
         runner=runner,
     )
+    MADE.append(rig.announcer)
     item = rig.timer()
     rig.announcer.start()
     try:
