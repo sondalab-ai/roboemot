@@ -598,6 +598,7 @@
  "SPEC 8": "SPEC 8",
  "SPEC 8, 11A": "SPEC 8, 11A",
  "SPEC 8: route conformance test": "SPEC 8: test di conformità della route",
+ "SPEC 11, 11A: voice tools": "SPEC 11, 11A: strumenti vocali",
  "Safety cap: a duck episode with no candidate frame for this long releases (with the ramp) on its own, in case barge-in stops getting frames with an episode open; counted as capped. Longer than any hesitant phrase that never reaches the cut-off": "Limite di sicurezza: un episodio di attenuazione senza frame candidati per questo tempo si rilascia da solo (con la rampa), nel caso il barge-in smetta di ricevere frame con un episodio aperto; contato come capped. Più lungo di qualsiasi frase esitante che non raggiunge mai l'interruzione",
  "Same for a close-face trigger: the frame stamp is the capture time, so detection time counts (SPEC 13: vision trigger to reflex motion, 250 ms on cm4)": "Lo stesso per un trigger da volto vicino: il timestamp del frame è il tempo di acquisizione, quindi il tempo di rilevamento conta (SPEC 13: dal trigger di visione al movimento di riflesso, 250 ms su cm4)",
  "Sample rate the sounds are synthesised at": "Frequenza di campionamento a cui vengono sintetizzati i suoni",

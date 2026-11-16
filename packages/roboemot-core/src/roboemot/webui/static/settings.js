@@ -21,7 +21,7 @@ const SETTING_ADVANCED = "adv:"; // open/collapsed key prefix of a group's Advan
 // section is never hidden.
 const SETTING_PURPOSES = [
   { id: "safety", sections: ["safety"] },
-  { id: "voice", sections: ["voice", "conversation"] },
+  { id: "voice", sections: ["voice", "conversation", "tools"] },
   { id: "behaviour", sections: ["personality", "persona", "affect", "appraisal", "register", "expression", "circadian", "soothe"] },
   { id: "perception", sections: ["vision", "attention", "world", "identity", "enrollment", "music", "light", "catalogue"] },
   { id: "motion", sections: ["motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map"] },
