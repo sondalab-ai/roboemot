@@ -35,6 +35,16 @@ def now(name: str | None) -> datetime:
     return datetime.now(zone(name) if name else None)
 
 
+def zone_or_local(name: str | None) -> ZoneInfo:
+    """The zone ``name`` names, or this machine's zone when it is None or empty, or UTC when
+    the machine names none. Always a real zone, never a fixed offset, so a local clock time
+    stays the same across a DST switch (SPEC 11, Voice tools)."""
+    if name:
+        return zone(name)
+    local = local_name()
+    return zone(local) if local else ZoneInfo("UTC")
+
+
 def local_name(localtime: Path = LOCALTIME, env: dict[str, str] | None = None) -> str | None:
     """This machine's IANA zone name: ``TZ`` when it is one, else the target of
     ``/etc/localtime`` (macOS and most Linux); None when neither names a known zone."""

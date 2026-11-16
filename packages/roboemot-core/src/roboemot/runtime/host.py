@@ -35,6 +35,7 @@ from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
 from roboemot.soothe import SootheRunner
+from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
@@ -84,6 +85,8 @@ class RuntimeHost:
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
     realtime_route: RealtimeRoute | None = None  # the realtime speech route, when enabled
+    scheduler: Scheduler | None = None  # timers and reminders (SPEC 11, Voice tools); with voice
+    scheduler_runner: SchedulerRunner | None = None  # tools.due; an announcer set_consumer(True)
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)

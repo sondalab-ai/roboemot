@@ -12,9 +12,10 @@ import random
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
-from roboemot import paths
+from roboemot import paths, timezones
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.phase import SPEAKING, THINKING
@@ -33,6 +34,7 @@ from roboemot.skills.plugins import (
 )
 from roboemot.skills.registry import SkillRegistry
 from roboemot.soothe import SootheRunner
+from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import AUDIO_DROPPED, AUDIO_NOT_HEARD, AUDIO_SENT
@@ -151,6 +153,7 @@ def start_voice_output(
     )
     if realtime is not None:
         realtime.events = host.events
+    start_scheduler(host, stack, p, cleanup)  # stops after the conversation that sets items
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
     registry = p.perception.registry
@@ -206,16 +209,45 @@ def skill_registry(
 ) -> SkillRegistry:
     """The conversation's skills (SPEC 11): the default skills over the robot's pipeline plus
     every ``roboemot.skills`` plugin, each plugin loaded once. The tools' host gets the run's
-    parts (``nap``: ``runtime.request_nap``, SPEC 7A). Warns once when the merged
-    ``conversation.llm_skills`` hides one of core's own voice tools."""
+    parts (``nap``: ``runtime.request_nap``, SPEC 7A; ``scheduler``: ``runtime.scheduler``,
+    SPEC 11). Warns once when the merged ``conversation.llm_skills`` hides one of core's own
+    voice tools."""
     host = tool_host(stack.effective, p.bus)
     host.nap = runtime.request_nap
+    host.scheduler = runtime.scheduler
     plugins = load_plugin_skill_sets(host)
     warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
     env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
         p.runner.engine
     )
     return build_skill_registry(env, host, plugins)
+
+
+def start_scheduler(
+    host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
+) -> Scheduler:
+    """The run's timers and reminders (SPEC 11, Voice tools): the store in the data folder,
+    loaded with the restart grace, and its runner publishing ``tools.due``, stopped by
+    ``cleanup``. Recurrence uses ``circadian.timezone`` (this machine's zone when null), read
+    live. Sets ``host.scheduler`` and ``host.scheduler_runner``."""
+
+    def now() -> datetime:
+        return datetime.now(UTC)
+
+    def zone() -> tzinfo:
+        return timezones.zone_or_local(stack.effective().circadian.timezone)
+
+    scheduler = host.scheduler = Scheduler(
+        paths.schedule_path(p.cfg.data_dir),
+        lambda: stack.effective().tools.scheduler,
+        now,
+        zone,
+    )
+    scheduler.load(now())
+    runner = host.scheduler_runner = SchedulerRunner(scheduler, p.bus, scheduler.cfg)
+    cleanup.callback(runner.close)
+    runner.start()
+    return scheduler
 
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:

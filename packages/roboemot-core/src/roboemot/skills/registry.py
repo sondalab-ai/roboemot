@@ -151,9 +151,10 @@ def skill(
     return wrap
 
 
-# Keys of the results the executor and the default skills write (``error``, ``detail``,
-# ``ok``, ``applied``, ``status``); a custom skill that returns other keys is checked as text.
-RESULT_KEYS = ("error", "detail", "ok", "applied", "status")
+# Keys of the results the executor, the default skills and core's voice tools write (``error``,
+# ``detail``, ``ok``, ``applied``, ``status``; the scheduler's ``id``, ``kind``, ``due``,
+# ``items``); a custom skill that returns other keys is checked as text.
+RESULT_KEYS = ("error", "detail", "ok", "applied", "status", "id", "kind", "due", "items")
 
 
 def skill_of(item: Any) -> Skill | None:
