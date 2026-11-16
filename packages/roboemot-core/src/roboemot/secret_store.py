@@ -17,11 +17,11 @@ import json
 import os
 import re
 import stat
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from . import paths
+from .fileio import replace_file
 
 # Starts with a letter or digit so a name is never read as a command line option.
 NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -149,20 +149,8 @@ class SecretStore:
         return data
 
     def _write(self, data: dict[str, str]) -> None:
-        fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".")  # 0600
-        tmp = Path(name)
-        try:
-            with os.fdopen(fd, "w") as handle:
-                os.fchmod(handle.fileno(), FILE_MODE)
-                handle.write(json.dumps(data, indent=2, sort_keys=True))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self.path)
-            self._sync_folder()
-        except BaseException:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
-            raise
+        # self.path itself, never resolved: a planted symlink is replaced, not written through
+        replace_file(self.path, json.dumps(data, indent=2, sort_keys=True), FILE_MODE)
 
 
 def no_secrets(name: str) -> str:

@@ -69,6 +69,8 @@ BEHAVIOUR_MODULES = [
     "conversation/summaries.py",
     "conversation/sources.py",
     "skills/bridge.py",
+    "skills/host.py",
+    "skills/plugins.py",
     "runtime/assembly.py",
     "runtime/diagnostics.py",
     "runtime/host.py",

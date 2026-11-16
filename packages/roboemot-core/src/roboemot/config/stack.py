@@ -22,7 +22,6 @@ import functools
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -35,6 +34,7 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from ..fileio import replace_file
 from ..redact import scrub, scrub_text, shown
 from .schema import (
     DEFAULT_ROUTE_PROTOCOL,
@@ -1962,7 +1962,12 @@ class ConfigStack:
     def _persist_app(self) -> None:
         path = self.files.get("app")
         if path and not str(path).startswith("preset:"):
-            _replace_file(Path(path), yaml.safe_dump(self.app, sort_keys=False))
+            # owner-only: app.yaml may hold a literal api_key. A symlink keeps pointing at its
+            # target, the file replaced: planting one needs write access to the data folder,
+            # which is already the app user's, so following it grants nothing new.
+            replace_file(
+                Path(path).resolve(), yaml.safe_dump(self.app, sort_keys=False), APP_FILE_MODE
+            )
             self._mtimes["app"] = _mtime(path)
 
     def _expire(self) -> bool:
@@ -2011,35 +2016,6 @@ class ConfigStack:
         for layer, path in self.files.items():
             if not str(path).startswith("preset:"):
                 self._mtimes[layer] = _mtime(path)
-
-
-def _replace_file(path: Path, text: str) -> None:
-    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder,
-    owner-only (``APP_FILE_MODE``: the file may hold a literal ``api_key``) whatever the old mode
-    was, synced, renamed over the target, then the folder synced as a best effort. A kill at any
-    point leaves the old file or the new one, never a truncated one. A symlink keeps pointing at
-    its target, which is the file replaced: planting one needs write access to the data folder,
-    which is already the app user's, so following it grants nothing new."""
-    target = path.resolve()
-    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "w") as handle:
-            os.fchmod(handle.fileno(), APP_FILE_MODE)
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
-    with contextlib.suppress(OSError):  # the new file is in place: durability is best effort
-        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_CLOEXEC)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
 
 
 def _mtime(path: Path) -> float:

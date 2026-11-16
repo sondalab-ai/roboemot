@@ -6872,6 +6872,14 @@ class WebUIConfig(Strict):
         return [h.lower().rstrip(".") for h in value]
 
 
+# --------------------------------------------------------------------------- tools (SPEC 11)
+
+
+class ToolsConfig(Strict):
+    """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
+    tool adds its own sub-section."""
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -6938,6 +6946,7 @@ with warnings.catch_warnings():
         )
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
+        tools: ToolsConfig = param({}, "SPEC 11, 11A: voice tools")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
         llm_check: LLMCheckConfig = param({}, "SPEC 8: route conformance test", advanced=True)
         safety: SafetyConfig = param({}, "SPEC 12")

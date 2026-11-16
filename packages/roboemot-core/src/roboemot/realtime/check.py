@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..bus import Bus
 from ..config.schema import LLMRoute, RoboEmotConfig, realtime_connect_timeout_s
 from ..llm.conformance import (
     FAIL,
@@ -65,7 +66,9 @@ from ..llm.conformance import (
 from ..llm.prompt import CHARS_PER_TOKEN
 from ..llm.pseudonyms import route_is_local
 from ..skills import SkillRegistry
-from ..skills.defaults import SkillEnv, default_skills
+from ..skills.defaults import SkillEnv
+from ..skills.host import tool_host
+from ..skills.plugins import build_skill_registry
 from . import protocol
 from .route import EVENT_PREFIX, ITEM_PREFIX, MS_PER_S, realtime_extra, session_update
 from .session import GEMINI_LIVE, NO_KEY, DirectSession, SessionProvider
@@ -178,8 +181,9 @@ def _turn(cfg: RoboEmotConfig, route: LLMRoute) -> tuple[str, str]:
 def offline_tools(
     cfg: RoboEmotConfig, gestures: Callable[[], Sequence[str]] | None = None
 ) -> list[dict[str, Any]]:
-    """The tools a ``gemini_live`` check's setup carries: the default skills listed in
-    ``conversation.llm_skills``, built over an environment that acts on nothing, and the skip
+    """The tools a ``gemini_live`` check's setup carries: the default and plugin skills listed
+    in ``conversation.llm_skills`` (SPEC 11), the defaults built over an environment that acts on
+    nothing and the plugins over a host of their own (a bus nobody hears), and the skip
     and tone tools, as the worker offers them (``session_tools``). ``gestures``: the robot's
     playable names (the affect labels when None). No name in view ever goes in a choice list
     (``look_at`` offers its categories only, SPEC 12)."""
@@ -192,7 +196,7 @@ def offline_tools(
         affect=SimpleNamespace(cfg=cfg.affect),
     )
     conv = cfg.conversation
-    offered = default_skills(env).offered(conv.llm_skills)
+    offered = build_skill_registry(env, tool_host(lambda: cfg, Bus())).offered(conv.llm_skills)
     chat = SkillRegistry.tools(
         offered, enum_max=conv.tool_enum_max_items, max_chars=conv.tool_arg_max_chars
     )

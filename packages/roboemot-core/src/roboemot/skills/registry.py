@@ -63,6 +63,19 @@ class Skill:
     inline: bool = False
     describe: Callable[[], str] | None = None  # builds the description at run time
     follow_up: bool = True  # False: its result never changes what the robot says
+    available: Callable[[], bool] | None = None  # checked per request and per call
+
+    def is_available(self) -> bool:
+        """Whether the skill may be offered and run now: ``available()`` when set, else True.
+        A check that raises counts as unavailable (logged by name and exception type), so one
+        broken plugin never breaks a turn (SPEC 11, Voice tools)."""
+        if self.available is None:
+            return True
+        try:
+            return bool(self.available())
+        except Exception as exc:
+            log.warning("skill %s: availability check failed: %s", self.name, type(exc).__name__)
+            return False
 
     def text(self) -> str:
         """The description shown to the model: ``describe()`` when set, else the static one."""
@@ -97,6 +110,7 @@ def skill(
     inline: bool = False,
     describe: Callable[[], str] | None = None,
     follow_up: bool = True,
+    available: Callable[[], bool] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
@@ -108,7 +122,10 @@ def skill(
     builds the description at run time (it replaces ``description``). ``follow_up=False`` marks
     a fire-and-forget skill (a gesture, a look, a mood nudge): its result never changes what the
     robot says, so a round that already spoke and called only such skills asks the model no more
-    (SPEC 8, tool rounds). Plugin skills keep the default: their result may be the answer."""
+    (SPEC 8, tool rounds). Plugin skills keep the default: their result may be the answer.
+    ``available`` says whether the skill may be used now (a switch off, a part the run lacks);
+    it is checked when each request is built and again at call time, so it must read live state
+    (SPEC 11, LLM tools)."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
@@ -127,6 +144,7 @@ def skill(
             inline,
             describe,
             follow_up=follow_up,
+            available=available,
         )
         return fn
 
@@ -138,6 +156,16 @@ def skill(
 RESULT_KEYS = ("error", "detail", "ok", "applied", "status")
 
 
+def skill_of(item: Any) -> Skill | None:
+    """The :class:`Skill` of ``item``: itself when it is one, the record ``@skill`` put on a
+    function, or None for anything else (a plugin may hand back any object, so its result is
+    checked here before it reaches a registry)."""
+    if isinstance(item, Skill):
+        return item
+    s = getattr(item, "skill", None)
+    return s if isinstance(s, Skill) else None
+
+
 class SkillRegistry:
     """The skills of an app, by name."""
 
@@ -147,7 +175,7 @@ class SkillRegistry:
             self.add(s)
 
     def add(self, item: Callable[..., Any] | Skill) -> Skill:
-        s = item if isinstance(item, Skill) else getattr(item, "skill", None)
+        s = skill_of(item)
         if s is None:
             raise TypeError("not a skill: decorate it with @skill")
         if s.name in self._skills:
@@ -170,13 +198,14 @@ class SkillRegistry:
         )
 
     def offered(self, allow: Collection[str]) -> list[Skill]:
-        """The skills the model may call now: visible and listed in ``allow``. Call it for every
-        request."""
+        """The skills the model may call now: visible, listed in ``allow`` and available. Call
+        it for every request."""
         return [
             s
             for s in self._skills.values()
             if s.llm_visible
             and s.name in allow
+            and s.is_available()
             and all(s.resolved_choices().values())  # a parameter with nothing to choose from
         ]
 
@@ -247,11 +276,14 @@ async def execute(
     choices: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
 ) -> ToolOutcome:
     """Run the call ``name(args)``. Only a skill in ``offered`` runs (a model may name one it
-    was not given). Validation, timeout and exceptions become error results. ``choices`` is the
-    snapshot the model was shown (else the choices are resolved now)."""
+    was not given), and only while it is available (else ``unavailable``: it was turned off
+    after the request was built). Validation, timeout and exceptions become error results.
+    ``choices`` is the snapshot the model was shown (else the choices are resolved now)."""
     s = registry.get(name)
     if s is None or name not in offered:
         return _error("unknown_skill", "")
+    if not s.is_available():
+        return _error("unavailable", name)
     try:
         options = choices[name] if choices is not None else s.resolved_choices(enum_max)
         kwargs = validate(s.params, args, options, max_chars)
