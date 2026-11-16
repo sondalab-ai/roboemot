@@ -21,6 +21,7 @@ const settingsState = {
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
   routes: null, // GET /api/routes for the voice rows (a promise), once per settings view
+  voice: null, // GET /api/settings/voice: the voice-provider switch, read with the rows
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -29,7 +30,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null,
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null, voice: null,
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -584,9 +585,129 @@ async function settingsBatchSave(message, changes, verbKey = "saved") {
   const result = await pinnedCall(message, t("settings_save"),
     (pin) => api("POST", "/api/settings/batch", { changes, pin }));
   if (!result) return null;
+  await settingsBatchDone(result, verbKey);
+  return result;
+}
+
+// After a batch save: the revealed private values it changed kept current, the notice (layer,
+// restart) and the rows read again.
+async function settingsBatchDone(result, verbKey) {
+  for (const r of result.results || []) {
+    if (r.changed && revealedSettings.has(r.path)) revealedSettings.set(r.path, { ...revealedSettings.get(r.path), value: r.value });
+  }
   writeNotice(result, verbKey);
   await settingsReload(null);
-  return result;
+}
+
+// ---------------------------------------------------------------- voice provider switch
+
+const VOICE_SWITCH_GROUP = "core-voice";
+const VOICE_CUSTOM = "custom";
+
+// GET /api/settings/voice, or null on a failure (an older server, no editor): the row is then not shown.
+async function voiceSwitchFetch() {
+  try { return await api("GET", "/api/settings/voice"); } catch (e) { return null; }
+}
+
+// The answer of the unrevealed GET as the page shows it once the private fields are revealed: the
+// matched choice holds only while its private keys (`private_match`) equal the revealed values, which
+// every save keeps current. So a reload after a save never mixes a revealed page with an unrevealed
+// voice value. Without revealed values it is returned as it is.
+function voiceRevealed(voice) {
+  if (!voice || voice.revealed) return voice;
+  const choice = voice.choices.find((c) => c.id === voice.value);
+  const keys = choice ? choice.private_match || [] : [];
+  if (!choice || !revealedSettings.size || !keys.every((p) => revealedSettings.has(p))) return voice;
+  const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+  const same = keys.every((p) => revealedSettings.get(p).value === wanted.get(p));
+  return { ...voice, revealed: true, value: same ? voice.value : VOICE_CUSTOM };
+}
+
+// The confirmation text of a switch to `choice` over `diff`: the opt-ins it turns on or off, who
+// receives the audio when the opt-in is on and the receiving route changes (even with no opt-in
+// change), and the unaddressed audio when that consent turns on (SPEC 12).
+function voiceSwitchMessage(choice, diff, wanted) {
+  const changed = new Set(diff.changes.map((c) => c.path));
+  const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
+  const parts = [t("voice_switch_diff")];
+  for (const [on, key] of [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]) {
+    const paths = optIns(on);
+    if (paths.length) parts.push(t(key, { paths: paths.join(", ") }));
+  }
+  const audioOn = wanted.get("privacy.realtime_audio") === true;
+  if (audioOn && choice.audio_to && (changed.has("voice.realtime_route.route") || changed.has("voice.realtime_route.enabled"))) {
+    parts.push(t("voice_switch_audio_to", { provider: choice.audio_to }));
+  }
+  if (wanted.get("privacy.realtime_audio_unaddressed") === true && changed.has("privacy.realtime_audio_unaddressed")) {
+    parts.push(t("voice_switch_unaddressed"));
+  }
+  return parts.join(" ");
+}
+
+// One choice's name in the page language: the robot plugin words its own platform route.
+function voiceChoiceText(choice) {
+  if (choice.kind === "local") return t("voice_choice_local");
+  if (choice.kind === "platform") return t("voice_choice_platform", { label: choice.label || choice.route, route: choice.route });
+  return t("voice_choice_direct", { route: choice.route });
+}
+
+// The row at the top of the voice group: the current choice (or Custom) and every choice, the ones
+// that cannot be picked now disabled with their reason. Picking one runs `voiceSwitch`.
+function voiceSwitchRow(data) {
+  const id = "voice-switch";
+  const select = el("select", { id, class: "sl-field__input" },
+    data.value === VOICE_CUSTOM ? el("option", { value: VOICE_CUSTOM, selected: true, disabled: true }, t("voice_choice_custom")) : [],
+    data.choices.map((c) => el("option", { value: c.id, selected: c.id === data.value, disabled: !c.available },
+      c.available ? voiceChoiceText(c)
+        : t("voice_choice_unavailable", { choice: voiceChoiceText(c), reason: t("voice_reason_" + c.reason, { secret: c.secret || "" }) }))));
+  select.addEventListener("change", async () => {
+    const choice = data.choices.find((c) => c.id === select.value);
+    select.value = data.value;
+    if (choice) await voiceSwitch(choice);
+  });
+  return el("div", { class: "stack", "data-path": id }, field(id, t("voice_switch"), select,
+    t("voice_switch_hint") + (data.revealed ? "" : " " + t("voice_switch_unrevealed"))));
+}
+
+// Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
+// dialog lists what changes (the privacy opt-ins named, SPEC 12), and its confirm saves the batch with
+// the same PIN. The PIN lives only in this call; a save refused for the PIN starts again at the PIN
+// dialog. Returns the save's response, or null.
+async function voiceSwitch(choice) {
+  const title = t("voice_switch_pin_title", { choice: voiceChoiceText(choice) });
+  let held = null;
+  const diff = await pinnedCall(t("voice_switch_pin_message"), t("voice_switch_show"), async (pin) => {
+    const result = await api("POST", "/api/settings/batch/preview", { changes: choice.changes, pin });
+    held = pin;
+    return result;
+  }, null, title);
+  try {
+    if (!diff) return null;
+    if (!diff.changes.length) { notice(t("voice_switch_same")); return null; }
+    const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+    const items = diff.changes.map((c) => {
+      const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
+      return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
+    });
+    const message = voiceSwitchMessage(choice, diff, wanted);
+    let result = null;
+    let again = false;
+    const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
+      run: async () => {
+        try {
+          result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held });
+        } catch (err) {
+          if (err.message !== "bad_pin") throw err;
+          again = true;
+        }
+      } });
+    if (again) { held = null; return voiceSwitch(choice); }
+    if (!done || !result) return null;
+    await settingsBatchDone(result, "saved");
+    return result;
+  } finally {
+    held = null;
+  }
 }
 
 function settingLeaf(node) {
@@ -840,11 +961,17 @@ const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? sett
 
 // ---------------------------------------------------------------- reveal and reload
 
+// The same PIN also reads the voice switch matched on the privacy opt-ins (private, SPEC 12).
 async function revealSettings() {
-  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"),
-    (pin) => api("POST", "/api/settings/reveal", { pin }));
+  let voice = null;
+  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"), async (pin) => {
+    const fields = await api("POST", "/api/settings/reveal", { pin });
+    if (settingsState.voice) voice = await api("POST", "/api/settings/voice", { pin }).catch(() => null);
+    return fields;
+  });
   if (!result) return;
   revealedSettings = new Map(result.fields.map((f) => [f.path, f]));
+  if (voice) settingsState.voice = voice;
   settingsApplyModel(settingsState.data);
   refreshSettings();
 }
@@ -852,9 +979,10 @@ async function revealSettings() {
 async function settingsReload(changedPath) {
   const current = viewToken();
   if (changedPath) settingsState.leaves.delete(changedPath);
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return; // a new settings view or a logout replaced the groups this answer was for
   settingsState.data = data;
+  settingsState.voice = voiceRevealed(voice);
   settingsApplyModel(settingsState.data);
   refreshSettings();
   if (changedPath) settingsFocus(changedPath);
@@ -929,7 +1057,8 @@ function refreshGroup(g) {
       ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
         { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
       : [];
-    g.body.replaceChildren(...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
+    const lead = g.id === VOICE_SWITCH_GROUP && settingsState.voice ? [voiceSwitchRow(settingsState.voice), el("hr", { class: "sl-rule" })] : [];
+    g.body.replaceChildren(...lead, ...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
   }
   return hits.length;
 }
@@ -1009,10 +1138,11 @@ async function settingsView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   settingsState.routes = null; // the voice rows fetch the routes again, once for the view
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return;
   view.replaceChildren();
   settingsState.data = data;
+  settingsState.voice = voiceRevealed(voice);
   const robot = data.robot || null;
   const sections = [
     ...settingsSections(settingsTree(data.fields), "core", null),

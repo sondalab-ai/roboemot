@@ -75,6 +75,7 @@ from roboemot.redact import REDACTED, secret_shaped
 from roboemot.redact import origin as plain_origin
 from roboemot.secret_store import NAME as SECRET_NAME
 from roboemot.secret_store import SECRET_REF
+from roboemot.voice.factory import piper_python
 from roboemot.voice.models import ModelError, supported_languages
 
 from .languages import LANGUAGE_PATH, installed_languages
@@ -84,6 +85,7 @@ from .robot_section import (
     build_section,
     claimed,
     load_settings_plugin,
+    platform_voice,
     restart_hook,
     vet_claims,
 )
@@ -95,6 +97,7 @@ from .setting_clean import (
     key_choice,
 )
 from .validation import ValidationError
+from .voice_switch import MODELS_MISSING, PIPER_MISSING, voice_switch
 
 if TYPE_CHECKING:
     from roboemot.manifest import Manifest
@@ -256,6 +259,12 @@ def languages() -> frozenset[str]:
         return frozenset(supported_languages())
     except ModelError:
         return frozenset()
+
+
+def piper_installed(cfg: RoboEmotConfig) -> bool:
+    """Whether the Piper interpreter local voice runs with exists: a cloud-voice install removes
+    its virtualenv, and the robot then has no local voice even with the model files kept."""
+    return piper_python(cfg).exists()
 
 
 class SettingNotAllowed(LookupError):
@@ -459,10 +468,12 @@ class SettingsEditor:
         known_secrets: Callable[[], Iterable[str]] | None = None,
         installed: Callable[[RoboEmotConfig], Iterable[str]] = installed_languages,
         realtime_key_hosts: Callable[[], Iterable[str]] | None = None,
+        piper_ready: Callable[[RoboEmotConfig], bool] = piper_installed,
     ):
         self.stack = stack
         self._realtime_key_hosts = realtime_key_hosts
         self._installed = installed
+        self._piper_ready = piper_ready
         self.manifest = manifest
         self._known_secrets = known_secrets
         self._plugin = plugin
@@ -533,6 +544,23 @@ class SettingsEditor:
         """Only the private fields, with their real values (secrets stay redacted). The caller
         has verified the PIN."""
         return [f for f in self._catalogue(reveal_private=True) if f["private"]]
+
+    def voice_switch(self, revealed: bool = False, language: str = "") -> dict[str, Any]:
+        """The voice-provider switch over the effective configuration (``voice_switch``,
+        SPEC 8, 11A): the current choice and every choice with its full key list. Local is
+        available when the voice models of the page language and the Piper interpreter are
+        installed; a route when its key's secret is in the store. ``revealed`` (the caller
+        checked the PIN) lets the private keys decide the current choice; ``language`` is the
+        page's, for the plugin's label (default: the configured one). Nothing is written."""
+        cfg = self.stack.effective()
+        known = set(self._known_secrets()) if self._known_secrets is not None else None
+        local_problem = None
+        if cfg.conversation.language not in self._installed(cfg):
+            local_problem = MODELS_MISSING
+        elif not self._piper_ready(cfg):
+            local_problem = PIPER_MISSING
+        platform = platform_voice(self._plugin, cfg, language or cfg.conversation.language)
+        return voice_switch(cfg, platform, known, local_problem, revealed=revealed)
 
     # ------------------------------------------------------------------ writing
 

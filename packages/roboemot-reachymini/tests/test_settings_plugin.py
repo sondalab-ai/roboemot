@@ -5,13 +5,17 @@ from __future__ import annotations
 import logging
 import math
 import re
+import subprocess
+import sys
 from importlib.metadata import entry_points
 
 import httpx
 import pytest
 import yaml
 from roboemot.affect.clips import load_clip_library
+from roboemot.cloud_voice import ROUTES_KEY, cloud_voice_config
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Target
 from roboemot.manifest import load_manifest
@@ -20,6 +24,7 @@ from roboemot.webui.settings import SettingsEditor
 from roboemot_reachymini import app as app_module
 from roboemot_reachymini import daemon as daemon_module
 from roboemot_reachymini import settings as settings_module
+from roboemot_reachymini.cloud_voice import CLOUD_VOICE
 from roboemot_reachymini.daemon import APP_NAME, DaemonClient
 from roboemot_reachymini.settings import CLAIMS, ReachySettings, plugin
 
@@ -368,3 +373,23 @@ def test_the_rows_follow_the_page_language(language, word):
         for r in section.fields
         if ".constraints." in r["path"]
     )
+
+
+def test_the_voice_profile_is_the_installer_cloud_voice_profile():
+    installer = cloud_voice_config(CLOUD_VOICE)
+    wanted = {".".join(k): v for k, v in installer.items() if k[0] != ROUTES_KEY}
+    cfg = RoboEmotConfig.model_validate({"conversation": {"language": "it"}})
+    for lang, label in (("en", CLOUD_VOICE.provider), ("it", "Server di Pollen (Hugging Face)")):
+        profile = plugin.voice_profile(cfg, lang)  # the page language, not the configured one
+        assert (profile.route, profile.keys) == (CLOUD_VOICE.name, wanted)
+        assert (profile.label, profile.base_url) == (label, CLOUD_VOICE.base_url)
+
+
+def test_the_web_ui_plugin_does_not_load_the_installer():
+    code = (
+        "import sys, roboemot_reachymini.settings; "
+        "print([m for m in ('roboemot.install', 'roboemot_reachymini.install', 'termios', "
+        "'getpass', 'argparse') if m in sys.modules])"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"

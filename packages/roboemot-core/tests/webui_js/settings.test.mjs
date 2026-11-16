@@ -360,6 +360,215 @@ test("batch save: a refusal stays in the dialog, with no reload and no notice", 
   assert.equal(page.document.querySelector("#notice").textContent, "");
 });
 
+const VOICE_CHANGES = {
+  local: [{ path: "voice.realtime_route.enabled", value: false }, { path: "privacy.realtime_audio", value: false }],
+  gemini: [{ path: "voice.realtime_route.enabled", value: true }, { path: "privacy.realtime_audio", value: true }],
+};
+const voiceChoice = (id, kind, extra = {}) => ({
+  id, kind, route: null, protocol: null, label: null, audio_to: null, available: true, reason: null, secret: null, private_match: [],
+  changes: VOICE_CHANGES[id] || [], ...extra,
+});
+const VOICE = {
+  value: "local",
+  choices: [
+    voiceChoice("local", "local"),
+    voiceChoice("route:platform", "platform", { route: "platform", label: "Platform server", available: false, reason: "secret_missing", secret: "platform_token" }),
+    voiceChoice("gemini", "direct", { route: "gemini", protocol: "gemini_live", audio_to: "gemini.example", private_match: ["privacy.realtime_audio"] }),
+  ],
+};
+const VOICE_DIFF = {
+  changes: [
+    { path: "voice.realtime_route.enabled", old: false, new: true, restart: true, opt_in: false },
+    { path: "privacy.realtime_audio", old: "***", new: "***", restart: false, opt_in: true },
+  ],
+};
+const SAVED = { changed: true, layer: "runtime", persisted: true, applied: true, restart_required: true, results: [] };
+
+async function voicePage(extra = {}, voice = VOICE) {
+  const page = await settingsPage({ "GET /api/settings/voice": voice, ...extra });
+  await open(page, "core-voice");
+  return page;
+}
+
+test("voice switch: the row leads the voice group with the current choice and the reasons", async () => {
+  const page = await voicePage({ "GET /api/strings": { language: "en", strings: {
+    voice_choice_unavailable: "{choice}: {reason}", voice_reason_secret_missing: "needs {secret}",
+    voice_choice_platform: "{label} ({route})" } } });
+  const first = body(page, "core-voice").firstElementChild;
+  assert.equal(first.getAttribute("data-path"), "voice-switch");
+  const options = [...first.querySelectorAll("option")];
+  assert.deepEqual(options.map((o) => o.value), ["local", "route:platform", "gemini"]);
+  assert.equal(first.querySelector("select").value, "local");
+  assert.ok(options[1].disabled);
+  assert.equal(options[1].textContent, "Platform server (platform): needs platform_token");
+  assert.ok(!options[2].disabled);
+});
+
+test("voice switch: keys that match no choice show Custom", async () => {
+  const page = await voicePage({}, { ...VOICE, value: "custom" });
+  const select = row(page, "voice-switch").querySelector("select");
+  assert.equal(select.value, "custom");
+  assert.ok(select.querySelector('option[value="custom"]').disabled);
+});
+
+test("voice switch: one PIN dialog, the diff with the opt-ins named, then one batch with that PIN", async () => {
+  const page = await voicePage({ "POST /api/settings/batch/preview": VOICE_DIFF, "POST /api/settings/batch": SAVED });
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = "gemini";
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  assert.equal(select.value, "local", "the row shows the current choice until the save");
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch/preview").map((c) => c.body), [{ changes: VOICE_CHANGES.gemini, pin: PIN }]);
+  const confirm = page.document.querySelector("dialog");
+  assert.equal(confirm.querySelector("#dialog-pin"), null, "the PIN is asked once");
+  const text = confirm.textContent;
+  assert.ok(text.includes("voice_switch_opt_in"), "the privacy opt-ins are named");
+  assert.equal(confirm.querySelectorAll("li").length, 2);
+  assert.equal(posts(page, "/api/settings/batch").length, 0, "nothing is saved before the confirm");
+  submit(page.window, confirm.querySelector("form"));
+  await settle();
+  await settle();
+  assert.deepEqual(posts(page, "/api/settings/batch").map((c) => c.body), [{ changes: VOICE_CHANGES.gemini, pin: PIN }]);
+  const notice = page.document.querySelector("#notice").textContent;
+  assert.ok(notice.includes("settings_restart_needed"));
+  assert.ok(!page.document.documentElement.outerHTML.includes(PIN));
+  assert.ok(!storageDump(page.window).includes(PIN));
+});
+
+test("voice switch: the opt-in line names each opt-in path", async () => {
+  const page = await voicePage({
+    "GET /api/strings": { language: "en", strings: { voice_switch_opt_in: "Opt-in: {paths}." } },
+    "POST /api/settings/batch/preview": VOICE_DIFF,
+  });
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = "gemini";
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  await answerPin(page);
+  const confirm = page.document.querySelector("dialog");
+  assert.ok(confirm.textContent.includes("Opt-in: privacy.realtime_audio."));
+  buttons(confirm, "dialog_cancel")[0].click();
+  await settle();
+  assert.equal(posts(page, "/api/settings/batch").length, 0, "a cancel saves nothing");
+});
+
+test("voice switch: opt-ins a choice turns off are worded as off", async () => {
+  const page = await voicePage({
+    "GET /api/strings": { language: "en", strings: { voice_switch_opt_in: "On: {paths}.", voice_switch_opt_out: "Off: {paths}." } },
+    "POST /api/settings/batch/preview": VOICE_DIFF,
+  }, { ...VOICE, value: "gemini" });
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = "local";
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  await answerPin(page);
+  const text = page.document.querySelector("dialog").textContent;
+  assert.ok(text.includes("Off: privacy.realtime_audio.") && !text.includes("On:"));
+});
+
+async function pickVoice(page, id) {
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = id;
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  await answerPin(page);
+  return page.document.querySelector("dialog");
+}
+
+test("voice switch: a route change with the opt-in already on names who receives the audio", async () => {
+  const page = await voicePage({
+    "GET /api/strings": { language: "en", strings: { voice_switch_audio_to: "Audio to {provider}." } },
+    "POST /api/settings/batch/preview": { changes: [{ path: "voice.realtime_route.route", old: "platform", new: "gemini", restart: true, opt_in: false }] },
+  }, { ...VOICE, value: "route:platform" });
+  const confirm = await pickVoice(page, "gemini");
+  assert.ok(confirm.textContent.includes("Audio to gemini.example."), "no opt-in flips, the receiver still shows");
+});
+
+test("voice switch: turning the unaddressed opt-in on says what else is sent", async () => {
+  const changes = [{ path: "privacy.realtime_audio_unaddressed", value: true }];
+  const voice = { ...VOICE, choices: [...VOICE.choices, voiceChoice("route:p2", "platform", { route: "p2", label: "P", changes })] };
+  const page = await voicePage({
+    "GET /api/strings": { language: "en", strings: { voice_switch_unaddressed: "Also a TV." } },
+    "POST /api/settings/batch/preview": { changes: [{ path: "privacy.realtime_audio_unaddressed", old: "***", new: "***", restart: false, opt_in: true }] },
+  }, voice);
+  const confirm = await pickVoice(page, "route:p2");
+  assert.ok(confirm.textContent.includes("Also a TV."));
+});
+
+test("voice switch: a save refused for the PIN goes back to the PIN dialog", async () => {
+  let saves = 0;
+  const page = await voicePage({
+    "POST /api/settings/batch/preview": VOICE_DIFF,
+    "POST /api/settings/batch": () => (++saves === 1 ? reply(401, { error: "bad_pin" }) : SAVED),
+  });
+  const confirm = await pickVoice(page, "gemini");
+  submit(page.window, confirm.querySelector("form"));
+  await settle();
+  await settle();
+  const again = page.document.querySelector("dialog");
+  assert.ok(again && again.querySelector("#dialog-pin"), "the PIN is asked again");
+  await answerPin(page);
+  submit(page.window, page.document.querySelector("dialog form"));
+  await settle();
+  await settle();
+  assert.equal(posts(page, "/api/settings/batch").length, 2);
+  assert.ok(page.document.querySelector("#notice").textContent.includes("settings_restart_needed"));
+});
+
+test("voice switch: a reload after a save keeps the revealed voice value with the revealed rows", async () => {
+  const revealedVoice = { ...VOICE, value: "gemini", revealed: true };
+  const page = await voicePage({
+    "POST /api/settings/reveal": { fields: [{ ...fields()[0], path: "privacy.realtime_audio", value: true, private: true }] },
+    "POST /api/settings/voice": revealedVoice,
+    "POST /api/settings/batch": { ...SAVED, results: [{ path: "privacy.realtime_audio", changed: true, value: false }] },
+  }, { ...VOICE, value: "gemini", revealed: false });
+  page.run("revealSettings()");
+  await settle();
+  await answerPin(page);
+  assert.equal(row(page, "voice-switch").querySelector("select").value, "gemini");
+  page.run(`settingsBatchSave("x", [{ path: "privacy.realtime_audio", value: false }])`);
+  await settle();
+  await answerPin(page);
+  const shown = row(page, "voice-switch");
+  assert.equal(shown.querySelector("select").value, "custom", "the revealed opt-in now differs from the choice");
+  assert.ok(!shown.textContent.includes("voice_switch_unrevealed"), "the page never mixes revealed rows with an unrevealed value");
+});
+
+test("voice switch: a choice already in place saves nothing", async () => {
+  const page = await voicePage({ "POST /api/settings/batch/preview": { changes: [] } });
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = "gemini";
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  await answerPin(page);
+  assert.equal(page.document.querySelector("dialog"), null);
+  assert.equal(posts(page, "/api/settings/batch").length, 0);
+  assert.ok(page.document.querySelector("#notice").textContent.includes("voice_switch_same"));
+});
+
+test("voice switch: Show with PIN reads the switch matched on the private opt-ins with the same PIN", async () => {
+  const page = await voicePage({
+    "POST /api/settings/reveal": { fields: [] },
+    "POST /api/settings/voice": { ...VOICE, value: "custom", revealed: true },
+  }, { ...VOICE, revealed: false });
+  assert.ok(row(page, "voice-switch").textContent.includes("voice_switch_unrevealed"));
+  page.run("revealSettings()");
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/voice").map((c) => c.body), [{ pin: PIN }]);
+  assert.equal(page.document.querySelectorAll("dialog").length, 0, "one PIN dialog for both");
+  const shown = row(page, "voice-switch");
+  assert.equal(shown.querySelector("select").value, "custom");
+  assert.ok(!shown.textContent.includes("voice_switch_unrevealed"));
+});
+
+test("voice switch: without the switch endpoint the voice group has no switch row", async () => {
+  const page = await settingsPage();
+  await open(page, "core-voice");
+  assert.equal(row(page, "voice-switch"), null);
+});
+
 test("save: each write asks again, and an unchanged value sends nothing", async () => {
   const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } });
   await open(page, "core-voice");

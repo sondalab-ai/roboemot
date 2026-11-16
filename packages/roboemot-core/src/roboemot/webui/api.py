@@ -153,6 +153,7 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def change_many(self, changes: object, source: str) -> dict[str, Any]: ...
     def preview_many(self, changes: object) -> list[dict[str, Any]]: ...
+    def voice_switch(self, revealed: bool = False, language: str = "") -> dict[str, Any]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -511,6 +512,8 @@ class WebApi:
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/batch"): self._settings_batch,
             ("POST", "/api/settings/batch/preview"): self._settings_batch_preview,
+            ("GET", "/api/settings/voice"): self._settings_voice,
+            ("POST", "/api/settings/voice"): self._settings_voice_reveal,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
             ("POST", "/api/robot/restart"): self._robot_restart,
             ("POST", "/api/settings/reset"): self._settings_reset,
@@ -1018,6 +1021,24 @@ class WebApi:
         port = self._settings_port()
         body = self._batch_body(req)
         return self._settings_call(lambda: {"changes": port.preview_many(body["changes"])})
+
+    def _settings_voice(self, req: Request) -> Response:
+        """The voice-provider switch (SPEC 8, 11A): ``value`` (the current choice id, or
+        ``custom``) and ``choices`` with each one's availability and full change list, which the
+        page sends to the batch preview and save. Without the PIN the privacy opt-ins (private
+        fields) do not decide ``value`` (``revealed: false``); the writes take the PIN there."""
+        port = self._settings_port()
+        return Response(HTTPStatus.OK, port.voice_switch(language=self._language()))
+
+    def _settings_voice_reveal(self, req: Request) -> Response:
+        """The voice-provider switch with ``value`` matched on the private keys too
+        (``revealed: true``). Body: ``pin``, checked under the login limits like the reveal of
+        the private fields, which the page calls it with."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, port.voice_switch(revealed=True, language=self._language()))
 
     def _batch_body(self, req: Request) -> dict[str, Any]:
         """The body of a batch call with its shape checked (``batch_shape``), then the PIN."""

@@ -260,20 +260,23 @@ notices, the late token counts, the emulated item deletes and the codec's counts
 
 ### 4. Switch to Gemini
 
-A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot` (the default);
-the configuration refuses anything else, one edit at a time. In the **Settings** tab, edit in this
-order:
+A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot`. In the
+**Settings** tab, open the `voice` group:
 
-1. `voice.realtime_route.mode`: `direct` (first: Pollen's route accepts it, a Gemini route
-   refuses `platform`).
-2. `voice.realtime_route.route`: `gemini`.
-3. `voice.realtime_route.enabled`: true, if it is not already on.
+1. In **Voice provider**, the first row, pick `Route gemini (direct)`. The choice is greyed out,
+   with the reason, while the `gemini_key` secret is missing.
+2. Enter the PIN. The page lists every setting the switch changes, with the old and the new
+   value. It names the privacy opt-ins the switch turns on or off, and, with
+   `privacy.realtime_audio` on, the server that receives the utterances' audio
+   (`generativelanguage.googleapis.com`), also when the opt-in was already on for Pollen. The
+   Gemini choice turns `privacy.realtime_audio_unaddressed` off: Gemini runs robot turns only, so
+   that consent can never act there.
+3. Confirm. Every setting is saved at once, or none is.
 4. Restart RoboEmot (section 5, Restart RoboEmot).
 
-With `voice.realtime_route.input: audio` the utterances' audio goes to Google, and that needs the
-opt-in `privacy.realtime_audio` (section 4 of the Pollen steps). With `input: text` only the local transcript goes.
-
-To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
+To go back, pick the Pollen choice (`Pollen's server (Hugging Face) (route pollen)`) the same way,
+and restart. The row shows `Custom` when the voice settings match no choice (a setting edited by
+hand); picking a choice then replaces them all.
 
 ### What to expect
 
