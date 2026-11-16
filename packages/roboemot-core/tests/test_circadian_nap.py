@@ -814,3 +814,65 @@ def test_attention_on_a_person_keeps_a_pending_resume_armed():
     assert set(run(x, c.nap_resume_after_s - 3 * STEP)) == {"awake"}
     run(x, 5 * STEP)
     assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
+
+
+# ------------------------------------------------- next-nap countdown for the Live tab (2026-11-16)
+
+
+def due(x):
+    nap = x.r.snapshot()["nap"]
+    return nap["due_in_s"], nap["held"]
+
+
+def test_the_countdown_is_nap_after_s_minus_the_idle_time_and_the_lag():
+    x = rig()
+    run(x, 600)
+    assert due(x) == (x.cfg.circadian.nap_after_s - 600, False)
+    x.clock.advance(4.0)  # no tick yet: the clock keeps running between model updates
+    assert due(x) == (x.cfg.circadian.nap_after_s - 604, False)
+
+
+def test_the_countdown_restarts_on_activity():
+    talking = [False]
+    x = rig(conversing=lambda: talking[0])
+    run(x, 600)
+    talking[0] = True
+    run(x, STEP)
+    talking[0] = False
+    run(x, STEP)
+    assert due(x)[0] > x.cfg.circadian.nap_after_s - 600
+
+
+def test_no_countdown_while_napping_or_naps_off_or_in_quiet_hours():
+    assert due(napping(rig())) == (None, False)
+    assert due(rig(nap_after_s=None)) == (None, False)
+    x = rig(hour=23.0)
+    run(x, STEP)
+    assert due(x) == (None, False)
+
+
+def test_no_countdown_while_a_nap_is_impossible():
+    x = rig(engaged=lambda: True)
+    run(x, 600)
+    assert due(x) == (None, False)
+    y = rig()
+    y.r.hold("awake", 60)
+    run(y, STEP)
+    assert due(y) == (None, False)
+
+
+def test_a_due_nap_held_off_by_presence_shows_zero_and_held():
+    x = rig()
+    run(x, x.cfg.circadian.nap_after_s - STEP)
+    face(x)  # one sighting: presence, not activity
+    run(x, 2 * STEP)
+    assert x.r.model.state == "awake" and due(x) == (0.0, True)
+
+
+def test_after_a_stimulus_wake_the_countdown_uses_the_resume_time():
+    x = napping(rig())
+    loud(x)
+    c = x.cfg.circadian
+    run(x, c.wake_hold_s + 2 * STEP)
+    left, held = due(x)
+    assert not held and 0 < left <= c.nap_resume_after_s

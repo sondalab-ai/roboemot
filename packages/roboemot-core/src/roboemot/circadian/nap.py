@@ -24,6 +24,9 @@ quiet hours and naps off end the pending resume too, so the next day starts with
 time, and so do the end of a platform sleep and a rest of the rhythm's own (the caller's
 :meth:`disarm`). Presence and attention on a person hold a due resumed nap off but keep the resume
 armed (owner decision 2026-11-05). ``resumes`` counts the naps started this way.
+
+The Live tab shows how long until the next nap (:meth:`due_in`): the idle time still needed, only
+while the clock counts (``counting``); ``held`` says a due nap waits for presence to go.
 """
 
 from __future__ import annotations
@@ -44,10 +47,13 @@ class DayNap:
         self.resuming = False  # the last wake was a stimulus and no person has followed
         self._last: float | None = None  # last counted time; None while paused or not started
         self._face: tuple[float, float] | None = None  # (clock time, frame stamp) of a face
+        self.counting = False  # the last step added idle time toward a nap
+        self.held = False  # the last step found a nap due and presence holding it off
 
     def restart(self, t: float) -> None:
         """The idle clock starts again from zero at ``t``."""
         self.idle_s, self._last = 0.0, t
+        self.held = False
 
     def face(self, t: float, stamp: float, window_s: float) -> bool:
         """A face seen at ``t`` in the frame of ``stamp``: whether it is confirmed, i.e. a second
@@ -101,6 +107,7 @@ class DayNap:
         ``circadian.nap_resume_after_s`` (used after a stimulus wake), ``quiet`` the quiet hours,
         ``blocked`` a reason no nap is possible now (the clock restarts, a pending resume stays:
         the wake hold blocks), ``held`` presence that holds one off."""
+        self.counting = self.held = False
         if quiet or after_s is None:
             self.resuming = False  # the night or naps off: the next nap needs after_s again
         if self.napping:
@@ -117,8 +124,13 @@ class DayNap:
         if self._last is not None:
             self.idle_s += max(0.0, t - self._last)
         self._last = t
-        if self.idle_s < (resume_after_s if self.resuming else after_s) or held:
+        self.counting = True
+        if self.idle_s < (resume_after_s if self.resuming else after_s):
             return False
+        if held:
+            self.held = True
+            return False
+        self.counting = False
         self.napping = True
         self.naps += 1
         if self.resuming:
@@ -126,3 +138,13 @@ class DayNap:
             self.resuming = False
         self.started = t
         return True
+
+    def due_in(self, t: float, after_s: float | None, resume_after_s: float) -> float | None:
+        """Seconds from ``t`` until the next nap: the idle time still needed (``resume_after_s``
+        while a resume is armed, else ``after_s``) less the time since the clock last moved, at
+        least 0; None while the clock does not count (a nap, naps off, the quiet hours,
+        blocked)."""
+        if self.napping or not self.counting or after_s is None or self._last is None:
+            return None
+        need = resume_after_s if self.resuming else after_s
+        return max(0.0, need - self.idle_s - max(0.0, t - self._last))
