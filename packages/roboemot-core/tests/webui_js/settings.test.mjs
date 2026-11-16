@@ -326,6 +326,40 @@ test("save: the PIN is asked, path/value/PIN are posted, and the response layer 
   assert.ok(!page.document.documentElement.outerHTML.includes(PIN));
 });
 
+test("batch save: one PIN dialog posts every change at once, then the restart is announced", async () => {
+  const changes = [{ path: "voice.flag", value: false }, { path: "voice.mode", value: "a" }];
+  const page = await settingsPage({
+    "POST /api/settings/batch": { changed: true, layer: "runtime", persisted: true, applied: true, restart_required: true, results: [] },
+  });
+  page.run(`window.batchDone = settingsBatchSave("switch", ${JSON.stringify(changes)})`);
+  await settle();
+  assert.equal(posts(page, "/api/settings/batch").length, 0, "nothing is sent before the PIN");
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch").map((c) => c.body), [{ changes, pin: PIN }]);
+  assert.equal(posts(page, "/api/settings").length, 0);
+  assert.ok((await page.run("window.batchDone")).changed);
+  const notice = page.document.querySelector("#notice").textContent;
+  assert.ok(notice.includes("settings_layer_runtime") && notice.includes("settings_restart_needed"));
+});
+
+test("batch save: a refusal stays in the dialog, with no reload and no notice", async () => {
+  const page = await settingsPage({
+    "GET /api/strings": { language: "en", strings: { err_batch_endpoint_move: "Moved." } },
+    "POST /api/settings/batch": reply(422, { error: "batch_endpoint_move", field: "changes", path: "a.b" }),
+  });
+  const reads = () => page.calls.filter((c) => c.method === "GET" && c.path === "/api/settings").length;
+  const before = reads();
+  page.run(`window.batchDone = settingsBatchSave("switch", [{ path: "voice.flag", value: false }])`);
+  await settle();
+  const dialog = await answerPin(page);
+  assert.equal(dialog.querySelector("#dialog-error").textContent, "Moved.");
+  buttons(dialog, "dialog_cancel")[0].click();
+  await settle();
+  assert.equal(await page.run("window.batchDone"), null);
+  assert.equal(reads(), before, "no reload after a refusal");
+  assert.equal(page.document.querySelector("#notice").textContent, "");
+});
+
 test("save: each write asks again, and an unchanged value sends nothing", async () => {
   const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } });
   await open(page, "core-voice");
