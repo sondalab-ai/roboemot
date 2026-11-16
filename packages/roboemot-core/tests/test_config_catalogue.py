@@ -37,7 +37,7 @@ def rows(stack: ConfigStack) -> dict:
 def test_the_descriptor_contract_is_pinned():
     assert set(DESCRIPTOR_KEYS) == {
         "path", "kind", "nullable", "value", "default", "source", "gt", "ge", "le", "unit",
-        "restart", "admin_only", "opt_in", "conservative", "description", "choices",
+        "restart", "admin_only", "opt_in", "conservative", "advanced", "description", "choices",
         "item_kind", "length", "key", "entry", "secret", "private", "writable", "removable",
     }  # fmt: skip
     assert set(KINDS) == {
@@ -287,7 +287,7 @@ def test_circadian_location_is_private_but_not_secret_and_can_stay_writable():
 
 def test_private_paths_are_listed_explicitly_and_cover_every_privacy_field():
     private = {p for p, r in rows(ConfigStack()).items() if r["private"]}
-    assert is_private("privacy.debug_recording") and is_private("circadian.location.lat")
+    assert is_private("privacy.realtime_platform_id") and is_private("circadian.location.lat")
     assert not is_private("privacy_x") and not is_private("voice.wake_word")
     assert not [p for p in rows(ConfigStack()) if "minor" in p]
     for path in rows(ConfigStack()):

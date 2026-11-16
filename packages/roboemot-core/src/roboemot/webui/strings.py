@@ -332,6 +332,15 @@ EN: dict[str, str] = {
         "rule is saved to the app configuration file instead and survives a restart."
     ),
     "settings_core": "Core",
+    "settings_purpose_safety": "Safety",
+    "settings_purpose_voice": "Voice and conversation",
+    "settings_purpose_behaviour": "Behaviour and emotions",
+    "settings_purpose_perception": "Perception",
+    "settings_purpose_motion": "Motion",
+    "settings_purpose_models": "Models and privacy",
+    "settings_purpose_system": "System",
+    "settings_purpose_other": "Other",
+    "settings_advanced": "Advanced",
     "settings_robot": "Robot",
     "settings_nav": "Setting groups",
     "settings_search": "Search",
@@ -423,6 +432,45 @@ EN: dict[str, str] = {
     "err_key_duplicate": "Two rows use the same key.",
     "settings_default": "Default",
     "settings_save": "Save",
+    "voice_switch": "Voice provider",
+    "voice_switch_hint": (
+        "One choice sets every voice setting together. Custom: the voice settings match no "
+        "choice; picking one replaces them."
+    ),
+    "voice_choice_local": "Local voice (Piper and Vosk, on the robot)",
+    "voice_choice_platform": "{label} (route {route})",
+    "voice_choice_direct": "Route {route} (direct)",
+    "voice_choice_custom": "Custom",
+    "voice_choice_unavailable": "{choice}: {reason}",
+    "voice_reason_secret_missing": "needs the secret {secret}",
+    "voice_reason_models_missing": "the Piper and Vosk models are not installed",
+    "voice_reason_piper_missing": "Piper is not installed (reinstall with --piper)",
+    "voice_switch_pin_title": "Switch the voice to {choice}",
+    "voice_switch_pin_message": (
+        "Enter the PIN to see what changes. Nothing is saved until you confirm."
+    ),
+    "voice_switch_show": "Show changes",
+    "voice_switch_diff": "These settings change together, in one save:",
+    "voice_switch_line": "{path}: {old} → {new}",
+    "voice_switch_opt_in": (
+        "Privacy opt-in (SPEC 12): {paths}. On, microphone audio leaves the robot for the "
+        "route's server, a child's voice included."
+    ),
+    "voice_switch_opt_out": (
+        "Privacy opt-in turned off (SPEC 12): {paths}. Microphone audio no longer leaves the "
+        "robot for a route's server."
+    ),
+    "voice_switch_audio_to": "With the opt-in on, the utterances' audio goes to {provider}.",
+    "voice_switch_unaddressed": (
+        "The same consent lets the robot stream every speech segment it hears while it is awake, "
+        "not only speech meant for it (a television, people talking to each other), once server "
+        "turns are switched on."
+    ),
+    "voice_switch_confirm": "Switch",
+    "voice_switch_same": "The voice already uses this choice.",
+    "voice_switch_unrevealed": (
+        "The privacy opt-ins are private: this choice ignores them until you use Show with PIN."
+    ),
     "settings_edited": "Edited",
     "settings_add": "Add entry",
     "settings_remove": "Remove",
@@ -496,6 +544,21 @@ EN: dict[str, str] = {
         "Only for a realtime speech route. Gemini Live connects to the address as written "
         "(wss://) and needs direct mode and robot turns. Changing it later means changing the "
         "address with it, so it needs the configuration file."
+    ),
+    "route_presets": "Start from a preset",
+    "route_presets_hint": (
+        "A preset fills in the form below. Its key is stored in the API keys card under the name "
+        "it shows. After the add, pick the voice on the route's own card, where it can be played."
+    ),
+    "route_preset_key_missing": (
+        "Store the key {name} first in the API keys card below, under that name. This form keeps "
+        "the preset."
+    ),
+    "route_timeout_invalid": "The connect timeout is not a number. Correct it or leave it empty.",
+    "route_timeout": "Connect timeout (s)",
+    "route_timeout_hint": (
+        "Only for a realtime speech route: how long its session may take to connect. Empty uses "
+        "the shared realtime setting."
     ),
     "route_voice": "Voice",
     "route_voice_hint": (
@@ -780,6 +843,16 @@ EN: dict[str, str] = {
     "err_setting_guardrail": "The change was refused: it would loosen a safety or privacy rule.",
     "err_setting_invalid": "The value is not valid for this setting.",
     "err_settings_unavailable": "Settings are not available.",
+    "err_batch_empty": "There is nothing to save.",
+    "err_batch_too_long": "Too many settings in one save.",
+    "err_batch_duplicate": "The same setting appears twice in one save.",
+    "err_batch_endpoint_move": (
+        "Nothing was saved: one change moves a route with an API key to another address. Save "
+        "that address on its own."
+    ),
+    "err_batch_loosens_safety": (
+        "Nothing was saved: one change loosens a safety limit. Save that setting on its own."
+    ),
     "err_value_type": "The value has the wrong type.",
     "err_value_range": "The value is outside the allowed range.",
     "err_value_choice": "The value is not one of the allowed choices.",
@@ -1390,6 +1463,15 @@ IT: dict[str, str] = {
         "riavvio."
     ),
     "settings_core": "Nucleo",
+    "settings_purpose_safety": "Sicurezza",
+    "settings_purpose_voice": "Voce e conversazione",
+    "settings_purpose_behaviour": "Comportamento ed emozioni",
+    "settings_purpose_perception": "Percezione",
+    "settings_purpose_motion": "Movimento",
+    "settings_purpose_models": "Modelli e privacy",
+    "settings_purpose_system": "Sistema",
+    "settings_purpose_other": "Altro",
+    "settings_advanced": "Avanzate",
     "settings_robot": "Robot",
     "settings_nav": "Gruppi di impostazioni",
     "settings_search": "Cerca",
@@ -1482,6 +1564,45 @@ IT: dict[str, str] = {
     "err_key_duplicate": "Due righe usano la stessa chiave.",
     "settings_default": "Predefinito",
     "settings_save": "Salva",
+    "voice_switch": "Fornitore della voce",
+    "voice_switch_hint": (
+        "Una scelta imposta insieme tutte le impostazioni della voce. Personalizzata: le "
+        "impostazioni della voce non corrispondono a nessuna scelta; sceglierne una le sostituisce."
+    ),
+    "voice_choice_local": "Voce locale (Piper e Vosk, sul robot)",
+    "voice_choice_platform": "{label} (route {route})",
+    "voice_choice_direct": "Route {route} (diretta)",
+    "voice_choice_custom": "Personalizzata",
+    "voice_choice_unavailable": "{choice}: {reason}",
+    "voice_reason_secret_missing": "serve il segreto {secret}",
+    "voice_reason_models_missing": "i modelli di Piper e Vosk non sono installati",
+    "voice_reason_piper_missing": "Piper non è installato (reinstalla con --piper)",
+    "voice_switch_pin_title": "Passa la voce a {choice}",
+    "voice_switch_pin_message": (
+        "Inserisci il PIN per vedere cosa cambia. Non viene salvato nulla finché non confermi."
+    ),
+    "voice_switch_show": "Mostra le modifiche",
+    "voice_switch_diff": "Queste impostazioni cambiano insieme, in un solo salvataggio:",
+    "voice_switch_line": "{path}: {old} → {new}",
+    "voice_switch_opt_in": (
+        "Consenso privacy (SPEC 12): {paths}. Se attivo, l'audio del microfono lascia il robot "
+        "verso il server della route, voce di un bambino compresa."
+    ),
+    "voice_switch_opt_out": (
+        "Consenso privacy disattivato (SPEC 12): {paths}. L'audio del microfono non lascia più il "
+        "robot verso il server di una route."
+    ),
+    "voice_switch_audio_to": "Con il consenso attivo, l'audio degli enunciati va a {provider}.",
+    "voice_switch_unaddressed": (
+        "Lo stesso consenso permette al robot di inviare ogni segmento di parlato che sente da "
+        "sveglio, non solo quello rivolto a lui (una televisione, persone che parlano tra loro), "
+        "una volta attivati i turni del server."
+    ),
+    "voice_switch_confirm": "Cambia",
+    "voice_switch_same": "La voce usa già questa scelta.",
+    "voice_switch_unrevealed": (
+        "I consensi privacy sono privati: questa scelta li ignora finché non usi Mostra con il PIN."
+    ),
     "settings_edited": "Modificata",
     "settings_add": "Aggiungi voce",
     "settings_remove": "Rimuovi",
@@ -1559,6 +1680,24 @@ IT: dict[str, str] = {
         "Solo per un modello voce in tempo reale. Gemini Live si collega all'indirizzo così com'è "
         "(wss://) e richiede la modalità diretta e i turni decisi dal robot. Cambiarlo dopo "
         "significa cambiare anche l'indirizzo, quindi richiede il file di configurazione."
+    ),
+    "route_presets": "Parti da una configurazione pronta",
+    "route_presets_hint": (
+        "Una configurazione pronta compila il modulo qui sotto. La sua chiave si salva nella "
+        "scheda chiavi API con il nome che mostra. Dopo l'aggiunta, scegli la voce nella scheda "
+        "del modello, dove si può ascoltare."
+    ),
+    "route_preset_key_missing": (
+        "Salva prima la chiave {name} nella scheda chiavi API qui sotto, con quel nome. Questo "
+        "modulo tiene la configurazione scelta."
+    ),
+    "route_timeout_invalid": (
+        "Il tempo massimo di connessione non è un numero. Correggilo o lascialo vuoto."
+    ),
+    "route_timeout": "Tempo massimo di connessione (s)",
+    "route_timeout_hint": (
+        "Solo per un modello voce in tempo reale: quanto può durare la connessione della sua "
+        "sessione. Vuoto usa l'impostazione condivisa del tempo reale."
     ),
     "route_voice": "Voce",
     "route_voice_hint": (
@@ -1872,6 +2011,17 @@ IT: dict[str, str] = {
     "err_setting_guardrail": "Modifica rifiutata: allenterebbe una regola di sicurezza o privacy.",
     "err_setting_invalid": "Il valore non è valido per questa impostazione.",
     "err_settings_unavailable": "Le impostazioni non sono disponibili.",
+    "err_batch_empty": "Non c'è nulla da salvare.",
+    "err_batch_too_long": "Troppe impostazioni in un solo salvataggio.",
+    "err_batch_duplicate": "La stessa impostazione compare due volte in un salvataggio.",
+    "err_batch_endpoint_move": (
+        "Non è stato salvato nulla: una modifica sposta una route con chiave API a un altro "
+        "indirizzo. Salva quell'indirizzo da solo."
+    ),
+    "err_batch_loosens_safety": (
+        "Non è stato salvato nulla: una modifica allenta un limite di sicurezza. Salva quella "
+        "impostazione da sola."
+    ),
     "err_value_type": "Il valore ha il tipo sbagliato.",
     "err_value_range": "Il valore è fuori dall'intervallo ammesso.",
     "err_value_choice": "Il valore non è tra quelli ammessi.",

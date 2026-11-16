@@ -25,14 +25,16 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from roboemot.cloud_voice import ROUTES_KEY, cloud_voice_config
 from roboemot.config.catalogue import FieldDescriptor, descriptor
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import Manifest
 from roboemot.realtime.session import route_origin
-from roboemot.webui.robot_section import PATH_ROOT, RobotSection
+from roboemot.webui.robot_section import PATH_ROOT, RobotSection, RoutePreset, VoiceProfile
 from roboemot.webui.settings import StackPort
 from roboemot.webui.strings import DEFAULT_LANGUAGE, language_for
 
+from .cloud_voice import CLOUD_VOICE
 from .daemon import STOP_TIMEOUT_S, DaemonClient, DaemonError
 
 log = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "soft_stop": "What a soft stop does.",
         "hard_stop": "What a hard stop does.",
         "watchdog": "Ceiling for {ceiling}: the config value can only be lower.",
+        "voice_label": CLOUD_VOICE.provider,
     },
     "it": {
         "min": "Minimo hardware di {name}; un limite che nessuna impostazione può superare.",
@@ -84,6 +87,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "soft_stop": "Cosa fa un arresto morbido.",
         "hard_stop": "Cosa fa un arresto brusco.",
         "watchdog": "Limite per {ceiling}: il valore in configurazione può solo essere più basso.",
+        "voice_label": "Server di Pollen (Hugging Face)",
     },
 }
 
@@ -153,6 +157,28 @@ class ReachySettings:
                 cause,
                 "" if exc.status is None else f", HTTP {exc.status}",
             )
+
+    def voice_profile(self, cfg: RoboEmotConfig, language: str) -> VoiceProfile:
+        """The cloud-voice choice of the Settings voice switch: the keys the installer's
+        ``--cloud-voice`` writes (``cloud_voice_config`` of ``CLOUD_VOICE``, one source for both),
+        without the route entry, which the robot already has once the choice is offered. The
+        label is in ``language``, the page's."""
+        keys = {
+            ".".join(path): value
+            for path, value in cloud_voice_config(CLOUD_VOICE).items()
+            if path[0] != ROUTES_KEY
+        }
+        label = texts(language)["voice_label"]
+        return VoiceProfile(CLOUD_VOICE.name, label, keys, CLOUD_VOICE.base_url)
+
+    def route_presets(self, language: str) -> list[RoutePreset]:
+        """The cloud-voice route as a preset of the Models tab's add card: the installer's
+        ``llm_routes`` entry (``CLOUD_VOICE.entry()``) without its key, which the owner stores
+        under ``CLOUD_VOICE.secret``. Core hides it while a route of that name exists, so the
+        route the installer wrote stays the one in use. Labelled in ``language``."""
+        fields = {k: v for k, v in CLOUD_VOICE.entry().items() if k != "api_key"}
+        label = texts(language)["voice_label"]
+        return [RoutePreset(CLOUD_VOICE.name, label, fields, CLOUD_VOICE.secret)]
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of

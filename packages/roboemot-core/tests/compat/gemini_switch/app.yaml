@@ -1,0 +1,35 @@
+# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled,
+# circadian.timezone, in dev mode safety.allow_unmeasured_dynamics and, with --cloud-voice,
+# the cloud-voice route and settings; every other key is kept on reinstall (comments are
+# not). Uninstall removes this whole file, settings saved from the web UI included.
+schema_version: 1
+circadian:
+  timezone: Europe/Rome
+llm_routes:
+- name: pollen
+  kind: realtime
+  base_url: https://pollen-robotics-reachy-mini-realtime-url.hf.space/session
+  api_key: ${secret:hf_token}
+  model: s2s
+privacy:
+  realtime_audio: true
+  realtime_audio_unaddressed: true
+safety:
+  allow_unmeasured_dynamics: true
+voice:
+  backend: none
+  direction:
+    enabled: true
+  enabled: true
+  facing:
+    enabled: true
+  fallback_backend: none
+  realtime_route:
+    enabled: true
+    input: audio
+    mode: platform
+    route: pollen
+    skip_tool: true
+    tone_tool: true
+    transcript_timeout_s: 10.0
+  wake_word_policy: never

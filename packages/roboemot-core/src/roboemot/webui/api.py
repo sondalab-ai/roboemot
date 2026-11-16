@@ -31,7 +31,13 @@ from typing import Any, NoReturn, Protocol
 from urllib.parse import parse_qsl
 
 from roboemot.config.catalogue import FieldDescriptor
-from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
+from roboemot.config.schema import (
+    CONNECT_TIMEOUT_MAX_S,
+    CONNECT_TIMEOUT_MIN_S,
+    ROUTE_NAME_MAX_CHARS,
+    RoboEmotConfig,
+    WebUIConfig,
+)
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import (
     RouteBudgetExhausted,
@@ -49,7 +55,7 @@ from .guard import same_origin
 from .robot_section import PATH_ROOT
 from .routes import PreviewRate, RouteBusy
 from .secrets_admin import SecretInUse, secret_name, secret_value
-from .settings import SettingNotAllowed
+from .settings import EntryGuardrailError, SettingNotAllowed, batch_shape
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
@@ -79,7 +85,9 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind", "protocol", "voice"})
+ROUTE_FIELDS = frozenset(
+    {"name", "base_url", "model", "locality", "kind", "protocol", "voice", "connect_timeout_s"}
+)
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 # a server voice name the preview may ask for: empty (the route's default), or at most 64
 # characters that start with a letter, digit or underscore (never only spaces, a dot or a dash)
@@ -151,6 +159,10 @@ class SettingsPort(Protocol):
     def change(
         self, path: object, value: object, source: str, ack: object = None
     ) -> dict[str, Any]: ...
+    def change_many(self, changes: object, source: str) -> dict[str, Any]: ...
+    def preview_many(self, changes: object) -> list[dict[str, Any]]: ...
+    def voice_switch(self, revealed: bool = False, language: str = "") -> dict[str, Any]: ...
+    def route_presets(self, language: str = "") -> list[dict[str, Any]]: ...
     def add_entry(
         self, path: object, key: object, value: object, source: str
     ) -> dict[str, Any]: ...
@@ -317,12 +329,20 @@ class ApiError(Exception):
         code: str,
         retry_after: float | None = None,
         field: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
         self.retry_after = retry_after
         self.field = field
+        self.extra = extra or {}
+
+
+def entry_path(path: str | None) -> dict[str, Any]:
+    """``{"path": path}`` for the failing entry a batch refusal names
+    (``SettingsEditor.change_many``), else empty: only the path, never the value."""
+    return {"path": path} if path is not None else {}
 
 
 def holds_vector(value: Any, vetted: tuple[Any, ...] = ()) -> bool:
@@ -407,6 +427,7 @@ class WebApi:
             body: dict[str, Any] = {"error": exc.code}
             if exc.field:
                 body["field"] = exc.field
+            body.update(exc.extra)
             resp = Response(exc.status, body)
             if exc.retry_after is not None:
                 resp.headers["Retry-After"] = str(int(exc.retry_after) + 1)
@@ -498,6 +519,10 @@ class WebApi:
             ("POST", "/api/secrets/remove"): self._secret_remove,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
+            ("POST", "/api/settings/batch"): self._settings_batch,
+            ("POST", "/api/settings/batch/preview"): self._settings_batch_preview,
+            ("GET", "/api/settings/voice"): self._settings_voice,
+            ("POST", "/api/settings/voice"): self._settings_voice_reveal,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
             ("POST", "/api/robot/restart"): self._robot_restart,
             ("POST", "/api/settings/reset"): self._settings_reset,
@@ -987,6 +1012,53 @@ class WebApi:
             )
         )
 
+    def _settings_batch(self, req: Request) -> Response:
+        """Change several catalogue fields as one all-or-nothing save (SPEC 11A). Body:
+        ``changes`` (a list of ``{path, value}``) and the re-entered ``pin`` (checked once for the
+        batch, after the shape check so a malformed body costs no attempt). A keyed route's
+        endpoint never moves in a batch (``batch_endpoint_move``): that stays a single save with
+        its confirmation. The response names ``layer``, ``persisted``, ``applied`` and
+        ``restart_required`` over the batch and per path in ``results``."""
+        port = self._settings_port()
+        body = self._batch_body(req)
+        return self._settings_call(lambda: port.change_many(body["changes"], self._who(req)))
+
+    def _settings_batch_preview(self, req: Request) -> Response:
+        """The diff a batch save would make, nothing written (SPEC 11A): ``changes`` lists
+        ``{path, old, new, restart, opt_in}`` for each field whose value changes. Same body and
+        PIN check as ``/api/settings/batch``; secret and private values are masked."""
+        port = self._settings_port()
+        body = self._batch_body(req)
+        return self._settings_call(lambda: {"changes": port.preview_many(body["changes"])})
+
+    def _settings_voice(self, req: Request) -> Response:
+        """The voice-provider switch (SPEC 8, 11A): ``value`` (the current choice id, or
+        ``custom``) and ``choices`` with each one's availability and full change list, which the
+        page sends to the batch preview and save. Without the PIN the privacy opt-ins (private
+        fields) do not decide ``value`` (``revealed: false``); the writes take the PIN there."""
+        port = self._settings_port()
+        return Response(HTTPStatus.OK, port.voice_switch(language=self._language()))
+
+    def _settings_voice_reveal(self, req: Request) -> Response:
+        """The voice-provider switch with ``value`` matched on the private keys too
+        (``revealed: true``). Body: ``pin``, checked under the login limits like the reveal of
+        the private fields, which the page calls it with."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, port.voice_switch(revealed=True, language=self._language()))
+
+    def _batch_body(self, req: Request) -> dict[str, Any]:
+        """The body of a batch call with its shape checked (``batch_shape``), then the PIN."""
+        body = self._json_body(req)
+        v.only_keys(body, {"changes", "pin"})
+        if "changes" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        batch_shape(body["changes"])
+        self._check_pin(req, body.get("pin"))
+        return body
+
     def _robot_restart(self, req: Request) -> Response:
         """Restart RoboEmot through the robot plugin (SPEC 4A, 12). Body: ``pin``. The plugin's
         hook runs on its own thread after the response is sent, since it ends this process; its
@@ -1058,9 +1130,17 @@ class WebApi:
         try:
             return Response(HTTPStatus.OK, call())
         except SettingNotAllowed as exc:
-            raise ApiError(HTTPStatus.FORBIDDEN, "setting_not_allowed", field="path") from exc
+            raise ApiError(
+                HTTPStatus.FORBIDDEN,
+                "setting_not_allowed",
+                field="path",
+                extra=entry_path(exc.path),
+            ) from exc
         except GuardrailError as exc:
-            raise ApiError(HTTPStatus.FORBIDDEN, "setting_guardrail", field="value") from exc
+            path = exc.path if isinstance(exc, EntryGuardrailError) else None
+            raise ApiError(
+                HTTPStatus.FORBIDDEN, "setting_guardrail", field="value", extra=entry_path(path)
+            ) from exc
         except ConfigError as exc:
             raise ApiError(
                 HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
@@ -1097,23 +1177,29 @@ class WebApi:
     def _routes(self, req: Request) -> Response:
         """Routes by name, model and host, with the last conformance report and ``removable``
         (only the runtime layer holds the route, so the page may remove it), and the host
-        suffixes the realtime session provider declares (``realtime_key_hosts``)."""
+        suffixes the realtime session provider declares (``realtime_key_hosts``), the presets
+        of the add card (``presets``: id, label, fields, secret name; none whose route exists)
+        and the range of a route's ``connect_timeout_s``."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
         hosts = self.settings.realtime_key_hosts() if self.settings else []
+        presets = self.settings.route_presets(self._language()) if self.settings else []
         return Response(
             HTTPStatus.OK,
             {
                 "routes": [{**r, "removable": r["name"] in removable} for r in rows],
                 "realtime_key_hosts": hosts,  # where a realtime route's key may also go
                 "voices": {p: list(names) for p, names in KNOWN_VOICES.items()},
+                "presets": presets,
+                "connect_timeout_s": {"min": CONNECT_TIMEOUT_MIN_S, "max": CONNECT_TIMEOUT_MAX_S},
             },
         )
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
         ``locality``, ``kind`` (``chat`` or ``realtime``), ``protocol`` (``openai_realtime`` or
-        ``gemini_live``), ``voice`` (a realtime route's server voice), ``secret`` (a name in the
+        ``gemini_live``), ``voice`` (a realtime route's server voice), ``connect_timeout_s`` (a
+        realtime route's own connect timeout), ``secret`` (a name in the
         secret store; omitted or null for no key), ``ack_endpoint`` (required with a key: the
         endpoint the server names in ``endpoint_ack_required``) and ``pin``. A key typed into any
         field is refused."""

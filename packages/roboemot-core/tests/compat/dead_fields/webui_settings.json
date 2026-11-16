@@ -1,0 +1,15 @@
+{
+  "overrides": {
+    "llm_routes[{\"name\":\"vision_cloud\"}]": {
+      "base_url": "https://llm.example.com/v1",
+      "kind": "chat",
+      "locality": "cloud",
+      "model": "llava",
+      "name": "vision_cloud",
+      "supports_images": true
+    },
+    "motion.idle.gaze_shift_amplitude": 0.12,
+    "privacy.multimodal_frames": false
+  },
+  "v": 1
+}

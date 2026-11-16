@@ -483,13 +483,13 @@ def flatten(tree: Any, prefix: str = "") -> dict[str, Any]:
     return {prefix: tree}
 
 
-INHERITED_META = ("admin_only", "opt_in")  # a guard on a container covers everything inside it
+INHERITED_META = ("admin_only", "opt_in", "advanced")  # a flag on a container covers its inside
 
 
 def field_meta(dotted: str) -> dict[str, Any]:
-    """Metadata (unit, restart, conservative, opt_in, admin_only) of a path, {} if unknown.
-    ``admin_only`` and ``opt_in`` set on a container (a dict or model field) apply to every
-    leaf inside it.
+    """Metadata (unit, restart, conservative, opt_in, admin_only, advanced) of a path, {} if
+    unknown. ``admin_only``, ``opt_in`` and ``advanced`` set on a container (a dict or model
+    field) apply to every leaf inside it.
 
     Dict-valued fields (``voice.moods``) and list fields (``llm_routes``) consume one extra
     path element (the key or the index).

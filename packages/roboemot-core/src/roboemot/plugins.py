@@ -62,7 +62,9 @@ GROUPS: dict[str, GroupContract] = {
         instantiate=True,
     ),
     SETTINGS_GROUP: GroupContract(
-        "object implementing SettingsPlugin: section(stack, manifest) (SPEC 12)",
+        "object implementing SettingsPlugin: section(stack, manifest); optional "
+        "voice_profile(cfg, language) for the voice-provider switch (SPEC 11A, 12); optional "
+        "route_presets(language) for the Models tab presets (SPEC 8, 11A)",
         protocol=SettingsPlugin,
     ),
     CLIPS_GROUP: GroupContract(

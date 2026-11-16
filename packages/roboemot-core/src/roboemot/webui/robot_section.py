@@ -5,6 +5,10 @@ manifest ``robot.id`` (same pattern as ``roboemot.diagnostics`` and ``roboemot.w
 ``section(stack, manifest)`` returns a ``RobotSection``: read-only hardware rows it builds with
 ``config.catalogue.descriptor`` and the config paths it *claims*, which the web UI then lists under
 the robot instead of the core sections. Core stays robot-agnostic and never writes a plugin row.
+An optional ``voice_profile(cfg, language)`` (``VoiceProfiled``) gives the platform's own realtime
+route and its keys for the Settings voice-provider switch (``webui.voice_switch``). An optional
+``route_presets(language)`` (``RoutePresetted``) offers the platform's own route as a preset of the
+Models tab's add card (``webui.route_presets``).
 """
 
 from __future__ import annotations
@@ -14,12 +18,13 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, runtime_checkable
 
 from roboemot.config.catalogue import CONTAINERS, DESCRIPTOR_KEYS, FieldDescriptor, seal
 from roboemot.redact import REDACTED
 
 if TYPE_CHECKING:
+    from roboemot.config.schema import RoboEmotConfig
     from roboemot.manifest import Manifest
 
     from .settings import StackPort
@@ -105,6 +110,107 @@ class Restartable(Protocol):
     def restart(self) -> None:
         """Ask the robot's supervisor to restart RoboEmot. May block, may raise."""
         ...
+
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    """The robot platform's own voice choice for the Settings voice switch (SPEC 8, 11A): the
+    ``kind: realtime`` route it answers through, the choice's label in the page language, and
+    the dotted config keys with the values the choice writes (the installer's cloud-voice
+    profile, without the route entry itself), and the route's ``base_url``: a route of that name
+    elsewhere is not the platform's."""
+
+    route: str
+    label: str
+    keys: dict[str, Any]
+    base_url: str
+
+
+@runtime_checkable
+class VoiceProfiled(Protocol):
+    """Optional: a plugin whose robot platform has its own realtime speech route. The voice
+    switch then offers that route with these keys instead of the core direct-mode profile."""
+
+    def voice_profile(self, cfg: RoboEmotConfig, language: str) -> VoiceProfile | None:
+        """The platform's voice choice for ``cfg``, labelled in ``language`` (the page's), or
+        ``None``."""
+        ...
+
+
+def platform_voice(
+    plugin: SettingsPlugin | None, cfg: RoboEmotConfig, language: str
+) -> VoiceProfile | None:
+    """The plugin's ``voice_profile`` when it is ``VoiceProfiled``, else ``None``. A plugin that
+    raises or returns something that is not a ``VoiceProfile`` with a route name, a label, a
+    base URL and string keys gives none (logged by type only, never a value)."""
+    if not isinstance(plugin, VoiceProfiled):
+        return None
+    try:
+        profile = plugin.voice_profile(cfg, language)
+    except Exception as exc:
+        log.warning("settings plugin voice profile: %s", type(exc).__name__)
+        return None
+    if profile is None:
+        return None
+    if not (
+        isinstance(profile, VoiceProfile)
+        and isinstance(profile.route, str)
+        and profile.route
+        and isinstance(profile.label, str)
+        and isinstance(profile.base_url, str)
+        and isinstance(profile.keys, dict)
+        and all(isinstance(k, str) for k in profile.keys)
+    ):
+        log.warning("settings plugin voice profile: not a VoiceProfile, ignored")
+        return None
+    return profile
+
+
+@dataclass(frozen=True)
+class RoutePreset:
+    """One preset of the Models tab's add card (SPEC 8, 11A): ``id``, the button's ``label`` in
+    the page language, the route ``fields`` it fills in (never a key) and the name of the
+    ``secret`` its key is stored under. The owner still stores the key and adds the route."""
+
+    id: str
+    label: str
+    fields: dict[str, Any]
+    secret: str
+
+
+@runtime_checkable
+class RoutePresetted(Protocol):
+    """Optional: a plugin whose robot platform has a route of its own to offer in the Models
+    tab (the installer's cloud-voice route), next to core's presets."""
+
+    def route_presets(self, language: str) -> list[RoutePreset]:
+        """The platform's presets, labelled in ``language`` (the page's)."""
+        ...
+
+
+def platform_presets(plugin: SettingsPlugin | None, language: str) -> list[RoutePreset]:
+    """The plugin's ``route_presets`` when it is ``RoutePresetted``, else none. A plugin that
+    raises gives none; an item that is not a ``RoutePreset`` with a string id, label and secret
+    and string-keyed fields is dropped (logged by type only, never a value)."""
+    if not isinstance(plugin, RoutePresetted):
+        return []
+    try:
+        offered = list(plugin.route_presets(language))
+    except Exception as exc:
+        log.warning("settings plugin route presets: %s", type(exc).__name__)
+        return []
+    kept = []
+    for preset in offered:
+        if (
+            isinstance(preset, RoutePreset)
+            and all(isinstance(x, str) and x for x in (preset.id, preset.label, preset.secret))
+            and isinstance(preset.fields, dict)
+            and all(isinstance(k, str) for k in preset.fields)
+        ):
+            kept.append(preset)
+        else:
+            log.warning("settings plugin route preset: not a RoutePreset, ignored")
+    return kept
 
 
 def load_settings_plugin(robot_id: str) -> SettingsPlugin | None:

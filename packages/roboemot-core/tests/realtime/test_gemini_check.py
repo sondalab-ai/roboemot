@@ -18,7 +18,7 @@ import time
 
 import pytest
 from gemini_server import REFUSAL, REPLY
-from realtime_helpers import KEY
+from realtime_helpers import KEY, wait_until
 from roboemot.config.schema import LLMRoute, RoboEmotConfig
 from roboemot.llm.conformance import RouteBudgetExhausted
 from roboemot.llm.router import Router
@@ -105,7 +105,8 @@ def test_a_gemini_check_passes_with_the_delete_emulated_and_closes_its_session(g
     assert report.checks[-1].code == "item_delete_emulated"
     # the late total replaces the estimate: charged once, in full
     assert report.usage_reported == 1785 == report.charged == router.used("gemini")
-    assert srv.client_closes == [CLOSE_NORMAL] and srv.idle_closes == 0
+    assert wait_until(lambda: srv.client_closes == [CLOSE_NORMAL]), srv.client_closes
+    assert srv.idle_closes == 0
     assert leaks(report, caplog) == []
 
 

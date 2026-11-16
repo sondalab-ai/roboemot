@@ -20,7 +20,10 @@ changes anything when the robot has none (no token: it stops with nothing change
 `--secret hf_token` replaces an expired one), and removes Piper and its voice files (SPEC 4A,
 Installer). Settings saved in the web UI win over `app.yaml`: the installer stops when one would
 widen what leaves the robot (for example the facing check off) and names it; reset it in the
-web UI and run again. Read its privacy text before you answer: the audio of every utterance
+web UI and run again. A voice provider chosen in the web UI (for example Gemini) is kept by a
+reinstall in every mode, `-y` included; only `--cloud-voice` asks `Switch the voice back to
+Pollen's server (Hugging Face)?` (default no), and a yes removes only the voice switch's saved
+settings, which it lists first. Read its privacy text before you answer: the audio of every utterance
 spoken while a person faces the robot and looks at it leaves the robot for Pollen's server,
 phone calls included. `-y` does not turn it on. A reinstall with `--no-cloud-voice` removes
 exactly these keys; local voice then needs Piper again (`--piper`). Then start RoboEmot (step 5)
@@ -68,7 +71,11 @@ the shell use SSH.
 
 ## 3. Add the `pollen` route
 
-**Routes** tab, **Add a route** card (**Aggiungi un modello**):
+An install with `--cloud-voice` has written this route already: skip this step. Otherwise go to
+the **Routes** tab, **Add a route** card (**Aggiungi un modello**), and press **Pollen's server
+(Hugging Face)** under **Start from a preset**. The robot's settings plugin offers this preset,
+and only while no route named `pollen` exists. It fills in these fields, and the key when
+`hf_token` is stored:
 
 | Field | Value |
 | --- | --- |
@@ -191,7 +198,8 @@ card works too. The robot sends the key only in the `x-goog-api-key` header, nev
 
 ### 2. Add the `gemini` route
 
-**Routes** tab, **Add a route** card:
+**Routes** tab (**Modelli**), **Add a route** card: press **Gemini Live (Google)** under **Start
+from a preset**. The preset fills in every field below except the voice:
 
 | Field | Value |
 | --- | --- |
@@ -199,9 +207,20 @@ card works too. The robot sends the key only in the `x-goog-api-key` header, nev
 | Kind | Realtime speech (`realtime`) |
 | Realtime protocol | Gemini Live (`gemini_live`) |
 | Base URL | `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` |
-| Key | `gemini_key` |
 | Model | `gemini-3.8-live` |
-| Voice | pick one from the list, for example `Kore` (listen first: below) |
+| Locality | Cloud |
+| Connect timeout (s) | `15` |
+| Key | `gemini_key`, when it is stored |
+
+- When `gemini_key` is not stored yet, the card says so and fills the name `gemini_key` into the
+  **API keys** card below. Type the key there and save it. The add card keeps the preset; press
+  **Add route**.
+- The preset is not offered while a route named `gemini` exists. A route that the installer or
+  `app.yaml` wrote stays the one in use.
+- The PIN dialog names the host the key goes to (`wss://generativelanguage.googleapis.com`).
+- Pick the voice after the add, on the route's own card (below).
+- Adding the route does not turn the Gemini voice on. The robot keeps speaking as before until
+  you pick Gemini in the **Voice provider** row of the **Settings** tab (step 4).
 
 The same route in `app.yaml`:
 
@@ -229,8 +248,9 @@ llm_routes:
   `daily_token_budget`. Save the route to keep the voice. A preview while the conversation's
   session is up opens a second session, which the free tier may refuse (1008): try again later.
 - `connect_timeout_s`: the route's own connect budget. Some first connects took 10.6 s until
-  Gemini confirmed the session, more than the shared 5 s. The web UI form has no field for it: set
-  it in `app.yaml`, or search `llm_routes` in the **Settings** tab.
+  Gemini confirmed the session, more than the shared 5 s. The preset sets 15. The route form's
+  **Connect timeout (s)** field changes it (1 to 30 s); empty uses the shared
+  `voice.realtime_route.connect_timeout_s`.
 - The base URL has no query: the web UI refuses one.
 
 ### 3. Check the route
@@ -260,20 +280,23 @@ notices, the late token counts, the emulated item deletes and the codec's counts
 
 ### 4. Switch to Gemini
 
-A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot` (the default);
-the configuration refuses anything else, one edit at a time. In the **Settings** tab, edit in this
-order:
+A `gemini_live` route needs `voice.realtime_route.mode: direct` and `turns: robot`. In the
+**Settings** tab, open the `voice` group:
 
-1. `voice.realtime_route.mode`: `direct` (first: Pollen's route accepts it, a Gemini route
-   refuses `platform`).
-2. `voice.realtime_route.route`: `gemini`.
-3. `voice.realtime_route.enabled`: true, if it is not already on.
+1. In **Voice provider**, the first row, pick `Route gemini (direct)`. The choice is greyed out,
+   with the reason, while the `gemini_key` secret is missing.
+2. Enter the PIN. The page lists every setting the switch changes, with the old and the new
+   value. It names the privacy opt-ins the switch turns on or off, and, with
+   `privacy.realtime_audio` on, the server that receives the utterances' audio
+   (`generativelanguage.googleapis.com`), also when the opt-in was already on for Pollen. The
+   Gemini choice turns `privacy.realtime_audio_unaddressed` off: Gemini runs robot turns only, so
+   that consent can never act there.
+3. Confirm. Every setting is saved at once, or none is.
 4. Restart RoboEmot (section 5, Restart RoboEmot).
 
-With `voice.realtime_route.input: audio` the utterances' audio goes to Google, and that needs the
-opt-in `privacy.realtime_audio` (section 4 of the Pollen steps). With `input: text` only the local transcript goes.
-
-To go back, edit `route`: `pollen` first, then `mode`: `platform`, and restart.
+To go back, pick the Pollen choice (`Pollen's server (Hugging Face) (route pollen)`) the same way,
+and restart. The row shows `Custom` when the voice settings match no choice (a setting edited by
+hand); picking a choice then replaces them all.
 
 ### What to expect
 

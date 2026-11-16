@@ -15,12 +15,28 @@ const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
 const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 const SETTING_LANGUAGE = "conversation.language"; // the page language (webui/api.py `_language`)
+const SETTING_ADVANCED = "adv:"; // open/collapsed key prefix of a group's Advanced fold
+// Purpose groups of the core sections, in page order (SPEC 11A); the nav heading of each is
+// `settings_purpose_<id>`. A section no group lists goes last, under "Other", so a new schema
+// section is never hidden.
+const SETTING_PURPOSES = [
+  { id: "safety", sections: ["safety"] },
+  { id: "voice", sections: ["voice", "conversation"] },
+  { id: "behaviour", sections: ["personality", "persona", "affect", "appraisal", "register", "expression", "circadian", "soothe"] },
+  { id: "perception", sections: ["vision", "attention", "world", "identity", "enrollment", "music", "light", "catalogue"] },
+  { id: "motion", sections: ["motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map"] },
+  { id: "models", sections: ["llm_routes", "llm_check", "privacy"] },
+  { id: "system", sections: ["webui", "connectivity", "runtime", "data_dir", "schema_version"] },
+];
+const SETTING_OTHER_PURPOSE = "other";
 
 const settingsState = {
   query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
   leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
   routes: null, // GET /api/routes for the voice rows (a promise), once per settings view
+  voice: null, // GET /api/settings/voice: the voice-provider switch, read with the rows
+  navHeads: [], // nav headings with their groups: a heading hides when all its items do
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -29,7 +45,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null,
+    query: "", changedOnly: false, nullOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(), routes: null, voice: null, navHeads: [],
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -51,10 +67,15 @@ function mergeRevealed(fields) {
   return [...merged.values()];
 }
 
+// A `Literal[True]` field (the `*.additive` keys): one choice, fixed in code, so the page does not
+// show it. It stays in the schema and the catalogue, because robot manifests set it.
+const settingFixed = (row) => row.kind === "enum" && !row.nullable && Array.isArray(row.choices) &&
+  row.choices.length === 1 && row.choices[0] === true;
+
 // Nodes in a tree: a row sits under the nearest container that is a path prefix of it.
-// Returns the top-level nodes in schema order.
+// Returns the top-level nodes in schema order. Fixed rows (`settingFixed`) are left out.
 function settingsTree(fields) {
-  const rows = mergeRevealed(fields);
+  const rows = mergeRevealed(fields).filter((row) => !settingFixed(row));
   const nodes = new Map(rows.map((row) => [row.path, { row, kids: [], parent: null }]));
   const top = [];
   for (const node of nodes.values()) {
@@ -81,11 +102,26 @@ function settingsSections(top, scope, robot) {
     if (!by.has(name)) { by.set(name, []); order.push(name); }
     by.get(name).push(node);
   }
-  return order.map((name) => ({ id: scope + "-" + name, scope, title: name, nodes: by.get(name) }));
+  const sections = order.map((name) => ({ id: scope + "-" + name, scope, title: name, nodes: by.get(name), purpose: null }));
+  return scope === "core" ? byPurpose(sections) : sections;
+}
+
+// Core sections in purpose-group order (`SETTING_PURPOSES`), each with its `purpose` id. Sections
+// no group lists follow in schema order under `SETTING_OTHER_PURPOSE`. Paths and ids do not change.
+function byPurpose(sections) {
+  const rank = (section) => {
+    const at = SETTING_PURPOSES.findIndex((p) => p.sections.includes(section.title));
+    return at < 0 ? [SETTING_PURPOSES.length, 0] : [at, SETTING_PURPOSES[at].sections.indexOf(section.title)];
+  };
+  return sections
+    .map((section, n) => ({ section, n, rank: rank(section) }))
+    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.n - b.n)
+    .map(({ section, rank: [at] }) => ({ ...section, purpose: at < SETTING_PURPOSES.length ? SETTING_PURPOSES[at].id : SETTING_OTHER_PURPOSE }));
 }
 
 const nodeText = (node) => (node.row.path + " " + (node.row.description || "")).toLowerCase();
 const leafChanged = (row) => row.source === "runtime" || JSON.stringify(row.value) !== JSON.stringify(row.default);
+const nodeRuntime = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? node.kids.some(nodeRuntime) : node.row.source === "runtime");
 
 // Without a filter, the search words hit the node or one of its kids. With "changed only" or
 // "only null" on, the words and every filter that is on must hold on the same leaf (a leaf's path
@@ -577,6 +613,138 @@ function writeNotice(result, verbKey) {
   notice(parts.join(" "), result.persisted === false || result.applied === false);
 }
 
+// Saves `changes` ([{path, value}]) as one all-or-nothing batch behind one PIN dialog, then announces
+// it like a single save (layer, restart) and reloads the rows. A refusal leaves every path as it was.
+// Returns the response, or null when the dialog was cancelled.
+async function settingsBatchSave(message, changes, verbKey = "saved") {
+  const result = await pinnedCall(message, t("settings_save"),
+    (pin) => api("POST", "/api/settings/batch", { changes, pin }));
+  if (!result) return null;
+  await settingsBatchDone(result, verbKey);
+  return result;
+}
+
+// After a batch save: the revealed private values it changed kept current, the notice (layer,
+// restart) and the rows read again.
+async function settingsBatchDone(result, verbKey) {
+  for (const r of result.results || []) {
+    if (r.changed && revealedSettings.has(r.path)) revealedSettings.set(r.path, { ...revealedSettings.get(r.path), value: r.value });
+  }
+  writeNotice(result, verbKey);
+  await settingsReload(null);
+}
+
+// ---------------------------------------------------------------- voice provider switch
+
+const VOICE_SWITCH_GROUP = "core-voice";
+const VOICE_CUSTOM = "custom";
+
+// GET /api/settings/voice, or null on a failure (an older server, no editor): the row is then not shown.
+async function voiceSwitchFetch() {
+  try { return await api("GET", "/api/settings/voice"); } catch (e) { return null; }
+}
+
+// The answer of the unrevealed GET as the page shows it once the private fields are revealed: the
+// matched choice holds only while its private keys (`private_match`) equal the revealed values, which
+// every save keeps current. So a reload after a save never mixes a revealed page with an unrevealed
+// voice value. Without revealed values it is returned as it is.
+function voiceRevealed(voice) {
+  if (!voice || voice.revealed) return voice;
+  const choice = voice.choices.find((c) => c.id === voice.value);
+  const keys = choice ? choice.private_match || [] : [];
+  if (!choice || !revealedSettings.size || !keys.every((p) => revealedSettings.has(p))) return voice;
+  const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+  const same = keys.every((p) => revealedSettings.get(p).value === wanted.get(p));
+  return { ...voice, revealed: true, value: same ? voice.value : VOICE_CUSTOM };
+}
+
+// The confirmation text of a switch to `choice` over `diff`: the opt-ins it turns on or off, who
+// receives the audio when the opt-in is on and the receiving route changes (even with no opt-in
+// change), and the unaddressed audio when that consent turns on (SPEC 12).
+function voiceSwitchMessage(choice, diff, wanted) {
+  const changed = new Set(diff.changes.map((c) => c.path));
+  const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
+  const parts = [t("voice_switch_diff")];
+  for (const [on, key] of [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]) {
+    const paths = optIns(on);
+    if (paths.length) parts.push(t(key, { paths: paths.join(", ") }));
+  }
+  const audioOn = wanted.get("privacy.realtime_audio") === true;
+  if (audioOn && choice.audio_to && (changed.has("voice.realtime_route.route") || changed.has("voice.realtime_route.enabled"))) {
+    parts.push(t("voice_switch_audio_to", { provider: choice.audio_to }));
+  }
+  if (wanted.get("privacy.realtime_audio_unaddressed") === true && changed.has("privacy.realtime_audio_unaddressed")) {
+    parts.push(t("voice_switch_unaddressed"));
+  }
+  return parts.join(" ");
+}
+
+// One choice's name in the page language: the robot plugin words its own platform route.
+function voiceChoiceText(choice) {
+  if (choice.kind === "local") return t("voice_choice_local");
+  if (choice.kind === "platform") return t("voice_choice_platform", { label: choice.label || choice.route, route: choice.route });
+  return t("voice_choice_direct", { route: choice.route });
+}
+
+// The row at the top of the voice group: the current choice (or Custom) and every choice, the ones
+// that cannot be picked now disabled with their reason. Picking one runs `voiceSwitch`.
+function voiceSwitchRow(data) {
+  const id = "voice-switch";
+  const select = el("select", { id, class: "sl-field__input" },
+    data.value === VOICE_CUSTOM ? el("option", { value: VOICE_CUSTOM, selected: true, disabled: true }, t("voice_choice_custom")) : [],
+    data.choices.map((c) => el("option", { value: c.id, selected: c.id === data.value, disabled: !c.available },
+      c.available ? voiceChoiceText(c)
+        : t("voice_choice_unavailable", { choice: voiceChoiceText(c), reason: t("voice_reason_" + c.reason, { secret: c.secret || "" }) }))));
+  select.addEventListener("change", async () => {
+    const choice = data.choices.find((c) => c.id === select.value);
+    select.value = data.value;
+    if (choice) await voiceSwitch(choice);
+  });
+  return el("div", { class: "stack", "data-path": id }, field(id, t("voice_switch"), select,
+    t("voice_switch_hint") + (data.revealed ? "" : " " + t("voice_switch_unrevealed"))));
+}
+
+// Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
+// dialog lists what changes (the privacy opt-ins named, SPEC 12), and its confirm saves the batch with
+// the same PIN. The PIN lives only in this call; a save refused for the PIN starts again at the PIN
+// dialog. Returns the save's response, or null.
+async function voiceSwitch(choice) {
+  const title = t("voice_switch_pin_title", { choice: voiceChoiceText(choice) });
+  let held = null;
+  const diff = await pinnedCall(t("voice_switch_pin_message"), t("voice_switch_show"), async (pin) => {
+    const result = await api("POST", "/api/settings/batch/preview", { changes: choice.changes, pin });
+    held = pin;
+    return result;
+  }, null, title);
+  try {
+    if (!diff) return null;
+    if (!diff.changes.length) { notice(t("voice_switch_same")); return null; }
+    const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+    const items = diff.changes.map((c) => {
+      const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
+      return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
+    });
+    const message = voiceSwitchMessage(choice, diff, wanted);
+    let result = null;
+    let again = false;
+    const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
+      run: async () => {
+        try {
+          result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held });
+        } catch (err) {
+          if (err.message !== "bad_pin") throw err;
+          again = true;
+        }
+      } });
+    if (again) { held = null; return voiceSwitch(choice); }
+    if (!done || !result) return null;
+    await settingsBatchDone(result, "saved");
+    return result;
+  } finally {
+    held = null;
+  }
+}
+
 function settingLeaf(node) {
   const row = node.row;
   const hidden = settingHidden(row);
@@ -761,8 +929,8 @@ function addEntryForm(node) {
   const name = keyed ? null : free
     ? keySelect(free, "", { id: id + "-name", required: true })
     : el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
-  const fixed = (row.entry || []).filter((e) => e.kind === "json" && !e.secret);
-  const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !SETTING_CONTAINERS.includes(e.kind))
+  const fixed = (row.entry || []).filter((e) => (e.kind === "json" && !e.secret) || settingFixed(e));
+  const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !settingFixed(e) && !SETTING_CONTAINERS.includes(e.kind))
     .map((e) => ({ desc: e, ctl: buildControl(e, id + "-" + settingsState.serial++, { label: e.path }) }));
   const show = (code) => { failure.hidden = !code; failure.textContent = code ? t("err_" + code) : ""; };
   const submit = () => guarded(async () => {
@@ -828,11 +996,17 @@ const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? sett
 
 // ---------------------------------------------------------------- reveal and reload
 
+// The same PIN also reads the voice switch matched on the privacy opt-ins (private, SPEC 12).
 async function revealSettings() {
-  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"),
-    (pin) => api("POST", "/api/settings/reveal", { pin }));
+  let voice = null;
+  const result = await pinnedCall(t("settings_reveal_message"), t("settings_reveal"), async (pin) => {
+    const fields = await api("POST", "/api/settings/reveal", { pin });
+    if (settingsState.voice) voice = await api("POST", "/api/settings/voice", { pin }).catch(() => null);
+    return fields;
+  });
   if (!result) return;
   revealedSettings = new Map(result.fields.map((f) => [f.path, f]));
+  if (voice) settingsState.voice = voice;
   settingsApplyModel(settingsState.data);
   refreshSettings();
 }
@@ -840,9 +1014,10 @@ async function revealSettings() {
 async function settingsReload(changedPath) {
   const current = viewToken();
   if (changedPath) settingsState.leaves.delete(changedPath);
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return; // a new settings view or a logout replaced the groups this answer was for
   settingsState.data = data;
+  settingsState.voice = voiceRevealed(voice);
   settingsApplyModel(settingsState.data);
   refreshSettings();
   if (changedPath) settingsFocus(changedPath);
@@ -908,22 +1083,75 @@ function refreshGroup(g) {
   g.toggle.setAttribute("aria-expanded", String(open));
   g.body.hidden = !open;
   if (!open) return hits.length;
-  const capped = !manual && !g.showAll && hits.length > SETTING_AUTO_OPEN_MAX;
-  const shown = capped ? hits.slice(0, SETTING_AUTO_OPEN_MAX) : hits;
-  const key = shown.map((n) => n.row.path).join("|") + (capped ? "+" : "");
+  // The cap applies to the basic rows only; the fold holds every advanced hit and builds its rows
+  // only while it is open.
+  const basic = hits.filter((n) => !n.row.advanced);
+  const advanced = hits.filter((n) => n.row.advanced);
+  const capped = !manual && !g.showAll && basic.length > SETTING_AUTO_OPEN_MAX;
+  const shownBasic = capped ? basic.slice(0, SETTING_AUTO_OPEN_MAX) : basic;
+  const dirty = advanced.some((n) => rowDirty(g, n));
+  const foldOpen = advancedOpen(g, advanced, auto, dirty);
+  const key = [...shownBasic, ...advanced].map((n) => n.row.path).join("|") + (capped ? "+" : "") +
+    (foldOpen ? "^" : "") + (dirty ? "*" : "");
   if (g.shown !== key) {
     g.shown = key;
     const more = capped
-      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
-        { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: hits.length }), g.title) } }))]
+      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: basic.length }), "plain", () => { g.showAll = true; refreshGroup(g); },
+        { small: true, attrs: { "aria-label": rowName(t("settings_show_all", { n: basic.length }), g.title) } }))]
       : [];
-    g.body.replaceChildren(...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
+    const lead = g.id === VOICE_SWITCH_GROUP && settingsState.voice ? [voiceSwitchRow(settingsState.voice), el("hr", { class: "sl-rule" })] : [];
+    const rows = (nodes) => nodes.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat();
+    const fold = advanced.length
+      ? [shownBasic.length ? el("hr", { class: "sl-rule" }) : [], advancedFold(g, advanced.length, foldOpen, dirty, () => rows(advanced))]
+      : [];
+    g.body.replaceChildren(...lead, ...rows(shownBasic), ...more, ...fold);
   }
   return hits.length;
 }
 
+// A row of `g` built earlier that holds an unsaved edit (`editedMarker` sets data-dirty).
+function rowDirty(g, node) {
+  const built = g.cache.get(node.row.path);
+  return Boolean(built && (built.hasAttribute("data-dirty") || built.querySelector("[data-dirty]")));
+}
+
+// Whether the Advanced fold of `g` is open: opened by hand, by a search or filter that hits an
+// advanced row (`auto`), by an advanced row with a runtime value, or while one of its rows holds an
+// unsaved edit (`dirty`). Closed by hand wins; the toggle then marks the unsaved edit.
+function advancedOpen(g, advanced, auto, dirty) {
+  const id = SETTING_ADVANCED + g.id;
+  if (!advanced.length || settingsState.collapsed.has(id)) return false;
+  return settingsState.open.has(id) || auto || dirty || advanced.some(nodeRuntime);
+}
+
+// Records a hand open or close of the Advanced fold of `g`; a later filter change clears a close.
+function setFold(g, on) {
+  const id = SETTING_ADVANCED + g.id;
+  if (on) { settingsState.open.add(id); settingsState.collapsed.delete(id); }
+  else { settingsState.open.delete(id); settingsState.collapsed.add(id); }
+}
+
+// The closed-by-default disclosure that holds a group's advanced rows. `fill()` builds the rows
+// only while it is open; a closed fold with an unsaved edit inside shows the edited tag. A toggle
+// records the choice and redraws the group.
+function advancedFold(g, count, open, dirty, fill) {
+  const id = "adv-" + g.id;
+  const toggle = el("button", { type: "button", class: "sl-disclosure", id: id + "-toggle", "aria-expanded": String(open), "aria-controls": id },
+    t("settings_advanced"), el("span", { class: "sl-nav__count" }, String(count)));
+  const edited = dirty && !open ? el("span", { class: "sl-tag", "data-edited": "1" }, t("settings_edited")) : [];
+  toggle.addEventListener("click", () => {
+    setFold(g, !open);
+    refreshGroup(g);
+    const again = document.getElementById(id + "-toggle");
+    if (again) again.focus();
+  });
+  const body = el("div", { class: "stack nested", id, hidden: !open }, open ? fill() : []);
+  return el("div", { class: "stack", "data-advanced": g.id }, el("div", { class: "row" }, el("h4", { class: "setting-entry" }, toggle), edited), body);
+}
+
 function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
+  for (const head of settingsState.navHeads) head.node.hidden = head.groups.every((g) => g.navItem.hidden);
   const status = document.getElementById("settings-count");
   if (status) status.textContent = tn("settings_matches", total);
   const actions = document.getElementById("settings-robot-actions");
@@ -942,7 +1170,7 @@ function settingsGroup(section) {
   const toggle = el("button", { type: "button", class: "sl-disclosure", id, "aria-expanded": "false", "aria-controls": id + "-body" },
     el("code", { class: "sl-code" }, section.title), count);
   const navItem = el("button", { type: "button", class: "sl-nav__item", "data-group": section.id }, section.title, navCount);
-  const g = { id: section.id, title: section.title, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
+  const g = { id: section.id, title: section.title, scope: section.scope, purpose: section.purpose, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
     section: el("section", { class: "sl-card settings-group" }, el("h3", { class: "setting-group" }, toggle), body) };
   toggle.addEventListener("click", () => {
     const on = toggle.getAttribute("aria-expanded") !== "true";
@@ -997,10 +1225,11 @@ async function settingsView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   settingsState.routes = null; // the voice rows fetch the routes again, once for the view
-  const data = await api("GET", "/api/settings");
+  const [data, voice] = await Promise.all([api("GET", "/api/settings"), voiceSwitchFetch()]);
   if (!current()) return;
   view.replaceChildren();
   settingsState.data = data;
+  settingsState.voice = voiceRevealed(voice);
   const robot = data.robot || null;
   const sections = [
     ...settingsSections(settingsTree(data.fields), "core", null),
@@ -1016,9 +1245,12 @@ async function settingsView() {
   }
   const coreGroups = settingsState.groups.filter((g) => g.scope === "core");
   const robotGroups = settingsState.groups.filter((g) => g.scope === "robot");
+  const purposes = [...new Set(coreGroups.map((g) => g.purpose))];
+  const heads = purposes.map((p) => ({ node: el("div", { class: "sl-nav__group" }, t("settings_purpose_" + p)), groups: coreGroups.filter((g) => g.purpose === p) }));
+  if (robot) heads.push({ node: el("div", { class: "sl-nav__group" }, robot.title), groups: robotGroups });
+  settingsState.navHeads = heads;
   const nav = el("nav", { class: "sl-nav settings-nav", "aria-label": t("settings_nav") },
-    el("div", { class: "sl-nav__group" }, t("settings_core")), coreGroups.map((g) => g.navItem),
-    robot ? [el("div", { class: "sl-nav__group" }, robot.title), robotGroups.map((g) => g.navItem)] : []);
+    heads.map((h) => [h.node, h.groups.map((g) => g.navItem)]));
   const groups = el("div", { class: "stack", id: "settings-groups" }, settingsState.groups.map((g) => g.section));
   const robotActions = robot ? el("div", { class: "row", id: "settings-robot-actions" }) : [];
   view.append(intro, robotActions, el("div", { class: "settings-layout" }, nav, groups));

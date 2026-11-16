@@ -93,9 +93,9 @@ def test_the_own_noise_reflex_settings_only_tighten_at_runtime(path, tighter, lo
 def test_privacy_opt_in_needs_admin():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
-        stack.set("privacy.multimodal_frames", True)
-    stack.set("privacy.multimodal_frames", True, admin=True)
-    assert stack.get("privacy.multimodal_frames") is True
+        stack.set("privacy.realtime_audio", True)
+    stack.set("privacy.realtime_audio", True, admin=True)
+    assert stack.get("privacy.realtime_audio") is True
 
 
 def test_runtime_ttl_expires_and_is_audited(tmp_path):
@@ -183,7 +183,7 @@ def test_section_level_override_cannot_bypass_guardrails():
     with pytest.raises(GuardrailError):
         stack.set("safety", {"watchdog_return_factor": 1.0, "watchdog_ms": 2000})
     with pytest.raises(GuardrailError):
-        stack.set("privacy", {"debug_recording": True, "multimodal_frames": True})
+        stack.set("privacy", {"realtime_platform_id": True, "realtime_audio": True})
     with pytest.raises(GuardrailError):
         stack.set(
             "llm_routes",
@@ -239,7 +239,7 @@ def test_deep_merge_finds_keyed_lists_by_location(at, base, over, expected):
 def test_privacy_opt_in_with_integer_one_still_needs_admin():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
-        stack.set("privacy.debug_recording", 1)
+        stack.set("privacy.realtime_platform_id", 1)
 
 
 def test_the_register_approach_is_guarded():
@@ -252,7 +252,7 @@ def test_loosening_preset_needs_admin(tmp_path):
     (tmp_path / "default.yaml").write_text("schema_version: 1\n")
     (tmp_path / "evil.yaml").write_text(
         "extends: default\nsafety: {watchdog_return_factor: 1.0}\n"
-        "privacy: {debug_recording: true}\n"
+        "privacy: {realtime_platform_id: true}\n"
     )
     stack = ConfigStack(preset_dirs=[tmp_path])
     with pytest.raises(GuardrailError):
@@ -330,7 +330,7 @@ def test_baseline_never_absorbs_runtime_values():
     clock = Clock()
     stack = ConfigStack(clock=clock)
     stack.set("safety.watchdog_return_factor", 0.1, ttl_s=60)
-    stack.set("privacy.multimodal_frames", True, admin=True)
+    stack.set("privacy.realtime_audio", True, admin=True)
     clock.t += 61
     stack.poll()  # tightening expired
     stack.set("safety.watchdog_ms", 150)  # a further tightening must still be accepted
@@ -341,13 +341,13 @@ def test_runtime_privacy_approval_lapses_with_the_override():
     """N2: an admin opt-in with TTL does not become a permanent approval."""
     clock = Clock()
     stack = ConfigStack(clock=clock)
-    stack.set("privacy.debug_recording", True, admin=True, ttl_s=60)
+    stack.set("privacy.realtime_platform_id", True, admin=True, ttl_s=60)
     stack.set("voice.expressivity", 0.5)  # unrelated changes still work meanwhile
     clock.t += 61
     stack.poll()
-    assert stack.get("privacy.debug_recording") is False
+    assert stack.get("privacy.realtime_platform_id") is False
     with pytest.raises(GuardrailError):
-        stack.set("privacy.debug_recording", True)
+        stack.set("privacy.realtime_platform_id", True)
 
 
 def test_route_names_validated_and_unique():
@@ -411,9 +411,9 @@ def test_set_many_is_all_or_nothing_with_one_event():
 def test_set_many_gives_each_approval_to_the_override_that_covers_it():
     stack = ConfigStack()
     stack.set_many(
-        {"privacy.multimodal_frames": True, "affect.update_hz": 30.0}, source="t", admin=True
+        {"privacy.realtime_audio": True, "affect.update_hz": 30.0}, source="t", admin=True
     )
-    assert "privacy.multimodal_frames" in stack._runtime["privacy.multimodal_frames"].approved
+    assert "privacy.realtime_audio" in stack._runtime["privacy.realtime_audio"].approved
     assert stack._runtime["affect.update_hz"].approved == {}
 
 

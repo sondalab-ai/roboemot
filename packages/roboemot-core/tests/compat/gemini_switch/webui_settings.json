@@ -1,0 +1,26 @@
+{
+  "acks": {
+    "llm_routes[{\"name\":\"gemini\"}].api_key": {
+      "key": "4aa41adce4979046d392ff997d3d907e97fffafcfdd44f12eaf5095b7db48c21:dbc81fb3aac8462750bc432cc17fa51cb46136b3f51d0726ba7037484c74f713",
+      "origin": "wss://generativelanguage.googleapis.com"
+    }
+  },
+  "keys": {
+    "gemini": "${secret:gemini_key}"
+  },
+  "overrides": {
+    "llm_routes[{\"name\":\"gemini\"}]": {
+      "base_url": "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+      "connect_timeout_s": 15.0,
+      "kind": "realtime",
+      "locality": "cloud",
+      "model": "gemini-3.8-live",
+      "name": "gemini",
+      "protocol": "gemini_live",
+      "voice": "Kore"
+    },
+    "voice.realtime_route.mode": "direct",
+    "voice.realtime_route.route": "gemini"
+  },
+  "v": 1
+}

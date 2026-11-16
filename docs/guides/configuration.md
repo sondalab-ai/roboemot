@@ -68,6 +68,14 @@ What this means in practice:
   entry below it replaces that entry. Other routes stay.
 - The data folder is `~/.local/share/roboemot`, or `$ROBOEMOT_DATA_DIR` when that is set. `app.yaml`
   is always read from there. The `data_dir` setting cannot move it.
+- A setting that no longer exists does not stop the robot. It is listed under `dropped` in
+  `config/moved_settings.yaml`, and the robot ignores it in `app.yaml`, a preset and
+  `webui_settings.json`. The log says `setting <path> ignored: removed from the configuration`,
+  once per file. On 2026-11-16 these settings went, because no code read them:
+  `motion.arbiter.source_timeout_ms`, `motion.idle.gaze_shift_interval_s`,
+  `motion.idle.gaze_shift_amplitude`, the whole `mirror` section, `llm_routes[].supports_images`,
+  `privacy.multimodal_frames`, `privacy.keep_enrollment_images` and `privacy.debug_recording`
+  (SPEC 11A, Renamed and removed settings).
 
 ### Three ways to change a value
 
@@ -76,6 +84,13 @@ What this means in practice:
    and are saved in `webui_settings.json`. A privacy opt-in, a safety loosening and prompt text also
    need the admin confirmation (SPEC 11A, Guardrails). A safety loosening is the one edit that the
    web UI writes into `app.yaml` instead.
+   The groups come in purpose order: **Safety**, **Voice and conversation**, **Behaviour and
+   emotions**, **Perception**, **Motion**, **Models and privacy**, **System**, then the robot's own
+   section. Each group shows the settings an owner usually changes first. Tuning settings
+   (timeouts, rates, thresholds, buffer sizes) sit under a closed **Advanced** fold (**Avanzate**)
+   at the end of the group. A search, **Changed only** or **Only without a value (null)** still
+   finds them and opens the fold. So does a tuning setting you already changed in the web UI, or
+   one you are editing and have not saved. Safety, privacy and opt-in settings are never folded. The fold changes only the page: every key, path and saved value stays the same.
 2. **Installer flags** (`python scripts/install_on_robot.py ...`). They set only the installer's own
    keys in `app.yaml`: `voice.enabled`, the dev content (`--dev`) and the cloud-voice profile
    (`--cloud-voice`). A reinstall with the opposite flag removes exactly those keys. Add
@@ -125,6 +140,13 @@ The cloud voice is off by default. Audio leaving the robot is an admin opt-in (S
 Passing `--cloud-voice` accepts the `privacy.realtime_audio` opt-in, and with it `privacy.realtime_audio_unaddressed`: once `voice.realtime_route.turns` is `server`, every speech segment the robot hears while awake can stream to the server, not only speech meant for the robot. The profile does not set `turns`. `-y` alone never turns the
 profile on. An unattended run must say `--cloud-voice` or `--no-cloud-voice`.
 
+A reinstall keeps a voice provider chosen in the Settings voice switch (local voice, Pollen or
+another realtime route such as Gemini), whatever the flags, `-y` included. It says `Kept the voice
+provider <choice> (chosen in the web UI)` and leaves the voice keys of `app.yaml` as they are. Only
+`--cloud-voice` on a terminal asks `Switch the voice back to <platform>?` (default no). It lists the
+saved settings first. A yes removes the voice switch's settings from `webui_settings.json`, so
+`app.yaml` decides the voice again. Other saved settings stay.
+
 The profile needs the voice pipeline, so it keeps `voice.enabled: true`, which the installer sets.
 The installer refuses `--cloud-voice` together with `--no-voice` or `--piper`, before it touches the
 robot.
@@ -169,7 +191,43 @@ left the robot.
    confirmation. Open the **Live** tab. The status line should not say "Cloud voice down" /
    "Voce cloud non disponibile".
 
+### Switch the voice in the web UI: Voice provider
+
+The first row of the `voice` group on the Settings tab, **Voice provider** (**Fornitore della
+voce**), picks how the robot speaks in one save:
+
+- **Local voice**: Piper and Vosk on the robot; nothing leaves it. Greyed out while the Piper or
+  Vosk models of the page language or the Piper interpreter are missing (a `--cloud-voice` install
+  removes Piper; reinstall with `--piper`).
+- **One choice per `kind: realtime` route.** The robot's own route (Reachy Mini: `pollen`, at its
+  own address) writes the installer's cloud-voice keys. Any other route, a route that only borrows
+  that name included, runs in direct mode; a `gemini_live` route also with `turns: robot` and
+  `privacy.realtime_audio_unaddressed` off. A route is greyed out while its `${secret:name}` key is missing from the
+  secret store.
+- **Custom**: the voice settings match no choice. Picking a choice replaces them.
+
+Every choice writes the same 17 keys: `voice.enabled`, `voice.realtime_route.enabled`, `route`,
+`mode`, `input`, `turns`, `audio_gate`, `transcript_timeout_s`, `skip_tool` and `tone_tool`,
+`voice.backend`, `voice.fallback_backend`, `voice.wake_word_policy`,
+`voice.direction.enabled`, `voice.facing.enabled`, `privacy.realtime_audio` and
+`privacy.realtime_audio_unaddressed`. The row adds no config key: its value is computed from these.
+It matches a choice on `voice.enabled`, `voice.realtime_route.enabled`, `voice.backend`,
+`voice.fallback_backend` and the two privacy opt-ins (a direct route does not compare
+`realtime_audio_unaddressed`), plus `route`, `mode` and `input` when the choice turns the realtime
+route on: `input: text` on a realtime route stays a hand edit and shows as Custom. A tuned timeout or wake policy keeps the choice; the next switch writes
+it again. The opt-ins are private: until you use **Show with PIN** the row ignores them, so a local robot
+with an opt-in left on shows Local, and Custom after the PIN.
+
+Picking a choice asks for the PIN once and lists every setting that changes with its old and new
+value. It names the privacy opt-ins it turns on or off, the server that receives the audio when the
+receiving route changes with `privacy.realtime_audio` on, and what else is sent when
+`realtime_audio_unaddressed` turns on. Then it saves all of them or none (SPEC 11A, Batch settings
+save).
+Restart RoboEmot afterwards.
+
 ### Go back to local voice
+
+Pick **Local voice** in **Voice provider** (above), or:
 
 1. Run the installer again with `--no-cloud-voice`. It removes exactly the profile keys listed above
    and keeps every other key. Add `--piper` to install Piper again; the models step fetches the
@@ -201,6 +259,8 @@ A lost session reconnects in the background. The reconnect waits longer after ea
 (backoff, `connectivity.network.*`). The status clears without waiting for the next utterance.
 
 ### Advanced: transport and decoding
+
+On the Settings tab these keys sit under the voice group's **Advanced** fold.
 
 | Key | Default | Unit, range | What it does |
 | --- | --- | --- | --- |
@@ -381,6 +441,13 @@ voice; chat requests never use it. When no route answers, the robot says
 
 By default the list is empty. Add routes in `app.yaml` or on the web UI **Routes** tab.
 
+The **Add a route** card offers presets under **Start from a preset**: Gemini Live, and the robot
+platform's own realtime route when its settings plugin has one (Reachy Mini: Pollen's server). A
+preset fills in the form and picks its key when the key is stored. When the key is missing, the card
+names it and fills the name into the **API keys** card. A preset is hidden while a route of its name
+exists, so a route written by the installer or `app.yaml` stays the one in use. The presets live
+in `roboemot/webui/route_presets.yaml`.
+
 ```yaml
 llm_routes:
   - name: cloud
@@ -403,7 +470,7 @@ llm_routes:
 | `llm_routes[].max_tokens` | `300` | tokens, 16 to 8192 | Reply token cap. |
 | `llm_routes[].daily_token_budget` | `200000` | tokens per day, at least 0 | Daily token cap. Past it, the route is skipped until the next day. |
 | `llm_routes[].context_budget_tokens` | `8192` | tokens, 256 to 2000000 | Prompt budget per request, at 4 characters per token. The oldest turns are dropped to fit. |
-| `llm_routes[].supports_images` | `false` | on/off | The route accepts images (`image_url` parts). |
+| `llm_routes[].connect_timeout_s` | `null` | s, 1 to 30 | A realtime route's own `voice.realtime_route.connect_timeout_s`. `null` uses the shared value. The route form's **Connect timeout (s)** field sets it. |
 | `conversation.turn_reserve_tokens` | `256` | tokens, 16 to 8192 | Room every route's context budget must leave beyond the system prompt, for the newest turn. It is checked when the configuration loads. |
 
 ### Secrets and locality guardrails
@@ -550,9 +617,6 @@ the PIN.
 | `privacy.realtime_audio_unaddressed` | `false` | on/off | Opt-in. With `voice.realtime_route.turns: server`, lets every speech segment the robot hears while awake stream to the realtime route, not only speech meant for the robot; `server_gates` can narrow it. Without it `turns: server` runs as `robot`. The installer's `--cloud-voice` turns it on. |
 | `privacy.realtime_platform_id` | `false` | on/off | Opt-in. Lets the platform's session provider send the robot's stable platform identifier with each session request (platform mode only). The server can then link all sessions of this robot. |
 | `privacy.pseudonyms_to_cloud` | `false` | on/off | Sends pseudonyms instead of registry names to cloud routes, and puts the names back in the answer. A remote speech voice still hears the names it speaks. It blocks a cloud realtime route. Its safe direction is on: turning it off again needs the admin confirmation. |
-| `privacy.multimodal_frames` | `false` | on/off | Opt-in. Allows single camera frames to be sent to LLM routes for image questions. |
-| `privacy.keep_enrollment_images` | `false` | on/off | Opt-in. Keeps the face crops taken at enrollment. |
-| `privacy.debug_recording` | `false` | on/off | Opt-in. Allows time-limited debug recording. |
 | `webui.live.enabled` | `false` | on/off | Opt-in. Serves the Live tab: mood, who is in view by name, conversation phase. |
 | `webui.live.transcript` | `false` | on/off | Opt-in. Keeps the recent conversation, as text, in memory for the Live tab. It is never saved, logged or reported. |
 | `webui.live.video` | `false` | on/off | Opt-in. Serves a live camera preview to the Live tab. It needs `webui.live.enabled`. Every open page shows a banner while someone watches. |

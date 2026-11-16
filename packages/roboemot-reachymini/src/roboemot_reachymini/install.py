@@ -36,11 +36,12 @@ from pathlib import Path
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
-from roboemot.install import CloudVoiceRoute, Ui, WizardError
+from roboemot.install import Ui, WizardError
 from roboemot.install.pyenv import RemotePython
 from roboemot.install.remote import Remote
 from roboemot.install.ui import last_line
 
+from .cloud_voice import CLOUD_VOICE
 from .daemon import (
     APP_NAME,
     APP_START_TIMEOUT_S,
@@ -114,20 +115,6 @@ def stage_packages(root: Path, dest: Path) -> list[Path]:
         shutil.copy2(preset, data / "presets")
     (data / "app.yaml").unlink(missing_ok=True)
     return [dest / pkg for pkg in PACKAGES]
-
-
-CLOUD_VOICE = CloudVoiceRoute(
-    name="pollen",
-    kind="realtime",
-    base_url="https://pollen-robotics-reachy-mini-realtime-url.hf.space/session",
-    secret="hf_token",
-    model="s2s",
-    mode="platform",
-    provider="Pollen's server (Hugging Face)",
-    # The owner's hand-set value (robot, 2026-10-30): the transcript p50 was 8.3 s before CV-0;
-    # lower it to the measured p95 plus about 1 s once CV-0 is measured on the robot.
-    transcript_timeout_s=10.0,
-)
 
 
 class ReachyMiniWireless:
