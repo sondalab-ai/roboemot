@@ -265,6 +265,7 @@
     - `resume_after_s` (1.5, 0–30)
     - `connect_timeout_s` (8, 1–30)
     - `max_play_s` (7200, 60–43200)
+    - `volume_step_db` (3, 1–12)
   - `RadioConfig`:
     - `enabled` (`param(False, ..., opt_in=True)`)
     - `stations: list[Station]`, where `Station(name: str, url: str, genres: list[str], language: str | None)`. URLs must be `http(s)://`, checked at load.
@@ -283,7 +284,7 @@
   - Skills, with `available=lambda: host.config().tools.radio.enabled and bool(host.config().tools.radio.stations)`:
     - `radio_play(station: str)`, with `choices` = station names plus genres. A genre picks the first matching station. A URL is never accepted.
     - `radio_stop()`
-    - `radio_volume(change: Literal["up", "down"])`, which steps by `media.volume_step_db` (3, 1–12).
+    - `radio_volume(change: Literal["up", "down"])`, which steps by `tools.media.volume_step_db`.
 
 - [ ] **Step 1: Write the failing tests**
   - `test_media_player.py::test_player_pauses_while_robot_speaks_and_resumes_after_idle`: uses a fake `PcmStream` and a fake output. No chunk is pushed during the speaking window. Pushing resumes after `resume_after_s`.
