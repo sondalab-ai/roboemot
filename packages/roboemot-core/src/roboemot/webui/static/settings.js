@@ -649,8 +649,11 @@ async function voiceSwitch(choice) {
       const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
       return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
     });
-    const optIns = diff.changes.filter((c) => c.opt_in).map((c) => c.path);
-    const message = t("voice_switch_diff") + (optIns.length ? " " + t("voice_switch_opt_in", { paths: optIns.join(", ") }) : "");
+    const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
+    const named = [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]
+      .map(([on, key]) => [optIns(on), key]).filter(([paths]) => paths.length)
+      .map(([paths, key]) => " " + t(key, { paths: paths.join(", ") }));
+    const message = t("voice_switch_diff") + named.join("");
     let result = null;
     const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
       run: async () => { result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held }); } });

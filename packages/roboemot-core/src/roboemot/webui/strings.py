@@ -446,6 +446,10 @@ EN: dict[str, str] = {
         "Privacy opt-in (SPEC 12): {paths}. On, microphone audio leaves the robot for the "
         "route's server, a child's voice included."
     ),
+    "voice_switch_opt_out": (
+        "Privacy opt-in turned off (SPEC 12): {paths}. Microphone audio no longer leaves the "
+        "robot for a route's server."
+    ),
     "voice_switch_confirm": "Switch",
     "voice_switch_same": "The voice already uses this choice.",
     "voice_switch_unrevealed": (
@@ -1542,6 +1546,10 @@ IT: dict[str, str] = {
     "voice_switch_opt_in": (
         "Consenso privacy (SPEC 12): {paths}. Se attivo, l'audio del microfono lascia il robot "
         "verso il server della route, voce di un bambino compresa."
+    ),
+    "voice_switch_opt_out": (
+        "Consenso privacy disattivato (SPEC 12): {paths}. L'audio del microfono non lascia più il "
+        "robot verso il server di una route."
     ),
     "voice_switch_confirm": "Cambia",
     "voice_switch_same": "La voce usa già questa scelta.",

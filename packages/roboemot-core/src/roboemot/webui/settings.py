@@ -545,7 +545,9 @@ class SettingsEditor:
         cfg = self.stack.effective()
         known = set(self._known_secrets()) if self._known_secrets is not None else None
         local_ready = cfg.conversation.language in self._installed(cfg)
-        return voice_switch(cfg, platform_voice(self._plugin, cfg), known, local_ready, revealed)
+        return voice_switch(
+            cfg, platform_voice(self._plugin, cfg), known, local_ready, revealed=revealed
+        )
 
     # ------------------------------------------------------------------ writing
 

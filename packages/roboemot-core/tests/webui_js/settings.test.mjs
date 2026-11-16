@@ -452,6 +452,20 @@ test("voice switch: the opt-in line names each opt-in path", async () => {
   assert.equal(posts(page, "/api/settings/batch").length, 0, "a cancel saves nothing");
 });
 
+test("voice switch: opt-ins a choice turns off are worded as off", async () => {
+  const page = await voicePage({
+    "GET /api/strings": { language: "en", strings: { voice_switch_opt_in: "On: {paths}.", voice_switch_opt_out: "Off: {paths}." } },
+    "POST /api/settings/batch/preview": VOICE_DIFF,
+  }, { ...VOICE, value: "gemini" });
+  const select = row(page, "voice-switch").querySelector("select");
+  select.value = "local";
+  select.dispatchEvent(new page.window.Event("change"));
+  await settle();
+  await answerPin(page);
+  const text = page.document.querySelector("dialog").textContent;
+  assert.ok(text.includes("Off: privacy.realtime_audio.") && !text.includes("On:"));
+});
+
 test("voice switch: a choice already in place saves nothing", async () => {
   const page = await voicePage({ "POST /api/settings/batch/preview": { changes: [] } });
   const select = row(page, "voice-switch").querySelector("select");

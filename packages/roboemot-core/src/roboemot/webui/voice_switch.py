@@ -143,7 +143,7 @@ def choices(cfg: RoboEmotConfig, platform: VoiceProfile | None) -> list[Choice]:
     return out
 
 
-def matches(cfg: RoboEmotConfig, choice: Choice, revealed: bool = True) -> bool:
+def matches(cfg: RoboEmotConfig, choice: Choice, *, revealed: bool) -> bool:
     """Whether the effective ``cfg`` is ``choice``: every ``match`` key equal, and with the
     realtime route on in the choice every ``match_realtime`` key too. The tuning keys (timeouts,
     tools, wake policy, sound direction, turns) do not decide it. Without ``revealed`` (no PIN)
@@ -157,10 +157,10 @@ def matches(cfg: RoboEmotConfig, choice: Choice, revealed: bool = True) -> bool:
     return all(get_path(cfg, key) == choice.values[key] for key in keys)
 
 
-def current(cfg: RoboEmotConfig, options: list[Choice], revealed: bool = True) -> str:
+def current(cfg: RoboEmotConfig, options: list[Choice], *, revealed: bool) -> str:
     """The id of the first choice ``cfg`` is (``matches``), else ``custom``. Two choices never
     both match: they differ in the realtime switch or the route name."""
-    return next((c.id for c in options if matches(cfg, c, revealed)), CUSTOM)
+    return next((c.id for c in options if matches(cfg, c, revealed=revealed)), CUSTOM)
 
 
 def judged(
@@ -190,7 +190,8 @@ def voice_switch(
     platform: VoiceProfile | None,
     known: set[str] | None,
     local_ready: bool,
-    revealed: bool = False,
+    *,
+    revealed: bool,
 ) -> dict[str, Any]:
     """The switch as the API sends it: ``value`` (a choice id or ``custom``), ``revealed`` and
     ``choices``, each with ``id``, ``kind``, ``route``, ``protocol``, ``label``, ``available``,
@@ -199,7 +200,7 @@ def voice_switch(
     Without ``revealed`` (no PIN) ``value`` is matched without the private keys (``matches``)."""
     options = choices(cfg, platform)
     return {
-        "value": current(cfg, options, revealed),
+        "value": current(cfg, options, revealed=revealed),
         "revealed": revealed,
         "choices": [
             {
