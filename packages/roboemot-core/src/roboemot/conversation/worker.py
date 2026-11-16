@@ -59,6 +59,16 @@ path's affect runner) when the turn ends, unless the turn was skipped. Each call
 ``function_call_output`` and never starts a round of its own, except one more response when a
 response held only tone calls and no speech.
 
+Robot-initiated turns (SPEC 8, Conversation state; SPEC 11, Voice tools): ``event_turn`` queues
+a turn with no user utterance, first in line. Its event text takes the user text's place in the
+chat request, or goes as a text item before ``response.create`` on a realtime route (both wires).
+The history keeps the reply only and the live transcript records the event as kind ``event``.
+It never skips (no skip or tone tool), says no fallback line of its own (the announcer has one)
+and keeps the open session's person. Its future is True once the reply audio started, False
+when none started within ``tools.scheduler.announce_timeout_s``, counted from when the route
+can take the request (the open realtime session, else the chat request); a late reply is then
+cancelled.
+
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
 """
@@ -67,6 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import concurrent.futures
 import contextlib
 import dataclasses
 import json
@@ -154,6 +165,7 @@ TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realti
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
 TONE_INVALID = '{"error": "unknown_tone"}'  # not one of voice.realtime_route.tone_labels
 CANCELLED = "cancelled"  # the response.done status of a response cancelled (S2: by the server)
+EVENT = "event"  # the live transcript's kind of a robot-initiated turn's event text (SPEC 8)
 
 
 class Speech(Protocol):
@@ -242,6 +254,18 @@ class _Turn:
     messages: list[dict[str, Any]] | None = field(default=None, repr=False)
     # one-shot callbacks run once its last reply audio has ended (after_turn)
     after: list[Callable[[], None]] = field(default_factory=list, repr=False)
+    event: bool = False  # a robot-initiated turn: its utterance text is the event text
+    event_from: float | None = None  # when its route could take the request (announce timeout)
+
+
+@dataclass
+class _EventTurn:
+    """A queued robot-initiated turn (``event_turn``): the event text, its language and the
+    future that says whether its reply audio started in time."""
+
+    text: str = field(repr=False)
+    language: str
+    future: concurrent.futures.Future[bool] = field(repr=False)
 
 
 @dataclass
@@ -408,6 +432,9 @@ class ConversationWorker:
             dropped = [u for u, _ in self._pending]
             self._pending.clear()
         for utterance in dropped:  # never answered: they no longer hold the listening cue
+            if isinstance(utterance, _EventTurn):  # never announced: the announcer falls back
+                _resolve(utterance.future, False)
+                continue
             if isinstance(utterance, _ServerTurn):  # its response is cancelled, never played
                 self.realtime.release(utterance.offer.request)
                 continue
@@ -704,6 +731,8 @@ class ConversationWorker:
             try:
                 if isinstance(item[0], _ServerTurn):
                     await self._answer_server(item[0])
+                elif isinstance(item[0], _EventTurn):
+                    await self._answer_event(item[0])
                 else:
                     await self._answer(*item)
             except asyncio.CancelledError:
@@ -805,24 +834,48 @@ class ConversationWorker:
             inner.cancel()
 
     def _trim_tail(self) -> bool:
+        """A barge-in after the latest turn's stream ended: cut its history entry back to what
+        was heard. An entry left empty (an event turn's only reply, none of it heard) leaves
+        the history, and its realtime server items are deleted with it."""
+        orphans: list[list[dict[str, Any]]] = []
         with self._lock:
-            tail = self._tail
-            if tail is None or tail.cut or not any(tail.messages is m for m in self._turns):
-                return False
-            tail.cut = True
-            if tail.rt is not None:
-                return self._trim_realtime_tail(tail)
-            played = [text for job, text in tail.queued if self.speech.played(job)]
-            if len(played) == len(tail.queued):
-                return False
-            if played:
-                tail.messages[-1].update(content=" ".join(played), interrupted=True)
-            else:
-                tail.messages.pop()
-            self._counts["history_trimmed"] += 1
+            trimmed = self._trim_tail_locked(orphans)
+        self._delete_items(orphans)
+        return trimmed
+
+    def _trim_tail_locked(self, orphans: list[list[dict[str, Any]]]) -> bool:
+        """``_trim_tail`` with the lock held; an emptied entry goes to ``orphans``."""
+        tail = self._tail
+        if tail is None or tail.cut or not any(tail.messages is m for m in self._turns):
+            return False
+        tail.cut = True
+        if tail.rt is not None:
+            return self._trim_realtime_tail(tail, orphans)
+        played = [text for job, text in tail.queued if self.speech.played(job)]
+        if len(played) == len(tail.queued):
+            return False
+        if played:
+            tail.messages[-1].update(content=" ".join(played), interrupted=True)
+        else:
+            self._pop_reply(tail, orphans)
+        self._counts["history_trimmed"] += 1
         return True
 
-    def _trim_realtime_tail(self, tail: _Tail) -> bool:
+    def _pop_reply(self, tail: _Tail, orphans: list[list[dict[str, Any]]]) -> None:
+        """Drop the tail's reply message (none of it was heard; lock held). When that leaves
+        the entry empty (an event turn keeps no user line), the entry leaves the history, so it
+        takes no ``history_turns`` slot, and its ``rt`` mark, which sat on that message, goes
+        to ``orphans`` so its server items are deleted."""
+        mark = tail.messages[0].get("rt")
+        tail.messages.pop()
+        if tail.messages:
+            return
+        self._turns = collections.deque(t for t in self._turns if t is not tail.messages)
+        self._tail = None
+        if mark:
+            orphans.append([{"rt": mark}])
+
+    def _trim_realtime_tail(self, tail: _Tail, orphans: list[list[dict[str, Any]]]) -> bool:
         """``_trim_tail`` for a realtime reply still playing after its response ended: the
         server's items are truncated at what played (when its session is still the same) and
         the history keeps the words heard (lock held)."""
@@ -845,7 +898,7 @@ class ConversationWorker:
         if kept:
             tail.messages[-1].update(content=" ".join(kept), interrupted=True)
         else:
-            tail.messages.pop()
+            self._pop_reply(tail, orphans)
         self._counts["history_trimmed"] += 1
         return True
 
@@ -902,7 +955,9 @@ class ConversationWorker:
         without a local voice, the cue in their place); then the fixed lines it left."""
         if await self._realtime_ready(turn):
             turn.voice = "realtime"
-        answered = self._confirmation_reply(turn, now)
+        if turn.event:  # the session is open, or the chat request goes now
+            turn.event_from = self.clock()
+        answered = False if turn.event else self._confirmation_reply(turn, now)
         if not answered and turn.voice == "realtime":
             answered = await self._realtime_turn(turn)
         if not answered:
@@ -921,7 +976,8 @@ class ConversationWorker:
         the offline reaction (the puzzled gesture and the offline cue); else the fallback cue."""
         if router.offline:
             turn.outcome = "offline"
-            self.responder.speech_while_offline(self.clock(), turn.language)
+            if not turn.event:  # an event turn's fallback is the announcer's
+                self.responder.speech_while_offline(self.clock(), turn.language)
             return
         turn.outcome = "no_voice"
         self._say_fallback(turn)
@@ -1014,9 +1070,9 @@ class ConversationWorker:
                 turn.register,
                 language=turn.language,
                 robot_name=self._prompt_name(cfg),
-                skip_rule=not line,
+                skip_rule=not (line or turn.event),
                 conversation=None if line else turn.conversation,
-                tone_rule=not (line or turn.tone_retry or turn.rounds),
+                tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -1101,7 +1157,8 @@ class ConversationWorker:
         """``_realtime_rounds`` with ``_rt_lock`` held and the audio input held."""
         route, conv = self.realtime, turn.cfg.conversation
         rt_cfg = turn.cfg.voice.realtime_route
-        skip, tone = rt_cfg.skip_tool, rt_cfg.tone_tool
+        # an event turn is never skipped and has no user voice to note the tone of
+        skip, tone = rt_cfg.skip_tool and not turn.event, rt_cfg.tone_tool and not turn.event
         server = turn.server
         adopt = server.offer.request if server is not None else None
         if server is None:
@@ -1120,6 +1177,8 @@ class ConversationWorker:
             offered, choices, functions, toned = self._rt_tools(turn, server.offer.job.shown)
         else:
             offered, choices, functions, toned = self._rt_tools(turn)
+            if turn.event:
+                toned = []
             sent = route.send(
                 route.session_update(
                     turn.cfg, self._base_instructions(tone_rule=bool(toned)), functions + toned
@@ -1675,7 +1734,7 @@ class ConversationWorker:
                 tones[ev.call_id] = self._tone_call(turn, ev)
                 return False
             if ev.name == SKIP_TOOL and turn.cfg.voice.realtime_route.skip_tool:
-                if not (turn.rounds or calls):  # nothing acted in the turn yet
+                if not (turn.event or turn.rounds or calls):  # nothing acted in the turn yet
                     self._skip_call(turn)
                     return True
                 calls.append(ToolCall(ev.call_id, ev.name, {}))
@@ -1716,7 +1775,7 @@ class ConversationWorker:
     def _emit_tone(self, turn: _Turn) -> None:
         """The turn's tone as one appraisal event, ``speech.tone.<label>`` with the language
         only (as the fast path's ``speech.*`` events), unless the turn was skipped."""
-        if turn.tone is None or turn.skipped or turn.tone_emitted:
+        if turn.tone is None or turn.skipped or turn.tone_emitted or turn.event:
             return
         turn.tone_emitted = True
         self._counts["tones"] += 1
@@ -1877,6 +1936,141 @@ class ConversationWorker:
             route.count("lines")
             return reply.jobs[0][0] if reply.jobs else None
 
+    def busy(self) -> bool:
+        """Whether a turn is open, being served or waiting (a tool round included): the
+        announcer's idle check (SPEC 11, Voice tools). Any thread."""
+        with self._lock:
+            return self._active_turn is not None or self._serving is not None or bool(self._pending)
+
+    def event_turn(self, text: str, language: str) -> concurrent.futures.Future[bool]:
+        """Queue a robot-initiated turn for ``text`` (an event text, SPEC 8, Conversation state)
+        in ``language``, first in line, after the turn in flight. The future is True once its
+        reply audio started, False when no route answered in time or the worker is closed.
+        Any thread; it never waits."""
+        future: concurrent.futures.Future[bool] = concurrent.futures.Future()
+        loop, wake = self._loop, self._wake
+        if self._closed or loop is None or wake is None:
+            future.set_result(False)
+            return future
+        item = _EventTurn(text, language, future)
+        with self._lock:
+            self._pending.appendleft((item, NOT_RECORDED))  # type: ignore[arg-type]
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(wake.set)
+        return future
+
+    def local_line(self, text: str, language: str) -> concurrent.futures.Future[bool]:
+        """Say a fixed line with the local voice now (the announcer's fallback sentence,
+        SPEC 11); the future is whether it was queued (False without a local voice). Runs on
+        the worker's loop, which alone reads the affect and the register. Any thread."""
+        loop = self._loop
+        if loop is None or self._closed:
+            future: concurrent.futures.Future[bool] = concurrent.futures.Future()
+            future.set_result(False)
+            return future
+        return asyncio.run_coroutine_threadsafe(self._local_line(text, language), loop)
+
+    async def _local_line(self, text: str, language: str) -> bool:
+        """``local_line`` on the loop: a turn of its own that only says ``text``."""
+        cfg, now = self.stack.effective(), self.clock()
+        quiet = Prosody(0.0, None, None, 0.0)
+        utterance = Utterance("", language, now, now, now, False, False, frozenset(), quiet)
+        turn = _Turn(
+            utterance, cfg, language, self._register_for(cfg), self.speech.new_utterance(), 0
+        )
+        mood, intensity = self._mood(cfg, None)
+        return self._say_local(turn, text, mood, intensity)
+
+    async def _answer_event(self, ev: _EventTurn) -> None:
+        """Answer one robot-initiated turn; a turn that fails resolves its future False (else
+        its watcher resolves it)."""
+        try:
+            await self._answer_event_turn(ev)
+        except BaseException:
+            _resolve(ev.future, False)
+            raise
+
+    async def _answer_event_turn(self, ev: _EventTurn) -> None:
+        """The turn of ``event_turn``: as an utterance's, with the event text as its words, not
+        addressed (no turn latency), the session's own person (never a speaker change), and a
+        watcher that resolves the future (``_watch_event``)."""
+        now = self.clock()
+        cfg = self.stack.effective()
+        self.apply_config(cfg)
+        router = self.hub.sync(cfg)
+        self.expire(now)
+        with self._lock:
+            session = self._session
+        # the open session's person (never a speaker change); with none open, the person in
+        # view, as for an utterance, so that person's reply continues it (SPEC 8)
+        speaker = session.speaker if session is not None else self._who()
+        self._touch(now, speaker)
+        quiet = Prosody(0.0, None, None, 0.0)
+        utterance = Utterance(ev.text, ev.language, now, now, now, False, False, frozenset(), quiet)
+        register = self._register_for(cfg)
+        turn = _Turn(
+            utterance,
+            cfg,
+            ev.language,
+            register,
+            self.speech.new_utterance(),
+            max_reply_sentences(cfg, register),
+            speaker=speaker,
+            event=True,
+        )
+        turn.began, turn.stamps["heard"] = now, now
+        if self.transcript is not None:
+            _, turn.ring_gen = self.transcript.begin(EVENT, ev.text, ev.language)
+        self.affect.new_turn()
+        with self._lock:
+            self._active_turn = turn
+        task = asyncio.get_running_loop().create_task(self._watch_event(turn, ev.future))
+        self._after_tasks.add(task)
+        task.add_done_callback(self._after_tasks.discard)
+        try:
+            await self._respond(turn, router, now)
+        except BaseException as exc:
+            self._abandon(turn, cancelled=isinstance(exc, asyncio.CancelledError))
+            raise
+        finally:
+            self._inner = None
+            self.phase.end_thinking()
+        self._finish(turn)
+
+    async def _watch_event(self, turn: _Turn, future: concurrent.futures.Future[bool]) -> None:
+        """Resolve an event turn's future: True at its first reply audio; False once the turn
+        ended with nothing queued, or ``announce_timeout_s`` after its route could take the
+        request (``event_from``) with no audio. A timeout cancels the turn, so a late reply
+        never plays after the announcer's fallback."""
+        try:
+            await self._watch_event_audio(turn, future)
+        finally:  # the worker closing cancels it: never announced
+            _resolve(future, False)
+
+    async def _watch_event_audio(
+        self, turn: _Turn, future: concurrent.futures.Future[bool]
+    ) -> None:
+        """``_watch_event``'s polling loop."""
+        timeout = turn.cfg.tools.scheduler.announce_timeout_s
+        while not future.done():
+            if self.speech.first_audio_at(turn.speech_id) is not None:
+                _resolve(future, True)
+                return
+            if turn.done and not turn.queued:
+                _resolve(future, False)
+                return
+            start = turn.event_from
+            if start is not None and self.clock() - start >= timeout:
+                self._counts["event_timeouts"] += 1
+                with self._lock:
+                    turn.interrupted = turn.stopped = True
+                if turn.queued:
+                    self.speech.stop()  # its sentences never started: none plays late
+                self._cancel_inner()
+                _resolve(future, False)
+                return
+            await asyncio.sleep(AFTER_TURN_POLL_S)
+
     def say_line(self, text: str, language: str) -> bool:
         """A fixed line from outside a turn (the offline cue) in the server's voice while the
         route is up; False when it is not (the caller then says it with Piper). Any thread."""
@@ -1949,7 +2143,8 @@ class ConversationWorker:
             await inner
         except Offline:
             turn.outcome = "offline"
-            self.responder.speech_while_offline(self.clock(), turn.language)
+            if not turn.event:  # an event turn's fallback is the announcer's
+                self.responder.speech_while_offline(self.clock(), turn.language)
         except NoRouteAvailable:
             turn.outcome = "no_route"
             self._say_fallback(turn)
@@ -2338,11 +2533,14 @@ class ConversationWorker:
     def _say_fallback(self, turn: _Turn) -> None:
         """No route answered: the "can't think right now" line, or its cue where no voice can
         say it (SPEC 8, Non-verbal cues)."""
+        turn.fell_back = True
+        if turn.event:  # the announcer says the event's own fixed sentence (SPEC 11)
+            self._counts["event_fallbacks"] += 1
+            return
         text = pick(
             turn.cfg.conversation.fallback_lines, turn.language, turn.cfg.conversation.language
         )
         state = self.affect.state(self.clock())
-        turn.fell_back = True
         self._say(turn, text or "", state.label, state.intensity, cue="fallback")
         self._counts["fallbacks"] += 1
 
@@ -2375,19 +2573,19 @@ class ConversationWorker:
                 self._spoke_at = self._spoken_until(items if cut else turn.queued)
             dropped: list[list[dict[str, Any]]] = []
             if (spoken or turn.exchange) and self._max_turns > 0:
-                messages: list[dict[str, Any]] = [
-                    {"role": "user", "content": turn.utterance.text},
-                    *turn.exchange,
-                ]
-                # the server's items of this turn (deleted with it); _history_message sends a
-                # chat route only the chat fields, so this mark never leaves the robot
-                if turn.rt_items:
-                    # the turn's own list: items of a late call join it (_late_items)
-                    messages[0]["rt"] = (turn.rt_gen, turn.rt_items)
+                # an event turn keeps the reply only: its event text is never a user line
+                user = [] if turn.event else [{"role": "user", "content": turn.utterance.text}]
+                messages: list[dict[str, Any]] = [*user, *turn.exchange]
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
                     if len(kept) < len(texts) or turn.rt_partial:
                         messages[-1]["interrupted"] = True
+                # the server's items of this turn (deleted with it), on its first message;
+                # _history_message sends a chat route only the chat fields, so this mark never
+                # leaves the robot
+                if turn.rt_items:
+                    # the turn's own list: items of a late call join it (_late_items)
+                    messages[0]["rt"] = (turn.rt_gen, turn.rt_items)
                 self._turns.append(messages)
                 turn.messages = messages  # a server turn's words may come later (_attach)
                 dropped = self._cap_history()
@@ -2480,3 +2678,11 @@ class ConversationWorker:
                 "first_audio": ms(first_audio),
             }
         return out
+
+
+def _resolve(future: concurrent.futures.Future[bool], value: bool) -> None:
+    """Set ``future`` to ``value`` unless it is already done (a watcher and a turn's end may
+    both try; the first wins)."""
+    with contextlib.suppress(concurrent.futures.InvalidStateError):
+        if not future.done():
+            future.set_result(value)

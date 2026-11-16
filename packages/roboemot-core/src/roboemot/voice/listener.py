@@ -482,6 +482,11 @@ class VoiceListener:
         robot's name or a wake phrase addresses the robot until a new one opens it."""
         self._gate.close_window()
 
+    def open_follow_up(self) -> None:
+        """Open the wake gate's follow-up window now: the robot's announcement ended (SPEC 8,
+        robot-initiated turn), so the person can reply without the wake word. Any thread."""
+        self._gate.open_window(self._clock())
+
     def snapshot(self) -> dict[str, Any]:
         """Counters and fast-path latencies for the debug report: numbers only, no content."""
         with self._lock:

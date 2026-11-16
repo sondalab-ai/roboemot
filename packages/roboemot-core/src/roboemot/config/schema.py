@@ -6952,9 +6952,10 @@ class SchedulerConfig(Strict):
     )
     announce_timeout_s: float = param(
         8.0,
-        "When no LLM route answers an announcement within this long, the robot says a fixed "
-        "sentence with the local voice (or plays the fallback cue). Above the realtime connect "
-        "timeout",
+        "When the reply audio of an announcement has not started this long after the route "
+        "could take the request, the robot says a fixed sentence with the local voice (or plays "
+        "the fallback cue). Counted from the open session on a realtime route (its connect "
+        "timeout comes first) and from the request on a chat route",
         unit="s",
         ge=1,
         le=60,

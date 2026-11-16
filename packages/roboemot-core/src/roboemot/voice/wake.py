@@ -82,6 +82,14 @@ class WakeGate:
         with self._lock:
             self._until = -math.inf
 
+    def open_window(self, at: float) -> None:
+        """Open the follow-up window at ``at`` (audio clock) as an addressed utterance ending
+        then would: a robot-initiated turn's reply ended (SPEC 8, Conversation state), so the
+        person can answer without the wake word. Any speaker may follow it."""
+        with self._lock:
+            self._opened, self._speaker = at, None
+            self._until = at + min(self._window, self._max)
+
     def decide(
         self,
         *,
