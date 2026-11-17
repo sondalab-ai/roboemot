@@ -295,6 +295,22 @@ def drawn(rig):
     return decode(rig.video.frame("a")[0])
 
 
+def sampling_factors(jpeg):
+    """The per-component sampling bytes of the JPEG's baseline frame header (SOF0)."""
+    at = jpeg.index(b"\xff\xc0")
+    count = jpeg[at + 9]
+    return [jpeg[at + 10 + 3 * k + 1] for k in range(count)]
+
+
+def test_the_preview_keeps_full_chroma_so_thin_boxes_keep_their_colour():
+    rig = Rig(objects=[((300.0, 200.0, 400.0, 320.0), "cup", None)])
+    rig.apply(video_max_width=640)
+    rig.video.frame("a")
+    rig.submit(np.zeros((480, 640, 3), np.uint8))
+    jpeg = rig.video.frame("a")[0]
+    assert sampling_factors(jpeg) == [0x11, 0x11, 0x11]  # 4:4:4, no chroma subsampling
+
+
 def green_pixels(img):
     return int(((img[:, :, 1] > 150) & (img[:, :, 0] < 120) & (img[:, :, 2] < 120)).sum())
 

@@ -888,6 +888,7 @@ EN: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "This entry comes from the configuration file and cannot be removed here."
     ),
+    "err_entry_not_removed": "The entry could not be removed; nothing was changed.",
     "err_endpoint_ack_required": (
         "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
         "the button again to allow it."
@@ -2201,6 +2202,7 @@ IT: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "Questa voce viene dal file di configurazione e non si può rimuovere da qui."
     ),
+    "err_entry_not_removed": "Non è stato possibile rimuovere la voce; non è cambiato nulla.",
     "err_endpoint_ack_required": (
         "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
         "PIN e premi di nuovo il pulsante per consentirlo."
