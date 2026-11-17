@@ -16,9 +16,11 @@ hold. ``pause(reason)`` (the announcer's) holds it now and cuts what is still in
 An announcement's reply window (``VoiceListener.reply_window_open``) holds it too, so the person
 can answer the robot without its name (owner decision 2026-11-17).
 
-It stops on ``stop``, on a nap (``circadian.state`` ``resting``), on ``robot.asleep``, after
-``tools.media.max_play_s``, and at a stream end, stall or error. It publishes ``media.playing``
-(``{"station"}``) and ``media.stopped`` (``{"station", "reason"}``) with the station name only.
+It stops on ``stop``, on a rest (``circadian.state`` ``resting``: a requested nap, the quiet
+hours; while it plays the circadian runner starts no idle nap, owner decision 2026-11-17), on
+``robot.asleep``, after ``tools.media.max_play_s``, and at a stream end, stall or error. It
+publishes ``media.playing`` (``{"station"}``) and ``media.stopped`` (``{"station", "reason"}``)
+with the station name only.
 Logs carry the station name and a reason, never the URL, an exception's text or stream metadata.
 
 It also stops when a config change (``on_config``, a ``ConfigStack`` listener) turns

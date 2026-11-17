@@ -30,7 +30,7 @@ def config(**circadian):
     return ConfigStack(app={"circadian": circadian}).effective()
 
 
-def rig(hour: float = 10.0, *, conversing=None, engaged=None, **circadian):
+def rig(hour: float = 10.0, *, conversing=None, engaged=None, media_playing=None, **circadian):
     cfg = config(**circadian)
     clock, bus, events = FakeClock(), Bus(), []
     clock.set(0.0, hour)
@@ -39,6 +39,8 @@ def rig(hour: float = 10.0, *, conversing=None, engaged=None, **circadian):
         kw["conversing"] = conversing
     if engaged is not None:
         kw["engaged"] = engaged
+    if media_playing is not None:
+        kw["media_playing"] = media_playing
     r = CircadianRunner(
         cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0, **kw
     )
@@ -966,3 +968,32 @@ def test_the_report_carries_the_quiet_hours_window_state_and_countdown():
     y = rig(hour=23.0)
     assert y.r.snapshot()["quiet"]["active"] is True
     assert y.r.snapshot()["quiet"]["change_in_s"] == 8 * 3600.0
+
+
+def test_the_radio_holds_idle_naps_off_and_the_clock_restarts_when_it_stops():
+    """Review I3 (owner decision 2026-11-17): while the radio plays the idle-nap clock does not
+    run, so nobody facing the robot does not end the music; after it stops a nap needs the full
+    nap_after_s again."""
+    playing = [True]
+    x = rig(media_playing=lambda: playing[0])
+    after = x.cfg.circadian.nap_after_s
+    assert set(run(x, 3 * after)) == {"awake"}
+    assert x.r.snapshot()["nap"]["naps"] == 0
+    assert due(x) == (None, False)  # no countdown while it plays
+    playing[0] = False
+    assert set(run(x, after - 2 * STEP)) == {"awake"}
+    run(x, 3 * STEP)
+    assert x.r.model.state == "resting" and x.r.model.reason == "nap"
+
+
+def test_a_requested_nap_still_rests_the_robot_while_the_radio_plays():
+    """Review I3: the radio holds only the idle nap off; a requested nap rests the robot, and
+    its ``circadian.state`` ``resting`` is what stops the player (reason ``nap``)."""
+    seen = []
+    x = rig(media_playing=lambda: True)
+    x.bus.subscribe("circadian.state", lambda m: seen.append(m.payload.state))
+    run(x, STEP)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    run(x, STEP)
+    assert x.r.model.state == "resting" and x.r.model.reason == "nap"
+    assert seen[-1] == "resting"

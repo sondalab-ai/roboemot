@@ -4,10 +4,10 @@ confirmation, and when a nap starts and ends.
 The idle clock adds up time outside quiet hours with no confirmed face and no addressed speech:
 quiet hours pause it (idle from 22:15 and quiet hours from 22:30 make a nap at 07:15). It
 restarts from zero on activity and while a nap is impossible (``blocked``: naps off, the robot
-asleep, a hold, a rest of the rhythm's own, attention on a person), so a stale clock never fires a
-nap the moment one becomes possible again. Presence (``held``) only holds a due nap off: a single
-blip never resets the clock. Times are passed in; the caller (``CircadianRunner``) holds its lock
-and acts on the model (a wake, the ``nap`` input).
+asleep, a hold, a rest of the rhythm's own, attention on a person, the robot's radio playing),
+so a stale clock never fires a nap the moment one becomes possible again. Presence (``held``)
+only holds a due nap off: a single blip never resets the clock. Times are passed in; the caller
+(``CircadianRunner``) holds its lock and acts on the model (a wake, the ``nap`` input).
 
 A nap ends on activity (``activity``: a confirmed face, addressed speech, a conversation) and on
 a stimulus (``stimulus``: the room light rising, motion in front of a still camera, a loud sound;
