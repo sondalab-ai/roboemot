@@ -333,6 +333,7 @@ class VoiceListener:
         self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
         self._music_from_media = False  # the detector's last audio was the radio's pieces
         self._media_until = -math.inf  # where the last radio piece fed to it ends
+        self._radio_music = False  # the detector's music started on the radio's pieces
         self._gate = WakeGate(  # see apply_config
             "always", 0.0, music=self._music_during, media=self._media_at
         )
@@ -844,7 +845,10 @@ class VoiceListener:
             self._music_audio(samples, start, end, heard=True)
 
     def _publish_music(self, music: MusicDetector, event: str | None, stamp: float) -> None:
-        """Put a change of the music state on the bus; no change publishes nothing."""
+        """Put a change of the music state on the bus; no change publishes nothing. A start
+        notes whether the detector heard it on the radio's pieces (``_music_during``)."""
+        if event is not None:
+            self._radio_music = event == STARTED and self._music_from_media
         if event is None or self._bus is None:
             return
         topic = "music.started" if event == STARTED else "music.stopped"
@@ -857,11 +861,15 @@ class VoiceListener:
     def _music_during(self, start: float, end: float) -> bool:
         """The wake gate's music predicate: whether music played at any time in [start, end]
         (lock-free, one frozen view of the detector). False without a detector, while
-        ``music.enabled`` is off, or while the radio plays with ``tools.radio.dance`` off."""
+        ``music.enabled`` is off, while the radio is audible with ``tools.radio.dance`` off, and
+        while the music the detector holds started on the radio's own pieces: while the radio
+        is audible the media rule covers it, and while the radio is held no lyric can be heard,
+        though the detector carries that music through the hold for the dance (SPEC 8, Radio
+        playback). Music it heard on the microphone counts as ever."""
         music = self.music
         if music is None or not self._cfg.music.enabled or self._music_hidden(start):
             return False
-        return music.during(start, end)
+        return not self._radio_music and music.during(start, end)
 
     def music_state(self, now: float) -> MusicState | None:
         """The detector's state at ``now`` for the dance's room beat (lock-free, no blocking);

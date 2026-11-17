@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from audio_signals import drum_loop
 from reachy_config import reachy_config
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.media.player import MediaPlayer
@@ -276,20 +277,43 @@ class Turn:
         return self.open
 
 
-def with_player(r, steps=True):
+class DrumStream:
+    """A live stream with a steady beat (120 BPM), so the real music detector confirms music
+    on the radio's own pieces, as on the robot."""
+
+    def __init__(self) -> None:
+        self.audio = drum_loop(120, 120.0, RATE)
+        self.at = 0
+
+    def read(self, frames: int) -> np.ndarray:
+        piece = self.audio[self.at : self.at + frames]
+        self.at += frames
+        return piece
+
+    def kill(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def with_player(r, steps=True, stream=FakeStream):
     """A real ``MediaPlayer`` on the rig's clock, wired to the listener as the run wires it
-    (``runtime.startup.start_media``), playing a fake endless stream; with ``steps`` its feeder
-    steps once per chunk the rig feeds. Returns the player and the conversation's turn flag."""
+    (``runtime.startup.start_media``), playing a fake endless ``stream``; with ``steps`` its
+    feeder steps while the rig feeds, at most as fast as the speaker plays (once the speaker
+    holds at most one piece). Returns the player and the conversation's turn flag."""
     turn = Turn()
     host = SimpleNamespace(bus=None, conversation=turn, phase=None, voice_listener=r.listener)
+    output = FakeOutput(lambda: r.now)
     player = MediaPlayer(
-        FakeOutput(lambda: r.now),
+        output,
         host,
         lambda: r.cfg,
-        opener=lambda url, rate_hz, timeout_s: FakeStream(),
+        opener=lambda url, rate_hz, timeout_s: stream(),
         clock=lambda: r.now,
         wait=lambda seconds: False,
     )
+    piece_s = r.cfg.tools.media.chunk_ms / 1000.0
     r.listener.media_audible = player.audible_at
     r.listener.media_hold = player.hold_from
     player.on_piece = r.listener.hear_media
@@ -297,7 +321,8 @@ def with_player(r, steps=True):
 
     def process_and_step(chunk):
         process(chunk)
-        player.step()
+        if output.until - r.now <= piece_s:
+            player.step()
 
     if steps:
         r.listener.process = process_and_step
@@ -368,3 +393,52 @@ def test_an_utterance_inside_a_reply_window_over_a_station_never_deadlocks():
     thread.join(5.0)
     assert done.is_set()
     assert r.utterances[-1].addressed
+
+
+def test_music_the_detector_heard_on_the_radio_never_rejects_a_held_follow_up():
+    """With the detector hearing the radio's own pieces it confirms music on the robot's jazz
+    and carries it through the robot's reply (a hole does not count toward the release). That
+    music is the radio's: while the radio is audible the media rule covers it, and while it is
+    held no lyric can be heard, so it must not turn "stoppa la musica" into rejected_music."""
+    r = Rig(["reati"], final="reati", cfg=cfg("always"))
+    player, turn = with_player(r, stream=DrumStream)
+    r.feed(silence(10.0))
+    assert r.listener.music_state(r.now).playing  # the dance may start on the radio
+    r.say()
+    assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+    turn.open = True  # the robot says "Eccomi"
+    r.feed(silence(2.0))
+    turn.open = False
+    r.feed(silence(0.2))
+    assert r.listener.music_state(r.now).playing  # the flywheel keeps the dance's beat
+    say_text(r, "stoppa la musica")
+    assert r.utterances[-1].addressed and not r.utterances[-1].wake_word
+    decisions = r.listener.snapshot()["wake"]["decisions"]
+    assert decisions["rejected_music"] == 0 and decisions["window"] == 1
+    r.feed(silence(r.cfg.tools.media.resume_after_s + 0.5))
+    say_text(r, "amore mio")  # the radio is audible again: a lyric is rejected_media
+    assert not r.utterances[-1].addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["rejected_media"] == 1
+
+
+def test_the_reply_window_over_a_radio_the_detector_danced_to():
+    r, _, _ = direction_rig("ok grazie", FACE_RAD, cfg=cfg("always"))
+    player, _ = with_player(r, stream=DrumStream)
+    r.feed(silence(10.0))
+    assert r.listener.music_state(r.now).playing
+    player.pause("announce")
+    r.listener.open_follow_up()
+    r.feed(silence(0.2))
+    r.say()
+    assert r.utterances[-1].addressed and not r.utterances[-1].wake_word
+    assert r.listener.snapshot()["wake"]["decisions"]["rejected_music"] == 0
+
+
+def test_room_music_from_the_microphone_still_needs_the_wake_word():
+    """Music the detector heard from the microphone keeps the music rule (2026-11-04)."""
+    r = Rig(["come stai"], cfg=cfg("never"))
+    r.feed(drum_loop(120, 10.0, RATE) * 0.5)
+    assert r.listener.music_state(r.now).playing
+    r.say()
+    assert not r.utterances[-1].addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["rejected_music"] == 1
