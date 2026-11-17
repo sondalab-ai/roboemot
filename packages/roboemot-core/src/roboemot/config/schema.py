@@ -6547,6 +6547,38 @@ class LiveConfig(Strict):
         le=200000,
         advanced=True,
     )
+    prompts: bool = param(
+        False,
+        "Keep the recent requests that leave the robot for a cloud LLM (chat prompts and "
+        "realtime frames, as sent: names aliased, audio summarized, never a key or URL) in "
+        "memory for the Live tab's LLM prompts panel, a debug aid; off by default and then "
+        "nothing at all is kept. Never saved, logged or put in the debug report",
+        opt_in=True,
+    )
+    prompts_max_entries: int = param(
+        50,
+        "Most requests the LLM prompts panel keeps; the oldest go first",
+        ge=1,
+        le=500,
+        advanced=True,
+    )
+    prompts_max_chars: int = param(
+        16000,
+        "Longest text kept for one request in the LLM prompts panel; more is cut with a marker",
+        unit="chars",
+        ge=1000,
+        le=100000,
+        advanced=True,
+    )
+    prompts_response_max_chars: int = param(
+        100000,
+        "Most text characters one LLM prompts poll carries; a longer list sends its newest "
+        "requests",
+        unit="chars",
+        ge=10000,
+        le=1000000,
+        advanced=True,
+    )
     video: bool = param(
         False,
         "Serve a live camera preview (one JPEG at a time, with face boxes and names) to the Live "
