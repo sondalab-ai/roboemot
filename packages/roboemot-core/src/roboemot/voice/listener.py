@@ -71,7 +71,15 @@ speaking chunk and a chunk gap tell it where the hole began. Audio replayed by `
 fed: it is the user's voice after a cut. The wake gate asks it whether music played at any time
 in the utterance (``WakeGate``: the wake word is then required, ``rejected_music`` without it),
 also when an utterance that skipped Vosk ends. ``music.started`` and ``music.stopped`` go on the
-bus with the tempo only.
+bus with the tempo only. While the robot's own radio is audible and ``tools.radio.dance`` is on,
+the detector and the classifier hear the radio's own pieces instead of the microphone: a robot
+with a hardware echo canceller removes its radio from the microphone. The media player hands
+each piece that went to the speaker to ``hear_media`` (its feeder thread: one append to a
+bounded deque, the detector's window of pieces), stamped when it starts to play; this thread
+alone takes them and feeds them, so the detector keeps one feeding thread. The microphone's
+chunks then reach neither (no hole either: the radio's stamps carry their own holes); when the
+radio is held the microphone feeds them again once the radio's last piece has played, after one
+hole.
 
 The robot's own radio (``media_audible``, the media player's ``audible_at``, SPEC 8, Radio
 playback): while it can be heard as an utterance starts, only the wake word addresses the robot
@@ -320,6 +328,11 @@ class VoiceListener:
         # start)
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
+        # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
+        # thread only; sized in apply_config to the detector's window
+        self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
+        self._music_from_media = False  # the detector's last audio was the radio's pieces
+        self._media_until = -math.inf  # where the last radio piece fed to it ends
         self._gate = WakeGate(  # see apply_config
             "always", 0.0, music=self._music_during, media=self._media_at
         )
@@ -405,6 +418,7 @@ class VoiceListener:
             "barge_ins": 0,
             "errors": 0,
             "name_first_no_face": 0,  # the name opened a long final, no face at the voice
+            "media_rate_mismatch": 0,  # a radio piece at another rate than the detector's
         }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
@@ -429,6 +443,8 @@ class VoiceListener:
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
+        pieces = max(1, round(cfg.music.window_s * MS_PER_S / cfg.tools.media.chunk_ms))
+        self._media_pieces = collections.deque(self._media_pieces, maxlen=pieces)
         if self.music is not None:  # last: a band above the Nyquist frequency raises here
             self.music.apply_config(cfg.music)
         elif cfg.music.enabled:
@@ -678,8 +694,8 @@ class VoiceListener:
         lost = 0.0
         if chunk.gap and self._last_end is not None:
             lost = max(0.0, chunk.stamp - duration - self._last_end)
-        if chunk.gap and self.music is not None:  # the hole began where the last chunk ended
-            self.music.gap(chunk.stamp - duration - lost)
+        if chunk.gap:  # the hole began where the last chunk ended
+            self._music_gap(chunk.stamp - duration - lost)
         self._last_end = chunk.stamp
         try:
             self._process(chunk, chunk.stamp - duration)
@@ -701,8 +717,7 @@ class VoiceListener:
             self._playback_ended = self._playback_ended or self._playback  # its segment is gone
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
         if self._playback and speaking and not self._playback_ended:
-            if self.music is not None:  # the robot's own sound is never music
-                self.music.gap(start)
+            self._music_gap(start)  # the robot's own sound is never music
             if start >= self._playback_until and not self._playback_confirmed():
                 # its own bound, whatever the barge-in does (S2: confirm_ms, then it ends)
                 self.end_playback()
@@ -723,8 +738,7 @@ class VoiceListener:
                 self._muted = True
                 self._abort()
             self._count("dropped_speaking")
-            if self.music is not None:
-                self.music.gap(start)
+            self._music_gap(start)
             self._speaking_hook(chunk)
             return
         if self._muted and not speaking:
@@ -747,24 +761,87 @@ class VoiceListener:
         cut left open) is a hole to it: the robot's own sound must never count as music. The
         classifier gets the same chunks (the ``music_classifier`` stage), and while it decides
         (``music.classifier.decides``) its scores go to the detector. While the robot's own
-        radio plays with ``tools.radio.dance`` off, every chunk is a hole as well."""
+        radio is audible with ``tools.radio.dance`` off, every chunk is a hole as well; with it
+        on, the detector hears the radio's own pieces instead (``_hear_media``) and the
+        microphone's chunk not at all: behind a hardware echo canceller it holds the room
+        without the radio, and its stamps would mix two timelines."""
+        if self._media_feeds(start):
+            self._hear_media()
+            return
+        if self._music_from_media:
+            self._media_pieces.clear()
+            if start < self._media_until:  # the radio's last piece is still playing
+                return
+            self._music_from_media = False
+            self._music_gap(self._media_until)  # one hole, from the radio's last piece
         speaking = speaking or self._music_hidden(start)
+        if speaking:
+            self._music_gap(start)
+        self._music_audio(chunk.samples, start, chunk.stamp, heard=not speaking)
+
+    def _music_audio(self, samples: np.ndarray, start: float, end: float, heard: bool) -> None:
+        """One piece of audio for the classifier and the detector (``heard`` False: the
+        classifier skips it; the caller told the detector the hole). Publishes a change."""
         classifier, scores = self.music_classifier, None
-        if not speaking and classifier is not None:
-            scores = self._timed("music_classifier", classifier.feed, chunk.samples, start)
+        if heard and classifier is not None:
+            scores = self._timed("music_classifier", classifier.feed, samples, start)
         music = self.music
         if music is None:
             return
         music.classifier_primary = (
             classifier is not None and classifier.running and self._cfg.music.classifier.decides
         )
-        if speaking:
-            music.gap(start)
+        if not heard:
             return
         if scores is not None:
-            self._publish_music(music, music.classified(*scores, start), chunk.stamp)
-        event = self._timed("music", music.feed, chunk.samples, start)
-        self._publish_music(music, event, chunk.stamp)
+            self._publish_music(music, music.classified(*scores, start), end)
+        event = self._timed("music", music.feed, samples, start)
+        self._publish_music(music, event, end)
+
+    def _music_gap(self, stamp: float) -> None:
+        """A hole in the microphone's audio at ``stamp`` for the detector; none while it hears
+        the radio's pieces, whose own stamps show their holes."""
+        if self.music is not None and not self._music_from_media:
+            self.music.gap(stamp)
+
+    def _media_feeds(self, at: float) -> bool:
+        """Whether the detector hears the radio's pieces now: a detector, ``music.enabled``,
+        ``tools.radio.dance``, and the radio audible at ``at`` (SPEC 8, Radio playback)."""
+        cfg = self._cfg
+        if self.music is None or not cfg.music.enabled or not cfg.tools.radio.dance:
+            return False
+        return self._media_at(at)
+
+    def hear_media(self, samples: np.ndarray, rate_hz: int, start: float) -> None:
+        """A piece of the robot's own radio that went to the speaker and starts to play at
+        ``start`` (the media player's ``on_piece``, its feeder thread): kept for the music
+        detector while it may dance to the radio (``_media_feeds``), at most the detector's
+        window of pieces. Never blocks: one append to a bounded deque (thread-safe), taken
+        by the listener thread only. A piece at another rate than the detector's is dropped
+        (the player decodes at ``voice.sample_rate_hz``, as the detector runs)."""
+        cfg = self._cfg
+        if self.music is None or not cfg.music.enabled or not cfg.tools.radio.dance:
+            return
+        if rate_hz != cfg.voice.sample_rate_hz:
+            self._count("media_rate_mismatch")
+            return
+        self._media_pieces.append((samples, start))
+
+    def _hear_media(self) -> None:
+        """Feed the detector (and the classifier) the radio's pieces waiting, in play order,
+        on this thread: the same analysis as for a microphone chunk, never a second decode."""
+        self._music_from_media = True
+        rate = self._cfg.voice.sample_rate_hz
+        while self._media_pieces:
+            try:
+                samples, start = self._media_pieces.popleft()
+            except IndexError:  # emptied by a reload meanwhile
+                return
+            end = start + samples.size / rate
+            if end <= self._media_until:  # out of order: never feed the detector backwards
+                continue
+            self._media_until = end
+            self._music_audio(samples, start, end, heard=True)
 
     def _publish_music(self, music: MusicDetector, event: str | None, stamp: float) -> None:
         """Put a change of the music state on the bus; no change publishes nothing."""

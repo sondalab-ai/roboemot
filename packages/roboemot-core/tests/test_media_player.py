@@ -73,16 +73,20 @@ class FakeOutput:
     """The speech output as the player sees it: ``blocked`` stands for robot speech, a cue or
     an announcement queued or playing."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock=None) -> None:
         self.blocked = False
         self.pushed: list[tuple[int, int, float]] = []
         self.cuts = 0
+        self.clock = clock or (lambda: 0.0)
+        self.until = 0.0  # the speaker plays what it holds back to back
 
-    def play_media(self, samples, rate_hz, volume_db=0.0) -> bool:
+    def play_media(self, samples, rate_hz, volume_db=0.0) -> float:
+        """The stamp until which the piece will have played, 0.0 when refused."""
         if self.blocked:
-            return False
+            return 0.0
         self.pushed.append((samples.size, rate_hz, volume_db))
-        return True
+        self.until = max(self.until, self.clock()) + samples.size / rate_hz
+        return self.until
 
     def media_blocked(self) -> bool:
         return self.blocked
@@ -122,7 +126,7 @@ class Rig:
         )
         self.clock = Clock()
         self.bus = Bus()
-        self.output = FakeOutput()
+        self.output = FakeOutput(self.clock)
         self.conversation = Conversation()
         self.phase = Phase()
         self.host = SimpleNamespace(
@@ -637,3 +641,27 @@ def test_audible_follows_the_holds_by_stamp():
     assert r.player.audible_at(r.clock.t - 0.6)
     r.player.stop("user")
     assert not r.player.audible_at(r.clock.t - 0.6)  # no station: nothing is audible
+
+
+def test_each_piece_that_played_goes_on_with_its_play_stamp():
+    """SPEC 8, Radio playback (dance): behind a hardware echo canceller the microphone does not
+    hear the radio, so the listener gets the decoded pieces, before the volume, stamped with the
+    moment each starts to play; a refused piece goes nowhere, and a consumer error never stops
+    the music."""
+    r = Rig()
+    got: list[tuple[float, int, float]] = []
+    r.player.on_piece = lambda pcm, rate, start: got.append((float(pcm[0]), rate, start))
+    r.clock.t = 5.0
+    r.player.play(JAZZ)
+    assert r.step(2) == 2
+    rate = r.cfg.voice.sample_rate_hz
+    assert [g[:2] for g in got] == [(0.25, rate)] * 2  # the stream's own level
+    assert got[0][2] == pytest.approx(5.0)  # the speaker was idle: it starts now
+    assert got[1][2] == pytest.approx(5.0 + r.chunk_s)  # back to back after the first
+    r.output.blocked = True
+    r.step(2)
+    assert len(got) == 2  # held: nothing played, nothing goes on
+    r.output.blocked = False
+    r.player.on_piece = lambda pcm, rate, start: 1 / 0
+    r.step(round(r.cfg.tools.media.resume_after_s / r.chunk_s) + 2)
+    assert r.player.now_playing() == JAZZ and len(r.output.pushed) > 2

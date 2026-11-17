@@ -7,12 +7,22 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 from reachy_config import reachy_config
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.media.player import MediaPlayer
 from roboemot.voice.wake import WakeGate
 from test_media_player import JAZZ, FakeOutput, FakeStream
-from test_voice_listener import FACE_RAD, Rig, SpyMusic, direction_rig, say_text, silence
+from test_voice_listener import (
+    FACE_RAD,
+    RATE,
+    Rig,
+    SpyMusic,
+    direction_rig,
+    say_text,
+    silence,
+)
 
 
 def cfg(policy="unless_enrolled_in_view", **tools):
@@ -99,12 +109,79 @@ def test_dance_off_hides_music_while_playing():
 
 
 def test_dance_on_lets_the_detector_hear_the_robots_own_radio():
+    """The robot (2026-11-17): behind the hardware echo canceller the microphone read -72.7
+    dBFS while the radio played at -26.7 dBFS, so the dance never started. The detector now
+    hears the radio's own pieces, stamped when they play, and never the microphone's chunks
+    (AEC-cleaned room audio on another timeline): no microphone chunk is fed, no hole either."""
     r = Rig(["ciao"], cfg=cfg(dance=True))
     r.listener.media_audible = lambda at: True
     spy = r.listener.music = SpyMusic(True)
+    piece = np.full(3200, 0.25, np.float32)  # 200 ms at 16 kHz
+    r.listener.hear_media(piece, RATE, r.t + 0.1)
+    r.listener.hear_media(piece, RATE, r.t + 0.3)
     r.feed(silence(0.5))
-    assert spy.fed  # it may start the dance, with tempo and beat from the microphone
-    assert r.listener._music_during(r.t - 0.5, r.t)
+    assert spy.fed == [(pytest.approx(r.t - 0.4), 3200), (pytest.approx(r.t - 0.2), 3200)]
+    assert spy.gaps == []
+    assert r.listener._music_during(r.t - 0.5, r.t)  # it may start the dance
+
+
+def test_dance_off_keeps_no_radio_piece():
+    r = Rig(["ciao"], cfg=cfg(dance=False))
+    r.listener.media_audible = lambda at: True
+    spy = r.listener.music = SpyMusic(True)
+    r.listener.hear_media(np.ones(3200, np.float32), RATE, r.t)
+    r.feed(silence(0.5))
+    assert spy.fed == [] and spy.gaps  # the microphone's chunks are holes, no radio piece
+    assert len(r.listener._media_pieces) == 0
+
+
+def test_the_microphone_feeds_the_detector_again_while_the_radio_is_held():
+    """Held (the robot speaks, a turn is open), the radio plays nothing: the microphone hears
+    the room again, from the end of the radio's last piece, after one hole."""
+    r = Rig(["ciao"], cfg=cfg(dance=True))
+    audible = [True]
+    r.listener.media_audible = lambda at: audible[0]
+    spy = r.listener.music = SpyMusic(True)
+    r.listener.hear_media(np.ones(3200, np.float32), RATE, r.t + 0.1)  # plays until +0.3
+    r.feed(silence(0.128))
+    assert len(spy.fed) == 1
+    radio_end = spy.fed[0][0] + 0.2
+    audible[0] = False  # the robot answers: the player holds the radio
+    r.listener.hear_media(np.ones(3200, np.float32), RATE, r.t + 0.5)  # stale: never fed
+    r.feed(silence(0.5))
+    mic = spy.fed[1:]
+    assert mic and all(start >= radio_end for start, _ in mic)  # never back into the radio's
+    assert spy.gaps == [pytest.approx(radio_end)]  # one hole where the radio's piece ended
+    assert len(r.listener._media_pieces) == 0
+
+
+def test_the_radio_reaches_the_detector_through_the_player_on_one_thread():
+    """Wired as the run wires it: the player's feeder hands each piece it pushed to the
+    listener (``on_piece``), which feeds the detector on its own thread only."""
+    r = Rig(["ciao"], cfg=cfg(dance=True))
+    player, _ = with_player(r)
+    spy = r.listener.music = SpyMusic(True)
+    fed_on: set[str] = set()
+    feed = spy.feed
+
+    def on_thread(samples, start):
+        fed_on.add(threading.current_thread().name)
+        feed(samples, start)
+
+    spy.feed = on_thread
+    pieces: list[float] = []
+    hear = r.listener.hear_media
+
+    def from_another_thread(samples, rate_hz, start):
+        pieces.append(start)
+        worker = threading.Thread(target=hear, args=(samples, rate_hz, start), name="media")
+        worker.start()
+        worker.join()
+
+    player.on_piece = from_another_thread
+    r.feed(silence(1.0))
+    assert pieces and [s for s, _ in spy.fed] == pytest.approx(pieces[: len(spy.fed)])
+    assert fed_on == {threading.current_thread().name}  # the listener's thread only
 
 
 def test_the_wake_gate_media_rule_counts_rejected_media():
@@ -206,7 +283,7 @@ def with_player(r, steps=True):
     turn = Turn()
     host = SimpleNamespace(bus=None, conversation=turn, phase=None, voice_listener=r.listener)
     player = MediaPlayer(
-        FakeOutput(),
+        FakeOutput(lambda: r.now),
         host,
         lambda: r.cfg,
         opener=lambda url, rate_hz, timeout_s: FakeStream(),
@@ -215,6 +292,7 @@ def with_player(r, steps=True):
     )
     r.listener.media_audible = player.audible_at
     r.listener.media_hold = player.hold_from
+    player.on_piece = r.listener.hear_media
     process = r.listener.process
 
     def process_and_step(chunk):

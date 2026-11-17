@@ -24,6 +24,13 @@ decides an utterance by its start stamp: the radio rule (only the wake word addr
 applies only while the music is audible; while it is held the normal rules apply. ``playing``
 (a station set, held or not) stays the nap's and the self-soothing's check.
 
+Dance (SPEC 8, Radio playback): a robot whose microphone goes through a hardware echo canceller
+does not hear its own radio, so the music detector cannot hear it from the microphone. Each
+piece that went to the speaker is handed to ``on_piece(samples, rate_hz, start)`` (the
+listener's ``hear_media``): decoded once, at the stream's own level (before the volume), and
+stamped with the moment it starts to play (the stamp ``play_media`` returns, less the piece's
+length). It runs on the feeder thread and must not block.
+
 It stops on ``stop``, on a rest (``circadian.state`` ``resting``: a requested nap, the quiet
 hours; while it plays the circadian runner starts no idle nap, owner decision 2026-11-17), on
 ``robot.asleep``, after ``tools.media.max_play_s``, and at a stream end, stall or error. It
@@ -54,6 +61,8 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Any, Literal
+
+import numpy as np
 
 from .. import shutdown
 from ..bus import Message
@@ -110,6 +119,8 @@ class MediaPlayer:
         self._retired: list[PcmStream] = []  # killed streams the feeder still has to close
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
+        # each piece that went to the speaker, with its rate and play stamp (the dance's audio)
+        self.on_piece: Callable[[np.ndarray, int, float], None] | None = None
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -334,8 +345,22 @@ class MediaPlayer:
         while self.output.media_ahead_s() > piece_s:
             if self._wait(self.output.media_ahead_s() - piece_s) or gen != self._gen:
                 return
-        if not self.output.play_media(pcm, rate, self.volume_db()):
+        until = self.output.play_media(pcm, rate, self.volume_db())
+        if not until:
             self._hold()  # speech came between the check and the push
+            return
+        self._hand_on(pcm, rate, until - pcm.size / rate)
+
+    def _hand_on(self, pcm: np.ndarray, rate: int, start: float) -> None:
+        """Give a piece that went to the speaker to ``on_piece``; a consumer error costs the
+        piece, never the music."""
+        on_piece = self.on_piece
+        if on_piece is None:
+            return
+        try:
+            on_piece(pcm, rate, start)
+        except Exception as exc:
+            log.warning("media: piece consumer: %s", type(exc).__name__)
 
     def _ready(self, gen: int, resume_after_s: float) -> bool:
         """Whether a piece may be pushed now: the same stream still plays, nothing holds the

@@ -218,7 +218,8 @@ def start_media(
     listens for a nap and ``robot.asleep`` on the bus and for config changes (radio turned off,
     station removed), closes before the speech output, and
     tells the listener when the music can be heard (``audible_at``: the lyrics gate and
-    ``tools.radio.dance``) and lets it record a turn's hold (``hold_from``). Sets
+    ``tools.radio.dance``), lets it record a turn's hold (``hold_from``) and hands it the
+    pieces that played (``on_piece``: the dance's audio behind a hardware echo canceller). Sets
     ``host.media``; None (and no radio) otherwise."""
     if not isinstance(output.sink, MediaSink):
         return None
@@ -229,6 +230,7 @@ def start_media(
     if listener is not None:
         listener.media_audible = player.audible_at
         listener.media_hold = player.hold_from
+        player.on_piece = listener.hear_media
     return player
 
 
