@@ -62,6 +62,7 @@ log = logging.getLogger(__name__)
 
 COOKIE = "roboemot_session"
 LIVE_VIEWERS = "/api/live/viewers"  # polled by every page
+LIVE_PROMPTS = "/api/live/prompts"  # the LLM prompts panel, polled while it is open
 # Polls that never extend the idle session on their own (SPEC 11A, 12): an unattended Live tab
 # still times out after ``webui.session_ttl_s``. The page marks a poll with ``ACTIVE_HEADER``
 # when it saw a click, key or touch since its previous poll; only that poll counts as activity.
@@ -71,6 +72,7 @@ PASSIVE_POLLS = frozenset(
     {
         "/api/live/state",
         "/api/live/audio",
+        LIVE_PROMPTS,
         "/api/live/frame.jpg",
         LIVE_VIEWERS,
         EMOTIONS_STATE,
@@ -243,6 +245,11 @@ class LivePort(Protocol):
     def state(self) -> dict[str, Any] | None: ...
     def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
     def clear_transcript(self) -> bool: ...
+    def prompts(self, after: int, epoch: str = "") -> dict[str, Any] | None:
+        """The opt-in cloud LLM requests after the cursor, or None while the tab is off."""
+        ...
+
+    def clear_prompts(self) -> bool: ...
     def video_frame(self, client: str) -> tuple[bytes | None, str | None]:
         """One preview JPEG, or ``(None, code)``; the code is a stable error name."""
         ...
@@ -553,6 +560,8 @@ class WebApi:
             ("GET", "/api/live/frame.jpg"): self._live_frame,
             ("GET", LIVE_VIEWERS): self._live_viewers,
             ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
+            ("GET", LIVE_PROMPTS): self._live_prompts,
+            ("POST", "/api/live/prompts/clear"): self._live_prompts_clear,
             ("GET", EMOTIONS_STATE): self._emotions_state,
             ("POST", "/api/emotions/play"): self._emotions_play,
             ("POST", "/api/emotions/inject"): self._emotions_inject,
@@ -939,6 +948,21 @@ class WebApi:
     def _live_transcript_clear(self, req: Request) -> Response:
         """The Clear button: forget the live transcript (PIN session and CSRF were checked)."""
         if not self._live_source().clear_transcript():
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _live_prompts(self, req: Request) -> Response:
+        """The LLM prompts panel: the cloud requests recorded after the ``after``/``epoch``
+        cursor (``webui.live.prompts``, opt-in; its ``enabled`` false while off). Same session
+        and disabled codes as the audio poll; nothing stored, nothing logged."""
+        data = self._live_source().prompts(*live_cursor(req.query))
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, data)
+
+    def _live_prompts_clear(self, req: Request) -> Response:
+        """The panel's Clear button (PIN session and CSRF were checked)."""
+        if not self._live_source().clear_prompts():
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
         return Response(HTTPStatus.OK, {"ok": True})
 
