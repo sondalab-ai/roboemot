@@ -215,12 +215,15 @@ class MediaPlayer:
         """Hold the music now (``reason``: who asked, the announcer's ``announce``) and cut what
         is still in the speaker; it rejoins after ``tools.media.resume_after_s`` with no
         speech and no open addressed turn."""
+        resume_after_s = self.cfg().tools.media.resume_after_s
         with self._lock:
             if self._stream is None:
                 return
+            fresh = self._clock() - self._held_at >= resume_after_s
             self._held_at = self._clock()
         self.output.cut_media()
-        log.debug("media: paused (%s)", reason)
+        if fresh:  # a caller that keeps the music held calls this on every poll
+            log.debug("media: paused (%s)", reason)
 
     def volume(self, delta_db: float) -> float:
         """Step the music volume by ``delta_db``, kept within ``tools.media.volume_db``'s

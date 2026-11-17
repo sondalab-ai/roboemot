@@ -9,9 +9,11 @@ item in order:
 2. It wakes the robot from a nap or any other rest, the quiet hours included
    (``CircadianRunner.wake``), and waits until the state has left ``resting``: no gesture plays
    while the robot rests.
-3. It waits for the conversation to be idle (``conversation_idle``), at most
+3. It pauses the media player, when the run has one, and keeps it paused while it waits
+   (controller ruling 2026-11-17): the microphone hears the radio's vocals as speech, so
+   waiting first would hold the announcement for the whole wait.
+4. It waits for the conversation to be idle (``conversation_idle``), at most
    ``announce_max_wait_s``; after that only for the robot's current sentence to end.
-4. It pauses the media player, when the run has one.
 5. It requests the ``nod`` gesture and starts a robot-initiated turn (``event_turn``).
 6. When no route answered, it says the fixed sentence of ``prompts/event_<kind>.<lang>.txt``
    with the local voice, when there is one, and plays the ``fallback`` cue.
@@ -261,11 +263,10 @@ class Announcer:
         self._spoke = False
         if not self._ready():
             return None
+        self._pause_media()  # first: the radio's own vocals would keep the VAD busy
         if not self._wait_idle():
             return None
-        media = self.host.media  # None until the media player exists (T6)
-        if media is not None:
-            media.pause(MEDIA_REASON)
+        self._pause_media()
         if not self._ready():  # the wake hold may have run out during the idle wait
             return None
         cfg = self.cfg()
@@ -330,7 +331,15 @@ class Announcer:
                 return self._until(lambda: not self._in_sentence())
             if self.wait(POLL_S) or self._stop.is_set():
                 return False
+            self._pause_media()  # held for the whole wait: it would rejoin after resume_after_s
         return True
+
+    def _pause_media(self) -> None:
+        """Hold the media player's music now, when the run has a player (controller ruling
+        2026-11-17, review I1)."""
+        media = self.host.media
+        if media is not None:
+            media.pause(MEDIA_REASON)
 
     def _in_sentence(self) -> bool:
         """Whether one of the robot's sentences is playing now."""
