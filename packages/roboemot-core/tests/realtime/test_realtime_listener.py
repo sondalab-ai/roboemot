@@ -1019,3 +1019,48 @@ def test_without_the_radio_the_server_need_not_confirm_the_wake(ears):
         audio = ear.r.listener.snapshot()["realtime_audio"]
         assert audio["wake_unconfirmed_media"] == 0
         assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)
+
+
+def radio_held_by_holds(ear):
+    """The radio is audible except within ``resume_after_s`` after a recorded hold (the media
+    player's quiet span from ``hold_from``); returns the holds."""
+    holds: list[float] = []
+    resume = ear.rt.stack.effective().tools.media.resume_after_s
+    ear.r.listener.media_audible = lambda at: not any(h <= at <= h + resume for h in holds)
+    ear.r.listener.media_hold = holds.append
+    return holds
+
+
+def test_a_lyric_riding_an_unconfirmed_wake_is_not_answered_either(ears):
+    """The turn holds the radio from the name's last speech (``hold_from``), so the next words
+    get the normal rules. When the wake was a lyric, the next lyric line starts inside that
+    span and is a follow-up in the window the lyric opened: once the server says the first held
+    no name, the follow-up that holds none either is dropped too, and the window closes."""
+    heard = [["Sentito e il resto"], ["con la musica"]]
+    with TurnServer(heard=heard, transcript_delay_s=0.3) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        holds = radio_held_by_holds(ear)
+        ear.say()
+        ear.say()  # starts inside the first's quiet span: a follow-up, its audio goes too
+        assert len(holds) == 1
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert not ear.utterances[0].addressed and not ear.utterances[1].addressed
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 2
+        assert ear.r.listener.snapshot()["wake"]["decisions"]["window"] == 1
+        assert not ear.r.listener._gate.addressable(enrolled_in_view=False, start=ear.r.t)
+        assert ear.settle(lambda: len(server.of("conversation.item.delete")) == 2)
+        assert server.of("response.create") == []
+
+
+def test_a_follow_up_that_names_the_robot_is_answered_after_an_unconfirmed_wake(ears):
+    heard = [["Sentito e il resto"], ["Neve stoppa la musica"]]
+    with TurnServer(heard=heard, transcript_delay_s=0.3) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        radio_held_by_holds(ear)
+        ear.say()
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert not ear.utterances[0].addressed and ear.utterances[1].addressed
+        assert ear.r.listener.snapshot()["realtime_audio"]["wake_unconfirmed_media"] == 1
+        assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)

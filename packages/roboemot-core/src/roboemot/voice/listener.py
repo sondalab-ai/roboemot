@@ -96,8 +96,11 @@ must be confirmed by the server's transcript when one comes: a lyric can match t
 small local grammar, so a server final that holds neither the name nor a wake phrase (the
 server spotter, case-insensitive) is handed off not addressed, counted
 ``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media``): the conversation deletes
-its server items, plays no cue, and the radio rejoins as after any turn. A wake in a follow-up
-window or a reply window (the radio held) needs no confirmation. With ``tools.radio.dance`` off the
+its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
+closes. A follow-up in that window decided before the verdict (the lyric's next line starts
+inside the span the hold back-dates) goes with it when its own final holds neither either.
+Otherwise a wake in a follow-up window or a reply window (the radio held) needs no
+confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
@@ -250,6 +253,9 @@ class _Handoff:
     announced: bool = False  # its stream's opening went, and that was counted
     cued: bool = False  # ... and its listening cue began (AUDIO_SENT; a barge-in's waits, S3)
     media_wake: bool = False  # only the wake word addressed it, over the audible radio
+    # a follow-up in the window a media wake opened, decided before that wake's verdict
+    media_parent: _Handoff | None = field(default=None, repr=False)
+    unconfirmed: bool = False  # the server's words did not confirm its wake: not answered
 
 
 @dataclass
@@ -334,6 +340,7 @@ class VoiceListener:
         self._music_from_media = False  # the detector's last audio was the radio's pieces
         self._media_until = -math.inf  # where the last radio piece fed to it ends
         self._radio_music = False  # the detector's music started on the radio's pieces
+        self._media_wake: _Handoff | None = None  # the media wake whose verdict is still due
         self._gate = WakeGate(  # see apply_config
             "always", 0.0, music=self._music_during, media=self._media_at
         )
@@ -1408,6 +1415,7 @@ class VoiceListener:
         addressed = not outcome.startswith("rejected")
         p = self._handoff_for(ev, face)
         p.addressed = addressed
+        self._note_wake(p, outcome)
         if addressed:
             self._decided(p, outcome, "")  # its CPU fallback; words come with its final
         if addressed:
@@ -1665,6 +1673,7 @@ class VoiceListener:
             if p.addressed and media:  # its turn holds the radio from its last speech
                 self._hold_media(ev.last_speech_stamp)
             p.media_wake = media and outcome == "wake_word"
+            self._note_wake(p, outcome)
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)
@@ -1674,6 +1683,25 @@ class VoiceListener:
             return None
         self._finish(p, text, p.grammar_pass, heard, local_only=p.local_only)
         return None
+
+    def _note_wake(self, p: _Handoff, outcome: str) -> None:
+        """Keep the wake decision's media context: a wake opens a new window (the pending media
+        wake is ``p`` when it was one over the audible radio, else none), and a follow-up in the
+        window of a media wake whose server verdict is still due remembers that wake."""
+        if outcome == "wake_word":
+            self._media_wake = p if p.media_wake else None
+        elif outcome == "window" and self._media_wake is not None:
+            p.media_parent = self._media_wake
+
+    def _unconfirmed(self, p: _Handoff, server: bool) -> bool:
+        """Whether ``p``'s wake over the radio is not confirmed (its final holds neither the
+        name nor a wake phrase, checked by the caller): its own server final, or the media wake
+        whose window it followed in was not confirmed (hand-offs keep their order, so that
+        verdict is in)."""
+        if server and p.media_wake:
+            return True
+        parent = p.media_parent
+        return parent is not None and parent.unconfirmed
 
     def _name_first_at_face(self, at_face: AtFace | None) -> tuple[bool, AtFace | None]:
         """The name opened a long final (``NAME_FIRST``): it wakes the robot only when the
@@ -1774,12 +1802,17 @@ class VoiceListener:
         addressed = bool(p.addressed)
         if server and fast.wake_word:
             self._count_audio("wake_word_heard")
-        if server and addressed and p.media_wake and not fast.keywords & WAKE_CONFIRMS:
+        if addressed and not fast.keywords & WAKE_CONFIRMS and self._unconfirmed(p, server):
             # the local wake over the radio was a lyric the recognizer took for the name: the
             # server's words hold no name and no wake phrase, so it is not answered (SPEC 8)
-            addressed = False
+            addressed = p.addressed = False
+            p.unconfirmed = True
             self._count_audio("wake_unconfirmed_media")
             self.events("unanswered", "media")  # the Live tab: the wake word was not heard
+            if self._media_wake is p:  # no wake since: the window it opened was a lyric's
+                self._gate.close_window()
+        if self._media_wake is p:  # its verdict is in
+            self._media_wake = None
         self._fast.impulses(fast, addressed, state=p.state)
         utterance = Utterance(
             text,
