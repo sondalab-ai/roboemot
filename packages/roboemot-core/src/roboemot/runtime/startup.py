@@ -26,7 +26,7 @@ from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.skills.bridge import SkillBridge
-from roboemot.skills.host import tool_host
+from roboemot.skills.host import http_client, tool_host
 from roboemot.skills.plugins import (
     build_skill_registry,
     load_plugin_skill_sets,
@@ -212,11 +212,12 @@ def skill_registry(
     """The conversation's skills (SPEC 11): the default skills over the robot's pipeline plus
     every ``roboemot.skills`` plugin, each plugin loaded once. The tools' host gets the run's
     parts (``nap``: ``runtime.request_nap``, SPEC 7A; ``scheduler``: ``runtime.scheduler``,
-    SPEC 11). Warns once when the merged ``conversation.llm_skills`` hides one of core's own
-    voice tools."""
+    SPEC 11; ``http``: ``http_client``, a fresh client per call, SPEC 11, 12). Warns once when
+    the merged ``conversation.llm_skills`` hides one of core's own voice tools."""
     host = tool_host(stack.effective, p.bus)
     host.nap = runtime.request_nap
     host.scheduler = runtime.scheduler
+    host.http = http_client
     plugins = load_plugin_skill_sets(host)
     warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
     env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(

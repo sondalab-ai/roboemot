@@ -18,6 +18,8 @@ from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 
 if TYPE_CHECKING:
+    import httpx
+
     from ..tools.scheduler import Scheduler
 
 
@@ -28,13 +30,24 @@ class ToolHost:
     tools add their parts as fields that default to None. ``nap`` asks for a requested nap and
     returns its status at once (``RuntimeHost.request_nap``, SPEC 7A); runtime startup sets it.
     ``scheduler`` is the run's timers and reminders store (SPEC 11, Voice tools), set by runtime
-    startup."""
+    startup. ``http`` builds an HTTP client for one call (the caller closes it); runtime startup
+    sets it, a test injects one over ``httpx.MockTransport``, and a network tool without it is
+    unavailable."""
 
     config: Callable[[], RoboEmotConfig]
     wall_now: Callable[[], datetime]
     bus: Bus
     nap: Callable[[], str] | None = None
     scheduler: Scheduler | None = None
+    http: Callable[[], httpx.Client] | None = None
+
+
+def http_client() -> httpx.Client:
+    """The run's HTTP client for one tool call (SPEC 11, 12): no redirects followed, and no
+    proxy, CA or ``.netrc`` settings taken from the environment, like core's other clients."""
+    import httpx  # lazy: only a run with network tools needs it
+
+    return httpx.Client(trust_env=False, follow_redirects=False)
 
 
 def tool_host(config: Callable[[], RoboEmotConfig], bus: Bus) -> ToolHost:

@@ -36,7 +36,7 @@ TOKEN_PREFIXES = (
 )  # fmt: skip
 
 
-PRIVATE_PATHS = ("circadian.location", "privacy")
+PRIVATE_PATHS = ("circadian.location", "tools.weather.place_name", "privacy")
 PATH_WILDCARD = "*"
 
 

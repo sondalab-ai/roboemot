@@ -153,8 +153,13 @@ def skill(
 
 # Keys of the results the executor, the default skills and core's voice tools write (``error``,
 # ``detail``, ``ok``, ``applied``, ``status``; the scheduler's ``id``, ``kind``, ``due``,
-# ``items``); a custom skill that returns other keys is checked as text.
-RESULT_KEYS = ("error", "detail", "ok", "applied", "status", "id", "kind", "due", "items")
+# ``items``; the weather tool's forecast keys); a custom skill that returns other keys is checked
+# as text.
+RESULT_KEYS = (
+    "error", "detail", "ok", "applied", "status", "id", "kind", "due", "items",
+    "current", "days", "date", "conditions", "temperature_c", "humidity_pct", "wind_kmh",
+    "max_c", "min_c", "precipitation_probability_pct",
+)  # fmt: skip
 
 
 def skill_of(item: Any) -> Skill | None:

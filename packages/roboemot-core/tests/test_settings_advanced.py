@@ -44,7 +44,6 @@ WHOLLY_ADVANCED = {
     "light",
     "llm_check",
     "speech_motion_map",
-    "tools",  # only the scheduler limits so far (SPEC 11A: Advanced fold); weather adds a switch
 }
 # Guard-protected leaves in the fold (SPEC 11A): hardening knobs, still reachable by search and
 # the filters, and still guarded. Admin-only ones by path; conservative ones counted by section.
@@ -55,6 +54,8 @@ ADVANCED_ADMIN_ONLY = {
     "voice.realtime_route.turns",
     "voice.realtime_route.server_gates",
     "webui.frame_ancestors",
+    "tools.weather.base_url",
+    "tools.weather.geocode_url",
 }
 ADVANCED_CONSERVATIVE = {
     "catalogue": 6,

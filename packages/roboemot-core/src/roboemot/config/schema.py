@@ -7002,11 +7002,97 @@ class SchedulerConfig(Strict):
     )
 
 
+# The top of tools.weather.forecast_days, shared with the weather skill's argument range.
+FORECAST_DAYS_CEILING = 7
+FORECAST_URL_DEFAULT = "https://api.open-meteo.com/v1/forecast"
+GEOCODE_URL_DEFAULT = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHER_SCHEMES = ("https",)  # the request carries the private location (SPEC 12)
+
+
+class WeatherConfig(Strict):
+    """The weather tool through Open-Meteo (SPEC 11, Voice tools, Weather; 11A; 12: an admin
+    opt-in, the location stays private). The location is ``circadian.location``."""
+
+    enabled: bool = param(
+        False,
+        "Let the robot fetch the weather forecast from Open-Meteo when asked. The request sends "
+        "circadian.location (needed, else the tool is off) and the number of days over the "
+        "internet (SPEC 12)",
+        opt_in=True,
+    )
+    place_name: str = param(
+        "",
+        "Name of the place at circadian.location, as the place search found it; private "
+        "because it reveals the home town",
+    )
+    forecast_days: int = param(
+        3,
+        "Most days of daily forecast the weather tool returns, today included",
+        unit="days",
+        ge=1,
+        le=FORECAST_DAYS_CEILING,
+    )
+    cache_s: int = param(
+        600,
+        "A forecast is reused for this long, so a follow-up question costs no extra request; "
+        "0 asks every time",
+        unit="s",
+        ge=0,
+        le=3600,
+        advanced=True,
+    )
+    timeout_s: float = param(
+        3.0,
+        "Longest wait for Open-Meteo; a slower or failed request gives the error unreachable. "
+        "With weather on it must be less than conversation.tool_timeout_s, or the skill is "
+        "abandoned first",
+        unit="s",
+        ge=1,
+        le=30,
+        advanced=True,
+    )
+    base_url: str = param(
+        FORECAST_URL_DEFAULT,
+        "Open-Meteo forecast URL; https, no user info, query or fragment. It receives "
+        "circadian.location",
+        advanced=True,
+        admin_only=True,
+    )
+    geocode_url: str = param(
+        GEOCODE_URL_DEFAULT,
+        "Open-Meteo place search URL, used by the Tools tab; https, no user info, query or "
+        "fragment",
+        advanced=True,
+        admin_only=True,
+    )
+    geocode_results: int = param(
+        5,
+        "Most places a place search returns",
+        ge=1,
+        le=10,
+    )
+
+    @field_validator("base_url", "geocode_url")
+    @classmethod
+    def _plain_https(cls, value: str) -> str:
+        """The location goes to this URL (SPEC 12): https with a host (``route_url_ok``), and
+        no user info, query or fragment."""
+        import httpx  # lazy: keeps the config package light
+
+        if not route_url_ok(value, WEATHER_SCHEMES):
+            raise ValueError("must be an https URL with a host")
+        parsed = httpx.URL(value)
+        if parsed.userinfo or parsed.query or parsed.fragment:
+            raise ValueError("must have no user info, query or fragment")
+        return value
+
+
 class ToolsConfig(Strict):
     """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
     tool adds its own sub-section."""
 
     scheduler: SchedulerConfig = param({}, "SPEC 11, 11A: timers and reminders")
+    weather: WeatherConfig = param({}, "SPEC 11, 11A, 12: weather forecast (admin opt-in)")
 
 
 # --------------------------------------------------------------------------- root
@@ -7252,6 +7338,18 @@ with warnings.catch_warnings():
                     f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
                     "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
                     "(JSON-escaped) has to fit"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _weather_fits_the_tool_timeout(self) -> RoboEmotConfig:
+            # Only with weather on: a weather timeout of 1 s (its floor) must not forbid a
+            # shorter tool timeout while the tool cannot run (SPEC 11, Voice tools, Weather).
+            weather = self.tools.weather
+            if weather.enabled and weather.timeout_s >= self.conversation.tool_timeout_s:
+                raise ValueError(
+                    "tools.weather.timeout_s must be less than conversation.tool_timeout_s, "
+                    "or the skill is abandoned before Open-Meteo answers"
                 )
             return self
 
