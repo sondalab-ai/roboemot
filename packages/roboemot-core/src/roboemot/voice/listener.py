@@ -73,14 +73,18 @@ in the utterance (``WakeGate``: the wake word is then required, ``rejected_music
 also when an utterance that skipped Vosk ends. ``music.started`` and ``music.stopped`` go on the
 bus with the tempo only.
 
-The robot's own radio (``media_playing``, the media player, SPEC 8, Radio playback): while it
-plays, only the wake word addresses the robot (``WakeGate``, ``rejected_media``: the follow-up
-window, a face and the policy do not count), and with server turns no segment streams (the
-``media`` gate, always on: the wake gate decides each one locally). The one exception is an
-announcement's reply window (``open_follow_up``, ``reply_window_open``; owner decision
-2026-11-17): the media player keeps the radio paused while it is open, and the normal rules
-apply in it, the ``media`` gate and the name-first shortcut included. With ``tools.radio.dance``
-off the music detector ignores music while it plays: its chunks are holes to it, and
+The robot's own radio (``media_audible``, the media player's ``audible_at``, SPEC 8, Radio
+playback): while it can be heard as an utterance starts, only the wake word addresses the robot
+(``WakeGate``, ``rejected_media``: the follow-up window, a face and the policy do not count),
+and with server turns no segment streams (the ``media`` gate, always on: the wake gate decides
+each one locally). While the player holds the radio (robot speech, an open addressed turn, an
+announcement's reply window, ``open_follow_up``, ``reply_window_open``, and
+``tools.media.resume_after_s`` after them) no lyric can be heard and the normal rules apply,
+the ``media`` gate and the name-first shortcut included: "Neve" then "stoppa la musica" is a
+follow-up. An utterance the wake word addressed over the audible radio tells the player
+(``media_hold``) that its turn holds the music from its last speech, so the person's next words
+find it held even before the player's feeder saw the turn. With ``tools.radio.dance`` off the
+music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
 Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
@@ -302,10 +306,13 @@ class VoiceListener:
         self._clock = clock
         self._timer = timer
         self._direction = direction
-        # whether the robot's own radio plays (the media player's ``playing``, set at start)
-        self.media_playing: Callable[[], bool] = lambda: False
-        self._gate = WakeGate(  # see apply_config; it applies the reply window itself
-            "always", 0.0, music=self._music_during, media=lambda: bool(self.media_playing())
+        # whether the robot's own radio could be heard at a stamp, and the hold of a turn the
+        # wake word opened over it (the media player's ``audible_at`` and ``hold_from``, set at
+        # start)
+        self.media_audible: Callable[[float], bool] = lambda at: False
+        self.media_hold: Callable[[float], None] = lambda at: None
+        self._gate = WakeGate(  # see apply_config
+            "always", 0.0, music=self._music_during, media=self._media_at
         )
         self.music: MusicDetector | None = None  # built by apply_config while music.enabled
         self.music_classifier: MusicClassifier | None = None  # set by the pipeline
@@ -730,7 +737,7 @@ class VoiceListener:
         classifier gets the same chunks (the ``music_classifier`` stage), and while it decides
         (``music.classifier.decides``) its scores go to the detector. While the robot's own
         radio plays with ``tools.radio.dance`` off, every chunk is a hole as well."""
-        speaking = speaking or self._music_hidden()
+        speaking = speaking or self._music_hidden(start)
         classifier, scores = self.music_classifier, None
         if not speaking and classifier is not None:
             scores = self._timed("music_classifier", classifier.feed, chunk.samples, start)
@@ -764,7 +771,7 @@ class VoiceListener:
         (lock-free, one frozen view of the detector). False without a detector, while
         ``music.enabled`` is off, or while the radio plays with ``tools.radio.dance`` off."""
         music = self.music
-        if music is None or not self._cfg.music.enabled or self._music_hidden():
+        if music is None or not self._cfg.music.enabled or self._music_hidden(start):
             return False
         return music.during(start, end)
 
@@ -775,20 +782,32 @@ class VoiceListener:
         music = self.music
         if music is None or not self._cfg.music.enabled:
             return None
-        if self._music_hidden():
+        if self._music_hidden(now):
             return MusicState(False, None, None, 0.0, now)
         return music.state(now)
 
-    def _media_now(self) -> bool:
-        """Whether the robot's own radio plays now and no announcement's reply window holds it
-        paused (the ``media`` stream gate, the name-first shortcut, the dance switch). Not the
-        wake gate's predicate: the gate applies the reply window under its own lock."""
-        return bool(self.media_playing()) and not self.reply_window_open()
+    def _media_at(self, at: float) -> bool:
+        """Whether the robot's own radio could be heard at ``at`` (the media player's
+        ``audible_at``): the wake gate's media rule, the ``media`` stream gate, the name-first
+        shortcut, the dance switch. Takes only the player's leaf lock, never the wake gate's,
+        so the gate may ask it under its own lock."""
+        try:
+            return bool(self.media_audible(at))
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+            return False
 
-    def _music_hidden(self) -> bool:
-        """Whether the detector ignores music now: the radio plays and ``tools.radio.dance`` is
-        off (SPEC 8, Radio playback)."""
-        return not self._cfg.tools.radio.dance and self._media_now()
+    def _music_hidden(self, at: float) -> bool:
+        """Whether the detector ignores music at ``at``: the radio is audible and
+        ``tools.radio.dance`` is off (SPEC 8, Radio playback)."""
+        return not self._cfg.tools.radio.dance and self._media_at(at)
+
+    def _hold_media(self, at: float) -> None:
+        """Tell the media player an addressed turn holds the radio from ``at``."""
+        try:
+            self.media_hold(at)
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
 
     def _own_sound_cut(self) -> bool:
         """Someone's speech is in progress or starting as the speaking window opens: cut the
@@ -1052,9 +1071,9 @@ class VoiceListener:
         the music detector (``music.enabled``), ``at_face`` and ``facing`` without the voice
         direction, ``facing`` without ``voice.facing.enabled``. The verdict of the voice-at-face
         check is kept, so the wake gate does not ask it again. While the robot's own radio
-        plays, ``media`` keeps every segment local whatever is listed (SPEC 8, Radio playback:
-        only the wake word addresses the robot then)."""
-        if self._media_now():
+        can be heard as the segment starts, ``media`` keeps every segment local whatever is
+        listed (SPEC 8, Radio playback: only the wake word addresses the robot then)."""
+        if self._media_at(s.start):
             return "media"
         gates = self._cfg.voice.realtime_route.server_gates
         if "music" in gates:
@@ -1528,11 +1547,12 @@ class VoiceListener:
             face = p.face
             at_face = self._checked(p) if face is None else (lambda: face)
             wake = kind == WAKE
+            media = self._media_at(ev.start_stamp)
             if kind == NAME_FIRST:
-                # while the robot's own radio plays the wake word is required anyway and the
-                # sound direction is muted (own sound): the name opening the text wakes it
+                # while the robot's own radio is audible the wake word is required anyway and
+                # the sound direction is muted (own sound): the name opening the text wakes it
                 # without the voice-at-face check (controller ruling, SPEC 8 Radio playback)
-                if self._media_now():
+                if media:
                     wake = True
                 else:
                     wake, at_face = self._name_first_at_face(at_face)
@@ -1546,6 +1566,8 @@ class VoiceListener:
             )
             p.addressed = not outcome.startswith("rejected")
             self._decided(p, outcome, text)
+            if p.addressed and media:  # its turn holds the radio from its last speech
+                self._hold_media(ev.last_speech_stamp)
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)

@@ -608,3 +608,32 @@ def test_a_transcript_in_flight_pauses_the_player():
     ears.waiting = False
     r.step(round(r.cfg.tools.media.resume_after_s / r.chunk_s))
     assert r.step(2) == 2
+
+
+def test_audible_follows_the_holds_by_stamp():
+    """SPEC 8, Radio playback: the radio rule applies only while the music can be heard. A
+    hold covers its start to its last moment plus ``resume_after_s``; the listener asks by an
+    utterance's start stamp, and ``hold_from`` back-dates a turn's hold."""
+    r = Rig()
+    resume = r.cfg.tools.media.resume_after_s
+    assert not r.player.audible()  # no station
+    r.clock.t = 10.0
+    r.player.play(JAZZ)
+    assert r.player.audible() and not r.player.audible_at(9.0)  # not before it was set
+    r.step(2)
+    r.output.blocked = True  # the robot speaks
+    held_from = r.clock.t
+    r.step(5)
+    last_hold = r.clock.t - r.chunk_s
+    r.output.blocked = False
+    assert not r.player.audible_at(held_from) and not r.player.audible()
+    assert r.player.audible_at(held_from - r.chunk_s)  # before the hold: audible
+    r.step(round(resume / r.chunk_s) + 1)
+    assert r.player.audible()
+    assert not r.player.audible_at(last_hold + resume - r.chunk_s)  # by stamp, after the fact
+    r.step(10)
+    r.player.hold_from(r.clock.t - 0.5)  # a turn the wake word opened half a second ago
+    assert not r.player.audible_at(r.clock.t - 0.4)
+    assert r.player.audible_at(r.clock.t - 0.6)
+    r.player.stop("user")
+    assert not r.player.audible_at(r.clock.t - 0.6)  # no station: nothing is audible
