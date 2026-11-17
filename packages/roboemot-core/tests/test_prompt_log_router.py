@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 
 from roboemot.config.schema import LiveConfig, RoboEmotConfig
+from roboemot.llm import TextDelta
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.prompt_log import PromptRing
 from roboemot.llm.pseudonyms import NameSource
@@ -88,3 +89,16 @@ async def test_a_router_the_hub_rebuilds_still_records(tmp_path):
     await ask(rebuilt)
     (entry,) = host.prompts.snapshot(0)["entries"]
     assert entry["via"] == "m2"
+
+
+async def test_a_ring_that_fails_never_fails_a_request():
+    class Broken(PromptRing):
+        def chat(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    srv = Server()
+    broken = Broken(LiveConfig(enabled=True, prompts=True))
+    r = router(srv, [route("cloud", "api.example.com")], prompts=broken)
+    events = await ask(r)
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "Ciao Marcello!"
+    assert len(srv.requests) == 1
