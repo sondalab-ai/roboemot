@@ -3610,6 +3610,23 @@ class FastpathConfig(Strict):
         ge=1,
         le=20,
     )
+    server_name_max_edits: int = param(
+        1,
+        "While the robot's radio can be heard, a wake must be confirmed by the realtime route's "
+        "transcript (SPEC 8, Radio playback). A word there counts as the robot's name when, "
+        "reading i as e and u as o, it differs from the name only by this many inserted or "
+        "dropped vowels (a swapped vowel counts two; consonants must match): 1 takes `Nivea` "
+        "and `Nieve` for `Neve`, never `nave` or `nove`. 0 = the exact name only. Never used "
+        "for the local recognizer",
+        unit="vowels", ge=0, le=4, advanced=True,
+    )  # fmt: skip
+    server_name_min_letters: int = param(
+        4,
+        "A word of the robot's name shorter than this many letters must be spelled exactly in "
+        "the transcript that confirms a wake over the radio (server_name_max_edits does not "
+        "apply)",
+        unit="letters", ge=1, le=20, advanced=True,
+    )  # fmt: skip
     answer_window_s: float = param(
         6.0,
         "A yes or no heard within this long after the robot finished a sentence that ended in a "

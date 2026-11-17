@@ -10,11 +10,26 @@ refuses it under the output's lock anyway), and while an addressed turn is open:
 holds a turn open, served or waiting from the moment ``submit`` accepts an addressed utterance
 (the wake word's included) until its reply ends (``ConversationWorker.busy``), and the phase is
 ``thinking`` or ``speaking``. It never reads the VAD, ``voice_active()`` or the ``listening``
-phase, because the microphone hears the radio itself. While held it keeps reading and drops what
-it reads, so the stream stays live, and it rejoins ``tools.media.resume_after_s`` after the last
-hold. ``pause(reason)`` (the announcer's) holds it now and cuts what is still in the speaker.
-An announcement's reply window (``VoiceListener.reply_window_open``) holds it too, so the person
-can answer the robot without its name (owner decision 2026-11-17).
+phase: a robot without hardware echo cancellation hears the radio itself, and the music must
+not pause on its own lyrics. While held it keeps reading and drops what it reads, so the stream
+stays live, and it rejoins ``tools.media.resume_after_s`` after the last hold. ``pause(reason)``
+(the announcer's) holds it now and cuts what is still in the speaker. An announcement's reply
+window (``VoiceListener.reply_window_open``) holds it too, so the person can answer the robot
+without its name (owner decision 2026-11-17).
+
+Audible (SPEC 8, Radio playback): the music can be heard while a station is set and no hold
+covers the moment, from a hold's start to its last moment plus ``resume_after_s``
+(``audible_at``). The player keeps those quiet spans for ``music.history_s`` so the listener
+decides an utterance by its start stamp: the radio rule (only the wake word addresses the robot)
+applies only while the music is audible; while it is held the normal rules apply. ``playing``
+(a station set, held or not) stays the nap's and the self-soothing's check.
+
+Dance (SPEC 8, Radio playback): a robot whose microphone goes through a hardware echo canceller
+does not hear its own radio, so the music detector cannot hear it from the microphone. Each
+piece that went to the speaker is handed to ``on_piece(samples, rate_hz, start)`` (the
+listener's ``hear_media``): decoded once, at the stream's own level (before the volume), and
+stamped with the moment it starts to play (the stamp ``play_media`` returns, less the piece's
+length). It runs on the feeder thread and must not block.
 
 It stops on ``stop``, on a rest (``circadian.state`` ``resting``: a requested nap, the quiet
 hours; while it plays the circadian runner starts no idle nap, owner decision 2026-11-17), on
@@ -46,6 +61,8 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Any, Literal
+
+import numpy as np
 
 from .. import shutdown
 from ..bus import Message
@@ -94,11 +111,17 @@ class MediaPlayer:
         self._gen = 0  # moves on every play and stop: a feeder step on an old stream stops
         self._started = 0.0
         self._held_at = -math.inf  # the last moment something held the music
+        # spans in which the music was not audible: each hold from its start to its last
+        # moment plus ``resume_after_s``, merged when they touch, oldest first (``audible_at``)
+        self._quiet: list[tuple[float, float]] = []
         self._offset_db = 0.0  # the radio_volume steps on top of tools.media.volume_db
         self._asleep = False
         self._retired: list[PcmStream] = []  # killed streams the feeder still has to close
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
+        # each piece that went to the speaker, with its rate and play stamp (the dance's audio)
+        self.on_piece: Callable[[np.ndarray, int, float], None] | None = None
+        self._piece_errors = 0  # consecutive on_piece failures (feeder thread)
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -170,6 +193,7 @@ class MediaPlayer:
                 self._stream, self._station = stream, station
                 self._gen += 1
                 self._started, self._held_at = self._clock(), -math.inf
+                self._quiet = []
         if gone is not None:
             gone.close()  # never handed to the feeder: this thread is its only reader
             return "disabled"
@@ -219,12 +243,13 @@ class MediaPlayer:
         """Hold the music now (``reason``: who asked, the announcer's ``announce``) and cut what
         is still in the speaker; it rejoins after ``tools.media.resume_after_s`` with no
         speech and no open addressed turn."""
-        resume_after_s = self.cfg().tools.media.resume_after_s
+        cfg = self.cfg()
+        resume_after_s = cfg.tools.media.resume_after_s
         with self._lock:
             if self._stream is None:
                 return
             fresh = self._clock() - self._held_at >= resume_after_s
-            self._held_at = self._clock()
+            self._note_hold(self._clock(), cfg)
         self.output.cut_media()
         if fresh:  # a caller that keeps the music held calls this on every poll
             log.debug("media: paused (%s)", reason)
@@ -249,8 +274,39 @@ class MediaPlayer:
         return self._station
 
     def playing(self) -> bool:
-        """Whether a station plays (``media.playing`` holds): the listener's lyrics gate."""
+        """Whether a station is set (``media.playing`` holds), held or not: no idle nap and no
+        self-soothing sound starts while it is."""
         return self._station is not None
+
+    def audible(self) -> bool:
+        """Whether the music can be heard now: ``audible_at`` the player's clock now."""
+        return self.audible_at(self._clock())
+
+    def audible_at(self, at: float) -> bool:
+        """Whether the music could be heard at ``at`` (the monotonic clock): a station is set,
+        it was set by then, and no hold covered ``at`` (from a hold's start to its last moment
+        plus ``tools.media.resume_after_s``). The listener's radio rule (the wake gate's media
+        rule, the stream gate, the name-first shortcut, the dance's audio source). Any thread:
+        it takes only this player's leaf lock and reads no config, so the wake gate may ask it
+        under its own lock. A hold is known from the feeder's next step (at most one piece
+        later) or from ``hold_from``."""
+        with self._lock:
+            if self._station is None or at < self._started:
+                return False
+            return not any(lo <= at <= hi for lo, hi in self._quiet)
+
+    def hold_from(self, at: float) -> None:
+        """Record a hold from ``at`` (the monotonic clock, possibly past): an addressed
+        utterance ended at ``at`` while the music was audible, so its turn holds the music from
+        then. The feeder only sees the turn at its next step, after the endpoint and the wake
+        decision; an utterance that starts in between (the person goes on after the name) must
+        find the music held (SPEC 8, Radio playback). Changes nothing else: the feeder pauses
+        the music itself once it sees the turn. Any thread."""
+        cfg = self.cfg()
+        with self._lock:
+            if self._station is None:
+                return
+            self._note_hold(at, cfg)
 
     # ----------------------------------------------------------------- feeder
 
@@ -290,8 +346,26 @@ class MediaPlayer:
         while self.output.media_ahead_s() > piece_s:
             if self._wait(self.output.media_ahead_s() - piece_s) or gen != self._gen:
                 return
-        if not self.output.play_media(pcm, rate, self.volume_db()):
+        until = self.output.play_media(pcm, rate, self.volume_db())
+        if not until:
             self._hold()  # speech came between the check and the push
+            return
+        self._hand_on(pcm, rate, until - pcm.size / rate)
+
+    def _hand_on(self, pcm: np.ndarray, rate: int, start: float) -> None:
+        """Give a piece that went to the speaker to ``on_piece``; a consumer error costs the
+        piece, never the music."""
+        on_piece = self.on_piece
+        if on_piece is None:
+            return
+        try:
+            on_piece(pcm, rate, start)
+        except Exception as exc:  # logged once per run of failures, not once per piece
+            self._piece_errors += 1
+            if self._piece_errors == 1:
+                log.warning("media: piece consumer: %s", type(exc).__name__)
+            return
+        self._piece_errors = 0
 
     def _ready(self, gen: int, resume_after_s: float) -> bool:
         """Whether a piece may be pushed now: the same stream still plays, nothing holds the
@@ -306,8 +380,31 @@ class MediaPlayer:
             return self._clock() - self._held_at >= resume_after_s
 
     def _hold(self) -> None:
+        cfg = self.cfg()
         with self._lock:
-            self._held_at = self._clock()
+            self._note_hold(self._clock(), cfg)
+
+    def _note_hold(self, at: float, cfg: RoboEmotConfig) -> None:
+        """Something held the music at ``at`` (lock held): it rejoins ``resume_after_s`` after
+        the last hold, and ``[at, at + resume_after_s]`` joins the quiet spans, merged with any
+        it touches. Spans that ended over ``music.history_s`` ago are dropped: the listener
+        asks about an utterance's start no further back (as the music detector's intervals)."""
+        self._held_at = max(self._held_at, at)
+        lo, hi = at, at + cfg.tools.media.resume_after_s
+        quiet = self._quiet
+        if not quiet or lo > quiet[-1][1]:
+            quiet.append((lo, hi))  # the feeder's usual case: a new span after the last
+        elif lo >= quiet[-1][0]:
+            quiet[-1] = (quiet[-1][0], max(hi, quiet[-1][1]))  # it goes on: grow the last
+        else:  # back-dated (``hold_from``) before the last span: merge what it touches
+            kept = [(a, b) for a, b in quiet if not (a <= hi and lo <= b)]
+            for a, b in quiet:
+                if a <= hi and lo <= b:
+                    lo, hi = min(lo, a), max(hi, b)
+            quiet[:] = sorted([*kept, (lo, hi)])
+        horizon = self._clock() - cfg.music.history_s
+        while quiet and quiet[0][1] < horizon:
+            quiet.pop(0)
 
     def _turn_open(self) -> bool:
         """Whether an addressed turn is open: the conversation holds a turn open, served or

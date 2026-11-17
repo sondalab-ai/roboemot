@@ -273,11 +273,14 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
             "schedule_list", "weather",
         ]  # fmt: skip
         # the Reachy speaker plays media outside the speaking window: the run has a player,
-        # the listener hears when it plays, and radio is an admin opt-in (SPEC 8, 11, 12)
+        # the listener hears when it is audible, and radio is an admin opt-in (SPEC 8, 11, 12)
         assert app.media is not None and not skills.get("radio_play").is_available()
         radio_host = inspect.getclosurevars(skills.get("radio_play").fn).nonlocals["host"]
         assert radio_host.media is app.media
-        assert app.voice_listener.media_playing == app.media.playing
+        assert app.voice_listener.media_audible == app.media.audible_at
+        assert app.voice_listener.media_hold == app.media.hold_from
+        assert app.voice_listener.media_set == app.media.playing
+        assert app.media.on_piece == app.voice_listener.hear_media  # the dance hears the radio
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
         # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
         assert not skills.get("weather").is_available()
