@@ -41,6 +41,7 @@ from .schema import (
     SCHEMA_VERSION,
     WITHDRAW_RULE_FIELDS,
     WITHDRAW_SHARED_FIELDS,
+    PersonaConfig,
     RoboEmotConfig,
     VoiceConfig,
     rule_identity,
@@ -713,8 +714,13 @@ MANIFEST_BEHAVIOUR_KEYS = frozenset(
         "dance_motion_map",
         "voice",
         "motion",
+        "persona",
     }
 )  # what a robot manifest may set
+MANIFEST_PERSONA_KEYS = frozenset({"body_prompt"})  # the robot's body, as the LLM is told it
+# Prompt text a manifest may set without the admin: the manifest is product data, like the library
+# defaults, and describes its own hardware. Owner changes above it still need the admin.
+MANIFEST_PROMPT_PATHS = frozenset({"persona.body_prompt"})
 MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
 MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
 MANIFEST_VOICE_KEYS = frozenset(
@@ -794,6 +800,42 @@ def check_manifest_motion(motion: Any) -> None:
         raise ConfigError(
             f"manifest behaviour motion.arbiter may set {sorted(MANIFEST_ARBITER_KEYS)}, "
             f"not {extra}"
+        )
+
+
+def check_manifest_persona(persona: Any) -> None:
+    """A manifest may describe its robot's body (``persona.body_prompt``, text) and nothing else
+    under ``persona``: the persona prompt and the traits stay with the owner (SPEC 11A)."""
+    if persona is None:
+        return
+    if not isinstance(persona, dict):
+        raise ConfigError(
+            f"manifest behaviour persona must be a mapping of {sorted(MANIFEST_PERSONA_KEYS)}, "
+            f"not a mapping: {type(persona).__name__}"
+        )
+    extra = sorted(set(persona) - MANIFEST_PERSONA_KEYS)
+    if extra:
+        raise ConfigError(
+            f"manifest behaviour persona may set {sorted(MANIFEST_PERSONA_KEYS)}, not {extra}"
+        )
+    if not isinstance(persona.get("body_prompt", ""), str):
+        raise ConfigError("manifest behaviour persona.body_prompt must be text")
+
+
+def check_manifest_body_fits(manifest: dict, merged: dict) -> None:
+    """The manifest's body text against the owner's cap, when the owner keeps that text: a
+    ``persona.body_prompt_max_chars`` set below it names the cap and the two ways out, instead of
+    a length error that reads as the manifest's fault (SPEC 11A, Persona)."""
+    body = (manifest.get("persona") or {}).get("body_prompt")
+    persona = merged.get("persona") or {}
+    if not isinstance(body, str) or persona.get("body_prompt", body) != body:
+        return
+    cap = persona.get("body_prompt_max_chars", PersonaConfig().body_prompt_max_chars)
+    if len(body) > cap:
+        raise ConfigError(
+            f"the robot manifest's persona.body_prompt has {len(body)} characters, but "
+            f"persona.body_prompt_max_chars is {cap} in your configuration: raise the cap or set "
+            "your own persona.body_prompt"
         )
 
 
@@ -1092,6 +1134,7 @@ class ConfigStack:
     preset_dirs: list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        check_manifest_persona(self.manifest.get("persona"))  # no prompt text past the guard
         self._cached: RoboEmotConfig | None = None
         self._cached_until: float | None = None
         self._runtime: dict[str, _RuntimeValue] = {}
@@ -1133,15 +1176,15 @@ class ConfigStack:
         preset: str | None = None,
         preset_dirs: Iterable[Path] = (),
         app: Path | None = None,
-        manifest_behaviour: dict | None = None,
         audit_path: Path | None = None,
         clock: Callable[[], float] = time.time,
     ) -> ConfigStack:
+        """The stack from its files; the manifest layer comes later, checked, through
+        ``set_manifest_behaviour``."""
         dirs = [Path(p) for p in preset_dirs]
         files = {k: Path(v) for k, v in {"defaults": defaults, "app": app}.items() if v}
         stack = cls(
             defaults=load_yaml(defaults) if defaults else {},
-            manifest=manifest_behaviour or {},
             preset=resolve_preset(preset, dirs) if preset else {},
             app=load_yaml(app) if app else {},
             clock=clock,
@@ -1184,6 +1227,7 @@ class ConfigStack:
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
             check_manifest_motion(behaviour.get("motion"))
+            check_manifest_persona(behaviour.get("persona"))
             saved = self.manifest, self.channels, self.clips, self.body_yaw
             self.manifest, self.channels = behaviour, frozenset(channels)
             self.clips = frozenset(clips)
@@ -1193,12 +1237,18 @@ class ConfigStack:
                 layer = RoboEmotConfig.model_validate(
                     deep_merge(defaults.model_dump(mode="python"), behaviour)
                 )
-                found = violations(defaults, layer)  # the manifest layer alone, vs the defaults
+                found = [  # the manifest layer alone, vs the defaults
+                    v
+                    for v in violations(defaults, layer)
+                    if not (v.kind == "admin" and v.path in MANIFEST_PROMPT_PATHS)
+                ]
                 if found:
                     raise GuardrailError(
                         "manifest behaviour would loosen: " + "; ".join(map(str, found))
                     )
-                baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+                tree = self.merged_tree(include_runtime=False)
+                check_manifest_body_fits(behaviour, tree)
+                baseline = RoboEmotConfig.model_validate(tree)
                 self._check_channels(baseline)
                 self._check_clips(baseline)
                 self._check_route_budgets(baseline)

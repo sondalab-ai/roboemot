@@ -158,6 +158,21 @@ test("the mood card says why the robot rests", async (t) => {
   assert.ok(page.document.querySelector("#live-cards").textContent.includes("resting (A NAP)"));
 });
 
+test("the mood card counts down to the next nap, says when presence holds it, and hides it otherwise", async (t) => {
+  const strings = { ...STRINGS, live_nap_next: "NEXT NAP", live_nap_in: "in {n}", live_nap_held: "HELD" };
+  const mood = (circ) => ({ ...STATE, mood: { ...STATE.mood, circadian: { ...STATE.mood.circadian, ...circ } } });
+  const text = async (circ) => {
+    const page = await livePage(t, { "GET /api/live/state": mood(circ), "GET /api/strings": { language: "en", strings } });
+    await openLive(page);
+    return page.document.querySelector("#live-cards").textContent;
+  };
+  assert.ok((await text({ nap_in_s: 754.6, nap_held: false })).includes("NEXT NAP in 12:35"));
+  assert.ok((await text({ nap_in_s: 3725, nap_held: false })).includes("in 1:02:05"));
+  assert.ok((await text({ nap_in_s: 0, nap_held: true })).includes("NEXT NAP HELD"));
+  assert.ok(!(await text({ nap_in_s: null, nap_held: false })).includes("NEXT NAP"));
+  assert.ok(!(await text({})).includes("NEXT NAP"));
+});
+
 test("the modes card says when the robot is alone and holding still", async (t) => {
   const strings = { ...STRINGS, live_alone: "ALONE STILL" };
   const alone = await livePage(t, {

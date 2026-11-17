@@ -6019,6 +6019,15 @@ class PersonaConfig(Strict):
         admin_only=True,
     )
     prompt_max_chars: int = param(600, "Longest accepted prompt", ge=50, le=4000, advanced=True)
+    body_prompt: str = param(
+        "",
+        "The robot's body as the LLM is told it, right after the persona prompt; the robot "
+        "manifest sets the default; changes need the admin",
+        admin_only=True,
+    )
+    body_prompt_max_chars: int = param(
+        300, "Longest accepted body prompt", ge=50, le=2000, advanced=True
+    )
     traits_retry_s: float = param(
         300.0,
         "After a failed LLM rating, wait this long before asking again for the same prompt and "
@@ -6039,6 +6048,11 @@ class PersonaConfig(Strict):
         if len(self.prompt) > self.prompt_max_chars:
             raise ValueError(
                 f"persona.prompt has {len(self.prompt)} characters, max {self.prompt_max_chars}"
+            )
+        if len(self.body_prompt) > self.body_prompt_max_chars:
+            raise ValueError(
+                f"persona.body_prompt has {len(self.body_prompt)} characters, "
+                f"max {self.body_prompt_max_chars}"
             )
         return self
 

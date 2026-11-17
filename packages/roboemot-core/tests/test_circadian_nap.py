@@ -844,3 +844,94 @@ def test_quiet_hours_end_a_requested_nap_and_its_window():
     nap.start_requested(100.0, 600.0)
     nap.step(150.0, after_s=1800.0, resume_after_s=180.0, quiet=True, blocked=False, held=False)
     assert not nap.napping and not nap.requested(200.0)
+
+
+# ------------------------------------------------- next-nap countdown for the Live tab (2026-11-16)
+
+
+def due(x):
+    nap = x.r.snapshot()["nap"]
+    return nap["due_in_s"], nap["held"]
+
+
+def test_the_countdown_is_nap_after_s_minus_the_idle_time_and_the_lag():
+    x = rig()
+    run(x, 600)
+    assert due(x) == (x.cfg.circadian.nap_after_s - 600, False)
+    x.clock.advance(4.0)  # no tick yet: the clock keeps running between model updates
+    assert due(x) == (x.cfg.circadian.nap_after_s - 604, False)
+
+
+def test_the_countdown_restarts_on_activity():
+    talking = [False]
+    x = rig(conversing=lambda: talking[0])
+    run(x, 600)
+    talking[0] = True
+    run(x, STEP)
+    talking[0] = False
+    run(x, STEP)
+    assert due(x)[0] > x.cfg.circadian.nap_after_s - 600
+
+
+def test_no_countdown_while_napping_or_naps_off_or_in_quiet_hours():
+    assert due(napping(rig())) == (None, False)
+    assert due(rig(nap_after_s=None)) == (None, False)
+    x = rig(hour=23.0)
+    run(x, STEP)
+    assert due(x) == (None, False)
+
+
+def test_no_countdown_while_a_nap_is_impossible():
+    x = rig(engaged=lambda: True)
+    run(x, 600)
+    assert due(x) == (None, False)
+    y = rig()
+    y.r.hold("awake", 60)
+    run(y, STEP)
+    assert due(y) == (None, False)
+
+
+def test_a_due_nap_held_off_by_presence_shows_zero_and_held():
+    x = rig()
+    run(x, x.cfg.circadian.nap_after_s - STEP)
+    face(x)  # one sighting: presence, not activity
+    run(x, 2 * STEP)
+    assert x.r.model.state == "awake" and due(x) == (0.0, True)
+
+
+def test_after_a_stimulus_wake_the_countdown_uses_the_resume_time():
+    x = napping(rig())
+    loud(x)
+    c = x.cfg.circadian
+    run(x, c.wake_hold_s + 2 * STEP)
+    left, held = due(x)
+    assert not held and 0 < left <= c.nap_resume_after_s
+
+
+def test_no_countdown_and_no_hold_during_a_requested_nap():
+    """SPEC 7A, Requested nap: the robot naps, so the Live tab shows no next nap, even when
+    presence was holding a due nap off at the request and before the next model update."""
+    x = rig()
+    run(x, x.cfg.circadian.nap_after_s - STEP)
+    face(x)
+    run(x, 2 * STEP)
+    assert due(x) == (0.0, True)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    assert due(x) == (None, False)
+    for _ in range(int(x.cfg.circadian.requested_nap_min_s // STEP) - 1):
+        run(x, STEP)
+        assert due(x) == (None, False)
+
+
+def test_after_a_requested_nap_the_usual_countdown_rule_applies():
+    x = rig(requested_nap_min_s=600.0)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    run(x, 601.0)
+    assert x.r.model.reason == "nap" and due(x) == (None, False)  # an ordinary day nap now
+    face(x)
+    face(x, x.clock.t + 0.1)  # a confirmed face wakes it, as after any nap
+    run(x, STEP)
+    assert x.r.model.state == "awake"
+    run(x, x.cfg.circadian.wake_hold_s + 2 * STEP)
+    left, held = due(x)
+    assert not held and 0 < left <= x.cfg.circadian.nap_after_s

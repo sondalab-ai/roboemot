@@ -61,7 +61,7 @@
   - `roboemot.skills.host.ToolHost`, a dataclass. T1 fields: `config: Callable[[], RoboEmotConfig]`, `wall_now: Callable[[], datetime]` (tz-aware, `circadian.timezone`, via `timezones.now`), `bus: Bus`. Later tasks add fields with default `None`: `nap` (T2), `scheduler` (T3), `media` (T6), `http` (T5).
   - `roboemot.skills.plugins.SKILLS_GROUP = "roboemot.skills"`.
   - `load_skill_plugins(host: ToolHost) -> list[Callable[..., Any]]`. It loads every entry point in the group, without a `robot.id` key. Each entry point is a factory `(ToolHost) -> list[skill functions]`. A factory that raises or returns a non-skill is logged by entry-point name and skipped. One broken plugin never stops the run. Results are sorted by entry-point name.
-  - `GROUPS["roboemot.skills"] = GroupContract("factory (ToolHost) -> list of @skill functions: voice tools, not keyed by robot.id (SPEC 10, Voice tools)", factory_args=1)`. Update the `plugins.py` module docstring: this group is the one group not keyed by `robot.id`.
+  - `GROUPS["roboemot.skills"] = GroupContract("factory (ToolHost) -> list of @skill functions: voice tools, not keyed by robot.id (SPEC 11, Voice tools)", factory_args=1)`. Update the `plugins.py` module docstring: this group is the one group not keyed by `robot.id`.
   - `build_skill_registry(env: SkillEnv, host: ToolHost) -> SkillRegistry` in `skills/plugins.py`: `default_skills(env)` plus every plugin skill (a duplicate name is logged and skipped).
   - `ToolsConfig(Strict)` on `RoboEmotConfig.tools`. In T1 it is empty. Each later task adds its own sub-model (`scheduler`, `weather`, `media`, `radio`). `circadian.requested_nap_min_s` lives in `CircadianConfig` (T2).
 
@@ -74,7 +74,7 @@
 - [ ] **Step 2:** Run `pytest tests/test_fileio.py tests/test_skills.py tests/test_skill_plugins.py tests/test_robot_hierarchy.py -q`. Expected: the new tests FAIL.
 - [ ] **Step 3:** Implement the interfaces above. `startup.py:170` and `realtime/check.py` call `build_skill_registry`.
 - [ ] **Step 4:** Run `pytest -q` and `ruff check . && ruff format --check .`. Expected: all pass.
-- [ ] **Step 5:** Commit as `feat(skills): roboemot.skills plugin group and tools config (SPEC 10, 11A)`.
+- [ ] **Step 5:** Commit as `feat(skills): roboemot.skills plugin group and tools config (SPEC 11, 11A)`.
 
 ### Task T2: Sleep tool and requested nap
 
@@ -89,7 +89,7 @@
 - Produces:
   - `circadian.requested_nap_min_s: float = param(600.0, "...", unit="s", ge=60, le=7200)`.
   - `DayNap.start_requested(t: float, min_s: float) -> None`. It sets `napping=True` and `requested_until = t + min_s`. `DayNap.requested(t) -> bool` is True while `t < requested_until`.
-  - `CircadianRunner.request_nap(now: float) -> Literal["ok", "already_resting", "disabled", "asleep"]`. While `requested(t)` holds, `_activity` and `_stimulus` ignore face, speech, light, motion and loud. Only `wake()` and the wake-word branch of `_on_utterance` end the nap. After the window, the usual rules apply.
+  - `CircadianRunner.request_nap(now: float) -> Literal["ok", "already_resting", "disabled", "asleep"]`. While `requested(t)` holds, `_activity` and `_stimulus` ignore face, speech, light, motion and loud. Only `wake()` and the wake-word branch of `_on_utterance` (the name and the generic wake phrases) end the nap. After the window, the usual rules apply.
   - `RuntimeHost.request_nap() -> str` arms the nap and returns at once ("ok" when armed). The nap starts when the turn that called the tool has ended: the worker's turn-end hook, after the last reply audio. It does not start when speech is merely idle at call time, because the model usually says good night after the tool result. When the nap starts, the conversation's follow-up window closes, so only the robot's name addresses it.
   - `ToolHost.nap: Callable[[], str] | None`.
   - `roboemot.tools.sleep.skills(host) -> list`: one skill `go_to_sleep()`, `llm_visible=True`, `available=lambda: host.nap is not None`. It returns `SkillResult({"status": status})`. Description: "Take a nap now because the person asked; say a short good night in the same turn; the robot's name wakes you".
@@ -149,7 +149,7 @@
     - `reminder_cancel(which: str)`
     - `schedule_list()`
     - `describe=` adds the current local date, weekday and time in `circadian.timezone`, so the model resolves "tomorrow at 6". Results are JSON with `id`, the local due time and `kind`. Errors are `{"error": code}`.
-  - `conversation.llm_skills` default gains the five names above.
+  - `conversation.llm_skills` default gains the five names above. T3 also adds `weather`, `radio_play`, `radio_stop` and `radio_volume` to the default now (ruling 2026-11-16: `available` hides them until T5/T6 land and the admin enables them). The names are offered only once a registered skill has them.
 
 - [ ] **Step 1: Write the failing tests**
   - `test_tool_schedule.py::test_daily_reminder_keeps_local_time_across_dst`: `tz=Europe/Rome`, `local_time=08:00`, after `2026-10-24T08:00+02:00`. The next due is `2026-10-25T08:00+01:00`, then `2026-10-26T08:00+01:00`.
@@ -205,7 +205,7 @@
   - `test_tool_announce.py::test_napping_robot_is_woken`.
   - `test_tool_announce.py::test_quiet_hours_rest_is_lifted_before_the_nod`: `nod` is requested only after the state left `resting`, and the request returns True.
   - `test_event_turn.py::test_event_turn_opens_a_closed_realtime_session`: with the session closed by idle, `event_turn` opens it and the reply plays.
-  - `test_config.py::test_announce_timeout_exceeds_realtime_connect_timeout`: a validator rejects `tools.scheduler.announce_timeout_s` at or below the realtime route's `connect_timeout_s`.
+  - (ruling 2026-11-16, E) no validator: `announce_timeout_s` counts from when the route can take the request; tests: slow connect inside `connect_timeout_s` gives no fallback, a connect failure gives the fallback.
   - `test_tool_announce.py::test_fallback_sentence_and_cue_when_route_fails`.
   - `test_tool_announce.py::test_timer_repeats_until_answered_at_most_repeat_max`.
 - [ ] **Step 2:** Run the tests. Expected: FAIL.
@@ -231,10 +231,11 @@
     - `timeout_s` (5, 1–30)
     - `base_url` (`"https://api.open-meteo.com/v1/forecast"`, advanced)
     - `geocode_url` (`"https://geocoding-api.open-meteo.com/v1/search"`, advanced)
+    - `geocode_results` (5, 1–10)
   - `ToolHost.http: Callable[[], httpx.Client] | None`. It is injected so tests use `httpx.MockTransport`.
   - `fetch_forecast(client, lat, lon, days, timeout_s) -> Forecast`. The query is `current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code`, `daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max`, `forecast_days=days`, `timezone=auto`.
   - `Forecast` is a frozen dataclass of the current values and a per-day tuple. WMO `weather_code` maps to English words through the module constant `WMO_WORDS`.
-  - `geocode(client, query, language, timeout_s) -> list[Place(name, admin, country, lat, lon)]`. It is used by T7 only. `count=5`.
+  - `geocode(client, query, language, timeout_s) -> list[Place(name, admin, country, lat, lon)]`. It is used by T7 only. `count=tools.weather.geocode_results`.
   - Skill `weather(days: Annotated[int, Range(1, 7)] = 1)`, `available=lambda: host.config().tools.weather.enabled and host.config().circadian.location is not None`. It returns the structured forecast as JSON, clamps `days` to `forecast_days`, and caches by `(lat, lon, days)` for `cache_s`. A network error returns `{"error": "unreachable"}`.
 - [ ] **Step 1: Write the failing tests**
   - `test_tool_weather.py::test_weather_not_offered_when_disabled_or_no_location`.
@@ -264,6 +265,7 @@
     - `resume_after_s` (1.5, 0–30)
     - `connect_timeout_s` (8, 1–30)
     - `max_play_s` (7200, 60–43200)
+    - `volume_step_db` (3, 1–12)
   - `RadioConfig`:
     - `enabled` (`param(False, ..., opt_in=True)`)
     - `stations: list[Station]`, where `Station(name: str, url: str, genres: list[str], language: str | None)`. URLs must be `http(s)://`, checked at load.
@@ -282,7 +284,7 @@
   - Skills, with `available=lambda: host.config().tools.radio.enabled and bool(host.config().tools.radio.stations)`:
     - `radio_play(station: str)`, with `choices` = station names plus genres. A genre picks the first matching station. A URL is never accepted.
     - `radio_stop()`
-    - `radio_volume(change: Literal["up", "down"])`, which steps by `media.volume_step_db` (3, 1–12).
+    - `radio_volume(change: Literal["up", "down"])`, which steps by `tools.media.volume_step_db`.
 
 - [ ] **Step 1: Write the failing tests**
   - `test_media_player.py::test_player_pauses_while_robot_speaks_and_resumes_after_idle`: uses a fake `PcmStream` and a fake output. No chunk is pushed during the speaking window. Pushing resumes after `resume_after_s`.

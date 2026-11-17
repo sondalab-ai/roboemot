@@ -35,6 +35,30 @@ def _stack(args: argparse.Namespace) -> ConfigStack:
     )
 
 
+def _stack_with_manifest(args: argparse.Namespace) -> ConfigStack:
+    """``_stack`` for a command with ``_add_manifest_args``: with ``--manifest``, that robot's
+    behaviour block too (config layer 2: its voice pitch, its body prompt). Only the block is
+    used: nothing moves, so no platform is loaded for its body yaw."""
+    stack = _stack(args)
+    if args.manifest:
+        from .affect.clips import load_clip_library
+        from .manifest import load_manifest
+
+        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=args.dev)
+        stack.set_manifest_behaviour(
+            m.model.behaviour, m.channels, load_clip_library(m), body_yaw=None
+        )
+    return stack
+
+
+def _add_manifest_args(parser: argparse.ArgumentParser, what: str) -> None:
+    """``--manifest`` and ``--dev`` for a command that reads the robot's behaviour block."""
+    parser.add_argument("--manifest", help=f"robot manifest whose behaviour layer applies ({what})")
+    parser.add_argument(
+        "--dev", action="store_true", help="accept a manifest with unmeasured dynamics"
+    )
+
+
 def _discover(args: argparse.Namespace) -> int:
     """List robots answering on the LAN, matched to the manifests in ``--manifest-dir``."""
     from . import discovery
@@ -166,7 +190,7 @@ def _llm(args: argparse.Namespace) -> int:
     from .llm.conformance import check_route
     from .secret_store import SecretStore
 
-    cfg = _stack(args).effective()
+    cfg = _stack_with_manifest(args).effective()
     route = next((r for r in cfg.llm_routes if r.name == args.route), None)
     if route is None:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
@@ -252,7 +276,7 @@ def _realtime(args: argparse.Namespace) -> int:
     from .realtime.session import GEMINI_LIVE, DirectSession
     from .secret_store import SecretStore
 
-    cfg = _stack(args).effective()
+    cfg = _stack_with_manifest(args).effective()
     route = next((r for r in cfg.llm_routes if r.name == args.route), None)
     if route is None:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
@@ -287,18 +311,7 @@ def _voice(args: argparse.Namespace) -> int:
     from .voice.sample import render_samples
     from .voice.tts import TTSError, TTSUnavailable
 
-    stack = _stack(args)
-    if args.manifest:
-        from .affect.clips import load_clip_library
-        from .manifest import load_manifest
-
-        # only the behaviour block (config layer 2) is used: nothing moves, so no platform is
-        # loaded for its body yaw (the runtime refuses a body turn in the speaking map at start)
-        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=args.dev)
-        stack.set_manifest_behaviour(
-            m.model.behaviour, m.channels, load_clip_library(m), body_yaw=None
-        )
-    cfg = stack.effective()
+    cfg = _stack_with_manifest(args).effective()
     root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
     backend = PiperBackend(
         cfg.voice.piper,
@@ -448,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     llm.add_argument("--defaults")
     llm.add_argument("--preset")
     llm.add_argument("--preset-dir", action="append", default=["configs/presets"])
+    _add_manifest_args(llm, "e.g. the robot's body prompt in the check's system prompt")
 
     rtc = sub.add_parser(
         "realtime",
@@ -467,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
     rtc.add_argument("--defaults")
     rtc.add_argument("--preset")
     rtc.add_argument("--preset-dir", action="append", default=["configs/presets"])
+    _add_manifest_args(rtc, "e.g. the robot's body prompt in the session's instructions")
 
     sec = sub.add_parser(
         "secrets",
@@ -493,13 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     voice.add_argument(
         "--intensity", type=float, default=0.5, help="affect intensity 0..1 (default 0.5)"
     )
-    voice.add_argument(
-        "--manifest",
-        help="robot manifest whose behaviour layer applies (e.g. the robot's base pitch)",
-    )
-    voice.add_argument(
-        "--dev", action="store_true", help="accept a manifest with unmeasured dynamics"
-    )
+    _add_manifest_args(voice, "e.g. the robot's base pitch")
     voice.add_argument(
         "--python", help="Piper virtualenv interpreter (default: voice.piper.python, else the "
         "app data folder's piper-venv)",

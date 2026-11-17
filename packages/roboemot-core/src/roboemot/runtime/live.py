@@ -231,10 +231,13 @@ class LiveState:
         energy = None
         if circ is not None:
             sleepiness = circ.get("sleepiness")
+            nap = circ.get("nap") or {}
             energy = {
                 "state": circ["state"],
                 "reason": circ.get("reason"),
                 "sleepiness": None if sleepiness is None else round(sleepiness, ROUND_DIGITS),
+                "nap_in_s": nap.get("due_in_s"),
+                "nap_held": bool(nap.get("held")),
             }
         return {
             "label": s.label,

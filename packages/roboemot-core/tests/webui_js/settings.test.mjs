@@ -590,6 +590,20 @@ test("save: each write asks again, and an unchanged value sends nothing", async 
   assert.ok(input);
 });
 
+test("prompt text (a path ending in prompt) is edited in a textarea, even on one line", async () => {
+  const prompt = d("voice.prompt", "text", { value: "One line of prompt.", default: "", admin_only: true });
+  const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } }, { fields: [prompt], pin_required: true });
+  await open(page, "core-voice");
+  const area = row(page, "voice.prompt").querySelector("textarea");
+  assert.ok(area, "a textarea");
+  assert.equal(area.value, "One line of prompt.");
+  area.value = "Two\nlines.";
+  button(row(page, "voice.prompt"), "settings_save").click();
+  await settle();
+  await answerPin(page);
+  assert.equal(posts(page, "/api/settings")[0].body.value, "Two\nlines.");
+});
+
 test("save: a client pre-check flags the field and sends nothing", async () => {
   const page = await settingsPage();
   await open(page, "core-voice");

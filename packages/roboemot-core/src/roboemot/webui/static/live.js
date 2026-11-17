@@ -84,6 +84,8 @@ function liveMoodCard(d) {
     if (m.circadian.sleepiness !== null) {
       parts.push(progress(t("live_energy"), Math.round((1 - m.circadian.sleepiness) * LIVE_PERCENT), LIVE_PERCENT));
     }
+    if (m.circadian.nap_held) parts.push(liveRow(t("live_nap_next"), t("live_nap_held")));
+    else if (Number.isFinite(m.circadian.nap_in_s)) parts.push(liveRow(t("live_nap_next"), t("live_nap_in", { n: liveCountdown(m.circadian.nap_in_s) })));
   } else {
     parts.push(el("p", { class: "hint" }, t("live_circ_off")));
   }
@@ -188,6 +190,15 @@ function liveBeatMusic(music, beat) {
     liveRow(t("live_music"), t(m.playing ? "live_yes" : "live_no")),
     liveShare(t("live_music_confidence"), m.confidence),
   ];
+}
+
+// A time left as a clock: m:ss below an hour, h:mm:ss from an hour, whole seconds rounded.
+function liveCountdown(seconds) {
+  const total = Math.max(0, Math.round(seconds));
+  const h = Math.floor(total / LIVE_SECONDS_PER_HOUR);
+  const m = Math.floor((total % LIVE_SECONDS_PER_HOUR) / LIVE_SECONDS_PER_MINUTE);
+  const ss = String(total % LIVE_SECONDS_PER_MINUTE).padStart(2, "0");
+  return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":" + ss : m + ":" + ss;
 }
 
 // An age as the page shows it: seconds up to a minute, then whole minutes, then whole hours.

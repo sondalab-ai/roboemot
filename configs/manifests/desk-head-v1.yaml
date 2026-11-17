@@ -28,3 +28,9 @@ retargeting:
 safety:
   estop: {driver: gpio, pin: 17, active_low: true}
   watchdog_ms: 200
+behaviour:              # config layer 2 (SPEC 11A): this robot's defaults
+  # Body (SPEC 8, part 1b): from joints, sensors and expressive_channels above. Short on purpose.
+  persona:
+    body_prompt: >-
+      Your body: a head on a neck that pans and tilts, LED eyes, a camera, microphones and a
+      speaker. You have no arms or legs and cannot walk.
