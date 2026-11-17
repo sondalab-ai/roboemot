@@ -234,6 +234,9 @@ The settings an owner is most likely to change (cloud and local voice, LLM route
 hours, privacy), where each value lives and which one wins, are in the
 [Configuration guide](docs/guides/configuration.md).
 
+To let the robot nap on request, run timers and reminders, tell the weather and play internet
+radio by voice, see [Voice tools](docs/guides/voice-tools.md).
+
 Debug report with the robot's own system, temperature and battery data (SPEC 12A):
 
 ```bash
