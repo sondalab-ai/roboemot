@@ -32,6 +32,7 @@ from roboemot.diag import BusEvents, EventRing
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm.hub import RouterHub
+from roboemot.llm.prompt_log import PromptRing
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import Manifest
 from roboemot.motion import MotionLoop
@@ -257,6 +258,10 @@ def assemble(
     bus.subscribe("robot.asleep", lambda msg: transcript.set_asleep(True))
     bus.subscribe("robot.awake", lambda msg: transcript.set_asleep(False))
     transcript.attach(stack)  # its own listener: runs before the reload fan-out is subscribed
+    # The cloud LLM requests (Live tab, opt-in): the router hub's routers and the realtime
+    # clients get it through ``make_router`` and the realtime route, so a rebuild keeps it.
+    host.prompts = PromptRing(cfg.webui.live)
+    host.prompts.attach(stack)
     # Decision events ("What's happening", SPEC 12A): one diag.event per decision, kept in a
     # small ring only while the Live tab and its panel are on.
     host.events = BusEvents(bus)
