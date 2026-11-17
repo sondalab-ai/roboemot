@@ -305,3 +305,17 @@ def clean_key(key: object, cfg: RoboEmotConfig, *, dots: bool = False) -> str:
     ):
         raise ValidationError("key_invalid", "key")
     return key
+
+
+def clean_label(key: object, cfg: RoboEmotConfig) -> str:
+    """A new entry identity people read and say (a radio station's name, "RTL 102.5"): one line
+    of NFC text, single spaces, no control characters, within the phrase cap. It is never a path
+    segment as is: the catalogue addresses an entry it cannot name by its index."""
+    if not isinstance(key, str):
+        raise ValidationError("key_invalid", "key")
+    text = unicodedata.normalize("NFC", key)
+    if not text or _has_control(text) or " ".join(text.split()) != text:
+        raise ValidationError("name_invalid", "key")
+    if len(text) > cfg.webui.settings_phrase_max_chars:
+        raise ValidationError("name_too_long", "key")
+    return text
