@@ -373,7 +373,6 @@ class OverridesFile:
                             **({"keys": keys} if keys else {}),
                         },
                         indent=2,
-                        sort_keys=True,
                     )
                 )
                 handle.flush()
@@ -792,7 +791,7 @@ class SettingsEditor:
             refuse=REFUSED_CHECKS,
             exempt=exempt,
         )
-        self._overrides[stored] = entry
+        self._overrides[stored] = written if stored == target else entry
         if bind is not None and bind[0] != NO_KEY_REF:
             self._remember_key(entry["name"], bind[0])
             self.stack.note(
@@ -810,7 +809,8 @@ class SettingsEditor:
         """Remove the entry at ``path`` (``container.key`` or a list entry) if the catalogue lists
         it as ``removable``: only the runtime layer holds it. A lower layer's entry cannot be
         masked (the merge only adds and overrides), so that raises ``entry_in_lower_layer``; an
-        unknown entry raises ``SettingNotAllowed``."""
+        unknown entry raises ``SettingNotAllowed``; ``entry_not_removed`` when the stack held no
+        override at ``path`` (nothing changed, so success is never reported)."""
         with self._lock:
             rows, tree = self._rows(), self.stack.merged_tree()
             box_path, _, name = path.rpartition(".") if isinstance(path, str) else ("", "", "")
@@ -821,7 +821,10 @@ class SettingsEditor:
                 raise ValidationError("entry_in_lower_layer", "path")
             key = okey(tree, path)
             before = self._failures()
-            self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
+            if not self.stack.clear(
+                path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS
+            ):
+                raise ValidationError("entry_not_removed", "path")
             for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
                 del self._overrides[stored]
             for stored in [k for k in self._acks if k == key or k.startswith(key + ".")]:
@@ -1574,13 +1577,17 @@ def _migrated(stored: dict[str, Any], source: str) -> tuple[dict[str, Any], bool
     under the new path wins) and removed ones dropped with a log line naming the key only. A
     dropped setting (``DROPPED_SETTINGS``) is taken out of a stored value too, e.g. an added
     route, and logged once under ``source`` (the file); the flag says whether a value changed
-    that way, so the file is rewritten."""
+    that way, so the file is rewritten. A merged list stored under its own path as one entry (the
+    radio stations before they were a merged list held the last added station so) is read as
+    that added entry."""
     out: dict[str, Any] = {}
     stripped = False
     for key, value in stored.items():
         if any(key == old or key.startswith(old + ".") for old in REMOVED_SETTINGS):
             log.warning("web UI setting %s dropped: removed from the configuration", _shown(key))
             continue
+        if key in KEYED_LISTS and isinstance(value, dict) and value.get(KEYED_LISTS[key]):
+            key, stripped = entry_key(key, ident_fields(key, value)), True
         parsed = parse_okey(key)
         if parsed is not None and dropped_entry(parsed[0], parsed[1]):
             log_dropped(source, [f"{parsed[0]}[{parsed[1][KEYED_LISTS[parsed[0]]]}]"])

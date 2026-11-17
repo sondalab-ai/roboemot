@@ -19,14 +19,15 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from roboemot.config.schema import RoboEmotConfig, Station
-from roboemot.config.stack import ConfigStack
+from roboemot.config.stack import KEYED_LISTS, ConfigStack, GuardrailError
 from roboemot.diagnostics import Diagnostics
 from roboemot.runtime.tools_state import ToolsError, ToolsState
 from roboemot.tools.scheduler import Scheduler
 from roboemot.webui import make_server
 from roboemot.webui.api import PASSIVE_POLLS, TOOLS_STATE, TOOLS_STATUS
-from roboemot.webui.settings import SettingsEditor
+from roboemot.webui.settings import SettingNotAllowed, SettingsEditor
 from roboemot.webui.strings import STRINGS, language_for
+from roboemot.webui.validation import ValidationError
 from test_webui import PIN, Client, FakeService
 
 REMINDER = "pick up Giulia at the dentist"
@@ -507,3 +508,126 @@ def test_the_place_search_waits_no_longer_than_the_page_request_may_work():
     assert ToolsState(host, cfg, http=slow).geocode("Como") == []
     budget = cfg.webui.request_deadline_s * cfg.webui.request_work_share
     assert seen and all(v == budget for v in seen[0].values())
+
+
+# ------------------------------------------------------- station editor: add, remove, restart
+
+
+def radio_editor(tmp_path, stations=()):
+    """A stack with the radio on (``stations`` in app.yaml) and its editor (file ``s.json``)."""
+    radio = {"enabled": True, "stations": list(stations)}
+    stack = ConfigStack(
+        app={"webui": {"bind": "127.0.0.1", "port": 0}, "tools": {"radio": radio}},
+        audit_path=tmp_path / "a.jsonl",
+    )
+    return stack, SettingsEditor(stack, store=tmp_path / "s.json")
+
+
+def station(name: str, url: str = STATION_URL) -> dict:
+    return {"name": name, "url": url, "genres": [], "language": None}
+
+
+def names(stack: ConfigStack) -> list[str]:
+    return [s.name for s in stack.effective().tools.radio.stations]
+
+
+def restarted(tmp_path, stations=()) -> ConfigStack:
+    """A fresh stack with the overrides file restored, as after a restart."""
+    stack, editor = radio_editor(tmp_path, stations)
+    editor.restore()
+    return stack
+
+
+def segment(editor: SettingsEditor, name: str) -> str:
+    """The catalogue path segment of station ``name`` (its index when the name has a dot)."""
+    rows = {r["path"]: r for r in editor.fields()}
+    box = "tools.radio.stations"
+    return next(k for k in rows[box]["value"] if rows[f"{box}.{k}.name"]["value"] == name)
+
+
+def test_a_removed_station_is_gone_and_a_restart_keeps_every_added_one(tmp_path):
+    """Owner report 2026-11-17: removing a station said "removed" but the station stayed, and a
+    restart lost every added station (the file held one station, not a list)."""
+    stack, editor = radio_editor(tmp_path)
+    editor.add_entry("tools.radio.stations", None, {**station("Jazz"), "genres": ["jazz"]})
+    editor.add_entry("tools.radio.stations", None, station("Rock", "https://example.com/b.mp3"))
+    editor.add_entry("tools.radio.stations", None, station("Pop", "https://example.com/c.mp3"))
+    assert names(restarted(tmp_path)) == ["Jazz", "Rock", "Pop"]
+    assert editor.remove_entry(f"tools.radio.stations.{segment(editor, 'Jazz')}")["changed"]
+    assert names(stack) == ["Rock", "Pop"]
+    stored = json.loads((tmp_path / "s.json").read_text())["overrides"]
+    assert all(isinstance(v, dict) and v.get("name") for v in stored.values()), stored
+    assert sorted(v["name"] for v in stored.values()) == ["Pop", "Rock"]
+    assert names(restarted(tmp_path)) == ["Rock", "Pop"]
+
+
+def test_a_station_of_app_yaml_cannot_be_removed_and_its_edit_survives_a_restart(tmp_path):
+    lower = [station("Jazz"), station(DOTTED, "https://stream.example.org/rtl.mp3")]
+    stack, editor = radio_editor(tmp_path, lower)
+    editor.add_entry("tools.radio.stations", None, station("Rock", "https://example.com/b.mp3"))
+    for name in ("Jazz", DOTTED):
+        with pytest.raises(ValidationError) as exc:
+            editor.remove_entry(f"tools.radio.stations.{segment(editor, name)}")
+        assert exc.value.code == "entry_in_lower_layer"
+    url = "https://stream.example.org/rtl2.mp3"
+    edit = {"path": f"tools.radio.stations.{segment(editor, DOTTED)}.url", "value": url}
+    editor.change_many([edit])
+    again = restarted(tmp_path, lower)
+    assert names(again) == ["Jazz", DOTTED, "Rock"]
+    assert again.effective().tools.radio.stations[1].url == url
+    assert names(stack) == ["Jazz", DOTTED, "Rock"]
+
+
+def test_the_broken_station_file_of_an_older_version_restores_its_station(tmp_path, caplog):
+    """Before the fix the file held ``{"tools.radio.stations": {one station}}`` (the last one
+    added). It is read as that station, the file is rewritten, and no log line names its URL."""
+    old = {"v": 1, "overrides": {"tools.radio.stations": station("Rock")}}
+    (tmp_path / "s.json").write_text(json.dumps(old))
+    (tmp_path / "s.json").chmod(0o600)
+    caplog.set_level(logging.DEBUG)
+    assert names(restarted(tmp_path)) == ["Rock"]
+    assert STATION_URL not in logged(caplog)
+    stored = json.loads((tmp_path / "s.json").read_text())["overrides"]
+    assert "tools.radio.stations" not in stored, "the file is rewritten in the new shape"
+    assert names(restarted(tmp_path)) == ["Rock"]
+
+
+def test_a_station_field_edit_stored_by_an_older_version_still_lands(tmp_path):
+    """Before the fix an edit of an app.yaml station was stored by its catalogue path (an index
+    for a dotted name); it still edits that station once the list is merged by name."""
+    lower = [station("Jazz"), station(DOTTED, "https://stream.example.org/rtl.mp3")]
+    url = "https://stream.example.org/rtl2.mp3"
+    old = {
+        "v": 1,
+        "overrides": {"tools.radio.stations.1.url": url, "tools.radio.stations.Jazz.genres": ["j"]},
+    }
+    (tmp_path / "s.json").write_text(json.dumps(old))
+    (tmp_path / "s.json").chmod(0o600)
+    stations = restarted(tmp_path, lower).effective().tools.radio.stations
+    assert [(s.name, s.url, s.genres) for s in stations] == [
+        ("Jazz", STATION_URL, ["j"]),
+        (DOTTED, url, []),
+    ]
+
+
+def test_a_removal_that_removes_nothing_is_refused_and_keeps_the_file(tmp_path, monkeypatch):
+    stack, editor = radio_editor(tmp_path)
+    editor.add_entry("tools.radio.stations", None, station("Jazz"))
+    before = (tmp_path / "s.json").read_text()
+    monkeypatch.setattr(stack, "clear", lambda *a, **k: False)
+    with pytest.raises(ValidationError) as exc:
+        editor.remove_entry("tools.radio.stations.Jazz")
+    assert exc.value.code == "entry_not_removed"
+    assert (tmp_path / "s.json").read_text() == before
+    assert "err_entry_not_removed" in STRINGS["en"] and "err_entry_not_removed" in STRINGS["it"]
+
+
+def test_every_list_the_web_can_add_to_is_a_merged_list(tmp_path):
+    """A list of entries outside ``KEYED_LISTS`` is replaced whole by a layer, so the stack cannot
+    take one added entry out of it: no such list may gain an entry from the web UI."""
+    _, editor = radio_editor(tmp_path)
+    for row in editor.fields():
+        if row["kind"] != "keyed_list" or row["path"] in KEYED_LISTS:
+            continue
+        with pytest.raises((ValidationError, GuardrailError, SettingNotAllowed)):
+            editor.add_entry(row["path"], None, {"name": "probe"})
