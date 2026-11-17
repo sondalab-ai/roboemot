@@ -465,7 +465,13 @@ async function toolsCatalogueAddAll(group) {
 }
 
 // Only an https policy page becomes a link (the server checks it at load too).
-const toolsHttps = (url) => typeof url === "string" && url.startsWith("https://");
+function toolsHttps(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (e) {
+    return false;
+  }
+}
 
 function toolsCatalogueStation(s) {
   const facts = [s.operator, s.genres.join(", "), s.language, s.bitrate_kbps + " kbps"].filter(Boolean).join(" · ");
