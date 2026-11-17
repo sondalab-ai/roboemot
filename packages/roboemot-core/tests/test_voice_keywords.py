@@ -256,3 +256,38 @@ def test_a_name_of_several_words_matches_each_word_in_order():
     assert s.name_close("ciao nivea bianca", "it", 1, 4)
     assert not s.name_close("bianca nivea", "it", 1, 4)  # out of order
     assert not s.name_close("nivea nera", "it", 1, 4)  # every word must match
+
+
+# Owner decision 2026-11-17: English transcripts spell "Neve" the English way. Known false
+# accepts: "nav" and "nave" (one vowel off "neve" once a reads as e).
+NAME_CLOSE_EN = [
+    *[(w, True) for w in ("Navy", "Neva", "Nevay", "Neevee", "Nevvy", "Neveh", "Nev", "Neve")],
+    ("nav", True),
+    ("nave", True),
+    *[
+        (w, False)
+        for w in (
+            "never", "knave", "eve", "even", "nerve", "novel", "have", "give", "live",
+            "love", "move", "wave", "nova", "envy",
+        )
+    ],
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("word,close", NAME_CLOSE_EN)
+def test_a_close_english_spelling_of_the_name(word, close):
+    s = server_spotter("Neve")
+    assert s.name_close(f"hey {word} stop the music", "en", 1, 4) is close
+
+
+def test_the_english_rules_apply_only_to_english_transcripts():
+    s = server_spotter("Neve")
+    assert s.name_close("Navy", "en", 1, 4) and not s.name_close("Navy", "it", 1, 4)
+    assert not s.name_close("nave", "it", 1, 4)  # Italian unchanged
+
+
+def test_an_english_name_of_several_words():
+    s = server_spotter("Neve Bianca")
+    assert s.name_close("hi neevee biancah please", "en", 1, 4)
+    assert not s.name_close("hi neevee bianka please", "en", 1, 4)  # k is not c
+    assert not s.name_close("bianca navy", "en", 1, 4)

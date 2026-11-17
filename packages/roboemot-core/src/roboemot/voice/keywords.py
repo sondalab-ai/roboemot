@@ -23,6 +23,15 @@ order, so "Nivea" and "Nieve" are close to "Neve" while "nave", "nove", "deve", 
 A name word shorter than ``min_letters`` must match exactly; a name of several words matches
 word by word, all of them, in order.
 
+The spelling rules depend on the transcript's language (``SPELLING``, data, not code); a language
+without its own rules uses the default ones above. English (owner decision 2026-11-17: a server
+writes "Navy" or "Neevee" for "Neve") also reads ``y`` after the first letter as a vowel, drops a
+final ``h`` after a vowel, reads ``a`` as ``e`` too, and collapses doubled letters, on both the
+word and the name. So "Navy", "Neva", "Nevay", "Neevee", "Nevvy", "Neveh" and "Nev" are close to
+"Neve", while "never", "knave", "eve", "even", "nerve", "novel", "have", "give", "live", "love",
+"move" and "wave" are not. Known false accepts in English: "nav" and "nave" (and "navy" itself,
+which the owner wants accepted).
+
 ``grammar_phrases`` gives the same lists *folded* instead (lower case, accents kept): the form a
 recognizer vocabulary spells them in, for the grammar pass (``roboemot.voice.grammar``).
 """
@@ -32,6 +41,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..config.schema import KeywordSet
@@ -42,10 +52,40 @@ if TYPE_CHECKING:
 NON_WORD = re.compile(r"[\W_]+")
 FOLD_SPLIT = re.compile(r"[^\w']+|_")
 CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
-# vowels a recognizer swaps for one another, mapped to one class (a fact of the spelling, not a
-# tunable): ``name_close`` reads them as the same vowel
-VOWEL_CLASS = str.maketrans({"i": "e", "u": "o"})
-VOWELS = frozenset("aeo")  # the vowel classes after VOWEL_CLASS
+
+
+@dataclass(frozen=True)
+class Spelling:
+    """How a language's transcripts spell a name (facts of the spelling, not tunables):
+    ``before`` regex rewrites, then ``classes`` (vowels a recognizer swaps for one another,
+    mapped to one class), then ``after`` rewrites; ``vowels`` are the classes left."""
+
+    before: tuple[tuple[str, str], ...]
+    classes: dict[int, str]
+    after: tuple[tuple[str, str], ...]
+    vowels: frozenset[str]
+
+    def apply(self, word: str) -> str:
+        """``word`` (normalised) as these rules read it, ready for the vowel-edit count."""
+        for pattern, repl in self.before:
+            word = re.sub(pattern, repl, word)
+        word = word.translate(self.classes)
+        for pattern, repl in self.after:
+            word = re.sub(pattern, repl, word)
+        return word
+
+
+# ``name_close``'s spelling rules per transcript language, and the default (Italian and any
+# language without its own): spelling facts, not tunables
+DEFAULT_SPELLING = Spelling((), str.maketrans({"i": "e", "u": "o"}), (), frozenset("aeo"))
+SPELLING = {
+    "en": Spelling(
+        before=((r"(?<=.)y", "i"), (r"(?<=[aeiou])h$", "")),  # y as a vowel; a final h off
+        classes=str.maketrans({"i": "e", "u": "o", "a": "e"}),
+        after=((r"(.)\1+", r"\1"),),  # doubled letters as one
+        vowels=frozenset("eo"),
+    ),
+}
 NAME_FIRST = "name_first"  # grammar pass flag in what it heard: the name opened the utterance
 
 
@@ -171,9 +211,10 @@ class KeywordSpotter:
             return False
         targets = name.matching.split()
         words = normalise(text).split()
+        spelling = SPELLING.get(language, DEFAULT_SPELLING)
         for i in range(len(words) - len(targets) + 1):
             pairs = zip(words[i : i + len(targets)], targets, strict=True)
-            if all(_close(w, t, max_edits, min_letters) for w, t in pairs):
+            if all(_close(w, t, max_edits, min_letters, spelling) for w, t in pairs):
                 return True
         return False
 
@@ -193,32 +234,35 @@ class KeywordSpotter:
         return found
 
 
-def _close(word: str, target: str, max_edits: int, min_letters: int) -> bool:
+def _close(
+    word: str, target: str, max_edits: int, min_letters: int, spelling: Spelling = DEFAULT_SPELLING
+) -> bool:
     """Whether normalised ``word`` is a close spelling of normalised ``target`` (the module
     docstring's rule): exact when ``target`` is shorter than ``min_letters``."""
     if word == target:
         return True
     if len(target) < min_letters:
         return False
-    return _vowel_edits(word.translate(VOWEL_CLASS), target.translate(VOWEL_CLASS)) <= max_edits
+    edits = _vowel_edits(spelling.apply(word), spelling.apply(target), spelling.vowels)
+    return edits <= max_edits
 
 
-def _vowel_edits(a: str, b: str) -> float:
+def _vowel_edits(a: str, b: str, vowels: frozenset[str]) -> float:
     """The fewest vowel insertions and deletions that turn ``a`` into ``b`` (infinite when a
     consonant differs): an edit distance with no substitution and no consonant edit, over two
     short words."""
     inf = float("inf")
     row = [0.0]
     for ch in b:
-        row.append(row[-1] + 1 if ch in VOWELS else inf)
+        row.append(row[-1] + 1 if ch in vowels else inf)
     for ca in a:
         prev = row
-        row = [prev[0] + 1 if ca in VOWELS else inf]
+        row = [prev[0] + 1 if ca in vowels else inf]
         for j, cb in enumerate(b, 1):
             best = prev[j - 1] if ca == cb else inf
-            if ca in VOWELS:
+            if ca in vowels:
                 best = min(best, prev[j] + 1)
-            if cb in VOWELS:
+            if cb in vowels:
                 best = min(best, row[j - 1] + 1)
             row.append(best)
     return row[-1]
