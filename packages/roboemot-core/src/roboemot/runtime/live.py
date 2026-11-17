@@ -181,7 +181,7 @@ class LiveState:
         live = self._cfg.webui.live
         if not live.enabled:
             return None
-        ring = getattr(self._host, "prompts", None)
+        ring = self._host.prompts
         if ring is not None and not live.prompts:
             ring.apply_config(live)  # the flag is off here: whatever it still holds goes
         on = ring is not None and live.prompts
@@ -194,7 +194,7 @@ class LiveState:
         """The panel's Clear button. False while ``webui.live.enabled`` is off."""
         if not self._cfg.webui.live.enabled:
             return False
-        ring = getattr(self._host, "prompts", None)
+        ring = self._host.prompts
         if ring is not None:
             ring.clear()
         return True
