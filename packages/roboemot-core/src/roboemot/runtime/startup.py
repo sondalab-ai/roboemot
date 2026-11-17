@@ -257,8 +257,11 @@ def start_scheduler(
 ) -> Scheduler:
     """The run's timers and reminders (SPEC 11, Voice tools): the store in the data folder,
     loaded with the restart grace, and its runner publishing ``tools.due``, stopped by
-    ``cleanup``. Recurrence uses ``circadian.timezone`` (this machine's zone when null), read
-    live. Sets ``host.scheduler`` and ``host.scheduler_runner``."""
+    ``cleanup``. The runner is not started here: ``start_announcer`` starts it once the
+    announcer has attached, so no tick marks an item due at start fired unannounced (review C1);
+    ``start_scheduler_runner`` starts it at the end of startup when no announcer was built.
+    Recurrence uses ``circadian.timezone`` (this machine's zone when null), read live. Sets
+    ``host.scheduler`` and ``host.scheduler_runner``."""
 
     def now() -> datetime:
         return datetime.now(UTC)
@@ -274,16 +277,24 @@ def start_scheduler(
     )
     scheduler.load(now())
     runner = host.scheduler_runner = SchedulerRunner(scheduler, p.bus, scheduler.cfg)
-    cleanup.callback(runner.close)
-    runner.start()
+    cleanup.callback(runner.close)  # registered now: it stops after the conversation
     return scheduler
+
+
+def start_scheduler_runner(host: RuntimeHost) -> None:
+    """Start the scheduler runner when the run has one and it is not running yet: after the
+    announcer attached, or at the end of startup with none (each due item is then logged and
+    marked fired, SPEC 11, Due items)."""
+    runner = host.scheduler_runner
+    if runner is not None and not runner.alive:
+        runner.start()
 
 
 def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:
     """The announcer of due timers and reminders (SPEC 11, Voice tools; SPEC 8, robot-initiated
     turn), once the conversation runs: it attaches to the scheduler runner (which then stops
-    marking items fired itself) and is closed before the conversation. Sets
-    ``host.announcer``; nothing without a scheduler or a conversation."""
+    marking items fired itself), then the runner starts, and it is closed before the
+    conversation. Sets ``host.announcer``; nothing without a scheduler or a conversation."""
     if host.scheduler is None or host.conversation is None:
         return
     announcer = host.announcer = Announcer(
@@ -295,6 +306,7 @@ def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
     )
     cleanup.callback(announcer.close)  # before the conversation it hands turns to
     announcer.start()
+    start_scheduler_runner(host)  # attached first: its first tick reaches the announcer
 
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
@@ -427,6 +439,7 @@ def start_all(
     cleanup.callback(p.light_reader.stop)  # stopped before the camera thread
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
+    start_scheduler_runner(host)  # no announcer was built: the log-only fallback
     for world_source in p.plugin.sources:
         world_source.speaking = p.speech.sounding  # no turning towards its own sound
         cleanup.callback(world_source.stop)
