@@ -306,6 +306,19 @@ EN: dict[str, str] = {
     "live_transcript_event": "Event",
     "live_transcript_cut": "cut off",
     "live_transcript_clear": "Clear",
+    "live_prompts": "LLM prompts",
+    "live_prompts_note": (
+        "The conversation's chat requests to a cloud LLM and its realtime session's frames, as "
+        "sent: names aliased, audio summarized, never a key or an address. Route checks and "
+        "voice previews are not listed. Kept in the robot's memory only, never saved."
+    ),
+    "live_prompts_off": (
+        "The LLM prompts log is off, so nothing is kept. To turn it on, open Settings, find "
+        "webui.live.prompts and switch it on. It applies at once; switching it off forgets "
+        "what was kept."
+    ),
+    "live_prompts_empty": "No request sent yet.",
+    "live_prompts_clear": "Clear",
     "err_live_disabled": "The Live tab is off.",
     "err_live_unavailable": "The Live tab is not available on this robot.",
     "live_video": "Camera",
@@ -875,6 +888,7 @@ EN: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "This entry comes from the configuration file and cannot be removed here."
     ),
+    "err_entry_not_removed": "The entry could not be removed; nothing was changed.",
     "err_endpoint_ack_required": (
         "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
         "the button again to allow it."
@@ -1566,6 +1580,20 @@ IT: dict[str, str] = {
     "live_transcript_event": "Evento",
     "live_transcript_cut": "interrotto",
     "live_transcript_clear": "Cancella",
+    "live_prompts": "Prompt LLM",
+    "live_prompts_note": (
+        "Le richieste di chat della conversazione a un LLM cloud e i frame della sua sessione "
+        "realtime, così come inviati: nomi con alias, audio riassunto, mai una chiave o un "
+        "indirizzo. Le verifiche delle route e le anteprime della voce non compaiono. Resta "
+        "solo nella memoria del robot, non viene mai salvata."
+    ),
+    "live_prompts_off": (
+        "Il registro dei prompt LLM è spento, quindi non si conserva nulla. Per attivarlo apri "
+        "Impostazioni, cerca webui.live.prompts e attivalo. Vale subito; spegnerlo cancella "
+        "quanto conservato."
+    ),
+    "live_prompts_empty": "Nessuna richiesta inviata finora.",
+    "live_prompts_clear": "Cancella",
     "err_live_disabled": "La scheda Live è spenta.",
     "err_live_unavailable": "La scheda Live non è disponibile su questo robot.",
     "live_video": "Videocamera",
@@ -2174,6 +2202,7 @@ IT: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "Questa voce viene dal file di configurazione e non si può rimuovere da qui."
     ),
+    "err_entry_not_removed": "Non è stato possibile rimuovere la voce; non è cambiato nulla.",
     "err_endpoint_ack_required": (
         "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
         "PIN e premi di nuovo il pulsante per consentirlo."

@@ -214,10 +214,11 @@ def _route_entry(key: str) -> bool:
 
 def settings_text(settings: dict[str, Any]) -> str:
     """The web settings file as the web UI writes it (``OverridesFile.save``: two-space JSON,
-    sorted keys), so a file the installer rewrote reads the same to the app and to a person.
+    keys in the order they were saved, so entries added to a merged list keep their order), so a
+    file the installer rewrote reads the same to the app and to a person.
     The text holds the saved values: it travels only on the SSH channel's standard input,
     never on a command line or in a report."""
-    return json.dumps(settings, indent=2, sort_keys=True)
+    return json.dumps(settings, indent=2)
 
 
 def _switch_back(overrides: dict[str, Any], profile: VoiceProfile | None) -> tuple[str, ...]:

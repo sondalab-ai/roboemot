@@ -27,6 +27,7 @@ from roboemot.diagnostics import Diagnostics
 from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
+from roboemot.llm.prompt_log import PromptRing
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.media.player import MediaPlayer
 from roboemot.persona.llm_traits import TraitsWorker
@@ -94,6 +95,7 @@ class RuntimeHost:
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)
+    prompts: PromptRing | None = None  # opt-in in-memory cloud LLM requests (Live tab, SPEC 12)
     levels: AudioLevels | None = None  # microphone and output levels in dBFS (Live tab)
     events: EventSink = staticmethod(no_events)  # decision events onto the bus (diag.event)
     activity: EventRing | None = None  # the last decision events ("What's happening", Live tab)
@@ -110,6 +112,7 @@ class RuntimeHost:
             cfg.safety,
             secrets=SecretStore.for_data_dir(cfg.data_dir).get,
             monitor=monitor,
+            prompts=self.prompts,  # every rebuilt router keeps the Live tab's prompts ring
         )
 
     def on_utterance(self, utterance: Utterance) -> None:

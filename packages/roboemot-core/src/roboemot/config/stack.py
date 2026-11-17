@@ -92,6 +92,7 @@ KEYED_LISTS = _KeyedLists(
         "expression_map.*.variants": "clip",
         "circadian_motion.yawn.variants": "clip",
         "circadian_motion.stretch.variants": "clip",
+        "tools.radio.stations": "name",
     }
 )
 CHANNEL_ONLY = ("repeat", "curve")  # entry fields that only make sense with channels

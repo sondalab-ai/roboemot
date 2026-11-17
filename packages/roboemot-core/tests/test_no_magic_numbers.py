@@ -62,6 +62,7 @@ BEHAVIOUR_MODULES = [
     "llm/conformance.py",
     "llm/prompt.py",
     "llm/hub.py",
+    "llm/prompt_log.py",
     "skills/schema.py",
     "skills/registry.py",
     "skills/defaults.py",
