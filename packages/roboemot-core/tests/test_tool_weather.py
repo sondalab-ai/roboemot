@@ -215,7 +215,7 @@ async def test_disabling_mid_session_refuses_in_flight_call():
     rig = Rig()
     registry = SkillRegistry([rig.fn])
     assert [s.name for s in registry.offered(["weather"])] == ["weather"]
-    rig.cfg = config(enabled=False)  # the admin turns it off while the request is out
+    rig.cfg = config(enabled=False)  # the admin turns it off after the request was built
     assert registry.offered(["weather"]) == []
     out = await execute(registry, ["weather"], "weather", {"days": 1}, CTX, **EXEC)
     assert out.code == "unavailable" and not out.ok

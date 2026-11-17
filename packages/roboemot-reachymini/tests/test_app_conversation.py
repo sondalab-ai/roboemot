@@ -3,6 +3,7 @@ out, one shared router, shutdown order, summaries from the world and the registr
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -272,6 +273,8 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
         # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
         assert not skills.get("weather").is_available()
+        weather_host = inspect.getclosurevars(skills.get("weather").fn).nonlocals["host"]
+        assert weather_host.http is httpx.Client  # the run's HTTP client is wired
         # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
         assert skills.get("timer_set").is_available() and app.scheduler is not None
         assert app.scheduler_runner is not None and app.scheduler_runner.alive
