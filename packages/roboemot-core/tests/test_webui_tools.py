@@ -36,6 +36,17 @@ PLACE_LAT, PLACE_LON = 45.123456, 9.654321
 STATION_URL = "https://stream.example.org/secret-radio.mp3"
 ZONE = ZoneInfo("Europe/Rome")
 START = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+DOTTED = "RTL 102.5"  # a catalogue keys this station by its index, not its name
+
+
+class Mono:
+    """A monotonic clock the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
 
 
 class Player:
@@ -109,7 +120,15 @@ def served(tmp_path):
     stack = ConfigStack(
         app=app_config(
             tmp_path,
-            tools={"radio": {"enabled": True, "stations": [{"name": "Jazz", "url": STATION_URL}]}},
+            tools={
+                "radio": {
+                    "enabled": True,
+                    "stations": [
+                        {"name": "Jazz", "url": STATION_URL},
+                        {"name": DOTTED, "url": "https://stream.example.org/rtl.mp3"},
+                    ],
+                }
+            },
         ),
         audit_path=tmp_path / "audit.jsonl",
     )
@@ -118,7 +137,8 @@ def served(tmp_path):
     player = Player()
     calls: list[httpx.Request] = []
     host = SimpleNamespace(scheduler=sched, media=player, circadian_runner=object())
-    tools = ToolsState(host, cfg, http=geocoder(calls))
+    mono = Mono()
+    tools = ToolsState(host, cfg, http=geocoder(calls), clock=mono)
     stack.subscribe(tools.apply_config)
     editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
     srv = make_server(
@@ -127,7 +147,14 @@ def served(tmp_path):
     srv.set_pin(PIN)
     srv.start()
     yield SimpleNamespace(
-        client=Client(srv.port), sched=sched, player=player, calls=calls, stack=stack, host=host
+        client=Client(srv.port),
+        sched=sched,
+        player=player,
+        calls=calls,
+        stack=stack,
+        host=host,
+        mono=mono,
+        editor=editor,
     )
     srv.stop()
 
@@ -269,6 +296,7 @@ def test_radio_test_plays_a_listed_station_and_stop_stops_it(served):
     unknown = c.request("POST", "/api/tools/radio/test", {"name": "jazz music", "pin": PIN})
     assert unknown.status == 404 and unknown.json == {"error": "unknown_station"}
     served.player.status = "unreachable"
+    served.mono.now += 60
     down = c.request("POST", "/api/tools/radio/test", {"name": "Jazz", "pin": PIN})
     assert down.status == 200 and down.json == {"status": "unreachable"}
     stop = c.request("POST", "/api/tools/radio/stop", {"pin": PIN})
@@ -408,3 +436,63 @@ def test_the_state_serialises_and_holds_no_url(tmp_path):
     player.station = cfg.tools.radio.stations[0]
     tools = ToolsState(SimpleNamespace(scheduler=None, media=player, circadian_runner=None), cfg)
     assert STATION_URL not in json.dumps(tools.state())
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_a_station_whose_name_has_a_dot_test_plays_and_edits(served):
+    """The catalogue keys "RTL 102.5" by its index; the page sends the real name (review I1)."""
+    rows = {r["path"]: r for r in served.editor.fields()}
+    key = next(
+        k
+        for k in rows["tools.radio.stations"]["value"]
+        if rows[f"tools.radio.stations.{k}.name"]["value"] == DOTTED
+    )
+    assert key != DOTTED, "the path segment is not the name"
+    c = served.client
+    c.login()
+    ok = c.request("POST", "/api/tools/radio/test", {"name": DOTTED, "pin": PIN})
+    assert ok.status == 200 and ok.json == {"status": "ok"}
+    assert served.player.played == [DOTTED]
+    url = "https://stream.example.org/rtl2.mp3"
+    change = {"changes": [{"path": f"tools.radio.stations.{key}.url", "value": url}], "pin": PIN}
+    assert c.request("POST", "/api/settings/batch", change).status == 200
+    station = next(s for s in served.stack.effective().tools.radio.stations if s.name == DOTTED)
+    assert station.url == url
+
+
+def test_place_searches_and_test_plays_keep_a_minimum_interval(served):
+    c = served.client
+    c.login()
+    gap = served.stack.effective().webui.tools.min_interval_s
+    assert gap > 0
+    first = c.request("POST", "/api/tools/geocode", {"query": "Como", "pin": PIN})
+    assert first.status == 200
+    again = c.request("POST", "/api/tools/geocode", {"query": "Como", "pin": PIN})
+    assert again.status == 429 and again.json == {"error": "tools_too_soon"}
+    assert int(again.headers["Retry-After"]) >= 1
+    assert len(served.calls) == 1, "the refused search sent nothing"
+    play = c.request("POST", "/api/tools/radio/test", {"name": "Jazz", "pin": PIN})
+    assert play.status == 200, "the test play has its own interval"
+    assert c.request("POST", "/api/tools/radio/test", {"name": "Jazz", "pin": PIN}).status == 429
+    served.mono.now += gap
+    assert c.request("POST", "/api/tools/geocode", {"query": "Como", "pin": PIN}).status == 200
+    assert c.request("POST", "/api/tools/radio/test", {"name": "Jazz", "pin": PIN}).status == 200
+
+
+def test_the_place_search_waits_no_longer_than_the_page_request_may_work():
+    seen: list[object] = []
+
+    def slow() -> httpx.Client:
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(request.extensions["timeout"])
+            return httpx.Response(200, json={"results": []})
+
+        return httpx.Client(transport=httpx.MockTransport(handle))
+
+    cfg = RoboEmotConfig(tools={"weather": {"timeout_s": 30}})
+    host = SimpleNamespace(scheduler=None, media=None, circadian_runner=None)
+    assert ToolsState(host, cfg, http=slow).geocode("Como") == []
+    budget = cfg.webui.request_deadline_s * cfg.webui.request_work_share
+    assert seen and all(v == budget for v in seen[0].values())

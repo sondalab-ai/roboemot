@@ -95,10 +95,11 @@ TOOLS_STATUS = {
     "unknown_station": HTTPStatus.NOT_FOUND,
     "geocode_unreachable": HTTPStatus.BAD_GATEWAY,
     "geocode_failed": HTTPStatus.BAD_GATEWAY,
+    "tools_too_soon": HTTPStatus.TOO_MANY_REQUESTS,
 }
 # A timer or reminder id as the scheduler gives them (``t<n>``, ``r<n>``) or a hand edit made.
 TOOLS_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
-GEOCODE_QUERY_MAX_CHARS = 100  # a place name typed in the search box
+GEOCODE_QUERY_MAX_CHARS = 100  # a place name typed in the search box; the page has no copy
 ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
@@ -260,6 +261,16 @@ class EmotionsPort(Protocol):
     def state(self) -> dict[str, Any] | None: ...
     def play(self, label: str) -> bool: ...
     def inject(self, index: int) -> bool: ...
+
+
+class ToolsError(Exception):
+    """A Tools write was refused (``runtime.tools_state``): ``code`` is a ``TOOLS_STATUS`` key;
+    ``retry_after`` the seconds left of a minimum interval, when that refused it."""
+
+    def __init__(self, code: str, retry_after: float | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retry_after = retry_after
 
 
 class ToolsPort(Protocol):
@@ -1060,11 +1071,10 @@ class WebApi:
             return fn(arg)
         except OSError as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
-        except Exception as exc:
-            code = getattr(exc, "code", None)
-            if code in TOOLS_STATUS:
-                raise ApiError(TOOLS_STATUS[code], code) from exc
-            raise
+        except ToolsError as exc:
+            if exc.code not in TOOLS_STATUS:
+                raise
+            raise ApiError(TOOLS_STATUS[exc.code], exc.code, retry_after=exc.retry_after) from exc
 
     # ------------------------------------------------------------------ settings
 

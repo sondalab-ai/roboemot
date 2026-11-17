@@ -942,5 +942,6 @@
  "Shortest time between two voice previews of one route in the web UI; one sooner is refused (preview_rate) before anything is sent": "Tempo minimo tra due anteprime della voce di un modello nell'interfaccia web; una più ravvicinata viene rifiutata (preview_rate) prima di inviare qualsiasi cosa",
  "Share of webui.request_deadline_s that the work of one request may take (a catalogue import's embeddings, a voice preview); the rest is for reading, writing and replying": "Quota di webui.request_deadline_s che il lavoro di una richiesta può occupare (gli embedding di un'importazione del catalogo, un'anteprima della voce); il resto serve a leggere, scrivere e rispondere",
  "How often the open Tools tab asks for the timers, reminders and what plays": "Ogni quanto la scheda Strumenti aperta chiede i timer, i promemoria e cosa sta suonando",
- "SPEC 11, 11A, 12: the Tools tab": "SPEC 11, 11A, 12: la scheda Strumenti"
+ "SPEC 11, 11A, 12: the Tools tab": "SPEC 11, 11A, 12: la scheda Strumenti",
+ "Shortest time between two place searches, and between two test plays, from the Tools tab; one sooner is refused (tools_too_soon) before anything is sent": "Tempo minimo tra due ricerche di luoghi, e tra due prove di una stazione, dalla scheda Strumenti; una più ravvicinata viene rifiutata (tools_too_soon) prima di inviare qualsiasi cosa"
 }

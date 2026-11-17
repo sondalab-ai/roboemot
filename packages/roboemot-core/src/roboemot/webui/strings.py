@@ -1176,7 +1176,14 @@ EN: dict[str, str] = {
     "tools_repeat_once": "once",
     "tools_repeat_daily": "every day",
     "tools_repeat_weekdays": "on weekdays",
-    "tools_repeat_days": "on days {days}",
+    "tools_repeat_days": "on {days}",
+    "tools_weekday_1": "Monday",
+    "tools_weekday_2": "Tuesday",
+    "tools_weekday_3": "Wednesday",
+    "tools_weekday_4": "Thursday",
+    "tools_weekday_5": "Friday",
+    "tools_weekday_6": "Saturday",
+    "tools_weekday_7": "Sunday",
     "tools_cancel": "Cancel",
     "tools_cancel_message": "Cancel “{what}”? It will not be announced.",
     "tools_cancelled": "Cancelled.",
@@ -1239,7 +1246,8 @@ EN: dict[str, str] = {
     "err_unknown_station": "No station has that name.",
     "err_geocode_unreachable": "The place search could not be reached.",
     "err_geocode_failed": "The place search gave an answer that cannot be read.",
-    "err_query_invalid": "Type a place name (at most 100 characters).",
+    "err_query_invalid": "Type a place name; this one is empty or too long.",
+    "err_tools_too_soon": "Wait a few seconds before you try again.",
 }
 
 IT: dict[str, str] = {
@@ -2473,7 +2481,14 @@ IT: dict[str, str] = {
     "tools_repeat_once": "una volta",
     "tools_repeat_daily": "ogni giorno",
     "tools_repeat_weekdays": "nei giorni feriali",
-    "tools_repeat_days": "nei giorni {days}",
+    "tools_repeat_days": "di {days}",
+    "tools_weekday_1": "lunedì",
+    "tools_weekday_2": "martedì",
+    "tools_weekday_3": "mercoledì",
+    "tools_weekday_4": "giovedì",
+    "tools_weekday_5": "venerdì",
+    "tools_weekday_6": "sabato",
+    "tools_weekday_7": "domenica",
     "tools_cancel": "Annulla",
     "tools_cancel_message": "Annullare “{what}”? Non sarà annunciato.",
     "tools_cancelled": "Annullato.",
@@ -2538,7 +2553,8 @@ IT: dict[str, str] = {
     "err_unknown_station": "Nessuna stazione ha questo nome.",
     "err_geocode_unreachable": "La ricerca luoghi non è raggiungibile.",
     "err_geocode_failed": "La ricerca luoghi ha dato una risposta illeggibile.",
-    "err_query_invalid": "Scrivi il nome di un luogo (al massimo 100 caratteri).",
+    "err_query_invalid": "Scrivi il nome di un luogo; questo è vuoto o troppo lungo.",
+    "err_tools_too_soon": "Aspetta qualche secondo prima di riprovare.",
 }
 
 STRINGS: dict[str, dict[str, str]] = {"en": EN, "it": IT}

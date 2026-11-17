@@ -38,7 +38,8 @@ const toolsName = (name) => t("tools_name_" + name);
 
 function toolsItemRow(item, missed) {
   const what = item.text || t("tools_no_label");
-  const repeat = item.repeat === "days" ? t("tools_repeat_days", { days: item.days.join(", ") }) : t("tools_repeat_" + item.repeat);
+  const days = item.days.map((d) => t("tools_weekday_" + d)).join(", ");
+  const repeat = item.repeat === "days" ? t("tools_repeat_days", { days }) : t("tools_repeat_" + item.repeat);
   const parts = [badge(t("tools_kind_" + item.kind), item.kind === "timer" ? "info" : "success"), " ",
     el("span", {}, what), " ", el("span", { class: "sl-eyebrow" }, when(item.due_local) + " · " + repeat)];
   if (!missed) {
@@ -91,7 +92,7 @@ function toolsStatus(d) {
     const text = t(key) + (tool.enabled && !tool.available ? " " + t("tools_unavailable_" + tool.name) : "");
     if (box.dataset.shown === text) continue;
     box.dataset.shown = text;
-    box.replaceChildren(badge(t(key), tone), tool.enabled && !tool.available ? [" ", t("tools_unavailable_" + tool.name)] : []);
+    box.replaceChildren(badge(t(key), tone), ...(tool.enabled && !tool.available ? [" ", t("tools_unavailable_" + tool.name)] : []));
   }
 }
 
@@ -313,7 +314,7 @@ async function toolsPlaceUse(place) {
 }
 
 function toolsWeatherExtra() {
-  const query = textInput("tools-place-query", { maxlength: "100", autocomplete: "off" });
+  const query = textInput("tools-place-query", { autocomplete: "off" }); // the server owns the length limit
   const results = el("div", { class: "stack", id: "tools-place-results" });
   return [markedEyebrow("h3", t("tools_place_title")), toolsPlaceLine(),
     field("tools-place-query", t("tools_place_search_label"), query, t("tools_place_search_hint")),
@@ -323,8 +324,12 @@ function toolsWeatherExtra() {
 
 // ---------------------------------------------------------------- radio: the station editor
 
-function toolsStation(name, removable) {
-  const base = TOOLS_STATIONS + "." + name + ".";
+// One station of the editor. `key` is its catalogue path segment, which is its index when the name
+// has a dot, is all digits or is a duplicate; the name shown and sent is the entry's `name` row.
+function toolsStation(key, removable) {
+  const base = TOOLS_STATIONS + "." + key + ".";
+  const own = toolsRow(base + "name");
+  const name = own && typeof own.value === "string" ? own.value : key;
   const controls = [];
   const fields = ["url", "genres", "language"].map((k) => toolsRow(base + k)).filter(Boolean).map((r) => toolsSetting(r, controls));
   const save = async () => {
@@ -339,7 +344,7 @@ function toolsStation(name, removable) {
   };
   const remove = async () => {
     const out = await pinnedCall(t("tools_station_remove_message", { name }), t("tools_station_remove"),
-      (pin) => api("POST", "/api/settings/entry/remove", { path: TOOLS_STATIONS + "." + name, pin }));
+      (pin) => api("POST", "/api/settings/entry/remove", { path: TOOLS_STATIONS + "." + key, pin }));
     if (!out) return;
     notice(t("tools_station_removed", { name }));
     await toolsReload();
@@ -383,10 +388,10 @@ function toolsStationAdd() {
 function toolsRadioExtra() {
   const list = toolsRow(TOOLS_STATIONS);
   if (!list) return [];
-  const names = Array.isArray(list.value) ? list.value : [];
+  const keys = Array.isArray(list.value) ? list.value : [];
   const removable = new Set(list.removable || []);
   return [markedEyebrow("h3", t("tools_stations")), el("p", { class: "hint" }, t("tools_stations_intro")),
-    names.length ? names.map((n) => toolsStation(n, removable.has(n))) : el("p", { class: "hint" }, t("tools_stations_none")),
+    keys.length ? keys.map((k) => toolsStation(k, removable.has(k))) : el("p", { class: "hint" }, t("tools_stations_none")),
     toolsStationAdd()];
 }
 

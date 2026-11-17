@@ -6696,6 +6696,15 @@ class ToolsPageConfig(Strict):
         le=10000,
         advanced=True,
     )
+    min_interval_s: float = param(
+        3.0,
+        "Shortest time between two place searches, and between two test plays, from the Tools "
+        "tab; one sooner is refused (tools_too_soon) before anything is sent",
+        unit="s",
+        ge=0,
+        le=60,
+        advanced=True,
+    )
 
 
 class WebUIConfig(Strict):

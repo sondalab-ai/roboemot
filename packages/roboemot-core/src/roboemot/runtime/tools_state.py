@@ -22,6 +22,8 @@ The writes (the API checks the PIN session, CSRF and the PIN first): ``cancel`` 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +32,7 @@ from roboemot.skills.host import http_client
 from roboemot.tools.schedule import Item
 from roboemot.tools.timers import LOCAL_FORMAT
 from roboemot.tools.weather import BadResponse, ProviderError, coordinates, geocode
+from roboemot.webui.api import ToolsError
 from roboemot.webui.strings import language_for
 
 if TYPE_CHECKING:
@@ -49,19 +52,12 @@ TOOL_SKILLS: dict[str, tuple[str, ...]] = {
 STOP_REASON = "webui"  # ``media.stopped``'s reason for the tab's Stop button
 
 
-class ToolsError(Exception):
-    """A write was refused; ``code`` is the page's error code."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
 class ToolsState:
     """Builds the Tools tab's payload and runs its writes. ``host`` is the running
     ``RuntimeHost`` (``scheduler``, ``media`` and ``circadian_runner`` are read on every call,
     each may be None); ``cfg`` the configuration, kept current by ``apply_config``; ``http``
-    builds the HTTP client of one place search (the caller closes it)."""
+    builds the HTTP client of one place search (the caller closes it); ``clock`` is the
+    monotonic clock of the minimum interval between two place searches or two test plays."""
 
     def __init__(
         self,
@@ -69,8 +65,28 @@ class ToolsState:
         cfg: RoboEmotConfig,
         *,
         http: Callable[[], httpx.Client] = http_client,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._host, self._cfg, self._http = host, cfg, http
+        self._host, self._cfg, self._http, self._clock = host, cfg, http, clock
+        self._lock = threading.Lock()
+        self._last: dict[str, float] = {}  # when each outbound action last started
+
+    def _budget_s(self) -> float:
+        """How long the work of one page request may take (``webui.request_deadline_s`` times
+        ``webui.request_work_share``), so an outbound wait never outlives the request."""
+        web = self._cfg.webui
+        return web.request_deadline_s * web.request_work_share
+
+    def _pace(self, action: str) -> None:
+        """Start ``action`` (``geocode`` or ``radio_test``) only ``webui.tools.min_interval_s``
+        after its last start; ``tools_too_soon`` with the wait left otherwise."""
+        gap = self._cfg.webui.tools.min_interval_s
+        with self._lock:
+            now = self._clock()
+            last = self._last.get(action)
+            if last is not None and now - last < gap:
+                raise ToolsError("tools_too_soon", retry_after=gap - (now - last))
+            self._last[action] = now
 
     def apply_config(self, change: Any) -> None:
         """``ConfigStack`` subscriber: keep the settings this view reads (hot reload)."""
@@ -163,8 +179,8 @@ class ToolsState:
         station = next((s for s in cfg.tools.radio.stations if s.name == name), None)
         if station is None:
             raise ToolsError("unknown_station")
-        budget = cfg.webui.request_deadline_s * cfg.webui.request_work_share
-        return str(media.play(station, min(cfg.tools.media.connect_timeout_s, budget)))
+        self._pace("radio_test")
+        return str(media.play(station, min(cfg.tools.media.connect_timeout_s, self._budget_s())))
 
     def geocode(self, query: str) -> list[dict[str, Any]]:
         """The admin's place search through ``tools.weather.geocode_url``, names in the page
@@ -173,6 +189,7 @@ class ToolsState:
         cannot read. Logged by type only."""
         cfg = self._cfg
         weather = cfg.tools.weather
+        self._pace("geocode")
         try:
             with self._http() as client:
                 places = geocode(
@@ -181,7 +198,7 @@ class ToolsState:
                     query=query,
                     language=language_for(cfg.conversation.language),
                     count=weather.geocode_results,
-                    timeout_s=weather.timeout_s,
+                    timeout_s=min(weather.timeout_s, self._budget_s()),
                 )
         except ProviderError as exc:
             log.info("tools tab: place search unreachable (%s)", type(exc).__name__)

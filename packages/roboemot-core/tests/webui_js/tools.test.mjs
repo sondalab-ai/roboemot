@@ -37,7 +37,10 @@ const FIELDS = [
   row("tools.weather.place_name", "text", "***", { private: true, admin_only: true }),
   row("tools.weather.forecast_days", "int", 3, { ge: 1, le: 7 }),
   row("tools.radio.enabled", "bool", true, { opt_in: true }),
-  row("tools.radio.stations", "keyed_list", ["Jazz"], { key: "name", writable: false, removable: ["Jazz"], admin_only: true }),
+  // The catalogue keys "RTL 102.5" by its index (a dot in the name): the segment is "1".
+  row("tools.radio.stations", "keyed_list", ["Jazz", "1"], { key: "name", writable: false, removable: ["Jazz", "1"], admin_only: true }),
+  row("tools.radio.stations.1.name", "text", "RTL 102.5", { admin_only: true }),
+  row("tools.radio.stations.1.url", "text", "https://stream.example.org/rtl.mp3", { admin_only: true }),
   row("tools.radio.stations.Jazz.name", "text", "Jazz", { admin_only: true }),
   row("tools.radio.stations.Jazz.url", "text", "https://stream.example.org/jazz.mp3", { admin_only: true }),
   row("tools.radio.stations.Jazz.genres", "string_list", ["jazz"], { admin_only: true }),
@@ -48,6 +51,7 @@ const FIELDS = [
 
 const EN = {
   tab_tools: "Tools", tools_cancel: "Cancel", tools_kind_timer: "Timer", tools_kind_reminder: "Reminder", pin: "PIN",
+  tools_repeat_days: "on {days}", tools_weekday_1: "Monday", tools_weekday_3: "Wednesday",
   tools_radio_test_ok: "{name} plays.", tools_cancelled: "Cancelled.", tools_playing_line: "{name} at {volume} dB",
 };
 
@@ -229,4 +233,39 @@ test("station URLs show only in the editor, never from the state poll", async (t
   const editor = p.document.querySelector('[data-station="Jazz"]');
   assert.ok(editor.querySelector('input[value="https://stream.example.org/jazz.mp3"]') || editor.textContent.includes("jazz.mp3"));
   assert.ok(!p.document.querySelector("#tools-live").textContent.includes("example.org"));
+});
+
+test("a station keyed by its index shows and test-plays its real name", async (t) => {
+  let tested = null;
+  let removed = null;
+  const p = await toolsPage(t, {
+    routes: {
+      "POST /api/tools/radio/test": (b) => { tested = b; return { status: "ok" }; },
+      "POST /api/settings/entry/remove": (b) => { removed = b; return { changed: true, layer: "runtime" }; },
+    },
+  });
+  const box = p.document.querySelector('[data-station="RTL 102.5"]');
+  assert.ok(box, "the editor names the station by its name row");
+  assert.equal(box.querySelector("h4").textContent, "RTL 102.5");
+  box.querySelector('[data-action="test"]').click();
+  await settle();
+  await submitDialog(p, "123456");
+  assert.deepEqual(tested, { name: "RTL 102.5", pin: "123456" });
+  box.querySelector('[data-action="remove"]').click();
+  await settle();
+  await submitDialog(p, "123456");
+  assert.deepEqual(removed, { path: "tools.radio.stations.1", pin: "123456" }, "paths keep the segment");
+});
+
+test("an unavailable tool's status reads as words, with no stray comma", async (t) => {
+  const tools = STATE.tools.map((x) => (x.name === "radio" ? { ...x, available: false } : x));
+  const p = await toolsPage(t, { state: { ...STATE, tools } });
+  const text = p.document.querySelector("#tools-status-radio").textContent;
+  assert.equal(text, "tools_status_unavailable tools_unavailable_radio");
+});
+
+test("repeating days show as weekday names", async (t) => {
+  const items = [{ id: "r9", kind: "reminder", text: "gym", due_local: "2026-11-18T08:30:00", repeat: "days", days: [1, 3] }];
+  const p = await toolsPage(t, { state: { ...STATE, items } });
+  assert.ok(p.document.querySelector("#tools-items li").textContent.includes("on Monday, Wednesday"));
 });
