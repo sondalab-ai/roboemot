@@ -3,17 +3,22 @@
 ``weather`` returns the current conditions and a daily forecast for ``circadian.location`` as
 metric, structured JSON; the model phrases it. It is an admin opt-in (``tools.weather.enabled``)
 and is available only with a location and an HTTP client (``ToolHost.http``). A result is cached
-by ``(lat, lon, days)`` for ``tools.weather.cache_s``; a network error or a non-2xx answer gives
-``{"error": "unreachable"}`` and is never cached. ``geocode`` is the place search of the Tools
-tab. The request carries only the location and the number of days (``timezone=auto``: Open-Meteo
-resolves the zone from the location). Logs carry the tool name, the status and the HTTP status
+by ``(url, lat, lon, days)`` for ``tools.weather.cache_s``; a network error or a non-2xx answer
+(a redirect included: none is followed) gives ``{"error": "unreachable"}``, and a malformed or
+oversized answer ``{"error": "failed"}``; an error is never cached. Only numbers checked as
+numbers reach the model. ``geocode`` is the place search of the Tools tab. The request carries
+only the location and the number of days (``timezone=auto``: Open-Meteo resolves the zone from
+the location). Logs carry the tool name, the status and the HTTP status
 code only, never coordinates, a place, a query or a forecast; an httpx error's text may hold the
 URL, so it is never logged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import math
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -35,7 +40,15 @@ log = logging.getLogger(__name__)
 # httpx logs every request's full URL at INFO, coordinates included (SPEC 12).
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-__all__ = ["GEOCODE_URL_DEFAULT", "Forecast", "Place", "fetch_forecast", "geocode", "skills"]
+__all__ = [
+    "GEOCODE_URL_DEFAULT",
+    "BadResponse",
+    "Forecast",
+    "Place",
+    "fetch_forecast",
+    "geocode",
+    "skills",
+]
 
 CURRENT_FIELDS = "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code"
 DAILY_FIELDS = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
@@ -43,6 +56,10 @@ TIMEZONE_AUTO = "auto"
 GEOCODE_FORMAT = "json"
 UNREACHABLE = "unreachable"
 UNAVAILABLE = "unavailable"
+FAILED = "failed"
+# A 7-day forecast is about 2 KB and 10 places about 4 KB: a larger body is not Open-Meteo's.
+MAX_BODY_BYTES = 65536
+DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 UNKNOWN_CONDITIONS = "unknown"
 
 # WMO weather interpretation codes as Open-Meteo documents them, in English for the model.
@@ -84,6 +101,14 @@ DESCRIPTION = (
 Days = Annotated[
     int, Range(1, FORECAST_DAYS_CEILING), Desc("Days of forecast, today included; 1 is today")
 ]
+
+
+class BadResponse(Exception):
+    """Open-Meteo answered 2xx with a body that is too large, not JSON, or not the expected
+    shape and types. The skill gives ``failed``."""
+
+    def __init__(self) -> None:
+        super().__init__(FAILED)
 
 
 class ProviderError(Exception):
@@ -154,23 +179,96 @@ def coordinates(cfg: RoboEmotConfig) -> tuple[float, float] | None:
     return loc["lat"], loc["lon"]
 
 
+def _number(value: Any, nullable: bool = False) -> float | None:
+    """``value`` when it is a finite JSON number (None too when ``nullable``), else
+    :class:`BadResponse`: only checked numbers reach the model."""
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise BadResponse()
+    return value
+
+
+def _text(value: Any, pattern: re.Pattern[str] | None = None) -> str:
+    """``value`` when it is a string (matching ``pattern`` when given), else
+    :class:`BadResponse`."""
+    if not isinstance(value, str) or (pattern is not None and not pattern.fullmatch(value)):
+        raise BadResponse()
+    return value
+
+
+def _code(value: Any) -> int:
+    """A WMO code: a JSON integer, else :class:`BadResponse`."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise BadResponse()
+    return value
+
+
 def _get(client: httpx.Client, url: str, params: dict[str, Any], timeout_s: float) -> Any:
-    """GET ``url`` and return the JSON body; :class:`ProviderError` on a transport error or a
-    non-2xx answer. The httpx error is dropped (``from None``): its text may hold the URL."""
+    """GET ``url`` and return the JSON body. :class:`ProviderError` on a transport error or an
+    answer that is not 2xx (a redirect is never followed); :class:`BadResponse` for a body over
+    ``MAX_BODY_BYTES`` or one that is not JSON. The httpx error is dropped (``from None``): its
+    text may hold the URL."""
     try:
-        response = client.get(url, params=params, timeout=timeout_s)
+        with client.stream(
+            "GET", url, params=params, timeout=timeout_s, follow_redirects=False
+        ) as response:
+            if not response.is_success:
+                raise ProviderError(response.status_code)
+            data = bytearray()
+            for chunk in response.iter_bytes():
+                data += chunk
+                if len(data) > MAX_BODY_BYTES:
+                    raise BadResponse()
     except httpx.HTTPError:
         raise ProviderError() from None
-    if not response.is_success:
-        raise ProviderError(response.status_code)
-    return response.json()
+    try:
+        return json.loads(data)
+    except ValueError:
+        raise BadResponse() from None
+
+
+def _forecast(body: Any) -> Forecast:
+    """The :class:`Forecast` in an Open-Meteo answer; :class:`BadResponse` for any other
+    shape or a value of the wrong type."""
+    try:
+        now, daily = body["current"], body["daily"]
+        dates = daily["time"]
+        rain = daily.get("precipitation_probability_max") or [None] * len(dates)
+        rows = zip(
+            dates,
+            daily["weather_code"],
+            daily["temperature_2m_max"],
+            daily["temperature_2m_min"],
+            rain,
+            strict=True,
+        )
+        return Forecast(
+            temperature_c=_number(now["temperature_2m"]),
+            humidity_pct=_number(now["relative_humidity_2m"]),
+            wind_kmh=_number(now["wind_speed_10m"]),
+            conditions=conditions(_code(now["weather_code"])),
+            days=tuple(
+                Day(
+                    _text(date, DATE_PATTERN),
+                    conditions(_code(code)),
+                    _number(high),
+                    _number(low),
+                    _number(chance, nullable=True),
+                )
+                for date, code, high, low, chance in rows
+            ),
+        )
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise BadResponse() from None
 
 
 def fetch_forecast(
     client: httpx.Client, url: str, lat: float, lon: float, days: int, timeout_s: float
 ) -> Forecast:
     """The Open-Meteo forecast at ``(lat, lon)`` for ``days`` days (metric, the location's own
-    time zone). Raises :class:`ProviderError` when it cannot get one."""
+    time zone). Raises :class:`ProviderError` when it cannot get one and :class:`BadResponse`
+    when the answer is malformed or too large."""
     body = _get(
         client,
         url,
@@ -184,42 +282,34 @@ def fetch_forecast(
         },
         timeout_s,
     )
-    now, daily = body["current"], body["daily"]
-    rain = daily.get("precipitation_probability_max") or [None] * len(daily["time"])
-    return Forecast(
-        temperature_c=now["temperature_2m"],
-        humidity_pct=now["relative_humidity_2m"],
-        wind_kmh=now["wind_speed_10m"],
-        conditions=conditions(now["weather_code"]),
-        days=tuple(
-            Day(date, conditions(code), high, low, chance)
-            for date, code, high, low, chance in zip(
-                daily["time"],
-                daily["weather_code"],
-                daily["temperature_2m_max"],
-                daily["temperature_2m_min"],
-                rain,
-                strict=True,
-            )
-        ),
-    )
+    return _forecast(body)
 
 
 def geocode(
     client: httpx.Client, url: str, query: str, language: str, count: int, timeout_s: float
 ) -> list[Place]:
     """At most ``count`` places matching ``query`` (names in ``language``), best first; empty
-    when none matches. Raises :class:`ProviderError` when the search cannot run."""
+    when none matches. Raises :class:`ProviderError` when the search cannot run and
+    :class:`BadResponse` when the answer is malformed or too large."""
     body = _get(
         client,
         url,
         {"name": query, "count": count, "language": language, "format": GEOCODE_FORMAT},
         timeout_s,
     )
-    return [
-        Place(r["name"], r.get("admin1", ""), r.get("country", ""), r["latitude"], r["longitude"])
-        for r in body.get("results") or []
-    ]
+    try:
+        return [
+            Place(
+                _text(r["name"]),
+                _text(r.get("admin1", "")),
+                _text(r.get("country", "")),
+                _number(r["latitude"]),
+                _number(r["longitude"]),
+            )
+            for r in body.get("results") or []
+        ]
+    except (KeyError, TypeError, AttributeError):
+        raise BadResponse() from None
 
 
 def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[Callable[..., Any]]:
@@ -227,19 +317,19 @@ def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[
     ``tools.weather.enabled`` is on, ``circadian.location`` is set and the run has an HTTP client
     (all read on every check). ``clock`` is the cache's monotonic clock. Side-effect free: it only
     builds the skill, so the realtime check may call it with a throwaway host."""
-    cache: dict[tuple[float, float, int], tuple[float, dict[str, Any]]] = {}
+    cache: dict[tuple[str, float, float, int], tuple[float, dict[str, Any]]] = {}
     lock = threading.Lock()
 
     def available() -> bool:
         cfg = host.config()
         return cfg.tools.weather.enabled and coordinates(cfg) is not None and host.http is not None
 
-    def cached(key: tuple[float, float, int], ttl_s: float) -> dict[str, Any] | None:
+    def cached(key: tuple[str, float, float, int], ttl_s: float) -> dict[str, Any] | None:
         with lock:
             hit = cache.get(key)
             return hit[1] if hit is not None and clock() - hit[0] < ttl_s else None
 
-    def keep(key: tuple[float, float, int], ttl_s: float, body: dict[str, Any]) -> None:
+    def keep(key: tuple[str, float, float, int], ttl_s: float, body: dict[str, Any]) -> None:
         with lock:
             now = clock()
             for old in [k for k, (at, _) in cache.items() if now - at >= ttl_s]:
@@ -256,7 +346,7 @@ def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[
             return SkillResult({"error": UNAVAILABLE})
         wcfg = cfg.tools.weather
         span = min(days, wcfg.forecast_days)
-        key = (*where, span)
+        key = (wcfg.base_url, *where, span)
         body = cached(key, wcfg.cache_s)
         if body is not None:
             log.info("weather: cached")
@@ -267,6 +357,9 @@ def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[
         except ProviderError as e:
             log.info("weather: %s", e)
             return SkillResult({"error": UNREACHABLE})
+        except BadResponse:
+            log.info("weather: %s", FAILED)
+            return SkillResult({"error": FAILED})
         body = forecast.as_result()
         keep(key, wcfg.cache_s, body)
         log.info("weather: ok")

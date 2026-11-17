@@ -18,6 +18,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
+from roboemot.skills.host import http_client
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
@@ -274,7 +275,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
         assert not skills.get("weather").is_available()
         weather_host = inspect.getclosurevars(skills.get("weather").fn).nonlocals["host"]
-        assert weather_host.http is httpx.Client  # the run's HTTP client is wired
+        assert weather_host.http is http_client  # the run's HTTP client is wired
         # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
         assert skills.get("timer_set").is_available() and app.scheduler is not None
         assert app.scheduler_runner is not None and app.scheduler_runner.alive

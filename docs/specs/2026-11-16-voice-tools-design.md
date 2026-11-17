@@ -109,6 +109,8 @@ Owner picked approach 1 on 2026-11-16.
 - Result to the model: current conditions and a daily forecast for up to `tools.weather.forecast_days`, in metric units, as structured data; the model phrases it.
 - Short cache (`tools.weather.cache_s`) so a follow-up question costs no extra call.
 - Off by default; the admin turns it on (`tools.weather.enabled`).
+- A request waits at most `tools.weather.timeout_s` (default 3 s). While weather is enabled it must be less than `conversation.tool_timeout_s` (controller ruling 2026-11-17).
+- The forecast and place search URLs (`tools.weather.base_url`, `geocode_url`) are admin-only. Each must be `https`, with no user info, query or fragment, because the location goes to them.
 
 ### 5. Media player and radio tool
 

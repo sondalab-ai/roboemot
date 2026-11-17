@@ -42,6 +42,14 @@ class ToolHost:
     http: Callable[[], httpx.Client] | None = None
 
 
+def http_client() -> httpx.Client:
+    """The run's HTTP client for one tool call (SPEC 11, 12): no redirects followed, and no
+    proxy, CA or ``.netrc`` settings taken from the environment, like core's other clients."""
+    import httpx  # lazy: only a run with network tools needs it
+
+    return httpx.Client(trust_env=False, follow_redirects=False)
+
+
 def tool_host(config: Callable[[], RoboEmotConfig], bus: Bus) -> ToolHost:
     """A :class:`ToolHost` over ``config`` and ``bus`` whose wall clock reads
     ``circadian.timezone`` from ``config()`` on every call (the system's zone when it is null),
