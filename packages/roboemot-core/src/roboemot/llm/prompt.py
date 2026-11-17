@@ -1,6 +1,7 @@
 """System prompt composition (SPEC 8, Conversation state).
 
-Fixed order, the same for every route: persona prompt, register fragment, rules rendered from
+Fixed order, the same for every route: persona prompt, body prompt (the robot's physical
+body; the robot manifest sets its default), register fragment, rules rendered from
 structured parameters, the safety block, then (in ``build_messages``) the per-request speaker,
 scene and affect parts. The safety block is owned by the library; configuration can only
 append to it through ``safety.extra_prompt_rules``.
@@ -191,6 +192,7 @@ def _prompt(
     safety = [*SAFETY_RULES, *cfg.safety.extra_prompt_rules]
     parts = [
         cfg.persona.prompt,
+        cfg.persona.body_prompt,
         register.persona_fragment,
         " ".join(r for r in rules if r),
         "Rules you always follow: " + " ".join(safety),
@@ -272,7 +274,8 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     """Tokens of the largest system message a request can carry: parts 1 to 4 with a persona
     fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
     the longest vocabulary rule and language name, plus the two summaries at their caps (part 5
-    is capped, the affect line is a few words)."""
+    is capped, the affect line is a few words). The persona and body prompts count as written:
+    no person can override them, and every change to them runs this check again."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
     language = max([*LANGUAGE_NAMES.values(), cfg.conversation.language], key=len)
     fragment = "x" * cfg.register.persona_fragment_max_chars
@@ -326,5 +329,6 @@ def check_route_budgets(cfg: RoboEmotConfig) -> None:
                 f"llm route {route.name!r}: the system prompt (persona, register, rules, safety "
                 f"block and capped summaries) plus room for one turn needs about {need} tokens, "
                 f"but context_budget_tokens is {route.context_budget_tokens}; raise the budget "
-                "or shorten persona.prompt, safety.extra_prompt_rules or the summary caps"
+                "or shorten persona.prompt, persona.body_prompt, "
+                "safety.extra_prompt_rules or the summary caps"
             )

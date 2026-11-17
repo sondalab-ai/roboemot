@@ -131,7 +131,10 @@ def test_the_payload_shape():
     assert s["poll_ms"] == 750
     assert s["mood"] == {
         "label": "calm", "valence": 0.25, "arousal": -0.1, "intensity": 0.4,
-        "circadian": {"state": "awake", "reason": None, "sleepiness": 0.2},
+        "circadian": {
+            "state": "awake", "reason": None, "sleepiness": 0.2,
+            "nap_in_s": None, "nap_held": False,
+        },
     }  # fmt: skip
     assert s["modes"] == {
         "asleep": False, "rest": None, "alone": False, "paused": [], "online": True,
@@ -173,7 +176,13 @@ def test_modes_follow_the_parts():
 def test_the_mood_card_says_why_the_robot_rests():
     p = parts(circ=SimpleNamespace(snapshot=lambda: {"state": "resting", "reason": "nap"}))
     circadian = live(p).state()["mood"]["circadian"]
-    assert circadian == {"state": "resting", "reason": "nap", "sleepiness": None}
+    assert circadian == {
+        "state": "resting",
+        "reason": "nap",
+        "sleepiness": None,
+        "nap_in_s": None,
+        "nap_held": False,
+    }
 
 
 @pytest.mark.parametrize(

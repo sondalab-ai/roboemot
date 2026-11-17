@@ -131,6 +131,24 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert c.request("GET", "/api/live/state").json == {"error": "live_disabled"}
 
 
+@pytest.mark.parametrize(
+    ("nap", "want"),
+    [
+        ({"due_in_s": 754.6, "held": False}, (754.6, False)),
+        ({"due_in_s": 0.0, "held": True}, (0.0, True)),
+        ({"due_in_s": None, "held": False}, (None, False)),
+        (None, (None, False)),  # a snapshot without the nap block
+    ],
+)
+def test_the_mood_card_carries_the_next_nap_countdown(served, nap, want):
+    snap = {"state": "awake", "sleepiness": 0.1} | ({} if nap is None else {"nap": nap})
+    pipe = pipeline()
+    pipe.circ = SimpleNamespace(snapshot=lambda: snap)
+    cfg = ConfigStack(app={"webui": {"live": {"enabled": True}}}).effective()
+    circ = LiveState(served.host, pipe, cfg, clock=lambda: NOW).state()["mood"]["circadian"]
+    assert (circ["nap_in_s"], circ["nap_held"]) == want
+
+
 def test_the_poll_interval_follows_a_hot_reload(served):
     c = served.client
     c.login()

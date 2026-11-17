@@ -574,6 +574,7 @@ class CircadianRunner:
             st = self.last
             hold = self.model.hold_remaining(self._lag())
             c = self.cfg.circadian
+            due = self.nap.due_in(self.clock.monotonic(), c.nap_after_s, c.nap_resume_after_s)
             out: dict[str, Any] = {
                 "enabled": c.enabled,
                 "light_source": c.light_source,
@@ -588,6 +589,8 @@ class CircadianRunner:
                     "resume_after_s": c.nap_resume_after_s,
                     "resuming": self.nap.resuming,
                     "resumes": self.nap.resumes,
+                    "due_in_s": None if due is None else round(due, 1),
+                    "held": self.nap.held,
                 },
                 "present": self.present(),
                 "hold": None if hold is None else {"state": hold[0], "left_s": round(hold[1], 1)},

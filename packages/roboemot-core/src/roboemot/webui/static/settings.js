@@ -285,8 +285,11 @@ function enumControl(desc, id) {
   return { node: stale ? el("div", { class: "stack" }, field, hint) : field, labelFor: id, main: select, read };
 }
 
+// Prompt text (persona.prompt, persona.body_prompt) is prose: a textarea even when it is one line.
+const PROMPT_PATH = /(^|[._])prompt$/;
+
 function textControl(desc, id) {
-  const multi = typeof desc.value === "string" && desc.value.includes("\n");
+  const multi = (typeof desc.value === "string" && desc.value.includes("\n")) || PROMPT_PATH.test(desc.path || "");
   const input = multi
     ? el("textarea", { id, class: "sl-field__input", rows: "3" }, desc.value)
     : el("input", { type: "text", id, class: "sl-field__input", value: desc.value === null || desc.value === undefined ? "" : String(desc.value) });
