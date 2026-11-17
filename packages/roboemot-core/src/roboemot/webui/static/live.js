@@ -86,6 +86,7 @@ function liveMoodCard(d) {
     }
     if (m.circadian.nap_held) parts.push(liveRow(t("live_nap_next"), t("live_nap_held")));
     else if (Number.isFinite(m.circadian.nap_in_s)) parts.push(liveRow(t("live_nap_next"), t("live_nap_in", { n: liveCountdown(m.circadian.nap_in_s) })));
+    if (m.circadian.quiet) parts.push(liveQuietRow(m.circadian.quiet));
   } else {
     parts.push(el("p", { class: "hint" }, t("live_circ_off")));
   }
@@ -190,6 +191,16 @@ function liveBeatMusic(music, beat) {
     liveRow(t("live_music"), t(m.playing ? "live_yes" : "live_no")),
     liveShare(t("live_music_confidence"), m.confidence),
   ];
+}
+
+// The quiet hours: the window, a badge while they hold, and the time to their next edge.
+function liveQuietRow(q) {
+  const value = [q.start + "–" + q.end];
+  if (q.active) value.push(" ", badge(t("live_quiet_active"), "info"));
+  if (Number.isFinite(q.change_in_s)) {
+    value.push(" · " + t(q.active ? "live_quiet_ends" : "live_quiet_starts", { n: liveCountdown(q.change_in_s) }));
+  }
+  return liveRow(t("live_quiet"), ...value);
 }
 
 // A time left as a clock: m:ss below an hour, h:mm:ss from an hour, whole seconds rounded.

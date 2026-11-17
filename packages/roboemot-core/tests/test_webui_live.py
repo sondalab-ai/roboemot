@@ -149,6 +149,15 @@ def test_the_mood_card_carries_the_next_nap_countdown(served, nap, want):
     assert (circ["nap_in_s"], circ["nap_held"]) == want
 
 
+def test_the_mood_card_carries_the_quiet_hours_block(served):
+    quiet = {"start": "22:30", "end": "07:00", "active": False, "change_in_s": 12600.0}
+    pipe = pipeline()
+    pipe.circ = SimpleNamespace(snapshot=lambda: {"state": "awake", "quiet": quiet})
+    cfg = ConfigStack(app={"webui": {"live": {"enabled": True}}}).effective()
+    circ = LiveState(served.host, pipe, cfg, clock=lambda: NOW).state()["mood"]["circadian"]
+    assert circ["quiet"] == quiet
+
+
 def test_the_poll_interval_follows_a_hot_reload(served):
     c = served.client
     c.login()
