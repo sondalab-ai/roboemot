@@ -435,7 +435,74 @@ def test_media_pauses_when_the_player_exists(tmp_path):
     paused: list[str] = []
     rig.host.media = SimpleNamespace(pause=paused.append)
     rig.announcer.handle(rig.timer().id)
-    assert paused == ["announce"]
+    assert paused and set(paused) == {"announce"}
+
+
+class FakeRadio:
+    """A station that is audible unless something held it within ``resume_s`` (the player's
+    ``resume_after_s``); its vocals fire the VAD while audible."""
+
+    def __init__(self, clock: Clock, resume_s: float) -> None:
+        self.clock, self.resume_s = clock, resume_s
+        self.held_at = -float("inf")
+        self.paused: list[float] = []
+
+    def audible(self) -> bool:
+        return self.clock() - self.held_at >= self.resume_s
+
+    def pause(self, reason: str) -> None:
+        self.paused.append(self.clock())
+        self.held_at = self.clock()
+
+    def playing(self) -> bool:
+        return True
+
+
+def radio_rig(tmp_path, *, speaking_until=0.0, resume_s=1.0):
+    """A rig whose listener hears the radio's vocals (``voice_active``) while it is audible."""
+    rig = Rig(tmp_path, speaking_until=speaking_until)
+    radio = rig.host.media = FakeRadio(rig.clock, resume_s)
+    rig.host.voice_listener.voice_active = radio.audible
+    return rig, radio
+
+
+def test_the_radio_is_paused_before_the_idle_wait_so_its_vocals_do_not_delay_it(tmp_path):
+    """Review I1 (controller ruling 2026-11-17): the announcer pauses the radio first, so the
+    radio's own vocals (VAD activity) do not hold the announcement for announce_max_wait_s."""
+    rig, radio = radio_rig(tmp_path)
+    item = rig.timer()
+    due = rig.clock()
+    assert rig.announcer.handle(item.id)
+    ((at, _, _),) = rig.worker.turns
+    assert at - due < 1.0  # promptly, not after announce_max_wait_s (60 s)
+    assert radio.paused and radio.paused[0] <= at
+
+
+def test_the_radio_stays_paused_for_the_whole_idle_wait(tmp_path):
+    """Review I1: while the announcer waits for the robot's own sentence to end, the radio
+    stays held, so it does not rejoin (and fire the VAD) before the announcement."""
+    rig, _ = radio_rig(tmp_path, speaking_until=70.0, resume_s=1.0)
+    rig.clock.t = 50.0
+    item = rig.scheduler.add_timer(1, "pasta")
+    rig.clock.t += 1
+    assert rig.announcer.handle(item.id)
+    ((at, _, _),) = rig.worker.turns
+    assert at < 75.0  # right after the speech, not announce_max_wait_s after the start
+
+
+def test_a_reply_in_the_window_over_a_set_station_stops_the_repeats(tmp_path):
+    """Review I2 (owner decision 2026-11-17): with a station set, the announcement still opens
+    its reply window; the reply the wake gate then addresses ("ok, thanks", no name) stops the
+    timer's repeats (the listener side: test_listener_media)."""
+    rig, _ = radio_rig(tmp_path)
+    rig.announcer.attach()
+    assert rig.announcer.handle(rig.timer().id)
+    assert rig.host.voice_listener.opened  # the reply window opened over the station
+    info = UtteranceInfo("en", 2, 1, 0.0, 0.0, 0.0, True, False, -20.0, None, None)
+    rig.host.bus.publish("percept.utterance", info, rig.clock.t)
+    rig.clock.t += 600
+    rig.announcer.run_repeats()
+    assert len(rig.worker.turns) == 1
 
 
 # ------------------------------------------------------------------ the bus hand-off

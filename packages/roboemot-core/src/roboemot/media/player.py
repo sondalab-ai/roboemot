@@ -13,10 +13,14 @@ holds a turn open, served or waiting from the moment ``submit`` accepts an addre
 phase, because the microphone hears the radio itself. While held it keeps reading and drops what
 it reads, so the stream stays live, and it rejoins ``tools.media.resume_after_s`` after the last
 hold. ``pause(reason)`` (the announcer's) holds it now and cuts what is still in the speaker.
+An announcement's reply window (``VoiceListener.reply_window_open``) holds it too, so the person
+can answer the robot without its name (owner decision 2026-11-17).
 
-It stops on ``stop``, on a nap (``circadian.state`` ``resting``), on ``robot.asleep``, after
-``tools.media.max_play_s``, and at a stream end, stall or error. It publishes ``media.playing``
-(``{"station"}``) and ``media.stopped`` (``{"station", "reason"}``) with the station name only.
+It stops on ``stop``, on a rest (``circadian.state`` ``resting``: a requested nap, the quiet
+hours; while it plays the circadian runner starts no idle nap, owner decision 2026-11-17), on
+``robot.asleep``, after ``tools.media.max_play_s``, and at a stream end, stall or error. It
+publishes ``media.playing`` (``{"station"}``) and ``media.stopped`` (``{"station", "reason"}``)
+with the station name only.
 Logs carry the station name and a reason, never the URL, an exception's text or stream metadata.
 
 It also stops when a config change (``on_config``, a ``ConfigStack`` listener) turns
@@ -215,12 +219,15 @@ class MediaPlayer:
         """Hold the music now (``reason``: who asked, the announcer's ``announce``) and cut what
         is still in the speaker; it rejoins after ``tools.media.resume_after_s`` with no
         speech and no open addressed turn."""
+        resume_after_s = self.cfg().tools.media.resume_after_s
         with self._lock:
             if self._stream is None:
                 return
+            fresh = self._clock() - self._held_at >= resume_after_s
             self._held_at = self._clock()
         self.output.cut_media()
-        log.debug("media: paused (%s)", reason)
+        if fresh:  # a caller that keeps the music held calls this on every poll
+            log.debug("media: paused (%s)", reason)
 
     def volume(self, delta_db: float) -> float:
         """Step the music volume by ``delta_db``, kept within ``tools.media.volume_db``'s
@@ -305,13 +312,16 @@ class MediaPlayer:
     def _turn_open(self) -> bool:
         """Whether an addressed turn is open: the conversation holds a turn open, served or
         waiting, an addressed utterance's audio waits for the server's transcript (the wake
-        decision is taken, the final not yet), or the phase is thinking or speaking. Never the
-        VAD or the listening phase."""
+        decision is taken, the final not yet), an announcement's reply window is open (owner
+        decision 2026-11-17), or the phase is thinking or speaking. Never the VAD or the
+        listening phase."""
         conversation = self.host.conversation
         if conversation is not None and conversation.busy():
             return True
         listener = self.host.voice_listener
-        if listener is not None and listener.awaiting_transcript():
+        if listener is not None and (
+            listener.awaiting_transcript() or listener.reply_window_open()
+        ):
             return True
         phase = self.host.phase
         return phase is not None and phase.current()[0] in (THINKING, SPEAKING)

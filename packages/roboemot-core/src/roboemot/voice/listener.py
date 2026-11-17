@@ -76,7 +76,10 @@ bus with the tempo only.
 The robot's own radio (``media_playing``, the media player, SPEC 8, Radio playback): while it
 plays, only the wake word addresses the robot (``WakeGate``, ``rejected_media``: the follow-up
 window, a face and the policy do not count), and with server turns no segment streams (the
-``media`` gate, always on: the wake gate decides each one locally). With ``tools.radio.dance``
+``media`` gate, always on: the wake gate decides each one locally). The one exception is an
+announcement's reply window (``open_follow_up``, ``reply_window_open``; owner decision
+2026-11-17): the media player keeps the radio paused while it is open, and the normal rules
+apply in it, the ``media`` gate and the name-first shortcut included. With ``tools.radio.dance``
 off the music detector ignores music while it plays: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
@@ -301,8 +304,8 @@ class VoiceListener:
         self._direction = direction
         # whether the robot's own radio plays (the media player's ``playing``, set at start)
         self.media_playing: Callable[[], bool] = lambda: False
-        self._gate = WakeGate(  # see apply_config
-            "always", 0.0, music=self._music_during, media=self._media_now
+        self._gate = WakeGate(  # see apply_config; it applies the reply window itself
+            "always", 0.0, music=self._music_during, media=lambda: bool(self.media_playing())
         )
         self.music: MusicDetector | None = None  # built by apply_config while music.enabled
         self.music_classifier: MusicClassifier | None = None  # set by the pipeline
@@ -498,6 +501,12 @@ class VoiceListener:
         """Open the wake gate's follow-up window now: the robot's announcement ended (SPEC 8,
         robot-initiated turn), so the person can reply without the wake word. Any thread."""
         self._gate.open_window(self._clock())
+
+    def reply_window_open(self) -> bool:
+        """Whether the reply window an announcement opened (:meth:`open_follow_up`) is open
+        now: the media player keeps the radio paused while it is (SPEC 8, Radio playback).
+        Any thread."""
+        return self._gate.reply_window(self._clock())
 
     def snapshot(self) -> dict[str, Any]:
         """Counters and fast-path latencies for the debug report: numbers only, no content."""
@@ -771,9 +780,10 @@ class VoiceListener:
         return music.state(now)
 
     def _media_now(self) -> bool:
-        """Whether the robot's own radio plays now (the wake gate's media predicate; a leaf
-        read, no lock)."""
-        return bool(self.media_playing())
+        """Whether the robot's own radio plays now and no announcement's reply window holds it
+        paused (the ``media`` stream gate, the name-first shortcut, the dance switch). Not the
+        wake gate's predicate: the gate applies the reply window under its own lock."""
+        return bool(self.media_playing()) and not self.reply_window_open()
 
     def _music_hidden(self) -> bool:
         """Whether the detector ignores music now: the radio plays and ``tools.radio.dance`` is

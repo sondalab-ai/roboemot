@@ -326,6 +326,7 @@ def assemble(
         detection_period=host.detection_period,
         engaged=lambda: selector.engaged,
         conversing=lambda: in_conversation(phase, host.conversation, hearing=False),
+        media_playing=lambda: (media := host.media) is not None and media.playing(),
     )
     circ.events = host.events
     expression.circadian_factor = circ.amplitude_factor
