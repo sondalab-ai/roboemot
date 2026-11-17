@@ -50,6 +50,8 @@ the listener, barge-in and the realtime input do not take it for the robot's voi
 It is refused (nothing queued) behind speech the speaker already holds.
 ``cut_aside`` drops such a sound still pending or playing, flushed like a stop, when the answer's
 first audio comes (SPEC 8, S3: the answer never waits behind it); it never cuts speech.
+``push_media`` and ``cut_media`` do the same for the radio (SPEC 8, Radio playback), with a
+stream converter of its own so the music has no click at piece edges.
 
 Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
 never logged or published.
@@ -126,8 +128,10 @@ class ReachySpeaker:
         self._closing = False
         self._counts = {
             "pieces": 0, "underruns": 0, "late": 0, "restamped": 0, "pacer_reused": 0,
-            "asides_cut": 0,
+            "asides_cut": 0, "media_cut": 0,
         }  # fmt: skip
+        self._media_stream: StreamResampler | None = None  # the media's own converter
+        self._media_hz = 0  # its input rate as given (0: none yet, or flushed)
         self._gap_ms = {"underrun_ms": 0.0, "late_ms": 0.0, "restamped_ms": 0.0}
         self._at_stop_ms: list[float] = []  # last and max pending audio dropped by a stop
 
@@ -210,6 +214,46 @@ class ReachySpeaker:
             with self._lock:
                 self._speech_incoming -= 1
         return self.playing_until() if queued else 0.0
+
+    def push_media(self, samples: np.ndarray, rate_hz: int) -> float:
+        """Queue mono float32 media (the radio, SPEC 8, Radio playback): resampled as a stream
+        of its own across pushes (no click at piece edges) and pushed in pieces like speech,
+        but it extends only the gate's own-sound window (its echo tail at most one push long),
+        so the listener keeps hearing the room over it. Refused behind speech the speaker holds.
+        Returns the stamp until which everything queued has played; 0.0 if nothing was
+        queued."""
+        if not self._playing or self._out_hz is None or samples.size == 0 or rate_hz <= 0:
+            return 0.0
+        x = samples.astype(np.float32, copy=False).reshape(-1)
+        with self._lock:
+            if self._holds_speech(self._clock()):
+                return 0.0
+            generation = self._generation
+            if self._media_hz != rate_hz:
+                snapped = max(RATE_GRID_HZ, round(rate_hz / RATE_GRID_HZ) * RATE_GRID_HZ)
+                same = rate_hz == self._out_hz
+                self._media_stream = None if same else StreamResampler(snapped, self._out_hz)
+                self._media_hz = rate_hz
+            stream = self._media_stream
+        out = x if stream is None else stream.process(x)
+        with self._lock:
+            self._aside_s = out.size / self._out_hz  # the own-sound tail: at most one push
+        queued = self._push_pieces(out, generation, speech=False)
+        return self.playing_until() if queued else 0.0
+
+    def cut_media(self) -> bool:
+        """The media player paused or stopped, or speech comes (SPEC 8, Radio playback): drop
+        the media still pending or playing, flushed as ``stop`` flushes. Never cuts speech.
+        Whether it cut anything."""
+        with self._lock:
+            now = self._clock()
+            if self._holds_speech(now):
+                return False
+            if not self._pending and self._handed <= now:
+                return False
+            self._flush(now)
+            self._counts["media_cut"] += 1
+            return True
 
     def push_aside(self, samples: np.ndarray, rate_hz: int) -> float:
         """Queue a short mono sound that is not speech: resampled in one piece (the speech
@@ -445,6 +489,7 @@ class ReachySpeaker:
         """Drop everything queued and pending at ``now`` (the lock is held): ``stop``'s cut."""
         self._generation += 1
         self._stream, self._stream_hz = None, 0  # the next push starts a fresh stream
+        self._media_stream, self._media_hz = None, 0  # ... and so does the next media push
         self._drop_pending()
         self._handed = self._speech_handed = now
         if self._reference is not None:

@@ -22,6 +22,7 @@ from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
+from roboemot.media.player import MediaPlayer
 from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
 from roboemot.realtime.route import RealtimeRoute
@@ -39,6 +40,7 @@ from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import AUDIO_DROPPED, AUDIO_NOT_HEARD, AUDIO_SENT
+from roboemot.voice.speech import MediaSink
 from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
@@ -137,6 +139,7 @@ def start_voice_output(
     cues = host.cues = build_cues(host, stack, p, output)
     cues.events = host.events
     p.responder.cue = offline_cue(host, stack, p)
+    start_media(host, stack, output, listener, cleanup)
     if listener is None:
         return
     cut_own = own_sound_cut(output, soothe)
@@ -206,18 +209,41 @@ def start_voice_output(
         bind_barge_in(bargein, output, conv, listener, cut_own)
 
 
+def start_media(
+    host: RuntimeHost, stack: ConfigStack, output: Any, listener: Any, cleanup: ExitStack
+) -> MediaPlayer | None:
+    """The media player the radio plays through (SPEC 8, Radio playback; SPEC 11, Media
+    player), only when the speaker can play media outside the speaking window (``MediaSink``):
+    never through the speech path, which would make the listener deaf to the wake word. It
+    listens for a nap and ``robot.asleep`` on the bus and for config changes (radio turned off,
+    station removed), closes before the speech output, and
+    tells the listener when it plays (the lyrics gate and ``tools.radio.dance``). Sets
+    ``host.media``; None (and no radio) otherwise."""
+    if not isinstance(output.sink, MediaSink):
+        return None
+    player = host.media = MediaPlayer(output, host, stack.effective)
+    cleanup.callback(player.close)  # before the output goes away (callbacks run last in first)
+    cleanup.callback(stack.subscribe(player.on_config))  # radio off or station gone: stop
+    player.start()
+    if listener is not None:
+        listener.media_playing = player.playing
+    return player
+
+
 def skill_registry(
     stack: ConfigStack, p: Pipeline, registry: Any, runtime: RuntimeHost
 ) -> SkillRegistry:
     """The conversation's skills (SPEC 11): the default skills over the robot's pipeline plus
     every ``roboemot.skills`` plugin, each plugin loaded once. The tools' host gets the run's
     parts (``nap``: ``runtime.request_nap``, SPEC 7A; ``scheduler``: ``runtime.scheduler``,
-    SPEC 11; ``http``: ``http_client``, a fresh client per call, SPEC 11, 12). Warns once when
-    the merged ``conversation.llm_skills`` hides one of core's own voice tools."""
+    SPEC 11; ``http``: ``http_client``, a fresh client per call, SPEC 11, 12; ``media``:
+    ``runtime.media``, SPEC 11). Warns once when the merged ``conversation.llm_skills`` hides one
+    of core's own voice tools."""
     host = tool_host(stack.effective, p.bus)
     host.nap = runtime.request_nap
     host.scheduler = runtime.scheduler
     host.http = http_client
+    host.media = runtime.media
     plugins = load_plugin_skill_sets(host)
     warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
     env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(

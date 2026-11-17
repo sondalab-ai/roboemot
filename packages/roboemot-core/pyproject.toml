@@ -51,6 +51,7 @@ roboemot = "roboemot.cli:main"
 [project.entry-points."roboemot.skills"]
 sleep = "roboemot.tools.sleep:skills"
 timers = "roboemot.tools.timers:skills"
+radio = "roboemot.tools.radio:skills"
 weather = "roboemot.tools.weather:skills"
 
 [tool.hatch.build.targets.wheel]

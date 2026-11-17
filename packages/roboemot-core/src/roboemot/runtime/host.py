@@ -28,6 +28,7 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
+from roboemot.media.player import MediaPlayer
 from roboemot.persona.llm_traits import TraitsWorker
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.reflex import ReflexEngine
@@ -89,7 +90,7 @@ class RuntimeHost:
     scheduler: Scheduler | None = None  # timers and reminders (SPEC 11, Voice tools); with voice
     scheduler_runner: SchedulerRunner | None = None  # tools.due; an announcer set_consumer(True)
     announcer: Announcer | None = None  # announces due items (SPEC 11, robot-initiated turn)
-    media: Any = None  # the media player (SPEC 11, Media player); None until a run builds one
+    media: MediaPlayer | None = None  # the radio's player (SPEC 11); a speaker that can play media
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)

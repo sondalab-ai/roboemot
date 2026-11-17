@@ -1376,3 +1376,112 @@ def test_cut_raw_with_nothing_playing_does_nothing(make):
     sink = TimelineSink()
     out = make(sink=sink)
     assert not out.cut_raw() and not sink.stopped_at
+
+
+# ------------------------------------------------------------------ media (SPEC 8, Radio playback)
+
+
+class MediaSink(FakeSink):
+    """A sink that plays media outside the speaking window (the Reachy speaker's
+    ``push_media``); ``media_until`` stands for music still in the player."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.media: list[tuple[int, int, float]] = []
+        self.media_until = -math.inf
+        self.media_cuts = 0
+
+    def push_media(self, samples, rate_hz):
+        self.media.append((samples.size, rate_hz, float(np.max(np.abs(samples)))))
+        self.media_until = max(self.media_until, time.monotonic()) + samples.size / rate_hz
+        return self.media_until
+
+    def cut_media(self):
+        self.media_cuts += 1
+        held = self.media_until > time.monotonic()
+        self.media_until = -math.inf
+        return held
+
+    def playing_until(self):
+        return max(time.monotonic(), self.media_until)
+
+
+def test_media_plays_outside_the_queue_at_its_volume(make):
+    sink = MediaSink()
+    out = make(sink=sink)
+    assert out.play_media(blip(0.2), RATE, volume_db=-6.0)
+    assert sink.media == [(3200, RATE, pytest.approx(0.5 * 10 ** (-6 / 20), rel=1e-4))]
+    assert sink.pushed == [] and out.waiting() == 0  # never a job of the speech queue
+    assert not out.speaking_at(time.monotonic())  # the music is not the robot's voice
+    assert 0.0 < out.media_ahead_s() <= 0.2
+    assert out.snapshot()["media"] == {"pushed": 1}
+
+
+def test_media_is_refused_while_speech_is_queued_or_in_flight(make):
+    sink = MediaSink()
+    out = make(HoldingBackend(), sink=sink)
+    say(out)
+    say(out)  # held in synthesis: a job in flight
+    assert wait_for(lambda: len(out.backend.texts) == 2)
+    assert out.media_blocked()
+    assert not out.play_media(blip(), RATE)
+    assert sink.media == [] and out.snapshot()["media"] == {"refused": 1}
+
+
+class PlayingMediaSink(MediaSink):
+    """A media sink whose raw (cue) audio takes its length to play on the output's clock, as
+    the Reachy speaker's ``playing_until`` does."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__()
+        self.clock, self.until = clock, 0.0
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.until = max(self.until, self.clock()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return max(self.until, self.media_until)
+
+
+def test_a_queued_cue_sound_blocks_media():
+    """No loop thread runs, so the cue stays queued: no timing involved."""
+    out = SpeechOutput(RoboEmotConfig(), MediaSink(), FakeBackend())
+    out.play(np.zeros(RATE, np.float32), RATE, yields=True)  # a cue's sound
+    assert out.media_blocked() and not out.play_media(blip(), RATE)
+    assert out.snapshot()["media"] == {"refused": 1}
+
+
+def test_a_playing_cue_sound_blocks_media_until_it_has_played(make):
+    """CI 3.11 flake (PR 261): with a sink that played raw audio in no time, the cue ended
+    between ``media_blocked`` and ``play_media``. Here the cue lasts hours (``RATE`` samples
+    at 1 Hz) on a frozen clock, so it holds the queue until the test cancels it, whatever the
+    machine's load; then media goes."""
+    clock = FakeClock()
+    sink = PlayingMediaSink(clock)
+    out = make(sink=sink, clock=clock)
+    job = out.play(np.zeros(RATE, np.float32), 1, yields=True)  # a cue's sound, hours long
+    assert wait_for(lambda: out.started_at(job) is not None)  # pushed, holding the queue
+    assert out.media_blocked() and not out.play_media(blip(), RATE)
+    out.cancel(job)
+    assert wait_for(lambda: not out.live(job))
+    clock.now = sink.until  # its audio has played
+    assert not out.media_blocked() and out.play_media(blip(), RATE)
+
+
+def test_speech_cuts_the_media_still_in_the_sink(make):
+    sink = MediaSink()
+    out = make(FakeBackend(), sink=sink)
+    assert out.play_media(blip(2.0), RATE)  # two seconds of music in the player
+    t0 = time.monotonic()
+    say(out)
+    assert wait_for(lambda: sink.pushed)
+    assert sink.media_cuts == 1 and sink.pushed_at[0] - t0 < 1.0  # never behind the music
+    assert out.snapshot()["media"] == {"pushed": 1, "cut": 1}
+    assert out.media_ahead_s() == 0.0
+
+
+def test_media_needs_a_media_sink(make):
+    out = make(sink=FakeSink())
+    assert not out.play_media(blip(), RATE)
+    assert not out.cut_media() and out.waiting() == 0

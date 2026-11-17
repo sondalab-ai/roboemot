@@ -390,3 +390,44 @@ def test_an_aside_sound_through_the_speech_output_is_not_speech():
         assert out.waiting() == 0
     finally:
         out.close()
+
+
+def test_media_opens_only_the_own_sound_window_so_the_listener_still_hears():
+    """SPEC 8, Radio playback: the radio is the robot's own sound (no reflex, no turning to it)
+    but not its voice: the listener and barge-in keep hearing the room over it."""
+    mini, log = fake()
+    clock = Clock()
+    act = SpeechActivity(300)
+    sp = ReachySpeaker(mini, 100, act, clock)
+    sp.start_playing()
+    until = sp.push_media(np.full(3200, 0.1, np.float32), 16000)  # 0.2 s
+    assert until == pytest.approx(clock.t + 0.2, abs=1e-3)
+    assert not act.speaking(clock.t) and act.sounding(clock.t + 0.1)
+    assert sp.cut_media() and log.cleared == 1 and sp.playing_until() <= clock.t
+    assert not sp.cut_media()  # nothing left to cut
+
+
+def test_media_is_streamed_across_pushes_without_edge_clicks():
+    from roboemot_reachymini.resample import resample
+
+    mini, log = fake(out_rate=48000)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    x = sine(16000)
+    for i in range(0, x.size, 3200):
+        sp.push_media(x[i : i + 3200], 16000)
+    ref = resample(x, 16000, 48000)
+    out = np.concatenate(log.pushed)
+    assert np.abs(out - ref[: out.size]).max() < 1e-5  # a prefix of the whole, resampled once
+
+
+def test_media_is_refused_behind_speech_and_never_cuts_it():
+    mini, log = fake()
+    clock = Clock()
+    act = SpeechActivity(300)
+    sp = ReachySpeaker(mini, 100, act, clock)
+    sp.start_playing()
+    sp.push_audio_sample(np.zeros(16000, np.float32), 16000)  # one second of speech
+    assert sp.push_media(np.full(1600, 0.1, np.float32), 16000) == 0.0
+    assert not sp.cut_media() and log.cleared == 0
+    assert sp.pacing()["media_cut"] == 0
