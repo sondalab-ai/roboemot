@@ -846,15 +846,126 @@ async function liveAudioPoll(box, serial) {
   liveState.audioTimer = setTimeout(() => liveAudioPoll(box, serial), delay);
 }
 
+// ---------------------------------------------------------------- LLM prompts panel
+
+// A collapsed card under the audio cards (webui.live.prompts, opt-in): every request that left
+// for a cloud LLM, as a terminal log (one `$ time → route (model) label` line, then the body).
+// Polled from GET /api/live/prompts with the transcript's since-cursor, only while the panel is
+// open, the tab visible and the flag on: an `enabled: false` reply shows the hint and stops the
+// poll until the panel is opened again or the tab is entered again. Closing the panel, leaving the
+// tab or hiding the page drops the drawn text.
+// `chain` retires a request in flight when the panel is closed, reopened or its text dropped.
+const livePrompts = { timer: null, after: 0, epoch: null, ui: null, chain: 0 };
+
+function liveStopPrompts(drop) {
+  clearTimeout(livePrompts.timer);
+  livePrompts.timer = null;
+  if (!drop) return;
+  livePrompts.chain += 1;
+  livePrompts.after = 0;
+  livePrompts.epoch = null;
+  if (livePrompts.ui) livePrompts.ui.log.replaceChildren();
+}
+
+function livePromptsBuild(box) {
+  const log = el("div", { class: "live-prompts", id: "live-prompts-log", role: "log", "aria-label": t("live_prompts"), tabindex: "0", hidden: true });
+  const off = el("p", { class: "hint", hidden: true }, t("live_prompts_off"));
+  const none = el("p", { class: "hint", hidden: true }, t("live_prompts_empty"));
+  const error = el("p", { class: "hint", hidden: true });
+  const clear = button(t("live_prompts_clear"), "plain", () => guarded(livePromptsClear), { small: true, attrs: { id: "live-prompts-clear", hidden: true } });
+  const body = el("div", { class: "stack", id: "live-prompts-body", hidden: true }, off, none, error, log, clear, el("p", { class: "hint" }, t("live_prompts_note")));
+  const toggle = el("button", { type: "button", class: "sl-disclosure", id: "live-prompts-toggle", "aria-expanded": "false", "aria-controls": "live-prompts-body" }, t("live_prompts"));
+  const ui = { open: false, toggle, body, log, off, none, error, clear };
+  toggle.addEventListener("click", () => livePromptsOpen(ui, !ui.open));
+  box.replaceChildren(el("section", { class: "sl-card", id: "live-prompts-card" }, el("h2", { class: "sl-card__title" }, toggle), body));
+  livePrompts.ui = ui;
+  liveStopPrompts(true);
+}
+
+function livePromptsOpen(ui, open) {
+  ui.open = open;
+  ui.toggle.setAttribute("aria-expanded", String(open));
+  ui.body.hidden = !open;
+  liveStopPrompts(true);
+  if (open) livePromptsPoll(liveState.serial);
+}
+
+function livePromptRow(entry) {
+  const head = "$ " + when(entry.t * 1000, true) + " → " + entry.route + " (" + entry.via + ") " + entry.label;
+  return el("div", { class: "live-prompt", "data-seq": entry.seq },
+    el("span", { class: "live-prompt__head" }, head), "\n", el("span", { class: "live-prompt__body" }, entry.text));
+}
+
+function livePromptsRender(ui, p) {
+  ui.error.hidden = true;
+  ui.off.hidden = p.enabled;
+  ui.log.hidden = !p.enabled;
+  ui.clear.hidden = !p.enabled;
+  if (!p.enabled) {
+    ui.none.hidden = true;
+    liveStopPrompts(true);
+    return;
+  }
+  const log = ui.log;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= LIVE_SCROLL_SLACK_PX;
+  if (livePrompts.epoch !== p.epoch) log.replaceChildren();
+  livePrompts.epoch = p.epoch;
+  for (const entry of p.entries) {
+    const key = String(entry.seq);
+    const old = [...log.children].find((row) => row.dataset.seq === key);
+    if (old) old.replaceWith(livePromptRow(entry)); // an audio summary that grew
+    else log.append(livePromptRow(entry));
+  }
+  while (log.firstChild && Number(log.firstChild.dataset.seq) < p.min_seq) log.firstChild.remove();
+  while (p.max_entries > 0 && log.children.length > p.max_entries) log.firstChild.remove();
+  livePrompts.after = p.rev;
+  ui.none.hidden = log.children.length > 0;
+  if (p.entries.length && atBottom) log.scrollTop = log.scrollHeight; // a reader scrolled up stays put
+}
+
+async function livePromptsPoll(serial) {
+  liveStopPrompts();
+  const ui = livePrompts.ui;
+  if (!ui || !ui.open || !liveActive(serial)) return;
+  const chain = livePrompts.chain;
+  const current = () => liveActive(serial) && livePrompts.ui === ui && ui.open && livePrompts.chain === chain;
+  let delay = LIVE_RETRY_MS;
+  try {
+    const epoch = livePrompts.epoch ? "&epoch=" + encodeURIComponent(livePrompts.epoch) : "";
+    const data = await api("GET", "/api/live/prompts?after=" + livePrompts.after + epoch, undefined, liveActivity());
+    if (!current()) return;
+    livePromptsRender(ui, data.prompts);
+    if (!data.prompts.enabled) return; // off: asked again when the panel or the tab is reopened
+    delay = data.poll_ms || LIVE_RETRY_MS;
+  } catch (err) {
+    if (!current()) return;
+    if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+    ui.error.textContent = explain(err);
+    ui.error.hidden = false;
+    if (err.message === "live_disabled" || err.message === "live_unavailable") return;
+  }
+  livePrompts.timer = setTimeout(() => livePromptsPoll(serial), delay);
+}
+
+async function livePromptsClear() {
+  await api("POST", "/api/live/prompts/clear", {});
+  const ui = livePrompts.ui;
+  if (!ui) return;
+  ui.log.replaceChildren();
+  ui.none.hidden = false;
+}
+
 function liveView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   const box = el("div", { class: "live-grid", id: "live-cards" });
   const audio = el("div", { class: "live-grid", id: "live-audio" });
+  const prompts = el("div", { id: "live-prompts" });
   const activity = el("div", { id: "live-activity" });
   const stale = staleNote("live-stale", ["live-cards", "live-audio"]);
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), stale, activity, box, audio));
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), stale, activity, box, audio, prompts));
   liveAudioReset(audio);
+  livePromptsBuild(prompts);
   pollForget();
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
@@ -868,7 +979,9 @@ function liveResume() {
   liveState.after = 0; // turns may have changed while hidden: ask for the full list again
   liveState.epoch = null;
   const serial = ++liveState.serial;
-  return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
+  const polls = [livePoll(box, serial), liveAudioPoll(audio, serial)];
+  if (livePrompts.ui && livePrompts.ui.open) polls.push(livePromptsPoll(serial)); // dropped on hide
+  return Promise.all(polls);
 }
 
 // Hidden page: stop at once and retire the request in flight. Visible again: redraw and resume.
