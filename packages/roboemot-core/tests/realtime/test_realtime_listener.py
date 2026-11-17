@@ -968,12 +968,16 @@ def radio_audible(ear):
     return holds
 
 
-def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears):
+@pytest.mark.parametrize(
+    "lyric", ["Sentito e il resto con la musica", "e la nave va", "nove deve vede"]
+)
+def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears, lyric):
     """The robot (2026-11-17, radio playing jazz): a lyric leaking through the echo canceller
     matched the name in Vosk's small grammar, and the robot answered the server's "Sentito e il
     resto con la musica". With no name and no wake phrase in the server's words it is dropped
-    silently: not answered, counted, its server items deleted and the turn's hold released."""
-    with TurnServer(heard=[["Sentito e il resto con la musica"]]) as server:
+    silently: not answered, counted, its server items deleted and the turn's hold released.
+    Words one consonant or one other vowel from the name ("nave", "nove") do not confirm it."""
+    with TurnServer(heard=[[lyric]]) as server:
         ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
         holds = radio_audible(ear)
         seen = []
@@ -993,10 +997,19 @@ def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears)
 
 
 @pytest.mark.parametrize(
-    "heard", ["Neve, stoppa la musica", "NEVE STOPPA LA MUSICA", "stoppa la musica neve"]
+    "heard",
+    [
+        "Neve, stoppa la musica",
+        "NEVE STOPPA LA MUSICA",
+        "stoppa la musica neve",
+        "Nivea",  # the robot, 2026-11-17: a close spelling of the name (owner decision)
+        "Nieve stoppa la musica",
+        "ehi robot stoppa la musica",  # a wake phrase without the name
+    ],
 )
 def test_a_wake_over_the_radio_the_server_confirms_is_answered(ears, heard):
-    """The name in the server's words, in any case and anywhere, confirms the local wake."""
+    """The name in the server's words, in any case and anywhere, a close spelling of it, or a
+    wake phrase confirms the local wake."""
     with TurnServer(heard=[[heard]]) as server:
         ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
         radio_audible(ear)

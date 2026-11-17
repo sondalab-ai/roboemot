@@ -14,6 +14,15 @@ word wakes the robot at any sentence length (SPEC 8, owner decision 2026-11-04),
 elsewhere wakes only a short final. The grammar pass reports the same position in what it heard
 with the ``NAME_FIRST`` flag (never a category: the fast path takes it out).
 
+``name_close`` is for a server's transcript only (SPEC 8, Radio playback: the server must
+confirm a wake over the robot's radio), never for the local recognizer: a word is close to a
+word of the name when its spelling, with ``i`` read as ``e`` and ``u`` as ``o`` (the vowels a
+recognizer swaps), differs only by inserted or dropped vowels, at most ``max_edits`` of them
+(a swapped vowel class counts two: one dropped, one inserted). The consonants must match in
+order, so "Nivea" and "Nieve" are close to "Neve" while "nave", "nove", "deve", "nei" are not.
+A name word shorter than ``min_letters`` must match exactly; a name of several words matches
+word by word, all of them, in order.
+
 ``grammar_phrases`` gives the same lists *folded* instead (lower case, accents kept): the form a
 recognizer vocabulary spells them in, for the grammar pass (``roboemot.voice.grammar``).
 """
@@ -33,6 +42,10 @@ if TYPE_CHECKING:
 NON_WORD = re.compile(r"[\W_]+")
 FOLD_SPLIT = re.compile(r"[^\w']+|_")
 CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
+# vowels a recognizer swaps for one another, mapped to one class (a fact of the spelling, not a
+# tunable): ``name_close`` reads them as the same vowel
+VOWEL_CLASS = str.maketrans({"i": "e", "u": "o"})
+VOWELS = frozenset("aeo")  # the vowel classes after VOWEL_CLASS
 NAME_FIRST = "name_first"  # grammar pass flag in what it heard: the name opened the utterance
 
 
@@ -149,6 +162,21 @@ class KeywordSpotter:
         starts = [" ", *(f" {lead} " for lead in self._leads.get(language, ()))]
         return any(padded.startswith(f"{s}{n} ") for s in starts for n in names)
 
+    def name_close(self, text: str, language: str, max_edits: int, min_letters: int) -> bool:
+        """Whether ``text`` holds the robot's name, or a close spelling of it, as whole words in
+        order (module docstring): for a server's transcript only. False without a usable name."""
+        self._rebuild()
+        name = self._resolved
+        if name is None or not name.usable(language):
+            return False
+        targets = name.matching.split()
+        words = normalise(text).split()
+        for i in range(len(words) - len(targets) + 1):
+            pairs = zip(words[i : i + len(targets)], targets, strict=True)
+            if all(_close(w, t, max_edits, min_letters) for w, t in pairs):
+                return True
+        return False
+
     def spot(self, text: str, language: str) -> set[str]:
         """The categories whose phrases occur as whole words in ``text``."""
         padded = f" {normalise(text)} "
@@ -163,3 +191,34 @@ class KeywordSpotter:
             if any(f" {p} " in padded for p in phrases):
                 found.add(cat)
         return found
+
+
+def _close(word: str, target: str, max_edits: int, min_letters: int) -> bool:
+    """Whether normalised ``word`` is a close spelling of normalised ``target`` (the module
+    docstring's rule): exact when ``target`` is shorter than ``min_letters``."""
+    if word == target:
+        return True
+    if len(target) < min_letters:
+        return False
+    return _vowel_edits(word.translate(VOWEL_CLASS), target.translate(VOWEL_CLASS)) <= max_edits
+
+
+def _vowel_edits(a: str, b: str) -> float:
+    """The fewest vowel insertions and deletions that turn ``a`` into ``b`` (infinite when a
+    consonant differs): an edit distance with no substitution and no consonant edit, over two
+    short words."""
+    inf = float("inf")
+    row = [0.0]
+    for ch in b:
+        row.append(row[-1] + 1 if ch in VOWELS else inf)
+    for ca in a:
+        prev = row
+        row = [prev[0] + 1 if ca in VOWELS else inf]
+        for j, cb in enumerate(b, 1):
+            best = prev[j - 1] if ca == cb else inf
+            if ca in VOWELS:
+                best = min(best, prev[j] + 1)
+            if cb in VOWELS:
+                best = min(best, row[j - 1] + 1)
+            row.append(best)
+    return row[-1]

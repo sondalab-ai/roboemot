@@ -198,3 +198,61 @@ def test_gate_snapshot_has_no_content():
     }
     assert snap["decisions"]["wake_word"] == 1
     assert g.snapshot(50.0)["window_open"] is False
+
+
+def server_spotter(wake: str) -> KeywordSpotter:
+    """The spotter of a server's transcript: no recognizer vocabulary limits the name."""
+    names = RobotName()
+    names.configure(V)
+    return KeywordSpotter(V.keywords, wake, names.unchecked())  # type: ignore[arg-type]
+
+
+# Owner decision 2026-11-17 (SPEC 8, Radio playback): the server wrote "Nivea" for "Neve".
+# Accepted: close spellings a recognizer gives (vowels inserted, dropped, or i/e and u/o read
+# alike). Rejected: frequent Italian words one consonant or one other vowel away, so a lyric
+# without the name is still dropped. "nevi" (snows) is accepted: same vowels as the name.
+NAME_CLOSE = [
+    ("Neve", True),
+    ("NEVE", True),
+    ("Neve'", True),
+    ("Nivea", True),
+    ("Nieve", True),
+    ("nevi", True),
+    ("nave", False),
+    ("nove", False),
+    ("deve", False),
+    ("vede", False),
+    ("beve", False),
+    ("vene", False),
+    ("neva", False),
+    ("nevo", False),
+    ("leve", False),
+    ("breve", False),
+    ("nei", False),
+    ("nel", False),
+    ("neo", False),
+    ("ne", False),
+    ("eve", False),
+]
+
+
+@pytest.mark.parametrize("word,close", NAME_CLOSE)
+def test_a_close_spelling_of_the_name_in_a_server_transcript(word, close):
+    s = server_spotter("Neve")
+    assert s.name_close(f"ehm {word} stoppa la musica", "it", 1, 4) is close
+
+
+def test_a_close_spelling_needs_the_edit_bound_and_the_min_length():
+    s = server_spotter("Neve")
+    assert not s.name_close("Nivea", "it", 0, 4)  # 0 edits: the exact name only
+    assert s.name_close("Neve", "it", 0, 4)
+    assert not s.name_close("Nieve", "it", 1, 5)  # a name shorter than min_letters: exact
+    t = server_spotter("Bo")
+    assert t.name_close("bo", "it", 1, 1) and not t.name_close("boa", "it", 1, 4)
+
+
+def test_a_name_of_several_words_matches_each_word_in_order():
+    s = server_spotter("Neve Bianca")
+    assert s.name_close("ciao nivea bianca", "it", 1, 4)
+    assert not s.name_close("bianca nivea", "it", 1, 4)  # out of order
+    assert not s.name_close("nivea nera", "it", 1, 4)  # every word must match

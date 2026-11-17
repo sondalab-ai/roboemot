@@ -94,7 +94,8 @@ follow-up. An utterance the wake word addressed over the audible radio tells the
 find it held even before the player's feeder saw the turn. Such a wake over the audible radio
 must be confirmed by the server's transcript when one comes: a lyric can match the name in the
 small local grammar, so a server final that holds neither the name nor a wake phrase (the
-server spotter, case-insensitive) is handed off not addressed, counted
+server spotter, case-insensitive), nor a close spelling of the name (``FastPath.
+server_name_close``: "Nivea" for "Neve", never "nave"), is handed off not addressed, counted
 ``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media``): the conversation deletes
 its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
 closes. A follow-up in that window decided before the verdict (the lyric's next line starts
@@ -1693,6 +1694,14 @@ class VoiceListener:
         elif outcome == "window" and self._media_wake is not None:
             p.media_parent = self._media_wake
 
+    def _confirms(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
+        """Whether ``p``'s final confirms a wake over the radio: a wake phrase or the name in
+        it, or, in a server's transcript, a close spelling of the name (owner decision
+        2026-11-17: the server wrote "Nivea" for "Neve")."""
+        if fast.keywords & WAKE_CONFIRMS:
+            return True
+        return server and self._fast.server_name_close(text, p.language)
+
     def _unconfirmed(self, p: _Handoff, server: bool) -> bool:
         """Whether ``p``'s wake over the radio is not confirmed (its final holds neither the
         name nor a wake phrase, checked by the caller): its own server final, or the media wake
@@ -1802,7 +1811,7 @@ class VoiceListener:
         addressed = bool(p.addressed)
         if server and fast.wake_word:
             self._count_audio("wake_word_heard")
-        if addressed and not fast.keywords & WAKE_CONFIRMS and self._unconfirmed(p, server):
+        if addressed and self._unconfirmed(p, server) and not self._confirms(fast, text, p, server):
             # the local wake over the radio was a lyric the recognizer took for the name: the
             # server's words hold no name and no wake phrase, so it is not answered (SPEC 8)
             addressed = p.addressed = False
