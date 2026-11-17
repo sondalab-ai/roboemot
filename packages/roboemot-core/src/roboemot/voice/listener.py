@@ -83,7 +83,13 @@ announcement's reply window, ``open_follow_up``, ``reply_window_open``, and
 the ``media`` gate and the name-first shortcut included: "Neve" then "stoppa la musica" is a
 follow-up. An utterance the wake word addressed over the audible radio tells the player
 (``media_hold``) that its turn holds the music from its last speech, so the person's next words
-find it held even before the player's feeder saw the turn. With ``tools.radio.dance`` off the
+find it held even before the player's feeder saw the turn. Such a wake over the audible radio
+must be confirmed by the server's transcript when one comes: a lyric can match the name in the
+small local grammar, so a server final that holds neither the name nor a wake phrase (the
+server spotter, case-insensitive) is handed off not addressed, counted
+``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media``): the conversation deletes
+its server items, plays no cue, and the radio rejoins as after any turn. A wake in a follow-up
+window or a reply window (the radio held) needs no confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
@@ -149,6 +155,8 @@ HELD_GATES = frozenset({"at_face", "facing"})
 SERVER_GATES = ("music", "other_speaker", "at_face", "facing")  # decided by the listener
 OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be off
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
+# what in the server's transcript confirms a wake over the audible radio (SPEC 8, Radio playback)
+WAKE_CONFIRMS = frozenset({"name", "wake"})
 
 
 class VoiceChunkLike(Protocol):
@@ -233,6 +241,7 @@ class _Handoff:
     stream: bool = False  # its audio is a live stream's (turns: server)
     announced: bool = False  # its stream's opening went, and that was counted
     cued: bool = False  # ... and its listening cue began (AUDIO_SENT; a barge-in's waits, S3)
+    media_wake: bool = False  # only the wake word addressed it, over the audible radio
 
 
 @dataclass
@@ -343,6 +352,8 @@ class VoiceListener:
             "sent": 0,
             "transcribed": 0,
             "wake_word_heard": 0,  # the server's transcript held a wake phrase or the name
+            # a wake over the audible radio whose server transcript held neither: not answered
+            "wake_unconfirmed_media": 0,
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
             "decodes": 0,
@@ -1568,6 +1579,7 @@ class VoiceListener:
             self._decided(p, outcome, text)
             if p.addressed and media:  # its turn holds the radio from its last speech
                 self._hold_media(ev.last_speech_stamp)
+            p.media_wake = media and outcome == "wake_word"
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)
@@ -1677,6 +1689,12 @@ class VoiceListener:
         addressed = bool(p.addressed)
         if server and fast.wake_word:
             self._count_audio("wake_word_heard")
+        if server and addressed and p.media_wake and not fast.keywords & WAKE_CONFIRMS:
+            # the local wake over the radio was a lyric the recognizer took for the name: the
+            # server's words hold no name and no wake phrase, so it is not answered (SPEC 8)
+            addressed = False
+            self._count_audio("wake_unconfirmed_media")
+            self.events("unanswered", "media")  # the Live tab: the wake word was not heard
         self._fast.impulses(fast, addressed, state=p.state)
         utterance = Utterance(
             text,

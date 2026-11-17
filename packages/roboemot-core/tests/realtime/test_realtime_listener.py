@@ -952,3 +952,70 @@ def test_a_television_opening_with_the_name_over_music_is_rejected_music(ears):
         snap = ear.r.listener.snapshot()
         assert snap["name_first_no_face"] == 1
         assert snap["wake"]["decisions"]["rejected_music"] == 1
+
+
+# ------------------------------------------------------------------ the robot's radio (SPEC 8)
+
+NEVE_ALWAYS = {"voice": {"wake_word_policy": "always", "wake_word": "Neve"}}
+
+
+def radio_audible(ear):
+    """The robot's own radio is audible whenever asked (the media player's ``audible_at``);
+    returns the stamps the listener held it from (``hold_from``)."""
+    holds: list[float] = []
+    ear.r.listener.media_audible = lambda at: True
+    ear.r.listener.media_hold = holds.append
+    return holds
+
+
+def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears):
+    """The robot (2026-11-17, radio playing jazz): a lyric leaking through the echo canceller
+    matched the name in Vosk's small grammar, and the robot answered the server's "Sentito e il
+    resto con la musica". With no name and no wake phrase in the server's words it is dropped
+    silently: not answered, counted, its server items deleted and the turn's hold released."""
+    with TurnServer(heard=[["Sentito e il resto con la musica"]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        holds = radio_audible(ear)
+        seen = []
+        ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason))
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert not u.addressed and u.realtime is not None
+        assert len(holds) == 1  # the local wake held the radio from its last speech
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 1 and audio["wake_word_heard"] == 0
+        assert ("unanswered", "media") in seen
+        assert not ear.r.listener.awaiting_transcript()  # the player's hold ends normally
+        assert not ear.rt.worker.busy()
+        assert ear.settle(lambda: len(server.of("conversation.item.delete")) == 1)
+        assert server.of("response.create") == []
+
+
+@pytest.mark.parametrize(
+    "heard", ["Neve, stoppa la musica", "NEVE STOPPA LA MUSICA", "stoppa la musica neve"]
+)
+def test_a_wake_over_the_radio_the_server_confirms_is_answered(ears, heard):
+    """The name in the server's words, in any case and anywhere, confirms the local wake."""
+    with TurnServer(heard=[[heard]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        radio_audible(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].addressed
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 0
+        assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)
+
+
+def test_without_the_radio_the_server_need_not_confirm_the_wake(ears):
+    """Outside the audible radio nothing changes: the local wake decides."""
+    with TurnServer(heard=[["Sentito e il resto con la musica"]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        ear.r.listener.media_audible = lambda at: False
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].addressed
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 0
+        assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)
