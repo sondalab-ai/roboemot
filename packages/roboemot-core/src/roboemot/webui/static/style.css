@@ -96,14 +96,21 @@ ul.row { list-style: none; padding: 0; margin: 0; }
   }
 }
 #live-audio { margin-top: var(--sl-space-4); }
-/* The LLM prompts panel reads like a terminal: the theme's sunken surface and code colours, in
-   monospace (dark on the dark theme). Only kit tokens: no colour of its own (test_webui_page);
+/* The LLM prompts panel reads like a terminal, dark with light monospace text: on the dark theme
+   the sunken surface and code colours, on the light theme the inverted text and canvas (set on
+   the element, so they resolve there). Only kit tokens: no colour of its own (test_webui_page);
    high contrast resets the code colours, so the text colour is the fallback. */
 :root {
   --live-term-bg: var(--slc-sunken);
   --live-term-fg: var(--sl-code-fg, var(--slc-text));
   --live-term-head: var(--sl-code-string, var(--slc-text));
   --live-term-border: var(--slc-border);
+}
+[data-sl-theme="light"] .live-prompts {
+  --live-term-bg: var(--slc-text);
+  --live-term-fg: var(--slc-canvas);
+  --live-term-head: var(--slc-canvas);
+  --live-term-border: var(--slc-text);
 }
 .live-prompts {
   max-height: 32rem; overflow: auto; margin: 0; padding: var(--sl-space-3);
