@@ -476,3 +476,47 @@ async def test_an_available_check_that_raises_counts_as_unavailable(caplog):
     out = await execute(reg, ["broken"], "broken", {}, CTX, **EXEC)
     assert out.code == "unavailable"
     assert "broken" in caplog.text and "ZeroDivisionError" in caplog.text
+
+
+async def test_offer_without_choices_keeps_the_skill_with_a_plain_string_while_the_list_is_empty():
+    """Owner decision 2026-11-17 (SPEC 11, LLM tools): a skill that sets
+    ``offer_without_choices`` stays offered while a parameter's choices are empty. That
+    parameter is then a plain string within its cap, and the skill decides. With choices the
+    enum and the strict check apply as before."""
+    names: list[str] = []
+    calls: list[str] = []
+
+    @skill(
+        llm_visible=True, inline=True, choices={"who": lambda: names}, offer_without_choices=True
+    )
+    def pick(who: Annotated[str, MaxLen(8)]) -> str:
+        calls.append(who)
+        return "ok"
+
+    reg = SkillRegistry([pick])
+    offered = reg.offered(["pick"])
+    assert [s.name for s in offered] == ["pick"]
+    snap = SkillRegistry.snapshot_choices(offered, EXEC["enum_max"])
+    [tool] = reg.tools(offered, choices=snap, max_chars=EXEC["max_chars"])
+    assert tool["function"]["parameters"]["properties"]["who"] == {"type": "string", "maxLength": 8}
+    out = await execute(reg, ["pick"], "pick", {"who": "anyone"}, CTX, choices=snap, **EXEC)
+    assert out.ok and calls == ["anyone"]
+    out = await execute(reg, ["pick"], "pick", {"who": "x" * 9}, CTX, choices=snap, **EXEC)
+    assert out.code == "invalid_arguments"  # MaxLen still holds
+    names.extend(["a", "b"])  # the list is set after the snapshot: the snapshot decides
+    out = await execute(reg, ["pick"], "pick", {"who": "c"}, CTX, choices=snap, **EXEC)
+    assert out.ok and calls[-1] == "c"
+    snap = SkillRegistry.snapshot_choices(reg.offered(["pick"]), EXEC["enum_max"])
+    [tool] = reg.tools(reg.offered(["pick"]), choices=snap)
+    assert tool["function"]["parameters"]["properties"]["who"]["enum"] == ["a", "b"]
+    out = await execute(reg, ["pick"], "pick", {"who": "c"}, CTX, choices=snap, **EXEC)
+    assert out.code == "invalid_arguments"  # with choices, the strict check applies
+
+
+def test_without_the_flag_an_empty_choice_list_still_hides_the_skill():
+    @skill(llm_visible=True, choices={"who": lambda: []})
+    def pick(who: str) -> str:
+        return who
+
+    assert not pick.skill.offer_without_choices
+    assert SkillRegistry([pick]).offered(["pick"]) == []

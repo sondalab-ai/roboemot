@@ -63,13 +63,13 @@ class Rig:
         return self.fn(**kwargs).content
 
 
-def test_weather_not_offered_when_disabled_or_no_location():
+def test_weather_not_offered_when_disabled_or_without_http():
     rig = Rig(config(enabled=False))
     s = rig.fn.skill
     assert s.name == "weather" and s.llm_visible
     assert not s.is_available()
     rig.cfg = config(enabled=True, location=False)  # read live, never at factory time
-    assert not s.is_available()
+    assert s.is_available()  # owner decision 2026-11-17: on but not set up stays offered
     rig.cfg = config()
     assert s.is_available()
     rig.host.http = None  # the realtime check's throwaway host has no HTTP client
@@ -282,6 +282,18 @@ async def test_disabling_mid_session_refuses_in_flight_call():
     out = await execute(registry, ["weather"], "weather", {"days": 1}, CTX, **EXEC)
     assert out.code == "unavailable" and not out.ok
     assert rig.call(days=1) == {"error": "unavailable"}  # the skill checks again itself
+    assert rig.requests == []
+
+
+async def test_weather_on_without_a_place_is_offered_and_says_not_configured():
+    """Owner decision 2026-11-17: with weather on and no ``circadian.location`` the model still
+    gets the tool, so the robot can say how to set the place. No request leaves the robot."""
+    rig = Rig(config(location=False))
+    registry = SkillRegistry([rig.fn])
+    [offered] = registry.offered(["weather"])
+    assert "not_configured" in offered.text()
+    out = await execute(registry, ["weather"], "weather", {"days": 1}, CTX, **EXEC)
+    assert json.loads(out.content) == {"error": "not_configured"}
     assert rig.requests == []
 
 

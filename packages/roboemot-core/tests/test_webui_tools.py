@@ -386,6 +386,17 @@ def test_weather_is_available_only_with_a_place():
     assert ToolsState(host, placed).state()["tools"][2]["available"] is True
 
 
+def test_radio_without_a_station_keeps_its_hint_while_the_model_still_gets_it():
+    """Owner decision 2026-11-17: the model gets ``radio_play`` with no station (it answers
+    ``not_configured``), but the tab still shows "Add a station" (``available`` False)."""
+    media = SimpleNamespace(now_playing=lambda: None)
+    host = SimpleNamespace(scheduler=None, media=media, circadian_runner=None)
+    on = RoboEmotConfig(tools={"radio": {"enabled": True}})
+    assert ToolsState(host, on).state()["tools"][3] == {
+        "name": "radio", "enabled": True, "available": False,
+    }  # fmt: skip
+
+
 def test_a_failed_place_search_names_no_query(tmp_path, caplog):
     caplog.set_level(logging.DEBUG)
 
