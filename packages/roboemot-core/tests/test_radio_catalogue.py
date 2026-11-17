@@ -19,6 +19,7 @@ from roboemot.tools.radio_catalogue import (
     radio_catalogue,
 )
 from roboemot.webui.setting_clean import clean_label
+from roboemot.webui.strings import STRINGS
 
 SOMAFM_TERMS = "https://somafm.com/contact/tos.html"
 
@@ -40,6 +41,12 @@ def test_every_shipped_entry_is_a_valid_station():
 def test_the_groups_are_the_owner_s_six_in_order():
     assert [g.id for g in radio_catalogue().groups] == list(GROUP_IDS)
     assert all(g.stations for g in radio_catalogue().groups)
+
+
+def test_every_group_has_a_label_in_both_page_languages():
+    for language in ("en", "it"):
+        for group in GROUP_IDS:
+            assert f"tools_catalogue_group_{group}" in STRINGS[language], (language, group)
 
 
 def test_radio_france_and_somafm_are_marked_unofficial():

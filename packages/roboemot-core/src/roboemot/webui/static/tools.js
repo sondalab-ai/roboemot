@@ -415,7 +415,8 @@ async function toolsCatalogueFetch() {
 // What the add route takes: exactly a station's fields, never the catalogue-only ones.
 const toolsCatalogueValue = (s) => ({ name: s.name, url: s.url, genres: s.genres, language: s.language });
 const toolsCatalogueAdd = (s, pin) => api("POST", "/api/settings/entry", { path: TOOLS_STATIONS, value: toolsCatalogueValue(s), pin });
-// A refusal about the PIN or the session, not the station: Add all stops on it.
+// A refusal about the PIN or the session, not the station: Add all stops on it at the first station
+// (the dialog shows it); later, once a station went in, it counts as failed so the list reloads.
 const TOOLS_PIN_ERRORS = new Set(["bad_pin", "locked", "busy", "unauthorized", "csrf", "pin_not_set"]);
 
 async function toolsCatalogueAddOne(s) {
@@ -433,12 +434,12 @@ async function toolsCatalogueAddAll(group) {
   const counts = { added: 0, skipped: group.stations.length - pending.length, failed: 0 };
   if (!pending.length) { notice(t("tools_catalogue_all_added", { group: label })); return; }
   const out = await pinnedCall(tn("tools_catalogue_add_all_message", pending.length, { group: label }), t("tools_catalogue_add_all"), async (pin) => {
-    for (const s of pending) {
+    for (const [i, s] of pending.entries()) {
       try {
         await toolsCatalogueAdd(s, pin);
         counts.added += 1;
       } catch (err) {
-        if (TOOLS_PIN_ERRORS.has(err.message)) throw err;
+        if (i === 0 && TOOLS_PIN_ERRORS.has(err.message)) throw err;
         if (err.message === "entry_exists") counts.skipped += 1;
         else counts.failed += 1;
       }
