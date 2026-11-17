@@ -111,7 +111,8 @@ def test_radio_play_waits_no_longer_than_the_tool_timeout():
     capped by ``conversation.tool_timeout_s`` (5 s by default, below the 8 s connect timeout)."""
     host, fns, _ = rig(tool_timeout_s=3.0)
     fns["radio_play"](station="jazz")
-    assert host.media.played[-1][1] == pytest.approx(3.0)
+    assert host.media.played[-1][1] == pytest.approx(3.0 - radio.TOOL_TIMEOUT_MARGIN_S)
+    assert host.media.played[-1][1] < 3.0  # strictly below: the executor never wins the race
     host, fns, _ = rig(tool_timeout_s=30.0)
     fns["radio_play"](station="jazz")
     media = RoboEmotConfig().tools.media
@@ -136,6 +137,18 @@ def test_radio_stop_and_volume():
     assert fns["radio_volume"](change="up").content == {"volume_db": -12.0 + step}
     assert fns["radio_volume"](change="down").content == {"volume_db": -12.0}
     assert host.media.steps == [step, -step]
+
+
+def test_stop_and_volume_stay_available_while_something_plays():
+    """Review I3: with the radio turned off (or no station left) while a station still plays,
+    "stop the radio" must still have a tool; radio_play does not."""
+    host, fns, cfg = rig()
+    fns["radio_play"](station="jazz")
+    cfg["cfg"] = RoboEmotConfig.model_validate({"tools": {"radio": {"enabled": False}}})
+    assert not fns["radio_play"].skill.is_available()
+    assert fns["radio_stop"].skill.is_available() and fns["radio_volume"].skill.is_available()
+    assert fns["radio_stop"]().content == {"ok": True, "station": "Jazz FM"}
+    assert not fns["radio_stop"].skill.is_available()  # nothing plays any more
 
 
 def test_radio_results_are_known_result_keys():

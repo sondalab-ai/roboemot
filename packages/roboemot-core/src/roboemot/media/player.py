@@ -19,10 +19,19 @@ It stops on ``stop``, on a nap (``circadian.state`` ``resting``), on ``robot.asl
 (``{"station"}``) and ``media.stopped`` (``{"station", "reason"}``) with the station name only.
 Logs carry the station name and a reason, never the URL, an exception's text or stream metadata.
 
-Threads: one feeder thread (``media-player``) reads and pushes; ``play`` runs on the caller's
-thread (a skill's) and blocks up to the connect timeout; ``stop`` and the bus callbacks (the
-sleep thread's ``robot.asleep``, the circadian runner's state) only swap the state under the lock
-and kill the decoder, which ends the feeder's blocking read; ``close`` joins the feeder.
+It also stops when a config change (``on_config``, a ``ConfigStack`` listener) turns
+``tools.radio.enabled`` off (reason ``disabled``) or removes the playing station from
+``tools.radio.stations`` (reason ``removed``): withdrawing the opt-in ends the outbound stream.
+On the realtime audio path an addressed utterance's final waits for the server's transcript
+after the wake decision; the turn counts as open from then (``awaiting_transcript``).
+
+Threads: one feeder thread (``media-player``) reads and pushes, and it alone closes a stream (a
+stopped or replaced one is killed by whoever stops it and closed by the feeder, so a pipe is
+never closed under a read in flight). ``play`` runs on the caller's thread (a skill's), kills
+the stream that plays before it opens the new one, and blocks up to the connect timeout;
+``stop`` and the bus callbacks (the sleep thread's ``robot.asleep``, the circadian runner's state)
+only swap the state under the lock and kill the decoder, which ends the feeder's blocking read;
+``close`` joins the feeder, then closes what is left.
 """
 
 from __future__ import annotations
@@ -83,6 +92,7 @@ class MediaPlayer:
         self._held_at = -math.inf  # the last moment something held the music
         self._offset_db = 0.0  # the radio_volume steps on top of tools.media.volume_db
         self._asleep = False
+        self._retired: list[PcmStream] = []  # killed streams the feeder still has to close
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
 
@@ -112,6 +122,20 @@ class MediaPlayer:
         self._unsubscribe = []
         if self._thread is not None:
             shutdown.join(self._thread, JOIN_TIMEOUT_S)
+        if self._thread is None or not self._thread.is_alive():
+            self._close_retired()  # no reader is left: closing here races no read
+
+    def on_config(self, change: Any) -> None:
+        """A ``ConfigStack`` listener: stop when ``change.config`` turns the radio off
+        (``disabled``) or no longer lists the station that plays (``removed``)."""
+        station = self._station
+        if station is None:
+            return
+        radio = change.config.tools.radio
+        if not radio.enabled:
+            self.stop("disabled")
+        elif station not in radio.stations:
+            self.stop("removed")
 
     # ----------------------------------------------------------------- API
 
@@ -119,11 +143,13 @@ class MediaPlayer:
         """Play ``station`` instead of what plays now: ``ok`` once its first audio came,
         ``unreachable`` when none came within ``connect_timeout_s`` (default
         ``tools.media.connect_timeout_s``) or the decoder failed, ``disabled`` while the robot
-        sleeps or the player is closed. Blocks the caller up to that timeout."""
+        sleeps or the player is closed. Blocks the caller up to that timeout. What plays is
+        stopped (``replaced``) before the new stream is opened, so two decoders never run."""
         cfg = self.cfg()
         if self._closed.is_set() or self._asleep:
             log.info("media: %s not played (disabled)", station.name)
             return "disabled"
+        self.stop("replaced")
         timeout = (
             cfg.tools.media.connect_timeout_s if connect_timeout_s is None else connect_timeout_s
         )
@@ -135,16 +161,16 @@ class MediaPlayer:
         with self._lock:
             if self._closed.is_set() or self._asleep:
                 old, replaced, gone = None, None, stream
-            else:
+            else:  # another play may have won the race meanwhile: it is replaced too
                 old, replaced, gone = self._stream, self._station, None
                 self._stream, self._station = stream, station
                 self._gen += 1
                 self._started, self._held_at = self._clock(), -math.inf
         if gone is not None:
-            gone.close()
+            gone.close()  # never handed to the feeder: this thread is its only reader
             return "disabled"
         if old is not None:
-            old.close()
+            self._retire(old)
         if replaced is not None:
             self._publish(STOPPED_TOPIC, {"station": replaced.name, "reason": "replaced"})
         self._publish(PLAYING_TOPIC, {"station": station.name})
@@ -165,11 +191,25 @@ class MediaPlayer:
                 return
             self._stream = self._station = None
             self._gen += 1
-        stream.close()
+        self._retire(stream)
         self.output.cut_media()
         assert station is not None
         self._publish(STOPPED_TOPIC, {"station": station.name, "reason": reason})
         log.info("media: %s stopped (%s)", station.name, reason)
+
+    def _retire(self, stream: PcmStream) -> None:
+        """Kill ``stream`` now (any thread) and leave its close to the feeder."""
+        stream.kill()
+        with self._lock:
+            self._retired.append(stream)
+        self._wake.set()
+
+    def _close_retired(self) -> None:
+        """Close the killed streams (the feeder's thread, or after it is gone)."""
+        with self._lock:
+            retired, self._retired = self._retired, []
+        for stream in retired:
+            stream.close()
 
     def pause(self, reason: str) -> None:
         """Hold the music now (``reason``: who asked, the announcer's ``announce``) and cut what
@@ -209,6 +249,7 @@ class MediaPlayer:
 
     def _run(self) -> None:
         while not self._closed.is_set():
+            self._close_retired()  # the reader's own thread: no read of them is in flight
             if self._stream is None:
                 self._wake.wait()
                 self._wake.clear()
@@ -263,9 +304,14 @@ class MediaPlayer:
 
     def _turn_open(self) -> bool:
         """Whether an addressed turn is open: the conversation holds a turn open, served or
-        waiting, or the phase is thinking or speaking. Never the VAD or the listening phase."""
+        waiting, an addressed utterance's audio waits for the server's transcript (the wake
+        decision is taken, the final not yet), or the phase is thinking or speaking. Never the
+        VAD or the listening phase."""
         conversation = self.host.conversation
         if conversation is not None and conversation.busy():
+            return True
+        listener = self.host.voice_listener
+        if listener is not None and listener.awaiting_transcript():
             return True
         phase = self.host.phase
         return phase is not None and phase.current()[0] in (THINKING, SPEAKING)

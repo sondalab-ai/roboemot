@@ -215,13 +215,15 @@ def start_media(
     """The media player the radio plays through (SPEC 8, Radio playback; SPEC 11, Media
     player), only when the speaker can play media outside the speaking window (``MediaSink``):
     never through the speech path, which would make the listener deaf to the wake word. It
-    listens for a nap and ``robot.asleep`` on the bus, closes before the speech output, and
+    listens for a nap and ``robot.asleep`` on the bus and for config changes (radio turned off,
+    station removed), closes before the speech output, and
     tells the listener when it plays (the lyrics gate and ``tools.radio.dance``). Sets
     ``host.media``; None (and no radio) otherwise."""
     if not isinstance(output.sink, MediaSink):
         return None
     player = host.media = MediaPlayer(output, host, stack.effective)
     cleanup.callback(player.close)  # before the output goes away (callbacks run last in first)
+    cleanup.callback(stack.subscribe(player.on_config))  # radio off or station gone: stop
     player.start()
     if listener is not None:
         listener.media_playing = player.playing

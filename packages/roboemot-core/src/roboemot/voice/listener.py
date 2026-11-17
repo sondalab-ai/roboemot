@@ -1519,7 +1519,13 @@ class VoiceListener:
             at_face = self._checked(p) if face is None else (lambda: face)
             wake = kind == WAKE
             if kind == NAME_FIRST:
-                wake, at_face = self._name_first_at_face(at_face)
+                # while the robot's own radio plays the wake word is required anyway and the
+                # sound direction is muted (own sound): the name opening the text wakes it
+                # without the voice-at-face check (controller ruling, SPEC 8 Radio playback)
+                if self._media_now():
+                    wake = True
+                else:
+                    wake, at_face = self._name_first_at_face(at_face)
             outcome = self._gate.outcome(
                 wake_word=wake,
                 enrolled_in_view=self._enrolled(ev.start_stamp),

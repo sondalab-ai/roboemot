@@ -112,3 +112,20 @@ def test_the_wake_gate_media_rule_counts_rejected_media():
     assert gate.outcome(wake_word=True, enrolled_in_view=False, start=3, last_speech=4) == (
         "wake_word"
     )
+
+
+def test_a_long_name_led_command_with_degraded_doa_wakes_while_media_plays():
+    """Controller ruling (review I5): the radio is the robot's own sound, so the sound direction
+    is muted and the voice-at-face check runs degraded; while media plays the wake word is
+    required anyway, so the name opening a long command still addresses the robot."""
+    from test_voice_listener import OFF_FACE_RAD, direction_rig
+
+    command = "reati metti una stazione jazz per favore adesso"
+    r, _, _ = direction_rig(command, OFF_FACE_RAD, cfg=cfg("never"))
+    r.say()
+    assert not r.utterances[-1].addressed  # without the radio the check rejects it
+    assert r.listener.snapshot()["name_first_no_face"] == 1
+    r.listener.media_playing = lambda: True
+    r.say()
+    assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+    assert r.listener.snapshot()["name_first_no_face"] == 1  # no second rejection

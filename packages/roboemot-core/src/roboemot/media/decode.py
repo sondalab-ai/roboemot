@@ -2,13 +2,20 @@
 
 ``open_stream(url, rate_hz, timeout_s)`` gives a :class:`PcmStream`: ``read(frames)`` returns
 that many mono float32 samples at ``rate_hz``, or None once the stream ended, stalled for
-``timeout_s`` or failed; ``close`` ends it. It raises :class:`StreamError` when no audio came
-within ``timeout_s``.
+``timeout_s``, failed or was killed. ``kill`` (any thread) ends the decoder and makes the read
+in flight, or the next one, return None without delivering what arrives after it; ``close``
+(the reader's thread only) also releases the pipe, so its descriptor is never closed under a
+read in flight and never reused by another stream while that read runs. ``open_stream`` raises
+:class:`StreamError` when no audio came within ``timeout_s``.
 
 The decoder is a ``gst-launch-1.0`` subprocess that writes 16-bit PCM to its stdout. GStreamer is
-already on the robot for the Reachy Mini SDK (checked read-only on 2026-11-17: gst-launch-1.0
-1.26.2; no ffmpeg; no PyAV in the system Python or the SDK's venvs), so the radio adds no
-dependency. ``decodebin`` picks the MP3, AAC or Ogg decoder. The subprocess gets an argv list,
+already on the robot for the robot platform's media stack (checked read-only on 2026-11-17:
+gst-launch-1.0 1.26.2; no ffmpeg; no PyAV in the system Python or the platform's venvs), so the
+radio adds no dependency. ``decodebin`` picks the MP3, AAC or Ogg decoder. The adaptive and
+playlist demuxers (HLS, DASH, Smooth Streaming) are ranked NONE in the child's environment
+(``GST_PLUGIN_FEATURE_RANK``), so decodebin never plugs them: a station never makes the robot
+fetch a URL its manifest names. The child gets no ``GST_DEBUG*`` or ``GST_TRACERS`` setting
+either, so no debug file records the URL. The subprocess gets an argv list,
 never a shell. gst-launch joins its argv into a pipeline description, so the URL goes in as a
 double-quoted ``location`` value; the station URL validator (``config.schema.Station``) has
 already refused anything that could end that value (a quote, a space, a backslash) or link
@@ -16,7 +23,7 @@ elements (``!``). Like core's HTTP clients the source ignores proxy settings fro
 environment (they are removed from the child's environment) and follows no redirect, and it asks
 for no ICY metadata (``iradio-mode=false``), so no stream title ever reaches RoboEmot. stderr is
 discarded (GStreamer's errors quote the URL), and :class:`StreamError` never holds the URL or a
-decoder message (SPEC 12). ``close`` kills the subprocess; so does a stall.
+decoder message (SPEC 12). ``kill`` and ``close`` kill the subprocess; so does a stall.
 """
 
 from __future__ import annotations
@@ -44,6 +51,14 @@ PROXY_VARS = frozenset(
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     }
 )  # fmt: skip
+# GStreamer settings the child must not inherit: a debug log or a tracer can record the URL.
+GST_DEBUG_PREFIXES = ("GST_DEBUG", "GST_TRACERS")
+# Demuxers that fetch the URLs a manifest names (HLS, DASH, Smooth Streaming): never plugged.
+ADAPTIVE_DEMUXERS = (
+    "hlsdemux", "hlsdemux2", "dashdemux", "dashdemux2", "mssdemux", "mssdemux2",
+)  # fmt: skip
+FEATURE_RANK_VAR = "GST_PLUGIN_FEATURE_RANK"
+RANK_NONE = "NONE"
 UNREACHABLE = "unreachable"
 NO_DECODER = "no_decoder"
 
@@ -57,6 +72,7 @@ class PcmStream(Protocol):
     """Mono float32 PCM from one stream (see the module docstring)."""
 
     def read(self, frames: int) -> np.ndarray | None: ...
+    def kill(self) -> None: ...
     def close(self) -> None: ...
 
 
@@ -99,13 +115,22 @@ def pipeline(source: Sequence[str], rate_hz: int) -> list[str]:
 
 
 def child_env() -> dict[str, str]:
-    """This process's environment without the proxy settings (``PROXY_VARS``)."""
-    return {k: v for k, v in os.environ.items() if k not in PROXY_VARS}
+    """This process's environment for the decoder: no proxy settings (``PROXY_VARS``), no
+    GStreamer debug or tracer settings (``GST_DEBUG_PREFIXES``), and the adaptive demuxers
+    ranked NONE (``ADAPTIVE_DEMUXERS``; an inherited rank list is replaced, never merged)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in PROXY_VARS and not k.startswith(GST_DEBUG_PREFIXES)
+    }
+    env[FEATURE_RANK_VAR] = ",".join(f"{name}:{RANK_NONE}" for name in ADAPTIVE_DEMUXERS)
+    return env
 
 
 class GstStream:
     """A running decoder subprocess read as :class:`PcmStream`. ``timeout_s`` bounds every
-    read: no audio for that long ends the stream (None) and kills the decoder."""
+    read: no audio for that long ends the stream (None) and kills the decoder. One thread
+    reads (``read``, ``wait_audio``, ``close``); any other thread may only ``kill``."""
 
     def __init__(
         self,
@@ -118,6 +143,7 @@ class GstStream:
         self._clock = clock
         self._buf = bytearray()
         self._ended = False
+        self._killed = False  # set by ``kill`` from any thread; the reader checks it
 
     def wait_audio(self) -> bool:
         """Wait at most ``timeout_s`` for the first bytes of PCM; whether they came."""
@@ -125,9 +151,9 @@ class GstStream:
 
     def read(self, frames: int) -> np.ndarray | None:
         """``frames`` samples in [-1, 1), or None when the stream ended, stalled for
-        ``timeout_s`` or was closed (the decoder is then killed)."""
+        ``timeout_s`` or was killed (the reader then closes it)."""
         want = max(1, int(frames)) * SAMPLE_BYTES
-        if not self._fill(want):
+        if self._killed or not self._fill(want):
             self.close()
             return None
         data = bytes(self._buf[:want])
@@ -136,38 +162,48 @@ class GstStream:
 
     def _fill(self, want: int) -> bool:
         """Read from the pipe until ``want`` bytes are buffered; False at the end of the
-        stream, a pipe error, a close, or ``timeout_s`` without a byte."""
+        stream, a pipe error, a kill, or ``timeout_s`` without a byte. Bytes that arrive after
+        a kill are dropped, never delivered."""
         out = self._proc.stdout
-        if out is None:
+        if out is None or out.closed:
             return False
         fd = out.fileno()
         deadline = self._clock() + self._timeout_s
         while len(self._buf) < want:
-            if self._ended:
+            if self._ended or self._killed:
                 return False
             left = deadline - self._clock()
             if left <= 0:
                 return False
             try:
                 ready, _, _ = select.select([fd], [], [], left)
+                if self._killed:
+                    return False
                 if not ready:
                     return False
                 chunk = os.read(fd, READ_BYTES)
-            except (OSError, ValueError):  # closed meanwhile
+            except (OSError, ValueError):
                 return False
-            if not chunk:
+            if not chunk or self._killed:
                 self._ended = True
                 return False
             self._buf += chunk
             deadline = self._clock() + self._timeout_s  # a stall counts from the last byte
         return True
 
+    def kill(self) -> None:
+        """End the decoder from any thread: the read in flight (or the next) returns None, and
+        its pipe reaches end of file. Never touches the pipe itself and never waits."""
+        self._killed = True
+        with contextlib.suppress(OSError):
+            self._proc.kill()
+
     def close(self) -> None:
-        """Kill the decoder and release its pipe; safe to call twice and from any thread."""
+        """Kill the decoder, reap it and release its pipe. The reader's thread only (or after
+        the reader is gone); safe to call twice."""
+        self.kill()
         self._ended = True
         proc = self._proc
-        with contextlib.suppress(OSError):
-            proc.kill()
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             proc.wait(KILL_WAIT_S)
         if proc.stdout is not None:

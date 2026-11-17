@@ -4,10 +4,12 @@
 player (``ToolHost.media``). The model picks a station name or a genre from ``choices``; a genre
 plays the first station that lists it. The model never passes a URL: only a listed URL plays.
 ``radio_stop`` stops it and ``radio_volume(change)`` steps the music volume up or down by
-``tools.media.volume_step_db``. All three are available only while ``tools.radio.enabled`` is on,
-the station list is not empty and the run has a player (read on every check). A stream that
-does not start gives ``{"error": "unreachable"}``; the player stops on a later drop by itself.
-The connect wait is capped by ``conversation.tool_timeout_s``, so the model is never told
+``tools.media.volume_step_db``. ``radio_play`` is available only while ``tools.radio.enabled``
+is on, the station list is not empty and the run has a player (read on every check);
+``radio_stop`` and ``radio_volume`` are available then too, and also whenever something plays,
+so "stop the radio" always has a tool. A stream that does not start gives
+``{"error": "unreachable"}``; the player stops on a later drop by itself. The connect wait stays
+``TOOL_TIMEOUT_MARGIN_S`` below ``conversation.tool_timeout_s``, so the model is never told
 ``timeout`` about a stream that then plays. Logs carry the skill, the status and the station
 name only, never a URL.
 """
@@ -36,6 +38,9 @@ Change = Annotated[Literal["up", "down"], Desc("up: louder; down: quieter")]
 UNAVAILABLE = "unavailable"
 NOT_PLAYING = "not_playing"
 NOT_FOUND = "not_found"
+# How far below conversation.tool_timeout_s the connect wait ends: the skill returns its own
+# result before the executor abandons it (a margin for the thread hand-off, not a behaviour).
+TOOL_TIMEOUT_MARGIN_S = 0.5
 
 
 def names_and_genres(cfg: RoboEmotConfig) -> list[str]:
@@ -61,12 +66,16 @@ def pick(cfg: RoboEmotConfig, wanted: str) -> Station | None:
 def skills(host: ToolHost) -> list[Callable[..., Any]]:
     """The radio tools over ``host``: ``radio_play``, ``radio_stop`` and ``radio_volume``,
     available while ``tools.radio.enabled`` is on, ``tools.radio.stations`` is not empty and
-    ``host.media`` is set. Side-effect free: it only builds the skills, so the realtime check
-    may call it with a throwaway host."""
+    ``host.media`` is set; stop and volume also whenever something plays. Side-effect free: it
+    only builds the skills, so the realtime check may call it with a throwaway host."""
 
     def available() -> bool:
         cfg = host.config()
         return cfg.tools.radio.enabled and bool(cfg.tools.radio.stations) and host.media is not None
+
+    def controllable() -> bool:
+        player = host.media
+        return available() or (player is not None and player.now_playing() is not None)
 
     @skill(
         llm_visible=True,
@@ -83,14 +92,15 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         if chosen is None:  # the list changed after the model was shown it
             log.info("radio_play: %s", NOT_FOUND)
             return SkillResult({"error": NOT_FOUND})
-        wait_s = min(cfg.tools.media.connect_timeout_s, cfg.conversation.tool_timeout_s)
+        budget_s = cfg.conversation.tool_timeout_s - TOOL_TIMEOUT_MARGIN_S
+        wait_s = max(0.0, min(cfg.tools.media.connect_timeout_s, budget_s))
         status = player.play(chosen, connect_timeout_s=wait_s)
         log.info("radio_play: %s %s", status, chosen.name)
         if status == "ok":
             return SkillResult({"status": status, "station": chosen.name})
         return SkillResult({"error": status, "station": chosen.name})
 
-    @skill(llm_visible=True, description=STOP_DESCRIPTION, available=available)
+    @skill(llm_visible=True, description=STOP_DESCRIPTION, available=controllable)
     def radio_stop() -> SkillResult:
         player = host.media
         playing = player.now_playing() if player is not None else None
@@ -101,7 +111,7 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         log.info("radio_stop: ok %s", playing.name)
         return SkillResult({"ok": True, "station": playing.name})
 
-    @skill(llm_visible=True, description=VOLUME_DESCRIPTION, available=available)
+    @skill(llm_visible=True, description=VOLUME_DESCRIPTION, available=controllable)
     def radio_volume(change: Change) -> SkillResult:
         player = host.media
         if player is None:
