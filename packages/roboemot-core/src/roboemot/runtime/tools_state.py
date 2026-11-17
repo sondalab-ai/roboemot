@@ -15,8 +15,10 @@ HTTP error's text quotes the URL with the query).
 
 The writes (the API checks the PIN session, CSRF and the PIN first): ``cancel`` and
 ``clear_missed`` on the scheduler, ``radio_stop`` and ``radio_test`` on the player, and
-``geocode``, the admin's place search. A test play needs ``tools.radio.enabled`` like the
-``radio_play`` skill, so no stream leaves the robot before the admin opt-in.
+``geocode``, the admin's place search. ``catalogue`` is read-only: the shipped station
+catalogue with the stations already added marked (SPEC 11, Radio). A test play needs
+``tools.radio.enabled`` like the ``radio_play`` skill, so no stream leaves the robot before the
+admin opt-in.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.skills.host import http_client
+from roboemot.tools.radio_catalogue import radio_catalogue
 from roboemot.tools.schedule import Item
 from roboemot.tools.timers import LOCAL_FORMAT
 from roboemot.tools.weather import BadResponse, ProviderError, coordinates, geocode
@@ -130,6 +133,31 @@ class ToolsState:
             {"name": name, "enabled": switch[name], "available": switch[name] and has[name]}
             for name in TOOL_SKILLS
         ]
+
+    def catalogue(self) -> dict[str, Any]:
+        """The shipped station catalogue (SPEC 11, Radio) for the tab's Add buttons: ``groups``,
+        each ``{id, stations}``, every station with its fields and ``added`` when
+        ``tools.radio.stations`` already holds a station of that name (case ignored) or URL.
+        Served behind the PIN session, like the station editor's rows; the configured stations'
+        own URLs are compared here and never returned."""
+        stations = self._cfg.tools.radio.stations
+        names = {s.name.casefold() for s in stations}
+        urls = {s.url for s in stations}
+        return {
+            "groups": [
+                {
+                    "id": group.id,
+                    "stations": [
+                        {
+                            **s.model_dump(),
+                            "added": s.name.casefold() in names or s.url in urls,
+                        }
+                        for s in group.stations
+                    ],
+                }
+                for group in radio_catalogue().groups
+            ]
+        }
 
     def _item(self, item: Item) -> dict[str, Any]:
         """One timer or reminder as the tab lists it, due time in ``circadian.timezone``."""

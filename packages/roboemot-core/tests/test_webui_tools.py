@@ -22,6 +22,7 @@ from roboemot.config.schema import RoboEmotConfig, Station
 from roboemot.config.stack import KEYED_LISTS, ConfigStack, GuardrailError
 from roboemot.diagnostics import Diagnostics
 from roboemot.runtime.tools_state import ToolsError, ToolsState
+from roboemot.tools.radio_catalogue import GROUP_IDS, radio_catalogue
 from roboemot.tools.scheduler import Scheduler
 from roboemot.webui import make_server
 from roboemot.webui.api import PASSIVE_POLLS, TOOLS_STATE, TOOLS_STATUS
@@ -687,3 +688,87 @@ def test_every_list_the_web_can_add_to_is_a_merged_list(tmp_path):
             continue
         with pytest.raises((ValidationError, GuardrailError, SettingNotAllowed)):
             editor.add_entry(row["path"], None, {"name": "probe"})
+
+
+# ------------------------------------------------------- the station catalogue (SPEC 11, Radio)
+
+CATALOGUE = "/api/tools/radio/catalogue"
+STATION_KEYS = {
+    "name",
+    "url",
+    "genres",
+    "language",
+    "operator",
+    "policy_url",
+    "official",
+    "bitrate_kbps",
+    "added",
+}
+
+
+def catalogued(data: dict) -> dict[str, dict]:
+    return {s["name"]: s for g in data["groups"] for s in g["stations"]}
+
+
+def test_the_catalogue_needs_the_session_and_is_not_a_poll(served):
+    c = served.client
+    assert CATALOGUE not in PASSIVE_POLLS
+    assert c.request("GET", CATALOGUE).status == 401
+    c.login()
+    resp = c.request("GET", CATALOGUE)
+    assert resp.status == 200
+    data = resp.json
+    assert [g["id"] for g in data["groups"]] == list(GROUP_IDS)
+    for s in catalogued(data).values():
+        assert set(s) == STATION_KEYS
+        assert s["added"] is False
+    assert STATION_URL not in resp.body.decode(), "a configured station's URL is never echoed"
+
+
+def test_a_catalogue_station_shows_as_added_by_name_or_by_url():
+    shipped = [s for g in radio_catalogue().groups for s in g.stations]
+    by_name, by_url, other = shipped[0], shipped[1], shipped[2]
+    stations = [
+        {"name": by_name.name.upper(), "url": STATION_URL},
+        {"name": "My own name", "url": by_url.url},
+    ]
+    cfg = RoboEmotConfig(tools={"radio": {"stations": stations}})
+    host = SimpleNamespace(scheduler=None, media=None, circadian_runner=None)
+    marks = catalogued(ToolsState(host, cfg).catalogue())
+    assert marks[by_name.name]["added"] and marks[by_url.name]["added"]
+    assert not marks[other.name]["added"]
+    assert sum(s["added"] for s in marks.values()) == 2
+
+
+def test_every_catalogue_station_adds_through_the_settings_route_once(tmp_path):
+    """The Add button's gate is the settings entry route, not only the pydantic model."""
+    stack, editor = radio_editor(tmp_path)
+    shipped = [s for g in radio_catalogue().groups for s in g.stations]
+    for s in shipped:
+        assert editor.add_entry("tools.radio.stations", None, s.station())["changed"]
+    assert names(stack) == [s.name for s in shipped]
+    for s in shipped:
+        with pytest.raises(ValidationError) as exc:
+            editor.add_entry("tools.radio.stations", None, s.station())
+        assert exc.value.code == "entry_exists"
+
+
+def test_a_catalogue_station_is_added_and_removed_through_the_page_routes(served):
+    c = served.client
+    c.login()
+    pick = next(iter(catalogued(c.request("GET", CATALOGUE).json).values()))
+    value = {k: pick[k] for k in ("name", "url", "genres", "language")}
+    body = {"path": "tools.radio.stations", "value": value, "pin": PIN}
+    assert c.request("POST", "/api/settings/entry", body).status == 200
+    assert catalogued(c.request("GET", CATALOGUE).json)[pick["name"]]["added"] is True
+    assert names(served.stack) == ["Jazz", DOTTED, pick["name"]]
+    again = c.request("POST", "/api/settings/entry", body)
+    assert again.status == 422 and again.json["error"] == "entry_exists"
+    rows = {r["path"]: r for r in c.request("GET", "/api/settings").json["fields"]}
+    box = "tools.radio.stations"
+    named = {rows[f"{box}.{k}.name"]["value"]: k for k in rows[box]["removable"]}
+    key = named[value["name"]]
+    gone = {"path": f"{box}.{key}", "pin": PIN}
+    assert c.request("POST", "/api/settings/entry/remove", gone).status == 200
+    assert names(served.stack) == ["Jazz", DOTTED]
+    assert catalogued(c.request("GET", CATALOGUE).json)[pick["name"]]["added"] is False
