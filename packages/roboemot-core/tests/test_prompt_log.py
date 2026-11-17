@@ -138,10 +138,16 @@ def test_openai_audio_appends_collapse_into_one_growing_summary():
     snap = r.snapshot(first["rev"], first["epoch"])
     (entry,) = snap["entries"]
     assert entry["label"] == "audio" and entry["text"] == "[audio 9600 bytes in 3 frames]"
+    # a commit is folded into the summary: the session's entry is not pushed out by markers
     r.frame("rt", "openai_realtime", {"type": "input_audio_buffer.commit"})
     r.frame("rt", "openai_realtime", {"type": "input_audio_buffer.append", "audio": AUDIO})
+    entries = r.snapshot(0)["entries"]
+    assert [e["label"] for e in entries] == ["session.update", "audio"]
+    assert entries[1]["text"] == "[audio 12800 bytes in 4 frames; commit 1]"
+    r.frame("rt", "openai_realtime", {"type": "response.create"})
+    r.frame("rt", "openai_realtime", {"type": "input_audio_buffer.append", "audio": AUDIO})
     labels = [e["label"] for e in r.snapshot(0)["entries"]]
-    assert labels == ["session.update", "audio", "input_audio_buffer.commit", "audio"]
+    assert labels == ["session.update", "audio", "response.create", "audio"]
     # the session's audio settings object is not mistaken for a payload
     assert '"input": {}' in r.snapshot(0)["entries"][0]["text"]
     assert AUDIO not in json.dumps(r.snapshot(0))
@@ -158,12 +164,93 @@ def test_gemini_audio_is_summarized_and_setup_is_pretty_json():
             "gemini_live",
             {"realtimeInput": {"audio": {"data": AUDIO, "mimeType": "audio/pcm"}}},
         )
+    r.frame("gem", "gemini_live", {"realtimeInput": {"activityEnd": {}}})
     entries = r.snapshot(0)["entries"]
-    assert [e["label"] for e in entries] == ["setup", "realtimeInput", "audio"]
+    assert [e["label"] for e in entries] == ["setup", "audio"]
     assert entries[0]["via"] == "gemini_live"
     assert json.loads(entries[0]["text"]) == setup and "\n  " in entries[0]["text"]
-    assert entries[2]["text"] == "[audio 6400 bytes in 2 frames]"
+    assert entries[1]["text"] == "[audio 6400 bytes in 2 frames; activityStart 1, activityEnd 1]"
     assert AUDIO not in json.dumps(entries)
+
+
+def test_a_gemini_realtime_input_is_labelled_by_its_inner_key():
+    r = ring()
+    r.frame("gem", "gemini_live", {"realtimeInput": {"text": "ciao"}})
+    assert r.snapshot(0)["entries"][0]["label"] == "realtimeInput.text"
+
+
+def test_a_lone_marker_starts_an_audio_summary():
+    r = ring()
+    r.frame("gem", "gemini_live", {"realtimeInput": {"activityStart": {}}})
+    (entry,) = r.snapshot(0)["entries"]
+    assert (
+        entry["label"] == "audio"
+        and entry["text"] == "[audio 0 bytes in 0 frames; activityStart 1]"
+    )
+
+
+DATA_URL = "data:image/jpeg;base64," + AUDIO
+
+
+def test_a_chat_image_data_url_is_redacted():
+    msgs = [
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": DATA_URL}}],
+        }
+    ]
+    text = render_chat(msgs, None)
+    assert AUDIO not in text and "[3200 bytes]" in text
+
+
+def test_a_chat_input_audio_part_is_redacted():
+    part = {"type": "input_audio", "input_audio": {"data": AUDIO, "format": "wav"}}
+    text = render_chat([{"role": "user", "content": [part]}], None)
+    assert AUDIO not in text and '"input_audio": "[binary]"' in text
+
+
+def test_a_data_next_to_its_format_is_redacted_under_any_key():
+    part = {"type": "x", "blob": {"data": AUDIO, "format": "wav"}}
+    text = render_chat([{"role": "user", "content": [part]}], None)
+    assert AUDIO not in text and '"data": "[3200 bytes]"' in text
+
+
+def test_a_gemini_video_frame_is_redacted():
+    r = ring()
+    frame = {"realtimeInput": {"video": {"data": AUDIO, "mimeType": "image/jpeg"}}}
+    r.frame("gem", "gemini_live", frame)
+    (entry,) = r.snapshot(0)["entries"]
+    assert entry["label"] == "realtimeInput.video" and AUDIO not in entry["text"]
+
+
+def test_a_data_url_anywhere_is_redacted():
+    r = ring()
+    r.frame("rt", "openai_realtime", {"type": "conversation.item.create", "x": [DATA_URL]})
+    text = r.snapshot(0)["entries"][0]["text"]
+    assert AUDIO not in text and "[3200 bytes]" in text
+
+
+def test_a_long_number_list_is_collapsed_to_its_length():
+    r = ring()
+    r.frame("gem", "gemini_live", {"setup": {"x": list(range(40)), "y": [1, 2]}})
+    text = r.snapshot(0)["entries"][0]["text"]
+    assert '"x": "[40 numbers]"' in text and json.loads(text)["setup"]["y"] == [1, 2]
+
+
+def test_the_number_list_bound_is_the_web_ui_vector_guard():
+    from roboemot.llm.prompt_log import NUMBER_LIST_LEN
+    from roboemot.webui.api import VECTOR_GUARD_LEN
+
+    assert NUMBER_LIST_LEN == VECTOR_GUARD_LEN
+
+
+def test_the_poll_budget_counts_the_encoded_text():
+    r = ring(prompts_max_chars=10000, prompts_response_max_chars=10000)
+    for _ in range(3):  # 3000 non-ASCII characters each: 6 encoded characters per character
+        r.frame("rt", "openai_realtime", {"type": "conversation.item.create", "t": "è" * 3000})
+    entries = r.snapshot(0)["entries"]
+    assert len(entries) == 1  # 18000+ encoded characters each: only the newest fits
+    assert json.loads(entries[0]["text"])["t"] == "è" * 3000
 
 
 def test_binary_parts_are_redacted_wherever_they_sit():

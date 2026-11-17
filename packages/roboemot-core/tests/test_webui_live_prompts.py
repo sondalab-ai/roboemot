@@ -157,6 +157,7 @@ def test_a_frame_with_long_number_lists_passes_the_vector_guard(served):
     served.ring.frame("gem", "gemini_live", {"setup": {"x": list(range(200))}})
     r = prompts(c)
     assert r.status == 200 and r.json["prompts"]["entries"][0]["label"] == "setup"
+    assert '"x": "[200 numbers]"' in r.json["prompts"]["entries"][0]["text"]
 
 
 def test_the_response_is_not_cacheable(served):

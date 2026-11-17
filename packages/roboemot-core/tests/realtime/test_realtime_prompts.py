@@ -83,7 +83,7 @@ def test_a_gemini_session_shows_its_setup_and_no_key_or_url(gemini, cloud):
     assert (setup["route"], setup["via"], setup["label"]) == ("gemini", "gemini_live", "setup")
     assert "be kind" in json.dumps(json.loads(setup["text"])["setup"]["systemInstruction"])
     audio = [e for e in entries if e["label"] == "audio"]
-    assert audio and audio[0]["text"] == f"[audio {2 * len(PCM)} bytes in 2 frames]"
+    assert audio and audio[0]["text"] == f"[audio {2 * len(PCM)} bytes in 2 frames; activityStart 1]"
     text = dumped(prompts)
     assert KEY not in text and "x-goog-api-key" not in text.lower()
     assert "127.0.0.1" not in text and "localhost" not in text and "wss://" not in text
