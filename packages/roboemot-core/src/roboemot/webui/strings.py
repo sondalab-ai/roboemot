@@ -1277,6 +1277,8 @@ EN: dict[str, str] = {
     "tools_catalogue_skipped_n": "{n} already in the list.",
     "tools_catalogue_failed_n": "{n} could not be added.",
     "tools_catalogue_failed_n_one": "{n} could not be added.",
+    "tools_catalogue_stopped": "Stopped: {reason} {n} stations were not tried.",
+    "tools_catalogue_stopped_one": "Stopped: {reason} {n} station was not tried.",
     "tools_catalogue_unofficial": (
         "Unofficial stream: the operator publishes no permission for players like this one."
     ),
@@ -2629,6 +2631,8 @@ IT: dict[str, str] = {
     "tools_catalogue_skipped_n": "{n} già nell'elenco.",
     "tools_catalogue_failed_n": "{n} non aggiunte.",
     "tools_catalogue_failed_n_one": "{n} non aggiunta.",
+    "tools_catalogue_stopped": "Interrotto: {reason} {n} stazioni non provate.",
+    "tools_catalogue_stopped_one": "Interrotto: {reason} {n} stazione non provata.",
     "tools_catalogue_unofficial": (
         "Stream non ufficiale: chi lo gestisce non pubblica un permesso per lettori come questo."
     ),

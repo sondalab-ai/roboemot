@@ -415,8 +415,9 @@ async function toolsCatalogueFetch() {
 // What the add route takes: exactly a station's fields, never the catalogue-only ones.
 const toolsCatalogueValue = (s) => ({ name: s.name, url: s.url, genres: s.genres, language: s.language });
 const toolsCatalogueAdd = (s, pin) => api("POST", "/api/settings/entry", { path: TOOLS_STATIONS, value: toolsCatalogueValue(s), pin });
-// A refusal about the PIN or the session, not the station: Add all stops on it at the first station
-// (the dialog shows it); later, once a station went in, it counts as failed so the list reloads.
+// A refusal about the PIN or the session, not the station: Add all stops on it at any station. At the
+// first one the dialog shows it (nothing went in); later, the notice reports what went in, the cause
+// and how many were not tried.
 const TOOLS_PIN_ERRORS = new Set(["bad_pin", "locked", "busy", "unauthorized", "csrf", "pin_not_set"]);
 
 async function toolsCatalogueAddOne(s) {
@@ -427,11 +428,13 @@ async function toolsCatalogueAddOne(s) {
 }
 
 // One PIN for the group, then one add per station not yet listed. A station the server already
-// has (entry_exists) counts as skipped; another refusal counts as failed and the rest go on.
+// has (entry_exists) counts as skipped; another station refusal counts as failed and the rest go
+// on. A PIN or session refusal stops the run (TOOLS_PIN_ERRORS). An expired session after some
+// adds shows the counts first, then the login (boot), so the partial result is not lost silently.
 async function toolsCatalogueAddAll(group) {
   const label = t("tools_catalogue_group_" + group.id);
   const pending = group.stations.filter((s) => !s.added);
-  const counts = { added: 0, skipped: group.stations.length - pending.length, failed: 0 };
+  const counts = { added: 0, skipped: group.stations.length - pending.length, failed: 0, stopped: null, untried: 0 };
   if (!pending.length) { notice(t("tools_catalogue_all_added", { group: label })); return; }
   const out = await pinnedCall(tn("tools_catalogue_add_all_message", pending.length, { group: label }), t("tools_catalogue_add_all"), async (pin) => {
     for (const [i, s] of pending.entries()) {
@@ -439,7 +442,12 @@ async function toolsCatalogueAddAll(group) {
         await toolsCatalogueAdd(s, pin);
         counts.added += 1;
       } catch (err) {
-        if (i === 0 && TOOLS_PIN_ERRORS.has(err.message)) throw err;
+        if (TOOLS_PIN_ERRORS.has(err.message)) {
+          if (i === 0) throw err;
+          counts.stopped = err;
+          counts.untried = pending.length - i;
+          break;
+        }
         if (err.message === "entry_exists") counts.skipped += 1;
         else counts.failed += 1;
       }
@@ -450,9 +458,14 @@ async function toolsCatalogueAddAll(group) {
   const parts = [tn("tools_catalogue_added_n", out.added)];
   if (out.skipped) parts.push(tn("tools_catalogue_skipped_n", out.skipped));
   if (out.failed) parts.push(tn("tools_catalogue_failed_n", out.failed));
-  notice(parts.join(" "), out.failed > 0);
+  if (out.stopped) parts.push(tn("tools_catalogue_stopped", out.untried, { reason: explain(out.stopped) }));
+  notice(parts.join(" "), out.failed > 0 || out.stopped !== null);
+  if (out.stopped && out.stopped.status === 401 && out.stopped.message === "unauthorized") { await boot(); return; }
   await toolsReload();
 }
+
+// Only an https policy page becomes a link (the server checks it at load too).
+const toolsHttps = (url) => typeof url === "string" && url.startsWith("https://");
 
 function toolsCatalogueStation(s) {
   const facts = [s.operator, s.genres.join(", "), s.language, s.bitrate_kbps + " kbps"].filter(Boolean).join(" · ");
@@ -464,7 +477,9 @@ function toolsCatalogueStation(s) {
     el("div", { class: "row" }, el("strong", {}, s.name), action),
     el("p", { class: "hint" }, facts),
     s.official ? [] : el("p", { class: "hint", "data-unofficial": "" }, t("tools_catalogue_unofficial")),
-    el("p", { class: "hint" }, el("a", { href: s.policy_url, target: "_blank", rel: "noopener noreferrer" }, t("tools_catalogue_policy", { operator: s.operator }))));
+    toolsHttps(s.policy_url)
+      ? el("p", { class: "hint" }, el("a", { href: s.policy_url, target: "_blank", rel: "noopener noreferrer" }, t("tools_catalogue_policy", { operator: s.operator })))
+      : []);
 }
 
 function toolsCatalogueGroup(group) {
