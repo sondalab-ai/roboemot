@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 from roboemot.bus import Bus
-from roboemot.config.schema import RoboEmotConfig
+from roboemot.config.schema import FORECAST_URL_DEFAULT, RoboEmotConfig
 from roboemot.config.stack import ConfigStack, GuardrailError
 from roboemot.redact import is_private
 from roboemot.skills import SkillContext
@@ -18,6 +18,8 @@ from roboemot.skills.host import tool_host
 from roboemot.skills.plugins import load_plugin_skill_sets
 from roboemot.skills.registry import SkillRegistry, execute
 from roboemot.tools import weather
+from roboemot.webui.settings import SettingsEditor
+from test_webui_settings import put, serve
 
 FIXTURE = Path(__file__).parent / "data" / "weather" / "forecast.json"
 LAT, LON = 45.4642, 9.1900
@@ -83,6 +85,66 @@ def test_weather_is_off_by_default_and_an_admin_opt_in():
         stack.set("tools.weather.enabled", True)
     stack.set("tools.weather.enabled", True, admin=True)
     assert stack.get("tools.weather.enabled") is True
+
+
+def test_weather_timeout_must_be_below_the_tool_timeout():
+    cfg = RoboEmotConfig()
+    assert cfg.tools.weather.timeout_s == 3.0 < cfg.conversation.tool_timeout_s
+    config()  # the defaults with weather on load
+    with pytest.raises(ValueError, match="tool_timeout_s"):
+        RoboEmotConfig.model_validate(
+            {
+                "conversation": {"tool_timeout_s": 5},
+                "tools": {"weather": {"enabled": True, "timeout_s": 5}},
+            }
+        )
+    # with weather off the tool cannot run: a short tool timeout stays allowed
+    RoboEmotConfig.model_validate({"conversation": {"tool_timeout_s": 0.1}})
+
+
+@pytest.mark.parametrize("field", ["base_url", "geocode_url"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.open-meteo.com/v1/forecast",  # not https
+        "https:///v1/forecast",  # no host
+        "https://user:pw@api.open-meteo.com/v1/forecast",  # user info
+        "https://api.open-meteo.com/v1/forecast?apikey=x",  # query
+        "https://api.open-meteo.com/v1/forecast#frag",  # fragment
+        "https://api.open-meteo.com/v1/ forecast",  # a space
+        "ftp://api.open-meteo.com/v1/forecast",
+    ],
+)
+def test_weather_urls_must_be_plain_https(field, url):
+    with pytest.raises(ValueError):
+        RoboEmotConfig.model_validate({"tools": {"weather": {field: url}}})
+
+
+@pytest.mark.parametrize("field", ["base_url", "geocode_url"])
+def test_weather_urls_are_admin_only(field):
+    path = f"tools.weather.{field}"
+    stack = ConfigStack()
+    with pytest.raises(GuardrailError):
+        stack.set(path, "https://example.org/v1/forecast")
+    stack.set(path, "https://example.org/v1/forecast", admin=True)
+    assert stack.get(path) == "https://example.org/v1/forecast"
+
+
+def test_the_web_ui_refuses_a_forecast_url_that_is_not_plain_https(tmp_path):
+    """SPEC 12: the forecast URL receives the location. The settings page writes it only with
+    the PIN re-entered (one PIN covers operator and admin: ``test_webui_settings`` pins the
+    wrong-PIN refusal), and the load check refuses a URL that is not plain https."""
+    stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / "s.json"), stack)
+    path = "tools.weather.base_url"
+    try:
+        assert put(client, path, "http://example.org/v1/forecast").status == 422
+        assert put(client, path, "https://example.org/v1/forecast?k=1").status == 422
+        assert stack.get(path) == FORECAST_URL_DEFAULT
+        assert put(client, path, "https://example.org/v1/forecast").status == 200
+        assert stack.get(path) == "https://example.org/v1/forecast"
+    finally:
+        srv.stop()
 
 
 def test_place_name_is_private():
@@ -186,8 +248,8 @@ def test_the_timeout_reaches_the_request():
         seen.append(request.extensions["timeout"])
         return httpx.Response(200, json=json.loads(FIXTURE.read_text()))
 
-    Rig(config(timeout_s=7), handler=handler).call(days=1)
-    assert seen[0]["connect"] == 7 and seen[0]["read"] == 7
+    Rig(config(timeout_s=4), handler=handler).call(days=1)
+    assert seen[0]["connect"] == 4 and seen[0]["read"] == 4
 
 
 def test_logs_never_carry_coordinates(caplog):

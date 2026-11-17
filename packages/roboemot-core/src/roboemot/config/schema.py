@@ -7006,6 +7006,7 @@ class SchedulerConfig(Strict):
 FORECAST_DAYS_CEILING = 7
 FORECAST_URL_DEFAULT = "https://api.open-meteo.com/v1/forecast"
 GEOCODE_URL_DEFAULT = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHER_SCHEMES = ("https",)  # the request carries the private location (SPEC 12)
 
 
 class WeatherConfig(Strict):
@@ -7041,16 +7042,28 @@ class WeatherConfig(Strict):
         advanced=True,
     )
     timeout_s: float = param(
-        5.0,
-        "Longest wait for Open-Meteo; a slower or failed request gives the error unreachable",
+        3.0,
+        "Longest wait for Open-Meteo; a slower or failed request gives the error unreachable. "
+        "With weather on it must be less than conversation.tool_timeout_s, or the skill is "
+        "abandoned first",
         unit="s",
         ge=1,
         le=30,
         advanced=True,
     )
-    base_url: str = param(FORECAST_URL_DEFAULT, "Open-Meteo forecast URL", advanced=True)
+    base_url: str = param(
+        FORECAST_URL_DEFAULT,
+        "Open-Meteo forecast URL; https, no user info, query or fragment. It receives "
+        "circadian.location",
+        advanced=True,
+        admin_only=True,
+    )
     geocode_url: str = param(
-        GEOCODE_URL_DEFAULT, "Open-Meteo place search URL, used by the Tools tab", advanced=True
+        GEOCODE_URL_DEFAULT,
+        "Open-Meteo place search URL, used by the Tools tab; https, no user info, query or "
+        "fragment",
+        advanced=True,
+        admin_only=True,
     )
     geocode_results: int = param(
         5,
@@ -7058,6 +7071,20 @@ class WeatherConfig(Strict):
         ge=1,
         le=10,
     )
+
+    @field_validator("base_url", "geocode_url")
+    @classmethod
+    def _plain_https(cls, value: str) -> str:
+        """The location goes to this URL (SPEC 12): https with a host (``route_url_ok``), and
+        no user info, query or fragment."""
+        import httpx  # lazy: keeps the config package light
+
+        if not route_url_ok(value, WEATHER_SCHEMES):
+            raise ValueError("must be an https URL with a host")
+        parsed = httpx.URL(value)
+        if parsed.userinfo or parsed.query or parsed.fragment:
+            raise ValueError("must have no user info, query or fragment")
+        return value
 
 
 class ToolsConfig(Strict):
@@ -7311,6 +7338,18 @@ with warnings.catch_warnings():
                     f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
                     "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
                     "(JSON-escaped) has to fit"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _weather_fits_the_tool_timeout(self) -> RoboEmotConfig:
+            # Only with weather on: a weather timeout of 1 s (its floor) must not forbid a
+            # shorter tool timeout while the tool cannot run (SPEC 11, Voice tools, Weather).
+            weather = self.tools.weather
+            if weather.enabled and weather.timeout_s >= self.conversation.tool_timeout_s:
+                raise ValueError(
+                    "tools.weather.timeout_s must be less than conversation.tool_timeout_s, "
+                    "or the skill is abandoned before Open-Meteo answers"
                 )
             return self
 

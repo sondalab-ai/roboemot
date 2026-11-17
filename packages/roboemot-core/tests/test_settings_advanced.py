@@ -54,6 +54,8 @@ ADVANCED_ADMIN_ONLY = {
     "voice.realtime_route.turns",
     "voice.realtime_route.server_gates",
     "webui.frame_ancestors",
+    "tools.weather.base_url",
+    "tools.weather.geocode_url",
 }
 ADVANCED_CONSERVATIVE = {
     "catalogue": 6,
