@@ -665,3 +665,43 @@ def test_each_piece_that_played_goes_on_with_its_play_stamp():
     r.player.on_piece = lambda pcm, rate, start: 1 / 0
     r.step(round(r.cfg.tools.media.resume_after_s / r.chunk_s) + 2)
     assert r.player.now_playing() == JAZZ and len(r.output.pushed) > 2
+
+
+def test_a_failing_piece_consumer_is_logged_once_per_run_of_failures(caplog):
+    r = Rig()
+    fail = [True]
+
+    def consumer(pcm, rate, start):
+        if fail[0]:
+            raise ValueError
+
+    r.player.on_piece = consumer
+    r.player.play(JAZZ)
+    with caplog.at_level(logging.WARNING, logger="roboemot.media.player"):
+        r.step(5)
+        assert caplog.text.count("piece consumer") == 1
+        fail[0] = False
+        r.step(1)
+        fail[0] = True
+        r.step(3)
+        assert caplog.text.count("piece consumer") == 2  # a new run after a success
+
+
+def test_the_quiet_spans_grow_at_the_tail_and_merge_a_back_dated_hold():
+    """A hold that goes on grows the last span; a later one after a gap adds one; a hold back-
+    dated across earlier spans merges them; spans past ``music.history_s`` are dropped."""
+    r = Rig()
+    resume = r.cfg.tools.media.resume_after_s
+    r.player.play(JAZZ)
+    r.clock.t = 10.0
+    r.player.hold_from(10.0)
+    r.player.hold_from(10.5)
+    assert r.player._quiet == [(10.0, 10.5 + resume)]
+    r.player.hold_from(20.0)
+    assert r.player._quiet == [(10.0, 10.5 + resume), (20.0, 20.0 + resume)]
+    r.player.hold_from(11.0)  # back-dated before the last span: merges with the first only
+    assert r.player._quiet == [(10.0, 11.0 + resume), (20.0, 20.0 + resume)]
+    r.player.hold_from(9.0)  # before every span: merges into the first
+    r.clock.t = 20.0 + r.cfg.music.history_s
+    r.player.hold_from(r.clock.t)
+    assert r.player._quiet[0][0] == 20.0  # the first span ended too long ago: dropped

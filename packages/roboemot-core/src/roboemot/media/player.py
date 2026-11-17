@@ -121,6 +121,7 @@ class MediaPlayer:
         self._thread: threading.Thread | None = None
         # each piece that went to the speaker, with its rate and play stamp (the dance's audio)
         self.on_piece: Callable[[np.ndarray, int, float], None] | None = None
+        self._piece_errors = 0  # consecutive on_piece failures (feeder thread)
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -359,8 +360,12 @@ class MediaPlayer:
             return
         try:
             on_piece(pcm, rate, start)
-        except Exception as exc:
-            log.warning("media: piece consumer: %s", type(exc).__name__)
+        except Exception as exc:  # logged once per run of failures, not once per piece
+            self._piece_errors += 1
+            if self._piece_errors == 1:
+                log.warning("media: piece consumer: %s", type(exc).__name__)
+            return
+        self._piece_errors = 0
 
     def _ready(self, gen: int, resume_after_s: float) -> bool:
         """Whether a piece may be pushed now: the same stream still plays, nothing holds the
@@ -386,15 +391,20 @@ class MediaPlayer:
         asks about an utterance's start no further back (as the music detector's intervals)."""
         self._held_at = max(self._held_at, at)
         lo, hi = at, at + cfg.tools.media.resume_after_s
-        kept = []
-        for a, b in self._quiet:
-            if a <= hi and lo <= b:
-                lo, hi = min(lo, a), max(hi, b)
-            else:
-                kept.append((a, b))
-        kept.append((lo, hi))
+        quiet = self._quiet
+        if not quiet or lo > quiet[-1][1]:
+            quiet.append((lo, hi))  # the feeder's usual case: a new span after the last
+        elif lo >= quiet[-1][0]:
+            quiet[-1] = (quiet[-1][0], max(hi, quiet[-1][1]))  # it goes on: grow the last
+        else:  # back-dated (``hold_from``) before the last span: merge what it touches
+            kept = [(a, b) for a, b in quiet if not (a <= hi and lo <= b)]
+            for a, b in quiet:
+                if a <= hi and lo <= b:
+                    lo, hi = min(lo, a), max(hi, b)
+            quiet[:] = sorted([*kept, (lo, hi)])
         horizon = self._clock() - cfg.music.history_s
-        self._quiet = sorted(span for span in kept if span[1] >= horizon)
+        while quiet and quiet[0][1] < horizon:
+            quiet.pop(0)
 
     def _turn_open(self) -> bool:
         """Whether an addressed turn is open: the conversation holds a turn open, served or
