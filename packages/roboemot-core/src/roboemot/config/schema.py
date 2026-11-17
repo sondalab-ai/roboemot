@@ -7002,11 +7002,70 @@ class SchedulerConfig(Strict):
     )
 
 
+# The top of tools.weather.forecast_days, shared with the weather skill's argument range.
+FORECAST_DAYS_CEILING = 7
+FORECAST_URL_DEFAULT = "https://api.open-meteo.com/v1/forecast"
+GEOCODE_URL_DEFAULT = "https://geocoding-api.open-meteo.com/v1/search"
+
+
+class WeatherConfig(Strict):
+    """The weather tool through Open-Meteo (SPEC 11, Voice tools, Weather; 11A; 12: an admin
+    opt-in, the location stays private). The location is ``circadian.location``."""
+
+    enabled: bool = param(
+        False,
+        "Let the robot fetch the weather forecast from Open-Meteo when asked. The request sends "
+        "circadian.location (needed, else the tool is off) and the number of days over the "
+        "internet (SPEC 12)",
+        opt_in=True,
+    )
+    place_name: str = param(
+        "",
+        "Name of the place at circadian.location, as the place search found it; private "
+        "because it reveals the home town",
+    )
+    forecast_days: int = param(
+        3,
+        "Most days of daily forecast the weather tool returns, today included",
+        unit="days",
+        ge=1,
+        le=FORECAST_DAYS_CEILING,
+    )
+    cache_s: int = param(
+        600,
+        "A forecast is reused for this long, so a follow-up question costs no extra request; "
+        "0 asks every time",
+        unit="s",
+        ge=0,
+        le=3600,
+        advanced=True,
+    )
+    timeout_s: float = param(
+        5.0,
+        "Longest wait for Open-Meteo; a slower or failed request gives the error unreachable",
+        unit="s",
+        ge=1,
+        le=30,
+        advanced=True,
+    )
+    base_url: str = param(FORECAST_URL_DEFAULT, "Open-Meteo forecast URL", advanced=True)
+    geocode_url: str = param(
+        GEOCODE_URL_DEFAULT, "Open-Meteo place search URL, used by the Tools tab", advanced=True
+    )
+    geocode_results: int = param(
+        5,
+        "Most places a place search returns",
+        ge=1,
+        le=10,
+    )
+
+
 class ToolsConfig(Strict):
     """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
     tool adds its own sub-section."""
 
     scheduler: SchedulerConfig = param({}, "SPEC 11, 11A: timers and reminders")
+    weather: WeatherConfig = param({}, "SPEC 11, 11A, 12: weather forecast (admin opt-in)")
 
 
 # --------------------------------------------------------------------------- root

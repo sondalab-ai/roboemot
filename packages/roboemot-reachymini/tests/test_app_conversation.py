@@ -267,9 +267,11 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
             "go_to_sleep", "timer_set", "timer_cancel", "reminder_set", "reminder_cancel",
-            "schedule_list",
+            "schedule_list", "weather",
         ]  # fmt: skip
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
+        # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
+        assert not skills.get("weather").is_available()
         # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
         assert skills.get("timer_set").is_available() and app.scheduler is not None
         assert app.scheduler_runner is not None and app.scheduler_runner.alive

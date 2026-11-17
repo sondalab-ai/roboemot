@@ -76,6 +76,7 @@ BEHAVIOUR_MODULES = [
     "tools/scheduler.py",
     "tools/timers.py",
     "tools/announce.py",
+    "tools/weather.py",
     "runtime/assembly.py",
     "runtime/diagnostics.py",
     "runtime/host.py",
