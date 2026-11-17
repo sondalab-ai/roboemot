@@ -67,6 +67,7 @@ from ..config.schema import (
     realtime_connect_timeout_s,
     realtime_voice,
 )
+from ..llm.prompt_log import PromptRing
 from ..llm.pseudonyms import url_is_local
 from . import protocol
 from .gemini_wire import KEY_HEADER, GeminiWire
@@ -155,8 +156,10 @@ class RealtimeClient:
         may_send: Callable[[], bool] = lambda: True,
         platform_id: Callable[[], bool] = lambda: False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        prompts: PromptRing | None = None,
     ) -> None:
         self.route, self.settings, self.provider = route, settings, provider
+        self._prompts = prompts  # the Live tab's LLM prompts ring: each sent frame (``_tap``)
         self._auth_headers = auth_headers
         self._on_event = on_event
         self._on_close = on_close
@@ -354,6 +357,16 @@ class RealtimeClient:
             while len(self._sent_types) > SENT_TYPES_KEPT:
                 self._sent_types.popitem(last=False)
 
+    def _tap(self, frame: dict[str, Any]) -> None:
+        """Record a frame that left (after the codec) in the prompts ring, unless the connect
+        host is local (real names, not a cloud request). The payload only: never the URL, a
+        header or the key; the ring summarizes audio. A ring error never fails a send."""
+        prompts = self._prompts
+        if prompts is None or not prompts.enabled or ws_target_local(self._target):
+            return
+        with contextlib.suppress(Exception):
+            prompts.frame(self.route.name, self.route.protocol, frame)
+
     def _connect_timeout_s(self) -> float:
         """The connect budget of this route: its own ``connect_timeout_s`` when set, else the
         shared ``voice.realtime_route.connect_timeout_s`` (``realtime_connect_timeout_s``)."""
@@ -528,6 +541,7 @@ class RealtimeClient:
         for frame in frames:
             await ws.send(protocol.encode(frame))
             self._count("sent")
+            self._tap(frame)
 
     async def _await_session(
         self, ws: ClientConnection, fallback: dict[str, Any] | None = None
@@ -705,6 +719,7 @@ class RealtimeClient:
                     await asyncio.wait_for(
                         ws.send(protocol.encode(frame)), self.settings.send_timeout_s
                     )
+                    self._tap(frame)
             except TimeoutError:
                 self._count("send_stuck")
                 log.warning("realtime route %s: send stuck, socket aborted", self.route.name)
