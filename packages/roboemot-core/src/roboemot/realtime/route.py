@@ -107,6 +107,7 @@ from ..config.schema import (
 from ..diag import EventSink, no_events
 from ..health.network import route_endpoint
 from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
+from ..llm.prompt_log import PromptRing
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
@@ -391,7 +392,7 @@ class RealtimeRoute:
         self._client_factory = client_factory
         # the Live tab's LLM prompts ring (``PromptRing``), set by the runtime: every client this
         # route builds (a reconnect too) records the frames it sends (SPEC 11A, 12)
-        self.prompts: Any = None
+        self.prompts: PromptRing | None = None
         self._extra = extra
         self._extra_ok = False  # the extra is installed (read outside _lock, used under it)
         self.clock = clock
@@ -962,7 +963,7 @@ class RealtimeRoute:
             # read at each allocation (a reconnect after the opt-in went off sends no identifier)
             platform_id=lambda: self.stack.effective().privacy.realtime_platform_id,
             may_send=lambda: bool(box) and self._may_send_update(token, closes, box[0]),
-            **({"prompts": self.prompts} if self.prompts is not None else {}),
+            prompts=self.prompts,
         )
         box.append(client)
         return client

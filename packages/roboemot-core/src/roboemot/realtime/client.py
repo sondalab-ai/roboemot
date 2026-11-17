@@ -360,9 +360,10 @@ class RealtimeClient:
     def _tap(self, frame: dict[str, Any]) -> None:
         """Record a frame that left (after the codec) in the prompts ring, unless the connect
         host is local (real names, not a cloud request). The payload only: never the URL, a
-        header or the key; the ring summarizes audio. A ring error never fails a send."""
-        prompts = self._prompts
-        if prompts is None or not prompts.enabled or ws_target_local(self._target):
+        header or the key; the ring summarizes audio. A ring error never fails a send. Fails
+        closed: no known target counts as local."""
+        prompts, target = self._prompts, self._target
+        if prompts is None or not prompts.enabled or target is None or ws_target_local(target):
             return
         with contextlib.suppress(Exception):
             prompts.frame(self.route.name, self.route.protocol, frame)
