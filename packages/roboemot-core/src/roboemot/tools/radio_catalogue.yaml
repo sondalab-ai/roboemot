@@ -1,0 +1,216 @@
+# The station catalogue of the web UI's Tools tab (SPEC 11, Voice tools, Radio). Nothing here
+# plays: a station plays only once a person adds it to tools.radio.stations.
+#
+# Checked 2026-11-17. Every url answered 200 with an audio content type and no redirect (no -L),
+# and sent audio bytes. SomaFM refuses curl's and browsers' user agents, so its URLs were checked
+# with the user agent the robot's decoder sends (GStreamer souphttpsrc); see SPEC 11, Radio.
+#
+# official: false marks a stream whose operator publishes no permission for third-party players:
+# Radio France (no published third-party policy) and SomaFM (its terms grant no permission to
+# third-party clients, https://somafm.com/contact/tos.html; included by owner decision 2026-11-17).
+# The Tools tab shows a note for them.
+groups:
+  - id: jazz
+    stations:
+      - name: "Jazz24"
+        url: "https://knkx-live-a.edge.audiocdn.com/6285_128k"
+        genres: [jazz]
+        language: en
+        operator: "KNKX Public Radio"
+        policy_url: "https://www.knkx.org/stream-knkx-online"
+        official: true
+        bitrate_kbps: 128
+      - name: "WWOZ New Orleans"
+        url: "https://wwoz-sc.streamguys1.com/wwoz-hi.mp3"
+        genres: [jazz, blues]
+        language: en
+        operator: "WWOZ 90.7 FM"
+        policy_url: "https://wwoz.org/programs/streams"
+        official: true
+        bitrate_kbps: 128
+      - name: "Radio Paradise Beyond"
+        url: "https://stream.radioparadise.com/beyond-128"
+        genres: [jazz]
+        language: null
+        operator: "Radio Paradise"
+        policy_url: "https://radioparadise.com/listen/stream-links"
+        official: true
+        bitrate_kbps: 128
+      - name: "FIP Jazz"
+        url: "https://icecast.radiofrance.fr/fipjazz-midfi.mp3"
+        genres: [jazz]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-jazz"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Sonic Universe"
+        url: "https://ice6.somafm.com/sonicuniverse-128-mp3"
+        genres: [jazz]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+  - id: ambient_chillout
+    stations:
+      - name: "Radio Paradise Velvet"
+        url: "https://stream.radioparadise.com/velvet-128"
+        genres: [chillout]
+        language: null
+        operator: "Radio Paradise"
+        policy_url: "https://radioparadise.com/listen/stream-links"
+        official: true
+        bitrate_kbps: 128
+      - name: "Radio Paradise Mellow"
+        url: "https://stream.radioparadise.com/mellow-128"
+        genres: [chillout]
+        language: null
+        operator: "Radio Paradise"
+        policy_url: "https://radioparadise.com/listen/stream-links"
+        official: true
+        bitrate_kbps: 128
+      - name: "FIP Electro"
+        url: "https://icecast.radiofrance.fr/fipelectro-midfi.mp3"
+        genres: [electronic, chillout]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-electro"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Groove Salad"
+        url: "https://ice6.somafm.com/groovesalad-128-mp3"
+        genres: [ambient, chillout]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Drone Zone"
+        url: "https://ice6.somafm.com/dronezone-128-mp3"
+        genres: [ambient]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Deep Space One"
+        url: "https://ice6.somafm.com/deepspaceone-128-mp3"
+        genres: [ambient]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+  - id: funk_soul_rnb
+    stations:
+      - name: "WFMU Rock n Soul"
+        url: "https://stream0.wfmu.org/rocknsoul"
+        genres: [soul, funk, rnb]
+        language: en
+        operator: "WFMU"
+        policy_url: "https://wfmu.org/audiostream.shtml"
+        official: true
+        bitrate_kbps: 128
+      - name: "FIP Groove"
+        url: "https://icecast.radiofrance.fr/fipgroove-midfi.mp3"
+        genres: [funk, soul, rnb]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-groove"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Seven Inch Soul"
+        url: "https://ice6.somafm.com/7soul-128-mp3"
+        genres: [soul]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 160
+  - id: hiphop_rap
+    stations:
+      - name: "FIP Hip-Hop"
+        url: "https://icecast.radiofrance.fr/fiphiphop-midfi.mp3"
+        genres: [hiphop, rap]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-hip-hop"
+        official: false
+        bitrate_kbps: 128
+      - name: "Mouv"
+        url: "https://icecast.radiofrance.fr/mouv-midfi.mp3"
+        genres: [hiphop, rap]
+        language: fr
+        operator: "Radio France (Mouv')"
+        policy_url: "https://www.radiofrance.fr/mouv"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Fluid"
+        url: "https://ice6.somafm.com/fluid-128-mp3"
+        genres: [hiphop]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+  - id: rock
+    stations:
+      - name: "KEXP"
+        url: "https://kexp.streamguys1.com/kexp160.aac"
+        genres: [rock, indie]
+        language: en
+        operator: "KEXP 90.3 FM"
+        policy_url: "https://kexp.org/streaming-urls/"
+        official: true
+        bitrate_kbps: 160
+      - name: "Radio Paradise Rock"
+        url: "https://stream.radioparadise.com/rock-128"
+        genres: [rock]
+        language: null
+        operator: "Radio Paradise"
+        policy_url: "https://radioparadise.com/listen/stream-links"
+        official: true
+        bitrate_kbps: 128
+      - name: "FIP Rock"
+        url: "https://icecast.radiofrance.fr/fiprock-midfi.mp3"
+        genres: [rock]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-rock"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Left Coast 70s"
+        url: "https://ice6.somafm.com/seventies-128-mp3"
+        genres: [rock]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Indie Pop Rocks"
+        url: "https://ice6.somafm.com/indiepop-128-mp3"
+        genres: [indie, rock]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
+  - id: metal_progressive
+    stations:
+      - name: "FIP Metal"
+        url: "https://icecast.radiofrance.fr/fipmetal-midfi.mp3"
+        genres: [metal]
+        language: null
+        operator: "Radio France (FIP)"
+        policy_url: "https://www.radiofrance.fr/fip/radio-metal"
+        official: false
+        bitrate_kbps: 128
+      - name: "SomaFM Metal Detector"
+        url: "https://ice6.somafm.com/metal-128-mp3"
+        genres: [metal, progressive]
+        language: null
+        operator: "SomaFM"
+        policy_url: "https://somafm.com/contact/tos.html"
+        official: false
+        bitrate_kbps: 128
