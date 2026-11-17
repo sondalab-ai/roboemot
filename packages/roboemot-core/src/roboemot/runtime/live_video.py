@@ -272,7 +272,14 @@ class LiveVideo:
             else image.copy()
         )
         self._draw(cv2, small, scale, overlay)
-        ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, live.video_jpeg_quality])
+        # 4:4:4 chroma: subsampled chroma washes out the 1 px coloured boxes (OpenCV 5.1)
+        params = [
+            cv2.IMWRITE_JPEG_QUALITY,
+            live.video_jpeg_quality,
+            cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+            cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444,
+        ]
+        ok, buf = cv2.imencode(".jpg", small, params)
         if not ok:
             raise RuntimeError("jpeg encode failed")
         return bytes(buf)
