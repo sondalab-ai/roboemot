@@ -66,8 +66,16 @@ LIVE_VIEWERS = "/api/live/viewers"  # polled by every page
 # still times out after ``webui.session_ttl_s``. The page marks a poll with ``ACTIVE_HEADER``
 # when it saw a click, key or touch since its previous poll; only that poll counts as activity.
 EMOTIONS_STATE = "/api/emotions/state"
+TOOLS_STATE = "/api/tools/state"
 PASSIVE_POLLS = frozenset(
-    {"/api/live/state", "/api/live/audio", "/api/live/frame.jpg", LIVE_VIEWERS, EMOTIONS_STATE}
+    {
+        "/api/live/state",
+        "/api/live/audio",
+        "/api/live/frame.jpg",
+        LIVE_VIEWERS,
+        EMOTIONS_STATE,
+        TOOLS_STATE,
+    }
 )
 # A refused Emotions control (``runtime.emotions``): its status; the code is the error name.
 EMOTIONS_STATUS = {
@@ -78,6 +86,19 @@ EMOTIONS_STATUS = {
     "unknown_expression": HTTPStatus.UNPROCESSABLE_ENTITY,
     "unknown_rule": HTTPStatus.UNPROCESSABLE_ENTITY,
 }
+# A refused Tools write (``runtime.tools_state``): its status; the code is the error name.
+TOOLS_STATUS = {
+    "scheduler_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+    "radio_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+    "radio_disabled": HTTPStatus.CONFLICT,
+    "unknown_item": HTTPStatus.NOT_FOUND,
+    "unknown_station": HTTPStatus.NOT_FOUND,
+    "geocode_unreachable": HTTPStatus.BAD_GATEWAY,
+    "geocode_failed": HTTPStatus.BAD_GATEWAY,
+}
+# A timer or reminder id as the scheduler gives them (``t<n>``, ``r<n>``) or a hand edit made.
+TOOLS_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+GEOCODE_QUERY_MAX_CHARS = 100  # a place name typed in the search box
 ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
@@ -241,6 +262,19 @@ class EmotionsPort(Protocol):
     def inject(self, index: int) -> bool: ...
 
 
+class ToolsPort(Protocol):
+    """``roboemot.runtime.tools_state.ToolsState`` (SPEC 11, 11A, 12): ``state()`` is the Tools
+    tab's payload (station names, never URLs); the writes raise an error with a ``code`` when
+    refused. ``geocode`` is the admin's place search, its query never logged."""
+
+    def state(self) -> dict[str, Any]: ...
+    def cancel(self, item_id: str) -> bool: ...
+    def clear_missed(self) -> None: ...
+    def radio_stop(self) -> None: ...
+    def radio_test(self, name: str) -> str: ...
+    def geocode(self, query: str) -> list[dict[str, Any]]: ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -389,9 +423,11 @@ class WebApi:
         secrets: SecretsPort | None = None,
         live: LivePort | None = None,
         emotions: EmotionsPort | None = None,
+        tools: ToolsPort | None = None,
     ) -> None:
         self.live = live
         self.emotions = emotions
+        self.tools = tools
         self.service = service
         self.settings = settings
         self.secrets = secrets
@@ -509,6 +545,12 @@ class WebApi:
             ("GET", EMOTIONS_STATE): self._emotions_state,
             ("POST", "/api/emotions/play"): self._emotions_play,
             ("POST", "/api/emotions/inject"): self._emotions_inject,
+            ("GET", TOOLS_STATE): self._tools_state,
+            ("POST", "/api/tools/cancel"): self._tools_cancel,
+            ("POST", "/api/tools/missed/clear"): self._tools_missed_clear,
+            ("POST", "/api/tools/radio/stop"): self._tools_radio_stop,
+            ("POST", "/api/tools/radio/test"): self._tools_radio_test,
+            ("POST", "/api/tools/geocode"): self._tools_geocode,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
@@ -936,6 +978,92 @@ class WebApi:
             code = getattr(exc, "code", None)
             if code in EMOTIONS_STATUS:
                 raise ApiError(EMOTIONS_STATUS[code], code) from exc
+            raise
+
+    # ------------------------------------------------------------------ tools
+
+    def _tools_source(self) -> ToolsPort:
+        if self.tools is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "tools_unavailable")
+        return self.tools
+
+    def _tools_state(self, req: Request) -> Response:
+        """The Tools tab's state (SPEC 11A): tools, timers and reminders with their text,
+        missed items and what plays. Behind the PIN session only; read-only."""
+        return Response(HTTPStatus.OK, self._tools_source().state())
+
+    def _tools_body(self, req: Request, keys: set[str]) -> dict[str, Any]:
+        """A Tools write's body with exactly ``keys`` plus ``pin`` allowed; the PIN is checked
+        by the caller after the shape, so a malformed body costs no PIN attempt."""
+        body = self._json_body(req)
+        v.only_keys(body, keys | {"pin"})
+        return body
+
+    def _tools_cancel(self, req: Request) -> Response:
+        """Cancel one timer or reminder. Body: ``id``, ``pin``."""
+        source = self._tools_source()
+        body = self._tools_body(req, {"id"})
+        item_id = body.get("id")
+        if not isinstance(item_id, str) or not TOOLS_ITEM_ID.fullmatch(item_id):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        if not self._tools_call(source.cancel, item_id):
+            raise ApiError(HTTPStatus.NOT_FOUND, "unknown_item")
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _tools_missed_clear(self, req: Request) -> Response:
+        """Forget the missed items. Body: ``pin``."""
+        source = self._tools_source()
+        body = self._tools_body(req, set())
+        self._check_pin(req, body.get("pin"))
+        self._tools_call(lambda _: source.clear_missed(), None)
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _tools_radio_stop(self, req: Request) -> Response:
+        """Stop the radio. Body: ``pin``."""
+        source = self._tools_source()
+        body = self._tools_body(req, set())
+        self._check_pin(req, body.get("pin"))
+        self._tools_call(lambda _: source.radio_stop(), None)
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _tools_radio_test(self, req: Request) -> Response:
+        """Play a listed station by its exact name (SPEC 11A). Body: ``name``, ``pin``. The
+        answer is the player's status; ``radio_disabled`` before the admin opt-in."""
+        source = self._tools_source()
+        body = self._tools_body(req, {"name"})
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"status": self._tools_call(source.radio_test, name)})
+
+    def _tools_geocode(self, req: Request) -> Response:
+        """The place search (SPEC 11A, 12): a POST, because the query is private and never goes
+        in a URL. Body: ``query``, ``pin``. Nothing about the query is logged."""
+        source = self._tools_source()
+        body = self._tools_body(req, {"query"})
+        query = body.get("query")
+        if not isinstance(query, str):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        query = query.strip()
+        if not query or len(query) > GEOCODE_QUERY_MAX_CHARS:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "query_invalid", field="query")
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"places": self._tools_call(source.geocode, query)})
+
+    @staticmethod
+    def _tools_call(fn: Callable[[Any], Any], arg: Any) -> Any:
+        """Run a Tools write; a refusal with a known ``code`` becomes that error, and a store
+        that cannot be written is ``persist_failed`` (nothing changed)."""
+        try:
+            return fn(arg)
+        except OSError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code in TOOLS_STATUS:
+                raise ApiError(TOOLS_STATUS[code], code) from exc
             raise
 
     # ------------------------------------------------------------------ settings

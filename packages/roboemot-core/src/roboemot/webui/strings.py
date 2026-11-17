@@ -1127,6 +1127,119 @@ EN: dict[str, str] = {
     "err_external_control": "Someone or something is moving the robot: tests are off.",
     "err_unknown_expression": "This robot has no such expression or gesture.",
     "err_unknown_rule": "No such appraisal rule.",
+    "tab_tools": "Tools",
+    "settings_purpose_tools": "Voice tools",
+    "tools_intro": (
+        "The robot's voice tools: what is set, what was missed and what plays, with each tool's "
+        "switch and settings. Every change asks for the PIN."
+    ),
+    "tools_name_sleep": "Sleep",
+    "tools_name_scheduler": "Timers and reminders",
+    "tools_name_weather": "Weather",
+    "tools_name_radio": "Radio",
+    "tools_about_sleep": "Asked to, the robot takes a nap; its name wakes it.",
+    "tools_about_scheduler": (
+        "Timers and reminders set by voice; the robot announces them when they are due."
+    ),
+    "tools_about_weather": (
+        "The forecast from Open-Meteo for the place below. On, the place goes to Open-Meteo."
+    ),
+    "tools_about_radio": (
+        "Internet radio from the station list. On, the robot connects to the station's address."
+    ),
+    "tools_switch_label": "On",
+    "tools_switch_title": "{tool}: switch",
+    "tools_switch_on": "Turn on",
+    "tools_switch_off": "Turn off",
+    "tools_opt_in": (
+        "Admin opt-in (SPEC 12): {paths}. On, the robot connects to an internet service when asked."
+    ),
+    "tools_opt_out": (
+        "Admin opt-in turned off (SPEC 12): {paths}. The robot no longer connects to that service."
+    ),
+    "tools_status_ready": "Ready",
+    "tools_status_off": "Off",
+    "tools_status_unavailable": "Not available",
+    "tools_unavailable_sleep": "The circadian rhythm is not running.",
+    "tools_unavailable_scheduler": "Timers need the voice listener, which is not running.",
+    "tools_unavailable_weather": "Set a place first.",
+    "tools_unavailable_radio": "Add a station, or this robot's speaker cannot play music.",
+    "tools_settings": "Settings",
+    "tools_settings_unavailable": "The settings cannot be read now; only the status is shown.",
+    "tools_items": "Timers and reminders",
+    "tools_items_none": "No timer or reminder is set.",
+    "tools_items_off": "Timers and reminders are off.",
+    "tools_items_unavailable": "Timers and reminders are not available on this run.",
+    "tools_kind_timer": "Timer",
+    "tools_kind_reminder": "Reminder",
+    "tools_no_label": "no label",
+    "tools_repeat_once": "once",
+    "tools_repeat_daily": "every day",
+    "tools_repeat_weekdays": "on weekdays",
+    "tools_repeat_days": "on days {days}",
+    "tools_cancel": "Cancel",
+    "tools_cancel_message": "Cancel “{what}”? It will not be announced.",
+    "tools_cancelled": "Cancelled.",
+    "tools_missed": "Missed",
+    "tools_missed_intro": "These came due while RoboEmot was not running and were not announced.",
+    "tools_missed_none": "Nothing was missed.",
+    "tools_missed_clear": "Clear the list",
+    "tools_missed_clear_message": "Clear the list of missed timers and reminders?",
+    "tools_missed_cleared": "The list of missed items is clear.",
+    "tools_playing": "Now playing",
+    "tools_playing_none": "Nothing plays.",
+    "tools_playing_line": "{name}, music volume {volume} dB",
+    "tools_radio_stop": "Stop",
+    "tools_radio_stop_message": "Stop the radio?",
+    "tools_radio_stopped": "The radio stopped.",
+    "tools_radio_test_ok": "{name} plays.",
+    "tools_radio_test_unreachable": "{name} could not be reached.",
+    "tools_radio_test_disabled": "{name} cannot play now: the robot is asleep.",
+    "tools_place_title": "Place",
+    "tools_place": "Place: {place}",
+    "tools_place_unnamed": "set, without a name",
+    "tools_place_none": "No place is set: the weather tool stays off.",
+    "tools_place_hidden": "A place is set; its name is private.",
+    "tools_place_search_label": "Search for a place",
+    "tools_place_search_hint": (
+        "The search goes to Open-Meteo's place search; the name you type is not stored."
+    ),
+    "tools_place_search": "Search",
+    "tools_place_search_message": "Search Open-Meteo for this place.",
+    "tools_place_results_none": "No place matches.",
+    "tools_place_use": "Use",
+    "tools_place_use_message": "Set the place to {place} (circadian.location and its name).",
+    "tools_stations": "Stations",
+    "tools_stations_intro": (
+        "The robot plays only these addresses; the model picks a station by name or genre."
+    ),
+    "tools_stations_none": "No station yet.",
+    "tools_station_test": "Test play",
+    "tools_station_test_message": "Play {name} now?",
+    "tools_station_remove": "Remove",
+    "tools_station_remove_message": "Remove the station {name}?",
+    "tools_station_removed": "{name} was removed.",
+    "tools_station_lower": "This station is in a configuration file; remove it there.",
+    "tools_station_new": "New station",
+    "tools_station_name": "Name",
+    "tools_station_url": "Stream address",
+    "tools_station_url_hint": "http or https, no user name, quotes or spaces.",
+    "tools_station_genres": "Genres",
+    "tools_station_genres_hint": "Separated by commas, for example jazz, news.",
+    "tools_station_language": "Language (optional)",
+    "tools_station_needs": "A station needs a name and an address.",
+    "tools_station_add": "Add",
+    "tools_station_add_message": "Add the station {name}.",
+    "tools_station_added": "{name} was added.",
+    "err_tools_unavailable": "The Tools tab is not available on this robot.",
+    "err_scheduler_unavailable": "Timers and reminders are not available on this run.",
+    "err_radio_unavailable": "This robot's speaker cannot play the radio.",
+    "err_radio_disabled": "The radio is off: turn it on first.",
+    "err_unknown_item": "That timer or reminder is gone.",
+    "err_unknown_station": "No station has that name.",
+    "err_geocode_unreachable": "The place search could not be reached.",
+    "err_geocode_failed": "The place search gave an answer that cannot be read.",
+    "err_query_invalid": "Type a place name (at most 100 characters).",
 }
 
 IT: dict[str, str] = {
@@ -2304,6 +2417,128 @@ IT: dict[str, str] = {
     "err_external_control": "Qualcuno o qualcosa sta muovendo il robot: le prove sono sospese.",
     "err_unknown_expression": "Questo robot non ha questa espressione o questo gesto.",
     "err_unknown_rule": "Regola di valutazione inesistente.",
+    "tab_tools": "Strumenti",
+    "settings_purpose_tools": "Strumenti vocali",
+    "tools_intro": (
+        "Gli strumenti vocali del robot: cosa è impostato, cosa è stato perso e cosa suona, con "
+        "l'interruttore e le impostazioni di ogni strumento. Ogni modifica chiede il PIN."
+    ),
+    "tools_name_sleep": "Sonno",
+    "tools_name_scheduler": "Timer e promemoria",
+    "tools_name_weather": "Meteo",
+    "tools_name_radio": "Radio",
+    "tools_about_sleep": "Se glielo chiedi, il robot fa un pisolino; il suo nome lo sveglia.",
+    "tools_about_scheduler": (
+        "Timer e promemoria impostati a voce; il robot li annuncia alla scadenza."
+    ),
+    "tools_about_weather": (
+        "Le previsioni di Open-Meteo per il luogo qui sotto. Acceso, il luogo va a Open-Meteo."
+    ),
+    "tools_about_radio": (
+        "Radio via internet dall'elenco delle stazioni. Acceso, il robot si collega all'indirizzo "
+        "della stazione."
+    ),
+    "tools_switch_label": "Acceso",
+    "tools_switch_title": "{tool}: interruttore",
+    "tools_switch_on": "Accendi",
+    "tools_switch_off": "Spegni",
+    "tools_opt_in": (
+        "Consenso dell'amministratore (SPEC 12): {paths}. Acceso, il robot si collega a un "
+        "servizio internet quando glielo chiedi."
+    ),
+    "tools_opt_out": (
+        "Consenso dell'amministratore revocato (SPEC 12): {paths}. Il robot non si collega più a "
+        "quel servizio."
+    ),
+    "tools_status_ready": "Pronto",
+    "tools_status_off": "Spento",
+    "tools_status_unavailable": "Non disponibile",
+    "tools_unavailable_sleep": "Il ritmo giornaliero non è attivo.",
+    "tools_unavailable_scheduler": "I timer richiedono l'ascolto vocale, che non è attivo.",
+    "tools_unavailable_weather": "Prima imposta un luogo.",
+    "tools_unavailable_radio": (
+        "Aggiungi una stazione, oppure l'altoparlante di questo robot non può suonare musica."
+    ),
+    "tools_settings": "Impostazioni",
+    "tools_settings_unavailable": (
+        "Le impostazioni non si possono leggere ora; è mostrato solo lo stato."
+    ),
+    "tools_items": "Timer e promemoria",
+    "tools_items_none": "Nessun timer o promemoria impostato.",
+    "tools_items_off": "Timer e promemoria sono spenti.",
+    "tools_items_unavailable": "Timer e promemoria non sono disponibili in questa esecuzione.",
+    "tools_kind_timer": "Timer",
+    "tools_kind_reminder": "Promemoria",
+    "tools_no_label": "senza etichetta",
+    "tools_repeat_once": "una volta",
+    "tools_repeat_daily": "ogni giorno",
+    "tools_repeat_weekdays": "nei giorni feriali",
+    "tools_repeat_days": "nei giorni {days}",
+    "tools_cancel": "Annulla",
+    "tools_cancel_message": "Annullare “{what}”? Non sarà annunciato.",
+    "tools_cancelled": "Annullato.",
+    "tools_missed": "Persi",
+    "tools_missed_intro": (
+        "Sono scaduti mentre RoboEmot non era in esecuzione e non sono stati annunciati."
+    ),
+    "tools_missed_none": "Nulla è stato perso.",
+    "tools_missed_clear": "Svuota l'elenco",
+    "tools_missed_clear_message": "Svuotare l'elenco dei timer e promemoria persi?",
+    "tools_missed_cleared": "L'elenco dei persi è vuoto.",
+    "tools_playing": "In riproduzione",
+    "tools_playing_none": "Non suona nulla.",
+    "tools_playing_line": "{name}, volume della musica {volume} dB",
+    "tools_radio_stop": "Ferma",
+    "tools_radio_stop_message": "Fermare la radio?",
+    "tools_radio_stopped": "La radio si è fermata.",
+    "tools_radio_test_ok": "{name} suona.",
+    "tools_radio_test_unreachable": "{name} non è raggiungibile.",
+    "tools_radio_test_disabled": "{name} non può suonare ora: il robot dorme.",
+    "tools_place_title": "Luogo",
+    "tools_place": "Luogo: {place}",
+    "tools_place_unnamed": "impostato, senza nome",
+    "tools_place_none": "Nessun luogo impostato: il meteo resta spento.",
+    "tools_place_hidden": "Un luogo è impostato; il suo nome è privato.",
+    "tools_place_search_label": "Cerca un luogo",
+    "tools_place_search_hint": (
+        "La ricerca va alla ricerca luoghi di Open-Meteo; il nome che scrivi non viene salvato."
+    ),
+    "tools_place_search": "Cerca",
+    "tools_place_search_message": "Cerca questo luogo su Open-Meteo.",
+    "tools_place_results_none": "Nessun luogo corrisponde.",
+    "tools_place_use": "Usa",
+    "tools_place_use_message": "Imposta il luogo su {place} (circadian.location e il suo nome).",
+    "tools_stations": "Stazioni",
+    "tools_stations_intro": (
+        "Il robot suona solo questi indirizzi; il modello sceglie una stazione per nome o genere."
+    ),
+    "tools_stations_none": "Ancora nessuna stazione.",
+    "tools_station_test": "Prova",
+    "tools_station_test_message": "Suonare {name} adesso?",
+    "tools_station_remove": "Rimuovi",
+    "tools_station_remove_message": "Rimuovere la stazione {name}?",
+    "tools_station_removed": "{name} è stata rimossa.",
+    "tools_station_lower": "Questa stazione è in un file di configurazione; rimuovila lì.",
+    "tools_station_new": "Nuova stazione",
+    "tools_station_name": "Nome",
+    "tools_station_url": "Indirizzo dello stream",
+    "tools_station_url_hint": "http o https, senza nome utente, virgolette o spazi.",
+    "tools_station_genres": "Generi",
+    "tools_station_genres_hint": "Separati da virgole, per esempio jazz, notizie.",
+    "tools_station_language": "Lingua (facoltativa)",
+    "tools_station_needs": "Una stazione ha bisogno di un nome e di un indirizzo.",
+    "tools_station_add": "Aggiungi",
+    "tools_station_add_message": "Aggiungi la stazione {name}.",
+    "tools_station_added": "{name} è stata aggiunta.",
+    "err_tools_unavailable": "La scheda Strumenti non è disponibile su questo robot.",
+    "err_scheduler_unavailable": "Timer e promemoria non sono disponibili in questa esecuzione.",
+    "err_radio_unavailable": "L'altoparlante di questo robot non può suonare la radio.",
+    "err_radio_disabled": "La radio è spenta: prima accendila.",
+    "err_unknown_item": "Quel timer o promemoria non c'è più.",
+    "err_unknown_station": "Nessuna stazione ha questo nome.",
+    "err_geocode_unreachable": "La ricerca luoghi non è raggiungibile.",
+    "err_geocode_failed": "La ricerca luoghi ha dato una risposta illeggibile.",
+    "err_query_invalid": "Scrivi il nome di un luogo (al massimo 100 caratteri).",
 }
 
 STRINGS: dict[str, dict[str, str]] = {"en": EN, "it": IT}

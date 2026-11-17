@@ -363,7 +363,7 @@
  "Lively and fast (1) or slow and quiet (0)": "Vivace e veloce (1) o lento e tranquillo (0)",
  "Logged-in sessions kept; the oldest is dropped past this": "Sessioni con login conservate; oltre questo numero viene scartata la più vecchia",
  "Longest accepted body prompt": "Lunghezza massima accettata per il prompt del corpo",
- "Longest accepted persona_fragment":"Lunghezza massima accettata per persona_fragment",
+ "Longest accepted persona_fragment": "Lunghezza massima accettata per persona_fragment",
  "Longest accepted prompt": "Lunghezza massima accettata per un prompt",
  "Longest display name or consent name": "Lunghezza massima di un nome visualizzato o di un nome di consenso",
  "Longest free text (a prompt, a JSON value) the settings editor accepts (SPEC 11A)": "Lunghezza massima di un testo libero (un prompt, un valore JSON) accettata dall'editor delle impostazioni (SPEC 11A)",
@@ -940,5 +940,7 @@
  "The most reply audio one voice preview in the web UI may hold (PCM16, about 21 s at 24 kHz); a longer reply fails the preview": "L'audio di risposta massimo che un'anteprima della voce nell'interfaccia web può contenere (PCM16, circa 21 s a 24 kHz); una risposta più lunga fa fallire l'anteprima",
  "How much sooner than the web request's wait a voice preview itself gives up, so the page gets the preview's own failure code": "Quanto prima dell'attesa della richiesta web l'anteprima della voce si arrende da sola, così la pagina riceve il codice di errore dell'anteprima",
  "Shortest time between two voice previews of one route in the web UI; one sooner is refused (preview_rate) before anything is sent": "Tempo minimo tra due anteprime della voce di un modello nell'interfaccia web; una più ravvicinata viene rifiutata (preview_rate) prima di inviare qualsiasi cosa",
- "Share of webui.request_deadline_s that the work of one request may take (a catalogue import's embeddings, a voice preview); the rest is for reading, writing and replying": "Quota di webui.request_deadline_s che il lavoro di una richiesta può occupare (gli embedding di un'importazione del catalogo, un'anteprima della voce); il resto serve a leggere, scrivere e rispondere"
+ "Share of webui.request_deadline_s that the work of one request may take (a catalogue import's embeddings, a voice preview); the rest is for reading, writing and replying": "Quota di webui.request_deadline_s che il lavoro di una richiesta può occupare (gli embedding di un'importazione del catalogo, un'anteprima della voce); il resto serve a leggere, scrivere e rispondere",
+ "How often the open Tools tab asks for the timers, reminders and what plays": "Ogni quanto la scheda Strumenti aperta chiede i timer, i promemoria e cosa sta suonando",
+ "SPEC 11, 11A, 12: the Tools tab": "SPEC 11, 11A, 12: la scheda Strumenti"
 }

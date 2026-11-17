@@ -1427,6 +1427,7 @@ const TABS = {
   settings: settingsView,
   live: liveView,
   emotions: emotionsView,
+  tools: toolsView,
   debug: debugView,
 };
 

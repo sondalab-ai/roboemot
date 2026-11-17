@@ -6684,6 +6684,20 @@ class EmotionsPageConfig(Strict):
     )
 
 
+class ToolsPageConfig(Strict):
+    """The web UI's Tools tab: the voice tools' switches and settings, the active timers and
+    reminders, the missed items and what the radio plays (SPEC 11, Voice tools; 11A; 12)."""
+
+    poll_ms: int = param(
+        2000,
+        "How often the open Tools tab asks for the timers, reminders and what plays",
+        unit="ms",
+        ge=500,
+        le=10000,
+        advanced=True,
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -6896,6 +6910,7 @@ class WebUIConfig(Strict):
     )
     live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
     emotions: EmotionsPageConfig = param({}, "SPEC 11A, 12: the Emotions tab")
+    tools: ToolsPageConfig = param({}, "SPEC 11, 11A, 12: the Tools tab")
 
     @field_validator("frame_ancestors")
     @classmethod
