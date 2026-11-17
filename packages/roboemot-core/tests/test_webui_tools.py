@@ -561,6 +561,62 @@ def test_a_removed_station_is_gone_and_a_restart_keeps_every_added_one(tmp_path)
     assert names(restarted(tmp_path)) == ["Rock", "Pop"]
 
 
+def test_a_station_whose_name_has_a_dot_adds_edits_removes_and_restarts(tmp_path):
+    stack, editor = radio_editor(tmp_path)
+    editor.add_entry("tools.radio.stations", None, station("Jazz"))
+    editor.add_entry("tools.radio.stations", None, station(DOTTED))
+    key = segment(editor, DOTTED)
+    assert key != DOTTED, "the path segment is the index"
+    url = "https://stream.example.org/rtl2.mp3"
+    editor.change_many([{"path": f"tools.radio.stations.{key}.url", "value": url}])
+    again = restarted(tmp_path)
+    assert names(again) == ["Jazz", DOTTED]
+    assert again.effective().tools.radio.stations[1].url == url
+    assert editor.remove_entry(f"tools.radio.stations.{key}")["changed"]
+    assert names(stack) == ["Jazz"]
+    assert names(restarted(tmp_path)) == ["Jazz"]
+
+
+def test_the_page_adds_edits_and_removes_a_station_named_with_spaces(served, tmp_path):
+    """The Tools tab's own routes, with a name that is a path segment as is ("Radio Deejay")."""
+    c = served.client
+    c.login()
+    box, name = "tools.radio.stations", "Radio Deejay"
+    added = {"path": box, "value": station(name, "https://example.com/d.mp3"), "pin": PIN}
+    assert c.request("POST", "/api/settings/entry", added).status == 200
+    key = segment(served.editor, name)
+    url = "https://example.com/d2.mp3"
+    edit = {"changes": [{"path": f"{box}.{key}.url", "value": url}], "pin": PIN}
+    assert c.request("POST", "/api/settings/batch", edit).status == 200
+    assert served.stack.effective().tools.radio.stations[2].url == url
+    lower = [
+        {"name": "Jazz", "url": STATION_URL},
+        {"name": DOTTED, "url": "https://stream.example.org/rtl.mp3"},
+    ]
+    stack = ConfigStack(
+        app=app_config(tmp_path, tools={"radio": {"enabled": True, "stations": lower}}),
+        audit_path=tmp_path / "b.jsonl",
+    )
+    SettingsEditor(stack, store=tmp_path / "webui_settings.json").restore()
+    assert [(s.name, s.url) for s in stack.effective().tools.radio.stations][2] == (name, url)
+    gone = {"path": f"{box}.{key}", "pin": PIN}
+    assert c.request("POST", "/api/settings/entry/remove", gone).status == 200
+    assert names(served.stack) == ["Jazz", DOTTED]
+
+
+@pytest.mark.parametrize(
+    ("name", "code"),
+    [(" Jazz", "name_invalid"), ("Radio  Jazz", "name_invalid"), ("Ra\ndio", "name_invalid")],
+)
+def test_a_station_name_is_one_plain_line(tmp_path, name, code):
+    stack, editor = radio_editor(tmp_path)
+    editor.add_entry("tools.radio.stations", None, station("Radio Deejay"))
+    with pytest.raises(ValidationError) as exc:
+        editor.add_entry("tools.radio.stations", None, station(name))
+    assert exc.value.code == code
+    assert names(stack) == ["Radio Deejay"]
+
+
 def test_a_station_of_app_yaml_cannot_be_removed_and_its_edit_survives_a_restart(tmp_path):
     lower = [station("Jazz"), station(DOTTED, "https://stream.example.org/rtl.mp3")]
     stack, editor = radio_editor(tmp_path, lower)

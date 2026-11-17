@@ -94,6 +94,7 @@ from .route_presets import route_presets
 from .setting_clean import (
     clean_hooked,
     clean_key,
+    clean_label,
     clean_value,
     hook_for,
     key_choice,
@@ -114,6 +115,8 @@ GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
 # keyed by language: a new key must be one the voice stack supports
 LANGUAGE_MAPS = frozenset({"voice.keywords"})
+# Keyed lists whose new entries are named in free text (spaces, dots), not as a path segment.
+LABEL_NAMED = frozenset({"tools.radio.stations"})
 # whole-value maps keyed by language (free text per key): a key that is new must be a language the
 # voice stack supports, as for the keyed language maps above
 LANGUAGE_DICTS = frozenset(
@@ -1419,8 +1422,11 @@ class SettingsEditor:
         just the entry; any other list is replaced by the old entries plus the new one."""
         id_field = box["key"]
         ident = entry.get(id_field)
-        clean_key(ident, cfg, dots=id_field == "event")
         path = box["path"]
+        if path in LABEL_NAMED:
+            clean_label(ident, cfg)
+        else:
+            clean_key(ident, cfg, dots=id_field == "event")
         current = get_path(tree, path)
         if any(entry_identity(path, e) == entry_identity(path, entry) for e in current):
             raise ValidationError("entry_exists", "value")
