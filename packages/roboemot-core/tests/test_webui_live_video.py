@@ -338,7 +338,13 @@ def test_the_new_video_settings_have_units_and_ranges():
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/live/state", "/api/live/audio?after=0", "/api/live/frame.jpg", "/api/live/viewers"],
+    [
+        "/api/live/state",
+        "/api/live/audio?after=0",
+        "/api/live/prompts?after=0",
+        "/api/live/frame.jpg",
+        "/api/live/viewers",
+    ],
 )
 def test_no_live_poll_extends_an_idle_session_unless_the_page_saw_input(tmp_path, stack, path):
     """R3 SF1, SPEC 11A/12: an open, unattended Live tab still times out after session_ttl_s.

@@ -20,6 +20,9 @@ robot is doing now, the conditions that hold (offline, the cloud route down with
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
 Codes and numbers only: the page builds the sentences in its language. A host without voice has
 no route or listener (None): the status then comes from the other parts.
+
+``prompts`` is the LLM prompts panel (``webui.live.prompts``, opt-in): the host's ``PromptRing``
+of cloud requests as they left, read behind the same cursor as the transcript.
 """
 
 from __future__ import annotations
@@ -50,6 +53,9 @@ ROUTE_DOWN = ("fallback_local", "blocked")  # realtime route states that mean it
 ROUTE_UP_REASONS = (None, "off")  # a blocked route with these reasons is just not in use
 NO_TRANSCRIPT = {
     "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_turns": 0, "turns": []
+}  # fmt: skip
+NO_PROMPTS = {
+    "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_entries": 0, "entries": []
 }  # fmt: skip
 
 
@@ -163,6 +169,34 @@ class LiveState:
         if not self._cfg.webui.live.enabled:
             return False
         ring = self._host.transcript
+        if ring is not None:
+            ring.clear()
+        return True
+
+    def prompts(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:
+        """The LLM prompts panel's poll: the cloud requests added or changed after revision
+        ``after`` (cursor as ``audio``) and the page's poll interval; None while
+        ``webui.live.enabled`` is off. With ``webui.live.prompts`` off the ring is cleared and
+        the block is ``NO_PROMPTS``; with it on and no ring on the host the block is None (the
+        API answers ``live_unavailable``)."""
+        live = self._cfg.webui.live
+        if not live.enabled:
+            return None
+        ring = self._host.prompts
+        if not live.prompts:
+            if ring is not None:
+                ring.apply_config(live)  # the flag is off here: whatever it still holds goes
+            return {"poll_ms": live.audio_poll_ms, "prompts": NO_PROMPTS}
+        return {
+            "poll_ms": live.audio_poll_ms,
+            "prompts": ring.snapshot(after, epoch) if ring is not None else None,
+        }
+
+    def clear_prompts(self) -> bool:
+        """The panel's Clear button. False while ``webui.live.enabled`` is off."""
+        if not self._cfg.webui.live.enabled:
+            return False
+        ring = self._host.prompts
         if ring is not None:
             ring.clear()
         return True

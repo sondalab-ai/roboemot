@@ -39,6 +39,7 @@ from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
 from ..secret_store import SECRET_REF, SecretUnavailable, no_secrets
 from .prompt import CHARS_PER_TOKEN, trim_history
+from .prompt_log import PromptRing
 from .pseudonyms import (
     TOOL_ARGS_MAX_DEPTH,
     Outgoing,
@@ -156,6 +157,8 @@ class Router:
     _unavailable: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     failures: list[tuple[str, str]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    # the Live tab's LLM prompts ring (SPEC 11A, 12): every cloud request as it leaves
+    prompts: PromptRing | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Resolve every ``${secret:name}`` route key now (startup and each rebuild after a
@@ -394,6 +397,9 @@ class Router:
             log.debug(
                 "llm route %s: dropped %d oldest turns to fit the budget", route.name, dropped
             )
+        if self.prompts is not None and not route_is_local(route):
+            with contextlib.suppress(Exception):  # a debug aid never fails a request
+                self.prompts.chat(route.name, route.model, messages, tools)  # aliased, trimmed
         loop = asyncio.get_running_loop()
         client = self._client(route)
         kwargs: dict[str, Any] = {

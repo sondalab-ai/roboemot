@@ -1,0 +1,234 @@
+"""SPEC 8, 11A, 12: the realtime client's tap into the Live tab's LLM prompts ring. Each frame is
+recorded as it left the wire codec (Gemini's ``setup``, OpenAI's ``session.update``), audio is
+summarized, never kept; no key, header or URL; a local connect host records nothing.
+
+The fake servers listen on this machine, so their connect target is local: the tests that need
+a cloud target say so by patching ``ws_target_local``."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from fake_server import PCM, FakeServer
+from realtime_helpers import KEY, UPDATE, bearer, route, settings, wait_until
+from roboemot.config import ConfigStack
+from roboemot.config.schema import LiveConfig
+from roboemot.llm.prompt_log import PromptRing
+from roboemot.realtime import client as client_mod
+from roboemot.realtime import protocol
+from roboemot.realtime.client import RealtimeClient
+from roboemot.realtime.route import RealtimeRoute
+from roboemot.realtime.session import Allocation, DirectSession
+from test_gemini_client import gemini_route
+
+
+def ring() -> PromptRing:
+    return PromptRing(LiveConfig(enabled=True, prompts=True))
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    monkeypatch.setattr(client_mod, "ws_target_local", lambda target: False)
+
+
+def dumped(prompts: PromptRing) -> str:
+    return json.dumps(prompts.snapshot(0), ensure_ascii=False)
+
+
+def test_openai_frames_are_recorded_and_audio_is_summarized(cloud):
+    prompts = ring()
+    with FakeServer() as server:
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict,
+            prompts=prompts,
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            for _ in range(3):
+                assert c.send(protocol.audio_append(PCM)).result(2)
+            assert c.send(protocol.text_item("ciao")).result(2)
+            assert c.send(protocol.function_output("c1", '{"ok": true}')).result(2)
+        finally:
+            c.close()
+    entries = prompts.snapshot(0)["entries"]
+    labels = [e["label"] for e in entries]
+    item = "conversation.item.create"
+    assert labels == ["session.update", "audio", item, item]
+    assert {e["route"] for e in entries} == {"rt"} and entries[0]["via"] == "openai_realtime"
+    assert json.loads(entries[0]["text"])["session"]["instructions"] == "be kind"
+    assert entries[1]["text"] == f"[audio {3 * len(PCM)} bytes in 3 frames]"
+    assert "ciao" in entries[2]["text"] and "function_call_output" in entries[3]["text"]
+    assert protocol.audio_append(PCM)["audio"] not in dumped(prompts)
+    assert str(server.port) not in dumped(prompts)
+
+
+def test_a_gemini_session_shows_its_setup_and_no_key_or_url(gemini, cloud):
+    prompts = ring()
+    srv = gemini([["audio"]])
+    r = gemini_route(srv.base_url(), locality="local")
+    c = RealtimeClient(r, settings(), DirectSession(), auth_headers=bearer, prompts=prompts)
+    try:
+        assert c.connect(UPDATE)
+        for _ in range(2):
+            assert c.send(protocol.audio_append(PCM)).result(2)
+        assert c.send(protocol.text_item("ciao")).result(2)
+        assert c.send(protocol.response_create()).result(2)
+        assert wait_until(
+            lambda: any(e["label"] == "clientContent" for e in prompts.snapshot(0)["entries"])
+        )
+    finally:
+        c.close()
+    entries = prompts.snapshot(0)["entries"]
+    setup = entries[0]
+    assert (setup["route"], setup["via"], setup["label"]) == ("gemini", "gemini_live", "setup")
+    assert "be kind" in json.dumps(json.loads(setup["text"])["setup"]["systemInstruction"])
+    audio = [e for e in entries if e["label"] == "audio"]
+    assert (
+        audio and audio[0]["text"] == f"[audio {2 * len(PCM)} bytes in 2 frames; activityStart 1]"
+    )
+    text = dumped(prompts)
+    assert KEY not in text and "x-goog-api-key" not in text.lower()
+    assert "127.0.0.1" not in text and "localhost" not in text and "wss://" not in text
+    assert protocol.audio_append(PCM)["audio"] not in text
+
+
+def test_a_local_connect_host_records_nothing():
+    prompts = ring()
+    with FakeServer() as server:
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict,
+            prompts=prompts,
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            assert c.send(protocol.text_item("ciao")).result(2)
+        finally:
+            c.close()
+    assert prompts.size == 0
+
+
+def test_with_the_flag_off_nothing_is_recorded(cloud):
+    prompts = PromptRing(LiveConfig(enabled=True, prompts=False))
+    with FakeServer() as server:
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict,
+            prompts=prompts,
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            assert c.send(protocol.text_item("ciao")).result(2)
+        finally:
+            c.close()
+    assert prompts.size == 0 and prompts.snapshot(0)["rev"] == 0
+
+
+def test_a_ring_that_fails_never_fails_a_send(cloud):
+    class Broken(PromptRing):
+        def frame(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    with FakeServer() as server:
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict,
+            prompts=Broken(LiveConfig(enabled=True, prompts=True)),
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            assert c.send(protocol.text_item("ciao")).result(2)
+        finally:
+            c.close()
+
+
+def test_every_client_the_route_builds_gets_the_ring():
+    from roboemot.health.network import NetworkMonitor
+    from test_realtime_route import CHAT, DIRECT, POLICY, RT, FakeRouter, StubClient, rt_stack
+
+    made: list[dict] = []
+
+    def factory(*a, **kw):
+        made.append(kw)
+        return StubClient(*a, **kw)
+
+    stack = rt_stack()
+    rt = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=factory,
+    )
+    assert rt.ready()
+    assert made[-1]["prompts"] is None  # no ring yet
+    rt.prompts = ring()
+    for port in (8766, 8767):  # a reconfigured route builds a new client: the same ring
+        routes = [CHAT, {**RT, "base_url": f"http://other.local:{port}/v1"}]
+        stack.set("llm_routes", routes, source="test", admin=True)
+        rt.apply_config(stack.effective())
+        assert rt.ready()
+        assert made[-1]["prompts"] is rt.prompts
+    assert len(made) == 3
+
+
+def test_no_known_target_records_nothing(cloud):
+    prompts = ring()
+    c = RealtimeClient(
+        route("http://127.0.0.1:1/v1"), settings(), DirectSession(), auth_headers=dict,
+        prompts=prompts,
+    )  # fmt: skip
+    c._tap({"type": "conversation.item.create"})  # fails closed: no target, nothing kept
+    assert prompts.size == 0
+
+
+class _TokenProvider:
+    """Allocates a connect URL whose query carries a session token."""
+
+    key_hosts: tuple[str, ...] = ()
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def allocate(self, request):
+        return Allocation(self.url)
+
+
+def test_an_allocated_url_and_its_token_are_in_no_entry(cloud):
+    prompts = ring()
+    with FakeServer() as server:
+        url = server.http_base("/v1/realtime", "token=QUERYSECRET").replace("http", "ws", 1)
+        c = RealtimeClient(
+            route(server.http_base()), settings(), _TokenProvider(url), auth_headers=dict,
+            prompts=prompts,
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            assert c.send(protocol.text_item("ciao")).result(2)
+        finally:
+            c.close()
+        assert "QUERYSECRET" in server.requests[0]["path"]  # the token did go to the server
+    text = dumped(prompts)
+    assert prompts.size >= 2 and "QUERYSECRET" not in text and "/v1/realtime" not in text
+
+
+def test_turning_the_flag_off_while_connected_stops_and_clears(cloud):
+    stack = ConfigStack(app={"webui": {"live": {"enabled": True, "prompts": True}}})
+    prompts = PromptRing(stack.effective().webui.live)
+    prompts.attach(stack)
+    with FakeServer() as server:
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict,
+            prompts=prompts,
+        )  # fmt: skip
+        try:
+            assert c.connect(UPDATE)
+            assert c.send(protocol.text_item("one")).result(2)
+            before = prompts.snapshot(0)
+            assert len(before["entries"]) == 2
+            stack.set("webui.live.prompts", False, source="test", admin=True)
+            assert c.send(protocol.text_item("two")).result(2)
+            after = prompts.snapshot(0)
+            assert after["entries"] == [] and after["epoch"] != before["epoch"]
+            assert not after["enabled"]
+        finally:
+            c.close()

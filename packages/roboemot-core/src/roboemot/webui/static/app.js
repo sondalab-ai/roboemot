@@ -371,6 +371,7 @@ function stopPolling() {
   state.timer = null;
   liveStopAudio(true);
   liveStopVideo(true);
+  liveStopPrompts(true);
 }
 
 // ---------------------------------------------------------------- focus after a dialog

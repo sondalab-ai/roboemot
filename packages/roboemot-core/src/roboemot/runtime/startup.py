@@ -157,6 +157,7 @@ def start_voice_output(
     )
     if realtime is not None:
         realtime.events = host.events
+        realtime.prompts = host.prompts  # each client it builds taps its frames (Live tab)
     start_scheduler(host, stack, p, cleanup)  # stops after the conversation that sets items
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
@@ -412,6 +413,8 @@ def start_all(
         host.transcript is not None
     ):  # registered first, so it runs last: a late sentence is wiped too
         cleanup.callback(host.transcript.clear)
+    if host.prompts is not None:  # last too: a request sent during shutdown is wiped
+        cleanup.callback(host.prompts.clear)
     cleanup.callback(p.tracker.close)
     cleanup.callback(p.runner.close)
     cleanup.callback(p.circ.close)
