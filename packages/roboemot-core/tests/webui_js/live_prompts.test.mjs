@@ -54,7 +54,7 @@ function ringServer(ring) {
   };
 }
 
-async function livePage(t, prompts) {
+async function livePage(t, prompts, clear = { ok: true }) {
   const page = await loadPage({
     "GET /api/session": { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 1000 },
     "GET /api/strings": { language: "en", strings: STRINGS },
@@ -62,7 +62,7 @@ async function livePage(t, prompts) {
     "GET /api/live/state": STATE,
     "GET /api/live/audio": AUDIO,
     "GET /api/live/prompts": prompts,
-    "POST /api/live/prompts/clear": { ok: true },
+    "POST /api/live/prompts/clear": clear,
   });
   t.after(() => page.window.close());
   return page;
@@ -182,7 +182,7 @@ test("leaving the tab stops the poll", async (t) => {
 
 test("the Clear button posts and empties the log", async (t) => {
   const ring = { enabled: true, epoch: "a.0", rev: 1, all: [{ ...entry(1), rev: 1 }] };
-  const page = await livePage(t, ringServer(ring));
+  const page = await livePage(t, ringServer(ring), () => { ring.all = []; ring.rev = 0; ring.epoch = "a.1"; return { ok: true }; });
   await openLive(page);
   await toggle(page);
   page.document.querySelector("#live-prompts-clear").click();
@@ -210,4 +210,35 @@ test("a new entry scrolls to the bottom only when the log was at the bottom", as
   ring.rev = 3;
   await sleep(WAIT_MS);
   assert.equal(log.scrollTop, 500);
+});
+
+test("a poll in flight when Clear is pressed cannot repaint the wiped rows", async (t) => {
+  const ring = { enabled: true, epoch: "a.0", rev: 1, all: [{ ...entry(1), rev: 1 }] };
+  const serve = ringServer(ring);
+  let hold = null; // "arm": the next poll's reply is held until the test lets it go
+  const page = await livePage(t, (body, path) => {
+    const reply = serve(body, path); // the reply as the server had it when asked
+    if (hold !== "arm") return reply;
+    return new Promise((resolve) => { hold = () => resolve(reply); });
+  });
+  await openLive(page);
+  await toggle(page);
+  assert.equal(rows(page).length, 1);
+  ring.all = [{ ...entry(1), rev: 1 }, { ...entry(2), rev: 2 }];
+  ring.rev = 2;
+  hold = "arm";
+  await sleep(WAIT_MS); // the next poll is in flight, holding the old entries
+  assert.equal(typeof hold, "function");
+  const release = hold;
+  hold = null;
+  ring.all = [];
+  ring.rev = 0;
+  ring.epoch = "a.1";
+  page.document.querySelector("#live-prompts-clear").click();
+  await settle();
+  release(); // the old reply arrives after the clear
+  await sleep(WAIT_MS);
+  assert.equal(rows(page).length, 0, "no wiped row came back");
+  assert.ok(page.calls.some((c) => c.method === "POST" && c.path === "/api/live/prompts/clear"));
+  assert.ok(promptCalls(page).at(-1).path.includes("epoch=a.1"), "the poll goes on from the new epoch");
 });

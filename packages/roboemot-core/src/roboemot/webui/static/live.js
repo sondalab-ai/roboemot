@@ -947,12 +947,17 @@ async function livePromptsPoll(serial) {
   livePrompts.timer = setTimeout(() => livePromptsPoll(serial), delay);
 }
 
+// Stops the poll chain first (a reply in flight cannot repaint the wiped rows), then starts it
+// again from the new epoch, whether or not the POST went through.
 async function livePromptsClear() {
-  await api("POST", "/api/live/prompts/clear", {});
+  liveStopPrompts(true);
   const ui = livePrompts.ui;
-  if (!ui) return;
-  ui.log.replaceChildren();
-  ui.none.hidden = false;
+  try {
+    await api("POST", "/api/live/prompts/clear", {});
+    if (ui && livePrompts.ui === ui) ui.none.hidden = false;
+  } finally {
+    if (ui && livePrompts.ui === ui && ui.open) livePromptsPoll(liveState.serial);
+  }
 }
 
 function liveView() {
