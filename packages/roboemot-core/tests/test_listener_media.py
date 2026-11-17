@@ -316,6 +316,7 @@ def with_player(r, steps=True, stream=FakeStream):
     piece_s = r.cfg.tools.media.chunk_ms / 1000.0
     r.listener.media_audible = player.audible_at
     r.listener.media_hold = player.hold_from
+    r.listener.media_set = player.playing
     player.on_piece = r.listener.hear_media
     process = r.listener.process
 
@@ -442,3 +443,60 @@ def test_room_music_from_the_microphone_still_needs_the_wake_word():
     r.say()
     assert not r.utterances[-1].addressed
     assert r.listener.snapshot()["wake"]["decisions"]["rejected_music"] == 1
+
+
+def test_room_music_right_after_the_radio_counts_again():
+    """Review: the radio's music must stop being ignored once the microphone is the detector's
+    source again, so music in the room after the radio still needs the wake word."""
+    r = Rig(["come stai"], cfg=cfg("never"))
+    player, _ = with_player(r, stream=DrumStream)
+    r.feed(silence(10.0))
+    assert r.listener.music_state(r.now).playing
+    assert not r.listener._music_during(r.now - 1.0, r.now)  # the radio's: the media rule's
+    player.stop("user")
+    r.feed(drum_loop(120, 3.0, RATE) * 0.5)  # a song in the room, no hole long enough to stop
+    assert r.listener.music_state(r.now).playing
+    assert r.listener._music_during(r.now - 1.0, r.now)
+
+
+def test_turning_the_dance_off_drops_the_waiting_radio_pieces():
+    r = Rig(["ciao"], cfg=cfg(dance=True))
+    r.listener.media_audible = lambda at: True
+    spy = r.listener.music = SpyMusic(True)
+    r.listener.hear_media(np.ones(3200, np.float32), RATE, r.t)
+    r.listener.apply_config(cfg(dance=False))
+    r.listener.apply_config(cfg(dance=True))
+    r.feed(silence(0.1))
+    assert spy.fed == []  # nothing stale after it is turned on again
+
+
+def test_a_hot_reload_while_the_player_appends_never_raises():
+    """Review: the reload rebuilt the deque by iterating the live one while the player's thread
+    appended (RuntimeError: deque mutated during iteration)."""
+    r = Rig(["ciao"], cfg=cfg(dance=True))
+    r.listener.music = SpyMusic(True)
+    sizes = [
+        cfg(dance=True),
+        RoboEmotConfig.model_validate(
+            {**cfg(dance=True).model_dump(), "tools": {"media": {"chunk_ms": 100}}}
+        ),
+    ]
+    stop, errors = threading.Event(), []
+    piece = np.ones(16, np.float32)
+
+    def feeder():
+        try:
+            while not stop.is_set():
+                r.listener.hear_media(piece, RATE, 0.0)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=feeder, daemon=True)
+    thread.start()
+    try:
+        for i in range(300):
+            r.listener.apply_config(sizes[i % 2])
+    finally:
+        stop.set()
+        thread.join(5.0)
+    assert errors == []

@@ -230,6 +230,7 @@ def start_media(
     if listener is not None:
         listener.media_audible = player.audible_at
         listener.media_hold = player.hold_from
+        listener.media_set = player.playing
         player.on_piece = listener.hear_media
     return player
 

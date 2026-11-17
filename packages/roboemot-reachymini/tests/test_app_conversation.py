@@ -279,6 +279,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         assert radio_host.media is app.media
         assert app.voice_listener.media_audible == app.media.audible_at
         assert app.voice_listener.media_hold == app.media.hold_from
+        assert app.voice_listener.media_set == app.media.playing
         assert app.media.on_piece == app.voice_listener.hear_media  # the dance hears the radio
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
         # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)

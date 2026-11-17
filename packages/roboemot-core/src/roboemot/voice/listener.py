@@ -335,6 +335,7 @@ class VoiceListener:
         # start)
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
+        self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
         # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
         # thread only; sized in apply_config to the detector's window
         self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
@@ -453,7 +454,10 @@ class VoiceListener:
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
         pieces = max(1, round(cfg.music.window_s * MS_PER_S / cfg.tools.media.chunk_ms))
-        self._media_pieces = collections.deque(self._media_pieces, maxlen=pieces)
+        if self._media_pieces.maxlen != pieces or not (cfg.music.enabled and cfg.tools.radio.dance):
+            # a fresh deque, never a copy of the live one: the player's thread appends to it
+            # meanwhile; turned off, nothing stale is fed after it is turned on again
+            self._media_pieces = collections.deque(maxlen=pieces)
         if self.music is not None:  # last: a band above the Nyquist frequency raises here
             self.music.apply_config(cfg.music)
         elif cfg.music.enabled:
@@ -782,6 +786,8 @@ class VoiceListener:
             if start < self._media_until:  # the radio's last piece is still playing
                 return
             self._music_from_media = False
+            if not self._media_set():  # the station stopped: room music counts again
+                self._radio_music = False
             self._music_gap(self._media_until)  # one hole, from the radio's last piece
         speaking = speaking or self._music_hidden(start)
         if speaking:
@@ -790,7 +796,10 @@ class VoiceListener:
 
     def _music_audio(self, samples: np.ndarray, start: float, end: float, heard: bool) -> None:
         """One piece of audio for the classifier and the detector (``heard`` False: the
-        classifier skips it; the caller told the detector the hole). Publishes a change."""
+        classifier skips it; the caller told the detector the hole). Publishes a change, at
+        ``end``: for a radio piece that is when it will have played, so the music state may
+        lead the sound by up to one piece (the player pushes the next piece while the speaker
+        still holds one)."""
         classifier, scores = self.music_classifier, None
         if heard and classifier is not None:
             scores = self._timed("music_classifier", classifier.feed, samples, start)
@@ -807,6 +816,15 @@ class VoiceListener:
         event = self._timed("music", music.feed, samples, start)
         self._publish_music(music, event, end)
 
+    def _media_set(self) -> bool:
+        """Whether a station is set, held or not (the media player's ``playing``): music the
+        detector started on the radio's pieces is ignored only while it is."""
+        try:
+            return bool(self.media_set())
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+            return False
+
     def _music_gap(self, stamp: float) -> None:
         """A hole in the microphone's audio at ``stamp`` for the detector; none while it hears
         the radio's pieces, whose own stamps show their holes."""
@@ -815,7 +833,11 @@ class VoiceListener:
 
     def _media_feeds(self, at: float) -> bool:
         """Whether the detector hears the radio's pieces now: a detector, ``music.enabled``,
-        ``tools.radio.dance``, and the radio audible at ``at`` (SPEC 8, Radio playback)."""
+        ``tools.radio.dance``, and the radio audible at ``at`` (SPEC 8, Radio playback). At the
+        switch back to the microphone the detector sees one hole, from the end of the radio's
+        last piece to the first microphone chunk after it (microphone chunks before it are
+        skipped: they overlap the radio's timeline); a short hole keeps its envelope, a long
+        one clears it, as any hole."""
         cfg = self._cfg
         if self.music is None or not cfg.music.enabled or not cfg.tools.radio.dance:
             return False
@@ -870,14 +892,15 @@ class VoiceListener:
         """The wake gate's music predicate: whether music played at any time in [start, end]
         (lock-free, one frozen view of the detector). False without a detector, while
         ``music.enabled`` is off, while the radio is audible with ``tools.radio.dance`` off, and
-        while the music the detector holds started on the radio's own pieces: while the radio
-        is audible the media rule covers it, and while the radio is held no lyric can be heard,
-        though the detector carries that music through the hold for the dance (SPEC 8, Radio
-        playback). Music it heard on the microphone counts as ever."""
+        while a station is set and the music the detector holds started on the radio's own
+        pieces: while the radio is audible the media rule covers it, and while the radio is
+        held no lyric can be heard, though the detector carries that music through the hold for
+        the dance (SPEC 8, Radio playback). Music it heard on the microphone counts as ever, and
+        so does music once the station stopped (room music right after the radio)."""
         music = self.music
         if music is None or not self._cfg.music.enabled or self._music_hidden(start):
             return False
-        return not self._radio_music and music.during(start, end)
+        return not (self._radio_music and self._media_set()) and music.during(start, end)
 
     def music_state(self, now: float) -> MusicState | None:
         """The detector's state at ``now`` for the dance's room beat (lock-free, no blocking);
