@@ -223,11 +223,42 @@ def test_vad_on_radio_sound_does_not_pause_the_player():
         def awaiting_transcript(self):
             return False  # no addressed utterance waits for the server
 
+        def reply_window_open(self):
+            return False  # no announcement's reply window is open
+
     r = Rig()
     r.host.voice_listener = Ears()
     r.phase.name, r.phase.listening_flag = LISTENING, True
     r.player.play(JAZZ)
     assert r.step(10) == 10
+
+
+def test_the_announcements_reply_window_keeps_the_player_paused():
+    """Review I2 (owner decision 2026-11-17): while an announcement's reply window is open the
+    radio stays paused, so the reply is heard without the wake word; it rejoins after the
+    window closes and ``resume_after_s`` passed."""
+
+    class Ears:
+        reply = False
+
+        def awaiting_transcript(self):
+            return False
+
+        def reply_window_open(self):
+            return self.reply
+
+        def voice_active(self):
+            raise AssertionError("the player read the VAD")
+
+    r = Rig()
+    r.host.voice_listener = ears = Ears()
+    r.player.play(JAZZ)
+    assert r.step(2) == 2
+    ears.reply = True
+    assert r.step(10) == 0
+    ears.reply = False
+    r.step(round(r.cfg.tools.media.resume_after_s / r.chunk_s))
+    assert r.step(2) == 2
 
 
 def test_pause_from_the_announcer_pauses_now_and_resumes_after_idle():
@@ -561,6 +592,9 @@ def test_a_transcript_in_flight_pauses_the_player():
 
         def awaiting_transcript(self):
             return self.waiting
+
+        def reply_window_open(self):
+            return False
 
         def voice_active(self):
             raise AssertionError("the player read the VAD")

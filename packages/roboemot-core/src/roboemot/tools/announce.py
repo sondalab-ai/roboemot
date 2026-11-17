@@ -18,7 +18,8 @@ item in order:
 6. When no route answered, it says the fixed sentence of ``prompts/event_<kind>.<lang>.txt``
    with the local voice, when there is one, and plays the ``fallback`` cue.
 7. Once the announcement audio has ended it marks the item fired. An answered announcement
-   opens the follow-up window.
+   opens the follow-up window, a reply window that counts even while a station is set: the
+   radio stays paused in it (owner decision 2026-11-17).
 
 A timer announcement repeats ``repeat_after_s`` after it ended when no addressed utterance came
 since it started (an "ok, thanks" over it counts), at most ``repeat_max`` times; a reminder does

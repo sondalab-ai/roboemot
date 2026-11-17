@@ -490,6 +490,21 @@ def test_the_radio_stays_paused_for_the_whole_idle_wait(tmp_path):
     assert at < 75.0  # right after the speech, not announce_max_wait_s after the start
 
 
+def test_a_reply_in_the_window_over_a_set_station_stops_the_repeats(tmp_path):
+    """Review I2 (owner decision 2026-11-17): with a station set, the announcement still opens
+    its reply window; the reply the wake gate then addresses ("ok, thanks", no name) stops the
+    timer's repeats (the listener side: test_listener_media)."""
+    rig, _ = radio_rig(tmp_path)
+    rig.announcer.attach()
+    assert rig.announcer.handle(rig.timer().id)
+    assert rig.host.voice_listener.opened  # the reply window opened over the station
+    info = UtteranceInfo("en", 2, 1, 0.0, 0.0, 0.0, True, False, -20.0, None, None)
+    rig.host.bus.publish("percept.utterance", info, rig.clock.t)
+    rig.clock.t += 600
+    rig.announcer.run_repeats()
+    assert len(rig.worker.turns) == 1
+
+
 # ------------------------------------------------------------------ the bus hand-off
 
 

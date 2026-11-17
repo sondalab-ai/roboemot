@@ -129,3 +129,48 @@ def test_a_long_name_led_command_with_degraded_doa_wakes_while_media_plays():
     r.say()
     assert r.utterances[-1].addressed and r.utterances[-1].wake_word
     assert r.listener.snapshot()["name_first_no_face"] == 1  # no second rejection
+
+
+def test_the_announcements_reply_window_counts_while_a_station_is_set():
+    """Review I2 (owner decision 2026-11-17): an announcement's reply window counts while a
+    station is set (the radio stays paused in it), so "ok, thanks" without the name is
+    answered and the timer's repeats stop; once it closes the lyrics gate applies again."""
+    from test_voice_listener import FACE_RAD, direction_rig, say_text
+
+    r, _, _ = direction_rig("ok grazie", FACE_RAD, cfg=cfg("always"))
+    r.listener.media_playing = lambda: True
+    r.feed(silence(0.5))
+    assert not r.listener.reply_window_open()
+    r.listener.open_follow_up()  # the announcement's audio ended
+    assert r.listener.reply_window_open()  # the media player stays paused (test_media_player)
+    s = SimpleNamespace(start=r.t, face=None, face_info={})
+    assert r.listener._stream_gate(s, r.t) != "media"  # server turns hear the reply too
+    r.say()
+    assert r.utterances[-1].addressed and not r.utterances[-1].wake_word
+    assert r.infos[-1].addressed  # percept.utterance: the announcer drops the repeats
+    window = r.cfg.voice.fastpath.addressed_window_s
+    r.feed(silence(window + 1.0))
+    assert not r.listener.reply_window_open()  # closed: the radio rejoins
+    say_text(r, "amore mio")
+    assert not r.utterances[-1].addressed
+    assert r.listener.snapshot()["wake"]["decisions"]["rejected_media"] == 1
+
+
+def test_the_wake_gate_reply_window_over_media_and_a_wake_word_window_does_not():
+    gate = WakeGate("always", 5.0, 120.0, media=lambda: True)
+    gate.open_window(10.0)
+    assert gate.reply_window(12.0)
+    assert gate.addressable(enrolled_in_view=False, start=12.0)
+    out = gate.outcome(wake_word=False, enrolled_in_view=False, start=12.0, last_speech=13.0)
+    assert out == "window"  # a follow-up extends it, as any window
+    assert gate.reply_window(17.5)
+    assert not gate.reply_window(18.5)
+    out = gate.outcome(wake_word=False, enrolled_in_view=False, start=19.0, last_speech=20.0)
+    assert out == "rejected_media"  # closed: only the wake word over the radio
+    gate.outcome(wake_word=True, enrolled_in_view=False, start=30.0, last_speech=31.0)
+    assert not gate.reply_window(32.0)  # the wake word's window is not a reply window
+    out = gate.outcome(wake_word=False, enrolled_in_view=False, start=32.0, last_speech=33.0)
+    assert out == "rejected_media"
+    gate.open_window(40.0)
+    gate.close_window()  # a requested nap started
+    assert not gate.reply_window(41.0)
