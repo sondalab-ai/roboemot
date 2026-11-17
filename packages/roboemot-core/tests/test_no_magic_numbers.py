@@ -85,6 +85,7 @@ BEHAVIOUR_MODULES = [
     "runtime/host.py",
     "runtime/levels.py",
     "runtime/live.py",
+    "runtime/tools_state.py",
     "runtime/live_hardware.py",
     "runtime/live_video.py",
     "conversation/transcript.py",

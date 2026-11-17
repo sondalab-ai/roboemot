@@ -221,7 +221,7 @@ def test_every_schema_section_is_in_one_purpose_group_and_each_has_its_heading()
     purposes = page_purposes()
     listed = [s for _, names in purposes for s in names]
     assert [p for p, _ in purposes] == [
-        "safety", "voice", "behaviour", "perception", "motion", "models", "system"
+        "safety", "voice", "tools", "behaviour", "perception", "motion", "models", "system"
     ]  # fmt: skip
     assert sorted(listed) == sorted(RoboEmotConfig.model_fields), "each section once, none unknown"
     for lang in STRINGS:

@@ -21,6 +21,7 @@ from roboemot.webui.settings import SettingsEditor
 from .emotions import EmotionsState
 from .host import RuntimeHost
 from .live import LiveState
+from .tools_state import ToolsState
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,9 @@ def start_webui(
         undo.append(emotions.close)  # the engine stops keeping the tab's history
         undo.append(stack.subscribe(emotions.apply_config))
         emotions.apply_config(SimpleNamespace(config=stack.effective()))
+        tools = ToolsState(host, stack.effective())  # reads host.scheduler / media per call
+        undo.append(stack.subscribe(tools.apply_config))
+        tools.apply_config(SimpleNamespace(config=stack.effective()))
         server = make_server(
             host.perception.enrollment,
             host.diagnostics,
@@ -155,6 +159,7 @@ def start_webui(
             ),
             live=live,
             emotions=emotions,
+            tools=tools,
         )
     except Exception as exc:
         stop()

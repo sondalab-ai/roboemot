@@ -86,6 +86,7 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
         "/static/settings.js": None,
         "/static/live.js": None,
         "/static/emotions.js": None,
+        "/static/tools.js": None,
         "/static/app.js": None,
         "/static/fx.js": "module",
     }
@@ -287,6 +288,7 @@ def test_tabs_are_the_strings_that_exist():
         "settings",
         "live",
         "emotions",
+        "tools",
         "debug",
     ]
     for name in names:
