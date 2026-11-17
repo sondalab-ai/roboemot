@@ -60,7 +60,8 @@ class DayNap:
     def start_requested(self, t: float, min_s: float) -> None:
         """The person asked for a nap at ``t``: it starts now, and for ``min_s`` only a wake from
         outside ends it (:meth:`requested`). It counts as a nap, and a person was there, so a
-        pending resume is dropped."""
+        pending resume is dropped; no next nap is counting or held (:meth:`due_in`)."""
+        self.counting = self.held = False
         self.napping = True
         self.naps += 1
         self.started = t

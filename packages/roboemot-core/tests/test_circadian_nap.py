@@ -906,3 +906,32 @@ def test_after_a_stimulus_wake_the_countdown_uses_the_resume_time():
     run(x, c.wake_hold_s + 2 * STEP)
     left, held = due(x)
     assert not held and 0 < left <= c.nap_resume_after_s
+
+
+def test_no_countdown_and_no_hold_during_a_requested_nap():
+    """SPEC 7A, Requested nap: the robot naps, so the Live tab shows no next nap, even when
+    presence was holding a due nap off at the request and before the next model update."""
+    x = rig()
+    run(x, x.cfg.circadian.nap_after_s - STEP)
+    face(x)
+    run(x, 2 * STEP)
+    assert due(x) == (0.0, True)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    assert due(x) == (None, False)
+    for _ in range(int(x.cfg.circadian.requested_nap_min_s // STEP) - 1):
+        run(x, STEP)
+        assert due(x) == (None, False)
+
+
+def test_after_a_requested_nap_the_usual_countdown_rule_applies():
+    x = rig(requested_nap_min_s=600.0)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    run(x, 601.0)
+    assert x.r.model.reason == "nap" and due(x) == (None, False)  # an ordinary day nap now
+    face(x)
+    face(x, x.clock.t + 0.1)  # a confirmed face wakes it, as after any nap
+    run(x, STEP)
+    assert x.r.model.state == "awake"
+    run(x, x.cfg.circadian.wake_hold_s + 2 * STEP)
+    left, held = due(x)
+    assert not held and 0 < left <= x.cfg.circadian.nap_after_s
