@@ -21,8 +21,8 @@ import pytest
 from roboemot.config.schema import RoboEmotConfig, Station
 from roboemot.config.stack import KEYED_LISTS, ConfigStack, GuardrailError
 from roboemot.diagnostics import Diagnostics
-from roboemot.runtime.tools_state import ToolsError, ToolsState
-from roboemot.tools.radio_catalogue import GROUP_IDS, radio_catalogue
+from roboemot.runtime.tools_state import ToolsError, ToolsState, check_catalogue, folded_name
+from roboemot.tools.radio_catalogue import GROUP_IDS, parse_catalogue, radio_catalogue
 from roboemot.tools.scheduler import Scheduler
 from roboemot.webui import make_server
 from roboemot.webui.api import PASSIVE_POLLS, TOOLS_STATE, TOOLS_STATUS
@@ -772,3 +772,52 @@ def test_a_catalogue_station_is_added_and_removed_through_the_page_routes(served
     assert c.request("POST", "/api/settings/entry/remove", gone).status == 200
     assert names(served.stack) == ["Jazz", DOTTED]
     assert catalogued(c.request("GET", CATALOGUE).json)[pick["name"]]["added"] is False
+
+
+def test_added_folds_names_like_the_add_route_shapes_them():
+    """NFC, collapsed whitespace and case are folded on both sides of the compare."""
+    first = radio_catalogue().groups[0].stations[0]
+    spaced = "  ".join(first.name.upper().split(" ")) if " " in first.name else first.name.upper()
+    cfg = RoboEmotConfig(tools={"radio": {"stations": [{"name": spaced, "url": STATION_URL}]}})
+    host = SimpleNamespace(scheduler=None, media=None, circadian_runner=None)
+    assert catalogued(ToolsState(host, cfg).catalogue())[first.name]["added"]
+    assert folded_name("Cafe\u0301  Jazz") == folded_name("caf\u00e9 jazz")
+
+
+def test_a_case_variant_shows_as_added_although_the_route_would_take_it(tmp_path):
+    """Documented mismatch (SPEC 11, Radio): the mark is conservative, the route exact. A name
+    that differs only in case is a new station for the route, and the catalogue marks it added."""
+    first = radio_catalogue().groups[0].stations[0]
+    stack, editor = radio_editor(tmp_path)
+    editor.add_entry("tools.radio.stations", None, first.station())
+    variant = {**first.station(), "name": first.name.lower(), "url": "https://example.org/v.mp3"}
+    assert editor.add_entry("tools.radio.stations", None, variant)["changed"]
+    assert names(stack) == [first.name, first.name.lower()]
+    host = SimpleNamespace(scheduler=None, media=None, circadian_runner=None)
+    assert catalogued(ToolsState(host, stack.effective()).catalogue())[first.name]["added"]
+
+
+def test_a_broken_catalogue_is_logged_at_start_up_without_urls_and_the_page_gets_503(
+    served, monkeypatch, caplog
+):
+    from roboemot.runtime import tools_state
+
+    bad = {"groups": [{"id": "jazz", "stations": [{"name": "X", "url": STATION_URL}]}]}
+
+    def broken():
+        return parse_catalogue(bad)
+
+    monkeypatch.setattr(tools_state, "radio_catalogue", broken)
+    caplog.set_level(logging.DEBUG)
+    assert check_catalogue() is False
+    assert "radio station catalogue unusable (ValidationError)" in logged(caplog)
+    assert STATION_URL not in logged(caplog)
+    c = served.client
+    c.login()
+    resp = c.request("GET", CATALOGUE)
+    assert resp.status == 503 and resp.json["error"] == "radio_catalogue_unavailable"
+    assert STATION_URL not in logged(caplog)
+
+
+def test_the_shipped_catalogue_passes_the_start_up_check():
+    assert check_catalogue() is True

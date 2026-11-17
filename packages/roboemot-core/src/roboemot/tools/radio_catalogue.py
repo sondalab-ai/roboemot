@@ -52,9 +52,13 @@ class CatalogueStation(Strict):
     @model_validator(mode="before")
     @classmethod
     def _a_station(cls, data: Any) -> Any:
-        """The station part goes through ``Station``'s own validators (name, URL rules)."""
+        """The station part goes through ``Station``'s own validators (name, URL rules). A
+        missing station field is reported as missing, by name, before ``Station`` sees it."""
         if isinstance(data, dict):
-            station = Station.model_validate({k: data.get(k) for k in STATION_FIELDS})
+            missing = [k for k in STATION_FIELDS if k not in data]
+            if missing:
+                raise ValueError(f"field required: {', '.join(missing)}")
+            station = Station.model_validate({k: data[k] for k in STATION_FIELDS})
             return {**data, **station.model_dump()}
         return data
 

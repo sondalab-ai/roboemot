@@ -114,3 +114,11 @@ def test_an_unknown_or_repeated_group_is_refused():
     data["groups"][1]["id"] = data["groups"][0]["id"]
     with pytest.raises(ValidationError, match="duplicate group id"):
         parse_catalogue(data)
+
+
+@pytest.mark.parametrize("field", ["name", "url", "genres", "language"])
+def test_a_missing_station_field_is_reported_as_required(field):
+    data = raw()
+    del data["groups"][0]["stations"][0][field]
+    with pytest.raises(ValidationError, match=f"field required: {field}"):
+        parse_catalogue(data)

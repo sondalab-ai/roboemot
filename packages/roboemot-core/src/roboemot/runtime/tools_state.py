@@ -26,8 +26,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
+import yaml
+from pydantic import ValidationError
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.skills.host import http_client
@@ -53,6 +57,26 @@ TOOL_SKILLS: dict[str, tuple[str, ...]] = {
     "radio": ("radio_play", "radio_stop", "radio_volume"),
 }
 STOP_REASON = "webui"  # ``media.stopped``'s reason for the tab's Stop button
+
+
+def check_catalogue() -> bool:
+    """Read the shipped station catalogue once (web UI start-up): False, with one error line that
+    names the failure type only (a validation message would quote the file's URLs), when it
+    cannot be read. The tab then gets ``radio_catalogue_unavailable`` and hides the section."""
+    try:
+        radio_catalogue()
+    except (OSError, yaml.YAMLError, ValidationError) as exc:
+        log.error(
+            "radio station catalogue unusable (%s); the Tools tab hides it", type(exc).__name__
+        )
+        return False
+    return True
+
+
+def folded_name(name: str) -> str:
+    """A station name compared for the catalogue's ``added`` mark: NFC, runs of whitespace as one
+    space, no edge spaces (the add route's ``clean_label`` shape) and case folded."""
+    return " ".join(unicodedata.normalize("NFC", name).split()).casefold()
 
 
 class ToolsState:
@@ -137,11 +161,17 @@ class ToolsState:
     def catalogue(self) -> dict[str, Any]:
         """The shipped station catalogue (SPEC 11, Radio) for the tab's Add buttons: ``groups``,
         each ``{id, stations}``, every station with its fields and ``added`` when
-        ``tools.radio.stations`` already holds a station of that name (case ignored) or URL.
-        Served behind the PIN session, like the station editor's rows; the configured stations'
-        own URLs are compared here and never returned."""
+        ``tools.radio.stations`` already holds a station of that name or URL. Names compare
+        folded (``folded_name``), which is more conservative than the add route's exact match: a
+        case variant shows as added although the route would take it. Served behind the PIN
+        session, like the station editor's rows; the configured stations' own URLs are compared
+        here and never returned."""
+        try:
+            groups = radio_catalogue().groups
+        except (OSError, yaml.YAMLError, ValidationError):
+            raise ToolsError("radio_catalogue_unavailable") from None
         stations = self._cfg.tools.radio.stations
-        names = {s.name.casefold() for s in stations}
+        names = {folded_name(s.name) for s in stations}
         urls = {s.url for s in stations}
         return {
             "groups": [
@@ -150,12 +180,12 @@ class ToolsState:
                     "stations": [
                         {
                             **s.model_dump(),
-                            "added": s.name.casefold() in names or s.url in urls,
+                            "added": folded_name(s.name) in names or s.url in urls,
                         }
                         for s in group.stations
                     ],
                 }
-                for group in radio_catalogue().groups
+                for group in groups
             ]
         }
 

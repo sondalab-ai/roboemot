@@ -1256,6 +1256,7 @@ EN: dict[str, str] = {
     "tools_station_add": "Add",
     "tools_station_add_message": "Add the station {name}.",
     "tools_station_added": "{name} was added.",
+    "err_radio_catalogue_unavailable": "The station catalogue cannot be read; see the robot's log.",
     "tools_catalogue": "Station catalogue",
     "tools_catalogue_intro": (
         "Checked streams that ship with RoboEmot, grouped by genre. Nothing plays until you add a "
@@ -2609,6 +2610,9 @@ IT: dict[str, str] = {
     "tools_station_add": "Aggiungi",
     "tools_station_add_message": "Aggiungi la stazione {name}.",
     "tools_station_added": "{name} è stata aggiunta.",
+    "err_radio_catalogue_unavailable": (
+        "Il catalogo delle stazioni non si legge; guarda il log del robot."
+    ),
     "tools_catalogue": "Catalogo delle stazioni",
     "tools_catalogue_intro": (
         "Stream verificati che arrivano con RoboEmot, divisi per genere. Non suona nulla finché "

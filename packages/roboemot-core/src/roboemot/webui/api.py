@@ -98,6 +98,7 @@ TOOLS_STATUS = {
     "geocode_unreachable": HTTPStatus.BAD_GATEWAY,
     "geocode_failed": HTTPStatus.BAD_GATEWAY,
     "tools_too_soon": HTTPStatus.TOO_MANY_REQUESTS,
+    "radio_catalogue_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
 }
 # A timer or reminder id as the scheduler gives them (``t<n>``, ``r<n>``) or a hand edit made.
 TOOLS_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
@@ -1036,7 +1037,9 @@ class WebApi:
         """The shipped station catalogue (SPEC 11, Radio; 11A) with the stations already added
         marked. Behind the PIN session only; read-only and not a poll. Adding one is the settings
         entry route."""
-        return Response(HTTPStatus.OK, self._tools_source().catalogue())
+        return Response(
+            HTTPStatus.OK, self._tools_call(lambda _: self._tools_source().catalogue(), None)
+        )
 
     def _tools_body(self, req: Request, keys: set[str]) -> dict[str, Any]:
         """A Tools write's body with exactly ``keys`` plus ``pin`` allowed; the PIN is checked
