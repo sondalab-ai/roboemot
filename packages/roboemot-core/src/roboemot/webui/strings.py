@@ -308,8 +308,9 @@ EN: dict[str, str] = {
     "live_transcript_clear": "Clear",
     "live_prompts": "LLM prompts",
     "live_prompts_note": (
-        "Every request that left for a cloud LLM, as it was sent: names aliased, audio "
-        "summarized, never a key or an address. Kept in the robot's memory only, never saved."
+        "The conversation's chat requests to a cloud LLM and its realtime session's frames, as "
+        "sent: names aliased, audio summarized, never a key or an address. Route checks and "
+        "voice previews are not listed. Kept in the robot's memory only, never saved."
     ),
     "live_prompts_off": (
         "The LLM prompts log is off, so nothing is kept. To turn it on, open Settings, find "
@@ -1580,9 +1581,10 @@ IT: dict[str, str] = {
     "live_transcript_clear": "Cancella",
     "live_prompts": "Prompt LLM",
     "live_prompts_note": (
-        "Ogni richiesta partita verso un LLM cloud, così come è stata inviata: nomi con alias, "
-        "audio riassunto, mai una chiave o un indirizzo. Resta solo nella memoria del robot, "
-        "non viene mai salvata."
+        "Le richieste di chat della conversazione a un LLM cloud e i frame della sua sessione "
+        "realtime, così come inviati: nomi con alias, audio riassunto, mai una chiave o un "
+        "indirizzo. Le verifiche delle route e le anteprime della voce non compaiono. Resta "
+        "solo nella memoria del robot, non viene mai salvata."
     ),
     "live_prompts_off": (
         "Il registro dei prompt LLM è spento, quindi non si conserva nulla. Per attivarlo apri "

@@ -6549,10 +6549,11 @@ class LiveConfig(Strict):
     )
     prompts: bool = param(
         False,
-        "Keep the recent requests that leave the robot for a cloud LLM (chat prompts and "
-        "realtime frames, as sent: names aliased, audio summarized, never a key or URL) in "
-        "memory for the Live tab's LLM prompts panel, a debug aid; off by default and then "
-        "nothing at all is kept. Never saved, logged or put in the debug report",
+        "Keep the conversation's recent cloud LLM requests (its chat prompts and the realtime "
+        "session's frames, as sent: names aliased, audio summarized, never a key or URL; route "
+        "checks and voice previews are not kept) in memory for the Live tab's LLM prompts "
+        "panel, a debug aid; off by default and then nothing at all is kept. Never saved, "
+        "logged or put in the debug report",
         opt_in=True,
     )
     prompts_max_entries: int = param(
