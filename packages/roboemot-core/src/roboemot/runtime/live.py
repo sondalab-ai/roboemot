@@ -238,6 +238,7 @@ class LiveState:
                 "sleepiness": None if sleepiness is None else round(sleepiness, ROUND_DIGITS),
                 "nap_in_s": nap.get("due_in_s"),
                 "nap_held": bool(nap.get("held")),
+                "quiet": circ.get("quiet"),
             }
         return {
             "label": s.label,

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
+from roboemot.circadian.model import window_change
 from roboemot.circadian.nap import DayNap
 from roboemot.circadian.replay import RecordingSink, ReplayClock
 from roboemot.config import ConfigError, ConfigStack
@@ -935,3 +936,33 @@ def test_after_a_requested_nap_the_usual_countdown_rule_applies():
     run(x, x.cfg.circadian.wake_hold_s + 2 * STEP)
     left, held = due(x)
     assert not held and 0 < left <= x.cfg.circadian.nap_after_s
+
+
+# ---------------------------------------------- quiet hours indicator for the Live tab (2026-11-17)
+
+
+@pytest.mark.parametrize(
+    ("hour", "window", "want"),
+    [
+        (19.0, ("22:30", "07:00"), (False, 3.5)),
+        (23.0, ("22:30", "07:00"), (True, 8.0)),
+        (3.0, ("22:30", "07:00"), (True, 4.0)),
+        (7.0, ("22:30", "07:00"), (False, 15.5)),
+        (13.0, ("12:00", "14:00"), (True, 1.0)),
+        (15.0, ("12:00", "14:00"), (False, 21.0)),
+        (9.0, ("08:00", "08:00"), (False, None)),  # an empty window never starts
+    ],
+)
+def test_quiet_hours_change_says_whether_they_hold_and_hours_to_the_next_edge(hour, window, want):
+    active, left_h = window_change(hour, window)
+    assert active is want[0]
+    assert left_h == (None if want[1] is None else pytest.approx(want[1]))
+
+
+def test_the_report_carries_the_quiet_hours_window_state_and_countdown():
+    x = rig(hour=19.0)
+    q = x.r.snapshot()["quiet"]
+    assert q == {"start": "22:30", "end": "07:00", "active": False, "change_in_s": 12600.0}
+    y = rig(hour=23.0)
+    assert y.r.snapshot()["quiet"]["active"] is True
+    assert y.r.snapshot()["quiet"]["change_in_s"] == 8 * 3600.0

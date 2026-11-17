@@ -90,6 +90,7 @@ from .model import (
     CircadianState,
     State,
     in_window,
+    window_change,
 )
 from .motion import CircadianMotion
 from .nap import DayNap
@@ -575,6 +576,7 @@ class CircadianRunner:
             hold = self.model.hold_remaining(self._lag())
             c = self.cfg.circadian
             due = self.nap.due_in(self.clock.monotonic(), c.nap_after_s, c.nap_resume_after_s)
+            quiet, change_h = window_change(self.clock.hour(), c.quiet_hours)
             out: dict[str, Any] = {
                 "enabled": c.enabled,
                 "light_source": c.light_source,
@@ -591,6 +593,14 @@ class CircadianRunner:
                     "resumes": self.nap.resumes,
                     "due_in_s": None if due is None else round(due, 1),
                     "held": self.nap.held,
+                },
+                "quiet": {
+                    "start": c.quiet_hours[0],
+                    "end": c.quiet_hours[1],
+                    "active": quiet,
+                    "change_in_s": None
+                    if change_h is None
+                    else round(change_h * SECONDS_PER_HOUR, 1),
                 },
                 "present": self.present(),
                 "hold": None if hold is None else {"state": hold[0], "left_s": round(hold[1], 1)},

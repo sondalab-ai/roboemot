@@ -54,6 +54,17 @@ def in_window(hour: float, window: tuple[str, str]) -> bool:
     return start <= hour < end if start <= end else (hour >= start or hour < end)
 
 
+def window_change(hour: float, window: tuple[str, str]) -> tuple[bool, float | None]:
+    """Whether ``hour`` is inside ``window`` and the wall-clock hours until its next edge: its
+    end while inside, its start while outside; None for an empty window (start equal to end),
+    which never starts."""
+    start, end = _hhmm(window[0]), _hhmm(window[1])
+    if start == end:
+        return False, None
+    active = in_window(hour, window)
+    return active, ((end if active else start) - hour) % HOURS_PER_DAY
+
+
 class CircadianModel:
     def __init__(self, cfg: CircadianConfig, *, phase_shift_h: float = 0.0):
         self.cfg = cfg
