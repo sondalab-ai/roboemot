@@ -133,7 +133,7 @@ def test_the_payload_shape():
         "label": "calm", "valence": 0.25, "arousal": -0.1, "intensity": 0.4,
         "circadian": {
             "state": "awake", "reason": None, "sleepiness": 0.2,
-            "nap_in_s": None, "nap_held": False,
+            "nap_in_s": None, "nap_held": False, "quiet": None,
         },
     }  # fmt: skip
     assert s["modes"] == {
@@ -182,6 +182,7 @@ def test_the_mood_card_says_why_the_robot_rests():
         "sleepiness": None,
         "nap_in_s": None,
         "nap_held": False,
+        "quiet": None,
     }
 
 

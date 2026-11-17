@@ -173,6 +173,23 @@ test("the mood card counts down to the next nap, says when presence holds it, an
   assert.ok(!(await text({})).includes("NEXT NAP"));
 });
 
+test("the mood card shows the quiet hours window, whether they hold, and the time to the next edge", async (t) => {
+  const strings = { ...STRINGS, live_quiet: "QUIET", live_quiet_active: "ON NOW", live_quiet_starts: "start in {n}", live_quiet_ends: "end in {n}" };
+  const text = async (quiet) => {
+    const circadian = { ...STATE.mood.circadian, quiet };
+    const page = await livePage(t, { "GET /api/live/state": { ...STATE, mood: { ...STATE.mood, circadian } }, "GET /api/strings": { language: "en", strings } });
+    await openLive(page);
+    return page.document.querySelector("#live-cards").textContent;
+  };
+  const before = await text({ start: "22:30", end: "07:00", active: false, change_in_s: 11525 });
+  assert.ok(before.includes("QUIET 22:30–07:00") && before.includes("start in 3:12:05") && !before.includes("ON NOW"));
+  const inside = await text({ start: "22:30", end: "07:00", active: true, change_in_s: 4800 });
+  assert.ok(inside.includes("ON NOW") && inside.includes("end in 1:20:00"));
+  const empty = await text({ start: "08:00", end: "08:00", active: false, change_in_s: null });
+  assert.ok(empty.includes("QUIET 08:00–08:00") && !empty.includes("start in"));
+  assert.ok(!(await text(null)).includes("QUIET"));
+});
+
 test("the modes card says when the robot is alone and holding still", async (t) => {
   const strings = { ...STRINGS, live_alone: "ALONE STILL" };
   const alone = await livePage(t, {
