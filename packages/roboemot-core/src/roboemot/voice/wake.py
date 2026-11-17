@@ -20,6 +20,11 @@ While music plays at any time in the utterance (``music(start, end)``, the music
 SPEC 8) the wake word is required whatever the policy, and the open window does not count:
 without the wake word the outcome is ``rejected_music``, before any other rule and without the
 voice-at-face check. An utterance with the wake word is addressed over music as without it.
+
+While the robot's own radio plays (``media()``, the media player, SPEC 8, Radio playback) the
+same holds with the outcome ``rejected_media``: only the wake word (the name or a generic wake
+phrase) addresses the robot, so it never answers the lyrics of its own music. The follow-up
+window, a face in view and the policy do not count. It is asked before the music rule.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ DECISIONS = (
     "rejected_not_facing",
     "rejected_no_facing_data",
     "rejected_music",
+    "rejected_media",
 )
 # The voice-at-face check's verdicts (``at_face``); a rejection is counted ``rejected_<verdict>``.
 AT_FACE = "at_face"
@@ -47,6 +53,7 @@ NOT_FACING = "not_facing"
 NO_FACING_DATA = "no_facing_data"
 AtFace = Callable[[], str]
 Music = Callable[[float, float], bool]  # music at any time in [start, end] (audio clock)
+Media = Callable[[], bool]  # the robot's own radio plays now
 
 
 class WakeGate:
@@ -58,11 +65,14 @@ class WakeGate:
         window_s: float,
         max_s: float = math.inf,
         music: Music | None = None,
+        media: Media | None = None,
     ) -> None:
-        """``music`` says whether music played in [start, end] (None: never). It runs under
-        this gate's lock, like ``at_face``, so it may take only leaf locks."""
+        """``music`` says whether music played in [start, end] (None: never); ``media``
+        whether the robot's own radio plays now (None: never). Both run under this gate's lock,
+        like ``at_face``, so they may take only leaf locks."""
         self._lock = threading.Lock()
         self._music = music
+        self._media = media
         self._policy = policy
         self._window = window_s
         self._max = max_s
@@ -126,7 +136,8 @@ class WakeGate:
         """``decide`` with its outcome (one of ``DECISIONS``): a ``rejected_*`` one is not
         addressed, and says which rule rejected it (the Live tab's decision event)."""
         with self._lock:
-            music = self._music_in(start, last_speech)
+            media = self._media_now()
+            music = media or self._music_in(start, last_speech)
             required = self._required(enrolled_in_view) or music
             if not required:
                 outcome = "not_required"
@@ -138,7 +149,7 @@ class WakeGate:
                 self._opened, self._speaker = last_speech, speaker
                 outcome = "wake_word"
             else:
-                outcome = self._follow(start, speaker, music)
+                outcome = "rejected_media" if media else self._follow(start, speaker, music)
                 if outcome == "window":
                     outcome = _face_outcome(outcome, at_face)
             self._decisions[outcome] += 1
@@ -161,6 +172,8 @@ class WakeGate:
         Nothing is counted or changed: the listener asks it when speech starts and when it ends
         (SPEC 8, Realtime speech route), ``decide`` still decides."""
         with self._lock:
+            if self._media_now():
+                return False
             music = self._music_in(start, start if end is None else end)
             required = self._required(enrolled_in_view) or music
             return not required or self._follow(start, speaker, music) == "window"
@@ -177,6 +190,10 @@ class WakeGate:
         """Whether music played at any time in [start, end] (lock held); False without a
         music predicate. Asked once per decision, so the rule and its reason agree."""
         return self._music is not None and self._music(start, end)
+
+    def _media_now(self) -> bool:
+        """Whether the robot's own radio plays now (lock held); False without a predicate."""
+        return self._media is not None and self._media()
 
     def _follow(self, start: float, speaker: str | None, music: bool = False) -> str:
         """Outcome of an utterance without the wake word: ``rejected_music`` while music

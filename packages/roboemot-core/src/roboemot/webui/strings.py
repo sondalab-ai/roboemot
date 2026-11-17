@@ -150,6 +150,7 @@ EN: dict[str, str] = {
     ),
     "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
     "live_ev_unanswered_music": "Not answered: music is playing, the wake word is needed",
+    "live_ev_unanswered_media": "Not answered: the radio is playing, the wake word is needed",
     "live_ev_unanswered_skipped": (
         "Not answered: the cloud model skipped it (conversation: {conversation})"
     ),
@@ -1280,6 +1281,7 @@ IT: dict[str, str] = {
         "Senza risposta: nessun dato sullo sguardo (nessuna rotazione della testa misurata)"
     ),
     "live_ev_unanswered_music": "Senza risposta: c'è musica, serve la parola di attivazione",
+    "live_ev_unanswered_media": "Senza risposta: suona la radio, serve la parola di attivazione",
     "live_ev_unanswered_skipped": (
         "Senza risposta: il modello cloud l'ha ignorata (conversazione: {conversation})"
     ),

@@ -44,6 +44,8 @@ TOPICS = (
     "config.changed",
     "diag.event",
     "tools.due",
+    "media.playing",
+    "media.stopped",
     "frames.camera",
     "frames.audio_in",
     "frames.audio_out",

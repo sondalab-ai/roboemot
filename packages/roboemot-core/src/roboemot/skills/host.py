@@ -20,6 +20,7 @@ from ..config.schema import RoboEmotConfig
 if TYPE_CHECKING:
     import httpx
 
+    from ..media.player import MediaPlayer
     from ..tools.scheduler import Scheduler
 
 
@@ -32,7 +33,8 @@ class ToolHost:
     ``scheduler`` is the run's timers and reminders store (SPEC 11, Voice tools), set by runtime
     startup. ``http`` builds an HTTP client for one call (the caller closes it); runtime startup
     sets it, a test injects one over ``httpx.MockTransport``, and a network tool without it is
-    unavailable."""
+    unavailable. ``media`` is the run's media player (SPEC 11, Media player), set by runtime
+    startup only when the speaker can play media."""
 
     config: Callable[[], RoboEmotConfig]
     wall_now: Callable[[], datetime]
@@ -40,6 +42,7 @@ class ToolHost:
     nap: Callable[[], str] | None = None
     scheduler: Scheduler | None = None
     http: Callable[[], httpx.Client] | None = None
+    media: MediaPlayer | None = None
 
 
 def http_client() -> httpx.Client:

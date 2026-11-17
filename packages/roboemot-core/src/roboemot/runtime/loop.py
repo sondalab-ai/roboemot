@@ -175,7 +175,10 @@ def _tick_until_stopped(
                     speech=p.speech,
                     output=host.speech_output,
                     soothe=host.soothe_runner,
-                    in_session=host.conversation is not None and host.conversation.in_session(),
+                    # the radio playing counts as a session: the robot never hums over its
+                    # own music (SPEC 7B; 8, Radio playback)
+                    in_session=(host.conversation is not None and host.conversation.in_session())
+                    or (host.media is not None and host.media.playing()),
                     last_voice=p.voice_heard[0],
                     echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
                     hearing=p.listener is not None and p.listener.voice_active(),

@@ -31,6 +31,12 @@ counted ``aside.cut``), so the answer starts where it is pushed, never behind th
 S3). Whether a conversation turn is in progress (the gaps between its sentences included) is
 the caller's check: the output sees jobs, not turns (the cues' ``quiet``).
 
+``play_media`` is the radio's path (SPEC 8, Radio playback): pieces pushed outside the queue
+through a :class:`MediaSink`, which keeps them out of the speaking window, only while no job is
+queued or in flight and no sentence is on the timeline (speech always wins: no mixing, no
+ducking). Any job's first push cuts the media still in the sink, so it never waits behind it.
+Counted under ``media`` in the report.
+
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
 For the debug report (SPEC 12A) the output measures, for any backend:
@@ -155,6 +161,19 @@ class AsideSink(Protocol):
 
     def push_aside(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def cut_aside(self) -> bool: ...
+
+
+@runtime_checkable
+class MediaSink(Protocol):
+    """An ``AudioSink`` that can play media (the radio, SPEC 8, Radio playback): ``push_media``
+    queues it as a stream (resampled across pushes) that opens only the own-sound window
+    (``SpeechActivity.extend_own``), never the speaking window, so the listener keeps hearing
+    the room (the wake word over the music) and barge-in does not take it for the robot's voice.
+    It refuses media behind speech the sink holds (returns 0.0). ``cut_media`` drops the media
+    still queued or playing, never speech; whether it cut anything."""
+
+    def push_media(self, samples: np.ndarray, rate_hz: int) -> float: ...
+    def cut_media(self) -> bool: ...
 
 
 @dataclass
@@ -296,6 +315,8 @@ class SpeechOutput:
         self._in_flight = False  # a job is off the queue and not finished (``play_aside``)
         self._aside: collections.Counter[str] = collections.Counter()
         self._aside_until = -math.inf  # where the last aside sound ends in the sink
+        self._media_until = -math.inf  # where the media pushed last ends in the sink
+        self._media: collections.Counter[str] = collections.Counter()  # pushed, refused, cut
         self._cue_sounds_cut = 0  # cue sounds (``yields``) an answer cut or dropped
         self._ready = threading.Event()
         self._closed = False
@@ -618,6 +639,7 @@ class SpeechOutput:
                 self._question_end = min(self._question_end, now)
             if self._duck is not None:  # under the lock: no push applies the old episode after
                 self._duck.clear()
+            self._media_until = -math.inf  # the sink flush below drops the media too
         self.sink.stop()
         loop = self._loop
         if loop is not None:
@@ -692,6 +714,76 @@ class SpeechOutput:
         if busy or self.sink.playing_until() > self.clock():
             return "busy"
         return None
+
+    def play_media(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> bool:
+        """Push a piece of media (the radio, SPEC 8, Radio playback) to the sink now, outside the
+        queue, at ``volume_db``; whether it went. Speech always wins: refused while any job
+        (a sentence, a stream, a cue or another raw sound) is queued or in flight, a stop is
+        pending, or a sentence is on the speech timeline; and on a sink that is no
+        :class:`MediaSink` (never a raw job, which would open the speaking window). The check
+        and the push share the lock every push takes, so speech queued meanwhile never lands
+        behind it; the next job's first push cuts what is left of it (``cut_media``). Any
+        thread."""
+        sink = self.sink
+        if not isinstance(sink, MediaSink):
+            return False
+        x = np.asarray(samples, np.float32)
+        louder = np.clip(x * np.float32(db_to_gain(volume_db)), -1.0, 1.0)
+        with self._lock:
+            if self._media_refused():
+                self._media["refused"] += 1
+                return False
+            try:
+                until = sink.push_media(louder, rate_hz)
+            except Exception as exc:  # a sink bug costs the piece, never the output
+                log.warning("speech: media: %s", type(exc).__name__)
+                until = 0.0
+            if until <= 0.0:
+                self._media["failed"] += 1
+                return False
+            self._media_until = until
+            self._media["pushed"] += 1
+        return True
+
+    def media_blocked(self) -> bool:
+        """Whether ``play_media`` would refuse now: robot speech, a cue or a raw sound is
+        queued or playing (the media player's pause, SPEC 8). Any thread."""
+        with self._lock:
+            return self._media_refused()
+
+    def media_ahead_s(self) -> float:
+        """Seconds of media pushed and not yet played (0 when none): the player pushes the
+        next piece only when this is at most one piece. Any thread."""
+        with self._lock:
+            return max(0.0, self._media_until - self.clock())
+
+    def cut_media(self) -> bool:
+        """Drop the media still queued or playing in the sink (the player paused or stopped);
+        never speech. Whether it cut anything. Any thread."""
+        with self._lock:
+            return self._cut_media()
+
+    def _media_refused(self) -> bool:
+        """``media_blocked`` with the lock held (the timeline takes its own lock after ours, as
+        ``stop`` does)."""
+        busy = self._closed or self._stopping or self._jobs or self._in_flight
+        return bool(busy) or self.timeline.playing(self.clock())
+
+    def _cut_media(self) -> bool:
+        """Cut the media in the sink when some may still play (lock held); whether it did."""
+        pending = self._media_until > self.clock()
+        self._media_until = -math.inf
+        if not pending:
+            return False
+        sink = self.sink
+        try:
+            cut = isinstance(sink, MediaSink) and sink.cut_media()
+        except Exception as exc:  # a sink bug costs the cut, never the answer
+            log.warning("speech: media cut: %s", type(exc).__name__)
+            cut = False
+        if cut:
+            self._media["cut"] += 1
+        return cut
 
     def cancel(self, job_id: int) -> None:
         """Drop raw job ``job_id`` only: removed if still queued; if it is the one in flight,
@@ -852,6 +944,7 @@ class SpeechOutput:
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
             aside, cue_sounds_cut = dict(self._aside), self._cue_sounds_cut
+            media = dict(self._media)
             rtf, rtf_sentence, push_ms, timeline_ms = (
                 list(self._rtf),
                 list(self._rtf_sentence),
@@ -873,6 +966,7 @@ class SpeechOutput:
             "no_voice": self.no_voice,
             "aside": aside,
             "cue_sounds_cut": cue_sounds_cut,
+            "media": media,
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
@@ -929,6 +1023,8 @@ class SpeechOutput:
         with self._lock:
             if self._stale(job) or job.id in self._raw_cancelled:
                 return False
+            if self._media_until > self.clock():
+                self._cut_media()  # speech, a cue or a hum never waits behind the radio
             now, until = self.clock(), self.sink.playing_until()
             if not isinstance(job, _RawJob) and self._aside_until > now:
                 until = self._cut_aside()  # the answer never waits behind the blip (SPEC 8)
@@ -982,6 +1078,8 @@ class SpeechOutput:
         try:
             while True:
                 with self._lock:
+                    if self._media_until > self.clock():
+                        self._cut_media()  # a cue or a hum never waits behind the radio
                     wait_s = self._queue_end() - self.clock()
                 if wait_s <= 0:
                     break

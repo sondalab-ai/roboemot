@@ -7087,12 +7087,137 @@ class WeatherConfig(Strict):
         return value
 
 
+# The range of tools.media.volume_db, shared with the player's volume steps (radio_volume).
+MEDIA_VOLUME_MIN_DB = -40.0
+MEDIA_VOLUME_MAX_DB = 0.0
+RADIO_SCHEMES = ("http", "https")  # many radio streams are plain http (SPEC 11, Radio)
+# Characters a station URL may not hold besides space, control characters and the backslash
+# (``route_url_ok``): the decoder passes the URL to gst-launch-1.0 as a double-quoted value of
+# its pipeline description, where a quote would end the value and ``!`` links elements
+# (SPEC 11, 12).
+STATION_URL_FORBIDDEN = frozenset("\"'!`")
+
+
+class MediaConfig(Strict):
+    """The media player that plays radio streams through the robot's speaker (SPEC 8, Radio
+    playback; SPEC 11, Voice tools, Media player; 11A)."""
+
+    volume_db: float = param(
+        -12.0,
+        "Music volume, apart from the voice volume; radio_volume steps it",
+        unit="dB",
+        ge=MEDIA_VOLUME_MIN_DB,
+        le=MEDIA_VOLUME_MAX_DB,
+    )
+    volume_step_db: float = param(
+        3.0,
+        "How much one radio_volume up or down changes the music volume",
+        unit="dB",
+        ge=1,
+        le=12,
+    )
+    chunk_ms: int = param(
+        200,
+        "Audio the player decodes and pushes to the speaker at a time",
+        unit="ms",
+        ge=50,
+        le=1000,
+        advanced=True,
+    )
+    resume_after_s: float = param(
+        1.5,
+        "The music rejoins the live stream after this long with no robot speech and no open "
+        "addressed turn",
+        unit="s",
+        ge=0,
+        le=30,
+        advanced=True,
+    )
+    connect_timeout_s: float = param(
+        8.0,
+        "Longest wait for a stream's first audio, and for more audio while it plays; a slower "
+        "stream gives the error unreachable, or stops the player",
+        unit="s",
+        ge=1,
+        le=30,
+        advanced=True,
+    )
+    max_play_s: int = param(
+        7200,
+        "The player stops after playing this long",
+        unit="s",
+        ge=60,
+        le=43200,
+    )
+
+
+class Station(Strict):
+    """One radio station (SPEC 11, Voice tools, Radio): the model picks it by name or genre;
+    only its URL is ever played."""
+
+    name: str = param("", "Station name, as the model and the person say it")
+    url: str = param(
+        "",
+        "Stream URL: http or https with a host, no user info, spaces, quotes or exclamation "
+        "marks. It is played as written (redirects are not followed) and never logged",
+    )
+    genres: list[str] = param([], "Genres the station plays; a genre picks the first station")
+    language: str | None = param(None, "Language the station speaks in, if any")
+
+    @field_validator("name")
+    @classmethod
+    def _named(cls, value: str) -> str:
+        """A station needs a name: the model picks it by name."""
+        if not value.strip():
+            raise ValueError("a station needs a name")
+        return value.strip()
+
+    @field_validator("url")
+    @classmethod
+    def _plain_stream_url(cls, value: str) -> str:
+        """http or https with a host (``route_url_ok``), no user info, and no character the
+        decoder's pipeline description reads as syntax (SPEC 11, 12). The error never quotes
+        the URL."""
+        import httpx  # lazy: keeps the config package light
+
+        if not route_url_ok(value, RADIO_SCHEMES):
+            raise ValueError("must be an http or https URL with a host")
+        if any(c in STATION_URL_FORBIDDEN for c in value):
+            raise ValueError("must hold no quotes, backquotes or exclamation marks")
+        if httpx.URL(value).userinfo:
+            raise ValueError("must have no user info")
+        return value
+
+
+class RadioConfig(Strict):
+    """Internet radio (SPEC 11, Voice tools, Radio; 11A; 12: an admin opt-in)."""
+
+    enabled: bool = param(
+        False,
+        "Let the robot play internet radio from the station list when asked. The robot "
+        "connects to the station's URL over the internet (SPEC 12)",
+        opt_in=True,
+    )
+    stations: list[Station] = param(
+        [],
+        "Stations the robot may play; the model picks one by name or genre and never passes a URL",
+        admin_only=True,
+    )
+    dance: bool = param(
+        True,
+        "The music detector may start the dance on the robot's own radio; off, it ignores "
+        "music while the radio plays",
+    )
+
+
 class ToolsConfig(Strict):
     """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
     tool adds its own sub-section."""
 
     scheduler: SchedulerConfig = param({}, "SPEC 11, 11A: timers and reminders")
     weather: WeatherConfig = param({}, "SPEC 11, 11A, 12: weather forecast (admin opt-in)")
+    media: MediaConfig = param({}, "SPEC 8, 11, 11A: the media player the radio plays through")
+    radio: RadioConfig = param({}, "SPEC 11, 11A, 12: internet radio (admin opt-in)")
 
 
 # --------------------------------------------------------------------------- root

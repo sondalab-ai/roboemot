@@ -55,6 +55,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "not_facing",
         "no_facing_data",
         "music",
+        "media",
         "skipped",
         "skipped_late",
         "stop_consumed",
