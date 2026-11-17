@@ -6,8 +6,9 @@ descriptions carry the local date, weekday and time in ``circadian.timezone``, s
 resolves "tomorrow at six" itself. A result is JSON with the item's ``id``, ``kind`` and local
 ``due`` time; an error is ``{"error": code}``: the store's ``full``, ``too_long``, ``in_past``,
 ``too_far``, ``bad_days``, ``empty``, and this module's ``bad_date``, ``bad_time`` and
-``not_found``. Logs carry skill names, ids and codes only, never a label or a reminder text
-(SPEC 12).
+``not_found``. The cancel skills stay offered with nothing active (owner decision 2026-11-17):
+a call then gets ``not_found``, and the model says the item already ended. Logs carry skill
+names, ids and codes only, never a label or a reminder text (SPEC 12).
 """
 
 from __future__ import annotations
@@ -48,12 +49,18 @@ TIMER_SET = (
     "Start a countdown timer for the person: the duration in seconds (convert minutes and "
     "hours yourself) and an optional label. You announce it when it ends"
 )
-TIMER_CANCEL = "Cancel a running timer, by its id or label"
+# Said to the model with each cancel skill: an empty store still offers them (owner decision
+# 2026-11-17), so "delete the timer" after it rang gets a clear answer, not "I can't help".
+NOT_FOUND_HINT = (
+    "The error not_found means no such {kind} is active: tell the person so, for example that "
+    "it already ended or was removed. Never say that you cannot help"
+)
+TIMER_CANCEL = "Cancel a running timer, by its id or label. " + NOT_FOUND_HINT.format(kind="timer")
 REMINDER_SET = (
     "Set a reminder at a local date and clock time, once or repeating. Resolve relative days "
     "(tomorrow, next Friday) yourself from the current local time below. You announce it then"
 )
-REMINDER_CANCEL = "Cancel a reminder, by its id or text"
+REMINDER_CANCEL = "Cancel a reminder, by its id or text. " + NOT_FOUND_HINT.format(kind="reminder")
 SCHEDULE_LIST = "List the active timers and reminders with their local due times"
 
 
@@ -168,6 +175,7 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         describe=described(TIMER_CANCEL),
         available=available,
         choices={"which": choices("timer")},
+        offer_without_choices=True,
     )
     def timer_cancel(which: Which) -> SkillResult:
         return cancel("timer_cancel", "timer", which)
@@ -194,6 +202,7 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         describe=described(REMINDER_CANCEL),
         available=available,
         choices={"which": choices("reminder")},
+        offer_without_choices=True,
     )
     def reminder_cancel(which: Which) -> SkillResult:
         return cancel("reminder_cancel", "reminder", which)

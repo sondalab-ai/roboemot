@@ -3,6 +3,7 @@ timer and reminder skills over the scheduler on ``ToolHost.scheduler``."""
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -11,13 +12,15 @@ from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig, SchedulerConfig
 from roboemot.skills.host import ToolHost
 from roboemot.skills.plugins import load_plugin_skill_sets
-from roboemot.skills.registry import SkillRegistry
+from roboemot.skills.registry import SkillContext, SkillRegistry, execute
 from roboemot.tools import timers
 from roboemot.tools.scheduler import Scheduler
 
 ROME = ZoneInfo("Europe/Rome")
 T0 = datetime(2026, 11, 16, 9, 0, tzinfo=UTC)  # Monday 10:00 in Rome
 NAMES = ["timer_set", "timer_cancel", "reminder_set", "reminder_cancel", "schedule_list"]
+CTX = SkillContext(speaker="p1", language="it", now=10.0)
+EXEC = {"timeout_s": 1.0, "max_chars": 50, "enum_max": 20}
 
 
 class Clock:
@@ -160,8 +163,26 @@ def test_cancel_by_id_or_label_with_choices(tmp_path):
     assert content(fns["timer_cancel"](which="pasta")) == {"error": "not_found"}
     assert content(fns["reminder_cancel"](which=r["id"])) == {"ok": True, "id": r["id"]}
     assert host.scheduler.items() == []
-    assert tc.resolved_choices()["which"] == []  # nothing to cancel: not offered
-    assert SkillRegistry([fns["timer_cancel"]]).offered(["timer_cancel"]) == []
+    assert tc.resolved_choices() == {}  # nothing to cancel: a plain string, still offered
+
+
+async def test_cancel_with_nothing_active_is_offered_and_says_not_found(tmp_path):
+    """Owner decision 2026-11-17: "Ok, grazie. Elimina il timer." after an announced timer
+    (removed from the store) must reach ``timer_cancel``, so the robot says the timer already
+    ended instead of "I can't help"."""
+    _, fns, _ = rig(tmp_path)
+    names = ["timer_cancel", "reminder_cancel"]
+    reg = SkillRegistry([fns[n] for n in names])
+    offered = reg.offered(names)
+    assert [s.name for s in offered] == names
+    snap = SkillRegistry.snapshot_choices(offered, EXEC["enum_max"])
+    for tool in SkillRegistry.tools(offered, choices=snap, max_chars=EXEC["max_chars"]):
+        which = tool["function"]["parameters"]["properties"]["which"]
+        assert which["type"] == "string" and "enum" not in which
+        assert "not_found" in tool["function"]["description"]
+    for name in names:
+        out = await execute(reg, names, name, {"which": "il timer"}, CTX, choices=snap, **EXEC)
+        assert json.loads(out.content) == {"error": "not_found"}
 
 
 def test_schedule_list_gives_local_times(tmp_path):

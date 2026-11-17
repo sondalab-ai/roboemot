@@ -4,10 +4,12 @@
 player (``ToolHost.media``). The model picks a station name or a genre from ``choices``; a genre
 plays the first station that lists it. The model never passes a URL: only a listed URL plays.
 ``radio_stop`` stops it and ``radio_volume(change)`` steps the music volume up or down by
-``tools.media.volume_step_db``. ``radio_play`` is available only while ``tools.radio.enabled``
-is on, the station list is not empty and the run has a player (read on every check);
-``radio_stop`` and ``radio_volume`` are available then too, and also whenever something plays,
-so "stop the radio" always has a tool. A stream that does not start gives
+``tools.media.volume_step_db``. ``radio_play`` is available while ``tools.radio.enabled`` is on
+and the run has a player (read on every check). With no station it is still offered (owner
+decision 2026-11-17): it returns ``{"error": "not_configured"}`` and plays nothing, so the robot
+tells the person to add a station in the web UI's Tools tab. ``radio_stop`` and ``radio_volume``
+are available while the radio is on with a station and a player, and also whenever something
+plays, so "stop the radio" always has a tool. A stream that does not start gives
 ``{"error": "unreachable"}``; the player stops on a later drop by itself. The connect wait stays
 ``TOOL_TIMEOUT_MARGIN_S`` below ``conversation.tool_timeout_s``, so the model is never told
 ``timeout`` about a stream that then plays. Logs carry the skill, the status and the station
@@ -29,7 +31,9 @@ log = logging.getLogger(__name__)
 
 PLAY_DESCRIPTION = (
     "Play internet radio through the robot's speaker: pick a station by its name, or a genre "
-    "to play the first station of that genre. The music pauses while you speak"
+    "to play the first station of that genre. The music pauses while you speak. "
+    "The error not_configured means no station is set up yet: tell the person to add one in "
+    "the Tools tab of the robot's web UI. Never offer a station or a link of your own"
 )
 STOP_DESCRIPTION = "Stop the radio that is playing"
 VOLUME_DESCRIPTION = "Make the radio music louder (up) or quieter (down) by one step"
@@ -38,6 +42,7 @@ Change = Annotated[Literal["up", "down"], Desc("up: louder; down: quieter")]
 UNAVAILABLE = "unavailable"
 NOT_PLAYING = "not_playing"
 NOT_FOUND = "not_found"
+NOT_CONFIGURED = "not_configured"
 # How far below conversation.tool_timeout_s the connect wait ends: the skill returns its own
 # result before the executor abandons it (a margin for the thread hand-off, not a behaviour).
 TOOL_TIMEOUT_MARGIN_S = 0.5
@@ -64,32 +69,38 @@ def pick(cfg: RoboEmotConfig, wanted: str) -> Station | None:
 
 
 def skills(host: ToolHost) -> list[Callable[..., Any]]:
-    """The radio tools over ``host``: ``radio_play``, ``radio_stop`` and ``radio_volume``,
-    available while ``tools.radio.enabled`` is on, ``tools.radio.stations`` is not empty and
-    ``host.media`` is set; stop and volume also whenever something plays. Side-effect free: it
-    only builds the skills, so the realtime check may call it with a throwaway host."""
+    """The radio tools over ``host``: ``radio_play``, ``radio_stop`` and ``radio_volume``.
+    ``radio_play`` is available while ``tools.radio.enabled`` is on and ``host.media`` is set,
+    with or without stations; stop and volume need a station too, or something that plays.
+    Side-effect free: it only builds the skills, so the realtime check may call it with a
+    throwaway host."""
 
     def available() -> bool:
         cfg = host.config()
-        return cfg.tools.radio.enabled and bool(cfg.tools.radio.stations) and host.media is not None
+        return cfg.tools.radio.enabled and host.media is not None
 
     def controllable() -> bool:
         player = host.media
-        return available() or (player is not None and player.now_playing() is not None)
+        playing = player is not None and player.now_playing() is not None
+        return (available() and bool(host.config().tools.radio.stations)) or playing
 
     @skill(
         llm_visible=True,
         description=PLAY_DESCRIPTION,
         available=available,
         choices={"station": lambda: names_and_genres(host.config())},
+        offer_without_choices=True,
     )
     def radio_play(station: StationArg) -> SkillResult:
         cfg, player = host.config(), host.media
         if player is None or not cfg.tools.radio.enabled:
             log.info("radio_play: %s", UNAVAILABLE)
             return SkillResult({"error": UNAVAILABLE})
+        if not cfg.tools.radio.stations:
+            log.info("radio_play: %s", NOT_CONFIGURED)
+            return SkillResult({"error": NOT_CONFIGURED})
         chosen = pick(cfg, station)
-        if chosen is None:  # the list changed after the model was shown it
+        if chosen is None:  # not on the list (it changed, or the model was shown none)
             log.info("radio_play: %s", NOT_FOUND)
             return SkillResult({"error": NOT_FOUND})
         budget_s = cfg.conversation.tool_timeout_s - TOOL_TIMEOUT_MARGIN_S

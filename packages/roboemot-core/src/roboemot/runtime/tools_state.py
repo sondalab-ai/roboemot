@@ -111,7 +111,10 @@ class ToolsState:
         }
 
     def _tools(self, cfg: RoboEmotConfig) -> list[dict[str, Any]]:
-        """Each tool's switch and whether the model may use it now (its skills' ``available``)."""
+        """Each tool's switch and whether it is ready: the run has its part and, for weather and
+        radio, it is set up (a place, a station). A tool that is on but not set up is still
+        offered to the model, which answers ``not_configured`` (owner decision 2026-11-17), so
+        here it stays not available and the tab keeps its hint ("Set a place first")."""
         listed = set(cfg.conversation.llm_skills)
         host = self._host
         switch = {name: set(skills) <= listed for name, skills in TOOL_SKILLS.items()}

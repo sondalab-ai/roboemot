@@ -3,6 +3,7 @@ skills over ``ToolHost.media``."""
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -11,11 +12,13 @@ from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig, Station
 from roboemot.skills.host import ToolHost
 from roboemot.skills.plugins import load_plugin_skill_sets
-from roboemot.skills.registry import SkillRegistry
+from roboemot.skills.registry import SkillContext, SkillRegistry, execute
 from roboemot.skills.schema import ArgError, validate
 from roboemot.tools import radio
 
 NAMES = ["radio_play", "radio_stop", "radio_volume"]
+CTX = SkillContext(speaker="p1", language="it", now=10.0)
+EXEC = {"timeout_s": 1.0, "max_chars": 50, "enum_max": 20}
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 JAZZ = {"name": "Jazz FM", "url": "http://jazz.example.test/live", "genres": ["jazz", "swing"]}
 ROCK = {"name": "Rock One", "url": "https://rock.example.test/s", "genres": ["rock", "jazz"]}
@@ -70,14 +73,16 @@ def test_core_registers_the_radio_plugin_and_lists_it_by_default():
     assert set(NAMES) <= set(RoboEmotConfig().conversation.llm_skills)
 
 
-def test_radio_not_offered_when_disabled_or_no_stations():
+def test_radio_not_offered_when_disabled_or_without_a_player():
     host, fns, cfg = rig(enabled=False)
     assert not any(fn.skill.is_available() for fn in fns.values())
     assert SkillRegistry(list(fns.values())).offered(NAMES) == []
-    cfg["cfg"] = RoboEmotConfig.model_validate(
+    cfg["cfg"] = RoboEmotConfig.model_validate(  # read live
         {"tools": {"radio": {"enabled": True, "stations": []}}}
     )
-    assert not any(fn.skill.is_available() for fn in fns.values())  # read live
+    assert fns["radio_play"].skill.is_available()
+    assert not fns["radio_stop"].skill.is_available()  # nothing to stop or turn up
+    assert not fns["radio_volume"].skill.is_available()
     cfg["cfg"] = RoboEmotConfig.model_validate(
         {"tools": {"radio": {"enabled": True, "stations": [JAZZ]}}}
     )
@@ -149,6 +154,29 @@ def test_stop_and_volume_stay_available_while_something_plays():
     assert fns["radio_stop"].skill.is_available() and fns["radio_volume"].skill.is_available()
     assert fns["radio_stop"]().content == {"ok": True, "station": "Jazz FM"}
     assert not fns["radio_stop"].skill.is_available()  # nothing plays any more
+
+
+async def test_radio_on_without_stations_is_offered_and_says_not_configured():
+    """Owner decision 2026-11-17: "metti un po' di musica" with the radio on and no station
+    must reach ``radio_play``, so the robot can say how to add a station. It plays nothing."""
+    host, fns, _ = rig(stations=())
+    reg = SkillRegistry(list(fns.values()))
+    offered = reg.offered(NAMES)
+    assert [s.name for s in offered] == ["radio_play"]
+    snap = SkillRegistry.snapshot_choices(offered, EXEC["enum_max"])
+    [tool] = SkillRegistry.tools(offered, choices=snap, max_chars=EXEC["max_chars"])
+    station = tool["function"]["parameters"]["properties"]["station"]
+    assert station["type"] == "string" and "enum" not in station
+    assert "not_configured" in tool["function"]["description"]
+    out = await execute(reg, NAMES, "radio_play", {"station": "jazz"}, CTX, choices=snap, **EXEC)
+    assert json.loads(out.content) == {"error": "not_configured"}
+    assert host.media.played == []
+
+
+def test_with_stations_an_unlisted_name_is_not_found_and_plays_nothing():
+    host, fns, _ = rig()
+    assert fns["radio_play"](station="http://evil.example.test/x").content == {"error": "not_found"}
+    assert host.media.played == []
 
 
 def test_radio_results_are_known_result_keys():

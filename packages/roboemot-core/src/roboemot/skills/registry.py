@@ -64,6 +64,7 @@ class Skill:
     describe: Callable[[], str] | None = None  # builds the description at run time
     follow_up: bool = True  # False: its result never changes what the robot says
     available: Callable[[], bool] | None = None  # checked per request and per call
+    offer_without_choices: bool = False  # an empty choice list becomes a plain string
 
     def is_available(self) -> bool:
         """Whether the skill may be offered and run now: ``available()`` when set, else True.
@@ -86,10 +87,15 @@ class Skill:
         return self.signature.params
 
     def resolved_choices(self, enum_max: int | None = None) -> dict[str, list[Any]]:
-        """The run-time choices of each parameter that has them, cut to ``enum_max`` items."""
+        """The run-time choices of each parameter that has them, cut to ``enum_max`` items.
+        With ``offer_without_choices`` an empty list is left out, so that parameter is a plain
+        string in the schema and the executor checks only its length: the skill decides
+        (owner decision 2026-11-17, SPEC 11, LLM tools)."""
         out = {}
         for name, source in self.choices.items():
             items = list(source())
+            if not items and self.offer_without_choices:
+                continue
             if enum_max is not None and len(items) > enum_max:
                 log.warning(
                     "skill %s: %d choices for %s, only the first %d are offered "
@@ -111,6 +117,7 @@ def skill(
     describe: Callable[[], str] | None = None,
     follow_up: bool = True,
     available: Callable[[], bool] | None = None,
+    offer_without_choices: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
@@ -125,7 +132,10 @@ def skill(
     (SPEC 8, tool rounds). Plugin skills keep the default: their result may be the answer.
     ``available`` says whether the skill may be used now (a switch off, a part the run lacks);
     it is checked when each request is built and again at call time, so it must read live state
-    (SPEC 11, LLM tools)."""
+    (SPEC 11, LLM tools). ``offer_without_choices`` keeps the skill offered while a ``choices``
+    list is empty: that parameter is then a plain string within its cap and the skill answers
+    for a value it does not know (a tool turned on but not set up says ``not_configured``).
+    Without it, an empty list hides the skill."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
@@ -145,6 +155,7 @@ def skill(
             describe,
             follow_up=follow_up,
             available=available,
+            offer_without_choices=offer_without_choices,
         )
         return fn
 
@@ -213,6 +224,7 @@ class SkillRegistry:
             and s.name in allow
             and s.is_available()
             and all(s.resolved_choices().values())  # a parameter with nothing to choose from
+            # (an opted-in skill leaves an empty list out, so it stays offered)
         ]
 
     @staticmethod

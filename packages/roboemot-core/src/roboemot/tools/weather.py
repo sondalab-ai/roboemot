@@ -2,7 +2,9 @@
 
 ``weather`` returns the current conditions and a daily forecast for ``circadian.location`` as
 metric, structured JSON; the model phrases it. It is an admin opt-in (``tools.weather.enabled``)
-and is available only with a location and an HTTP client (``ToolHost.http``). A result is cached
+and is available with an HTTP client (``ToolHost.http``). Without a location it is still offered
+(owner decision 2026-11-17): it returns ``{"error": "not_configured"}`` and sends no request, so
+the robot tells the person to set the place in the web UI's Tools tab. A result is cached
 by ``(url, lat, lon, days)`` for ``tools.weather.cache_s``; a network error or a non-2xx answer
 (a redirect included: none is followed) gives ``{"error": "unreachable"}``, and a malformed or
 oversized answer ``{"error": "failed"}``; an error is never cached. Only numbers checked as
@@ -57,6 +59,7 @@ GEOCODE_FORMAT = "json"
 UNREACHABLE = "unreachable"
 UNAVAILABLE = "unavailable"
 FAILED = "failed"
+NOT_CONFIGURED = "not_configured"
 # A 7-day forecast is about 2 KB and 10 places about 4 KB: a larger body is not Open-Meteo's.
 MAX_BODY_BYTES = 65536
 DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -96,7 +99,9 @@ WMO_WORDS: dict[int, str] = {
 
 DESCRIPTION = (
     "Get the weather at the robot's home: the current conditions and a daily forecast (today "
-    "first), in metric units. Phrase it for the person; ask for more days only when needed"
+    "first), in metric units. Phrase it for the person; ask for more days only when needed. "
+    "The error not_configured means the robot's place is not set yet: tell the person to set "
+    "it in the Tools tab of the robot's web UI"
 )
 Days = Annotated[
     int, Range(1, FORECAST_DAYS_CEILING), Desc("Days of forecast, today included; 1 is today")
@@ -314,15 +319,16 @@ def geocode(
 
 def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[Callable[..., Any]]:
     """The weather tool over ``host``: one skill, ``weather``, available while
-    ``tools.weather.enabled`` is on, ``circadian.location`` is set and the run has an HTTP client
-    (all read on every check). ``clock`` is the cache's monotonic clock. Side-effect free: it only
-    builds the skill, so the realtime check may call it with a throwaway host."""
+    ``tools.weather.enabled`` is on and the run has an HTTP client (both read on every check).
+    Without ``circadian.location`` it answers ``not_configured`` and sends nothing. ``clock`` is
+    the cache's monotonic clock. Side-effect free: it only builds the skill, so the realtime
+    check may call it with a throwaway host."""
     cache: dict[tuple[str, float, float, int], tuple[float, dict[str, Any]]] = {}
     lock = threading.Lock()
 
     def available() -> bool:
         cfg = host.config()
-        return cfg.tools.weather.enabled and coordinates(cfg) is not None and host.http is not None
+        return cfg.tools.weather.enabled and host.http is not None
 
     def cached(key: tuple[str, float, float, int], ttl_s: float) -> dict[str, Any] | None:
         with lock:
@@ -341,9 +347,12 @@ def skills(host: ToolHost, clock: Callable[[], float] = time.monotonic) -> list[
     def weather(days: Days = 1) -> SkillResult:
         cfg = host.config()
         where, factory = coordinates(cfg), host.http
-        if not cfg.tools.weather.enabled or where is None or factory is None:
+        if not cfg.tools.weather.enabled or factory is None:
             log.info("weather: %s", UNAVAILABLE)
             return SkillResult({"error": UNAVAILABLE})
+        if where is None:
+            log.info("weather: %s", NOT_CONFIGURED)
+            return SkillResult({"error": NOT_CONFIGURED})
         wcfg = cfg.tools.weather
         span = min(days, wcfg.forecast_days)
         key = (wcfg.base_url, *where, span)

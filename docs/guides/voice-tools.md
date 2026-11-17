@@ -66,6 +66,8 @@ Say "go to sleep". The robot says good night, then takes a nap when its reply ha
   Thursday at 7").
 - **List and cancel.** "What timers do I have?", "Cancel the oven timer", "Cancel the plants
   reminder". You can also cancel them in the Tools tab.
+- **Nothing to cancel.** A timer that rang is no longer active. If you ask to cancel it, the
+  robot says that it already ended or that no such timer is active.
 
 When an item is due:
 
@@ -96,6 +98,9 @@ of up to 3 days (`tools.weather.forecast_days`, 1 to 7), in metric units.
 
 - It needs a location: `circadian.location` (lat, lon). The place search in the Tools tab sets
   it.
+- If weather is on but no place is set, the robot still knows the tool. When you ask for the
+  weather, it says that no place is set up. It tells you to set the place in the Tools tab. It
+  sends no request.
 - Only the coordinates and the number of days leave the robot. The place name stays on the robot
   and is never sent to the language model.
 - A forecast is reused for 10 minutes (`tools.weather.cache_s`), so a follow-up question costs no
@@ -110,6 +115,9 @@ The robot plays internet radio streams from your station list through its speake
 - **Stations.** Each station has a name, a stream URL (http or https), optional genres and an
   optional language. The model picks a station by its name or by a genre ("play some jazz" plays
   the first jazz station). It can never play a URL that is not on your list.
+- **No station yet.** If the radio is on but the list is empty, the robot still knows the tool.
+  When you ask for music, it says that no station is set up. It tells you to add one in the Tools
+  tab. It plays nothing.
 - **Stream URLs.** Use the direct stream URL (often ending in `.mp3`, `.aac` or `/stream`).
   Redirects are not followed, and playlist formats (HLS `.m3u8`, DASH) are refused. If the test
   play fails, find the final stream URL of the station.
@@ -195,6 +203,7 @@ the model is not offered: ...`. Add the names, or reset the setting to its defau
 | The robot talks about a timer but none is set | The route does not pass tool calls (possibly Pollen's server) | Use a chat route, OpenAI realtime or Gemini Live |
 | "Timers need the voice listener" in the Tools tab | Voice is off | Turn voice on |
 | Weather: "Set a place first" | No `circadian.location` | Use the place search in the Tools tab |
+| The robot says no station or no place is set up | Radio or weather is on, but the station list is empty or no place is set | Add a station or set the place in the Tools tab |
 | Weather: "unreachable" | No internet, or Open-Meteo slower than 3 s | Check the network |
 | The test play says "could not be reached" | Wrong URL, a redirect, or a playlist URL | Use the final direct stream URL |
 | Radio: "this robot's speaker cannot play music" | The robot platform has no media output | Radio needs a speaker that supports media (Reachy Mini does) |
@@ -243,6 +252,10 @@ Rules:
   captured config.
 - **Parameter types.** Parameters may be `str`, `int`, `float`, `bool`, `Literal[...]`,
   `X | None`, or `Annotated` with `Range`, `MaxLen` and `Desc`. Arguments are validated strictly.
+- **Empty choices.** A skill with an empty `choices` list is not offered. Set
+  `offer_without_choices=True` to keep it offered. The parameter is then a plain string within
+  its length cap, and your skill decides. Return `{"error": "not_configured"}` when the tool is
+  not set up, and say in the description what the person must do.
 - **Timeout.** A skill that takes longer than `conversation.tool_timeout_s` (5 s) is abandoned.
 - **What `ToolHost` gives you.** `config`, `wall_now` (time in the robot's zone), `bus`, and,
   when the run has them, `nap`, `scheduler`, `http` (a client without redirects or environment
