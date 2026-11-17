@@ -17,6 +17,7 @@ KEYS = {
     "rejected_not_facing",
     "rejected_no_facing_data",
     "rejected_music",
+    "rejected_media",
 }
 WINDOW_S = 5.0
 
@@ -70,6 +71,7 @@ def test_wake_word_window_and_rejections_when_required(policy):
         "rejected_not_facing": 0,
         "rejected_no_facing_data": 0,
         "rejected_music": 0,
+        "rejected_media": 0,
     }
 
 

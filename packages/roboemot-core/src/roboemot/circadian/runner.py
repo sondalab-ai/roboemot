@@ -25,7 +25,9 @@ second sighting from another frame within the presence window); speech counts wh
 (the wake word, a face in view: the listener's rules), so a television's speech neither holds a
 nap off nor wakes one; a conversation in progress (``conversing``) counts too. Activity ends the
 nap like the wake word (``wake_hold_s``). Quiet hours end it without a wake. No nap while the
-robot is asleep (``robot.asleep``), held, resting on its own or attending to a person, and the
+robot is asleep (``robot.asleep``), held, resting on its own, attending to a person or playing
+its radio (``media_playing``, owner decision 2026-11-17: the music plays until someone stops it,
+``tools.media.max_play_s``, a requested nap, the quiet hours or the platform's sleep), and the
 idle clock restarts after each of those.
 
 Three stimuli also end a day nap (owner decision 2026-11-03), each behind its switch:
@@ -55,6 +57,14 @@ After a stimulus wake with no face, addressed speech or conversation since, the 
 only ``circadian.nap_resume_after_s`` of idle time after the wake hold (owner decision
 2026-11-05); the end of a platform sleep and a rest of the rhythm's own drop that, as activity
 does. The debug report counts those naps in ``resumes``.
+
+Requested nap (SPEC 7A, Requested nap; owner decision 2026-11-16): :meth:`request_nap` starts a day
+nap because the person asked (the ``go_to_sleep`` voice tool, SPEC 11). It drops any hold, so the
+awake hold of the wake word that came with the request does not keep the robot up. For
+``circadian.requested_nap_min_s`` after its start a face, speech without the wake word, a
+conversation, light, motion and a loud sound neither wake it nor count as activity; only the wake
+word (the wake-word branch of the utterance handler) and :meth:`wake` (a due timer or reminder)
+end it. After that window it is an ordinary day nap.
 """
 
 from __future__ import annotations
@@ -91,6 +101,7 @@ from .sampler import LightSampler
 TOPIC = "circadian.state"
 STATES = ("awake", "drowsy", "resting")
 Stimulus = Literal["light", "motion", "loud"]
+NapStatus = Literal["ok", "already_resting", "disabled", "asleep"]
 REPORT_DIGITS = 3
 
 
@@ -143,6 +154,7 @@ class CircadianRunner:
         detection_period: Callable[[], float] = lambda: math.inf,
         engaged: Callable[[], bool] = lambda: False,
         conversing: Callable[[], bool] = lambda: False,
+        media_playing: Callable[[], bool] = lambda: False,
     ) -> None:
         self.cfg = cfg
         self.bus = bus
@@ -152,6 +164,7 @@ class CircadianRunner:
         self.detection_period = detection_period
         self.engaged = engaged
         self.conversing = conversing
+        self.media_playing = media_playing  # the radio holds idle naps off (SPEC 7A)
         self.events: EventSink = no_events
         self.model = CircadianModel(cfg.circadian)
         self.sampler = LightSampler(cfg.light, cfg.circadian, self.clock.monotonic)
@@ -206,16 +219,21 @@ class CircadianRunner:
     def _on_utterance(self, msg: Message) -> None:
         """Speech addressed to the robot is a sign of people and activity for the day nap (it
         wakes one), and the wake word (``wake_word`` in the payload) wakes it (SPEC 7A, Waking).
-        Unaddressed speech (a television) does none of these."""
+        Unaddressed speech (a television) does none of these. Inside a requested nap's window only
+        the wake word wakes it (SPEC 7A, Requested nap)."""
         if not getattr(msg.payload, "addressed", False):
             return
         t = self.clock.monotonic()
+        wake_word = getattr(msg.payload, "wake_word", False)
         with self._lock:
             self._seen = t
-            woke = self._activity(t, "speech")
+            requested = wake_word and self.nap.requested(t)
+            if requested:
+                self.nap.wakes["speech"] += 1
+            woke = self._activity(t, "speech") or requested
         if woke:
             self.events("nap", "speech")
-        if getattr(msg.payload, "wake_word", False):
+        if wake_word:
             self.wake()
 
     def _on_loud(self, msg: Message) -> None:
@@ -276,11 +294,54 @@ class CircadianRunner:
             self._force = True
             self._cause = "wake"
 
+    def nap_status(self) -> NapStatus:
+        """Whether a requested nap could start now (SPEC 7A, Requested nap): ``disabled`` while
+        the rhythm is off, ``asleep`` while the platform sleeps, ``already_resting`` during the
+        quiet hours or any rest (a nap, a resting hold, the rhythm's own), else ``ok``. Reads
+        the live state and changes nothing."""
+        with self._lock:
+            return self._nap_status()
+
+    def _nap_status(self) -> NapStatus:
+        """:meth:`nap_status` with the lock held."""
+        c = self.cfg.circadian
+        if not c.enabled:
+            return "disabled"
+        if self._asleep:
+            return "asleep"
+        hold = self.model.hold_remaining(self._lag())
+        if (
+            self.model.state == "resting"
+            or self.nap.napping
+            or (hold is not None and hold[0] == "resting")
+            or in_window(self.clock.hour(), c.quiet_hours)
+        ):
+            return "already_resting"
+        return "ok"
+
+    def request_nap(self, now: float) -> NapStatus:
+        """Start a nap the person asked for at ``now`` (this runner's clock time) when
+        :meth:`nap_status` allows it, and return that status. Any hold is dropped (the wake
+        word's awake hold came with the request); the state changes within one tick, and only
+        the wake word or :meth:`wake` end it inside ``circadian.requested_nap_min_s``."""
+        with self._lock:
+            status = self._nap_status()
+            if status == "ok":
+                self.model.clear_hold()
+                self.nap.start_requested(now, self.cfg.circadian.requested_nap_min_s)
+                self._force = True
+                self._cause = None
+        if status == "ok":
+            self.events("nap", "start")
+        return status
+
     def _activity(self, t: float, reason: str, lag_s: float | None = None) -> bool:
         """Confirmed face, addressed speech or a conversation at ``t`` (``reason``): the nap
         clock restarts and a nap ends with a wake (caller holds the lock; ``lag_s`` as in
         :meth:`CircadianModel.hold`, default the time since the last update). Returns whether a
-        nap ended."""
+        nap ended. Inside a requested nap's window it is ignored."""
+        if self.nap.requested(t):
+            return False
         if not self.nap.activity(t, reason):
             return False
         self._woken(lag_s)
@@ -289,10 +350,12 @@ class CircadianRunner:
     def _stimulus(self, t: float, reason: Stimulus, lag_s: float | None = None) -> bool:
         """The light rising, motion or a loud sound at ``t`` (``reason``): ends a day nap with a
         wake when its switch (``nap_wake_on_<reason>``) is on, the platform is not asleep, the
-        stimulus' grace after the nap's start is over and the quiet hours have not begun; never
-        touches the idle clock while awake (caller holds the lock). Returns whether a nap
-        ended."""
+        stimulus' grace after the nap's start is over, the quiet hours have not begun and no
+        requested nap's window is open; never touches the idle clock while awake (caller holds
+        the lock). Returns whether a nap ended."""
         c = self.cfg.circadian
+        if self.nap.requested(t):
+            return False
         switch, grace_s = {
             "light": (c.nap_wake_on_light, c.nap_light_grace_s),
             "motion": (c.nap_wake_on_motion, c.nap_motion_grace_s),
@@ -321,13 +384,13 @@ class CircadianRunner:
         c = self.cfg.circadian
         return c.enabled and c.nap_wake_on_motion and self.nap.napping and not self._asleep
 
-    def _nap_blocked(self, dt: float, engaged: bool) -> bool:
+    def _nap_blocked(self, dt: float, engaged: bool, playing: bool) -> bool:
         """Whether no nap is possible now (caller holds the lock): the robot asleep, a hold, a
-        rest of the rhythm's own (the quiet hours only pause the clock), or attention on a
-        person."""
+        rest of the rhythm's own (the quiet hours only pause the clock), attention on a
+        person, or the robot's radio playing (owner decision 2026-11-17)."""
         resting = self.model.state == "resting" and self.model.reason != "quiet_hours"
         held = self.model.hold_remaining(dt) is not None
-        return self._asleep or held or resting or engaged
+        return self._asleep or held or resting or engaged or playing
 
     def _lag(self) -> float:
         """Seconds since the last model update: the model's clock stands that far behind, and a
@@ -436,6 +499,7 @@ class CircadianRunner:
         publish: CircadianState | None = None
         t = self.clock.monotonic()
         talking, engaged = self.conversing(), self.engaged()  # outside the lock: other parts
+        playing = self.media_playing()
         with self._lock:
             if (
                 not self._force
@@ -467,7 +531,7 @@ class CircadianRunner:
                 after_s=c.nap_after_s,
                 resume_after_s=c.nap_resume_after_s,
                 quiet=in_window(hour, c.quiet_hours),
-                blocked=self._nap_blocked(dt, engaged),  # engaged holds off, never wakes
+                blocked=self._nap_blocked(dt, engaged, playing),  # holds off, never wakes
                 held=c.presence_keeps_awake and self.present(),
             )
             if started:

@@ -196,3 +196,107 @@ def test_the_soothe_tick_hands_the_listeners_speech_to_the_runner():
         ctx = SootheContext(False, False, 0, False, False, hearing=hearing)
         soothe_tick(runner, 1.0, lambda ctx=ctx: ctx, "awake", False)
     assert seen == [False, True]
+
+
+def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slowly(
+    tmp_path, monkeypatch
+):
+    """Review C1 (SPEC 11, Due items): the scheduler runner ticks only once the announcer has
+    attached, so a one-shot item already due at start reaches the robot-initiated turn and is
+    not marked fired (deleted) unannounced while ``conv.start()`` is slow."""
+    import concurrent.futures
+    import threading
+    import time
+    from datetime import UTC, datetime, timedelta
+
+    from roboemot import paths
+    from roboemot.bus import Bus
+    from roboemot.runtime import startup
+    from roboemot.tools.scheduler import Scheduler
+
+    tick_s = 0.2
+    stack = ConfigStack(
+        app={
+            "data_dir": str(tmp_path),
+            "conversation": {"language": "en"},
+            "tools": {"scheduler": {"tick_s": tick_s}},
+            "voice": {"realtime_route": {"enabled": False}},
+        }
+    )
+    cfg = stack.effective()
+    before = datetime.now(UTC) - timedelta(seconds=30)
+    earlier = Scheduler(
+        paths.schedule_path(cfg.data_dir),
+        lambda: stack.effective().tools.scheduler,
+        lambda: before,
+        lambda: UTC,
+    )
+    earlier.load(before)
+    item = earlier.add_timer(1, "pasta")  # due 29 s ago: inside the restart grace
+    turns: list[str] = []
+    announced = threading.Event()
+
+    class SlowWorker:
+        """A conversation whose start takes several scheduler ticks (a loaded CM4)."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.events = None
+
+        def start(self) -> None:
+            time.sleep(4 * tick_s)
+
+        def close(self) -> None:
+            pass
+
+        def busy(self) -> bool:
+            return False
+
+        def event_turn(self, text, language):
+            turns.append(text)
+            announced.set()
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            future.set_result(True)
+            return future
+
+        def after_turn(self, callback) -> None:
+            callback()
+
+    quiet = SimpleNamespace(close=lambda: None, start=lambda: None)
+    output = SimpleNamespace(
+        close=lambda: None,
+        start=lambda: None,
+        speaking_at=lambda now: False,
+        timeline=SimpleNamespace(sentence_at=lambda now: None),
+    )
+    monkeypatch.setattr(startup, "build_speech", lambda *a, **k: output)
+    monkeypatch.setattr(startup, "SootheRunner", lambda *a, **k: quiet)
+    monkeypatch.setattr(startup, "build_cues", lambda *a, **k: SimpleNamespace(events=None))
+    monkeypatch.setattr(startup, "offline_cue", lambda *a, **k: None)
+    monkeypatch.setattr(startup, "start_media", lambda *a, **k: None)
+    monkeypatch.setattr(startup, "own_sound_cut", lambda *a, **k: lambda: False)
+    monkeypatch.setattr(startup, "skill_registry", lambda *a, **k: None)
+    monkeypatch.setattr(startup, "profile_source", lambda *a, **k: None)
+    monkeypatch.setattr(startup, "scene_source", lambda *a, **k: None)
+    monkeypatch.setattr(startup, "ConversationWorker", SlowWorker)
+    listener = SimpleNamespace(
+        bind_own_sound=lambda cut: None,
+        voice_active=lambda: False,
+        open_follow_up=lambda: None,
+    )
+    bus = Bus()
+    p = SimpleNamespace(
+        cfg=cfg, bus=bus, speaker=SimpleNamespace(close=lambda: None, start_playing=lambda: None),
+        listener=listener, bargein=None, responder=SimpleNamespace(cue=None),
+        runner=SimpleNamespace(engine=None, on_event=lambda *a: None),
+        perception=SimpleNamespace(registry=None), sleep=SimpleNamespace(asleep=False),
+        hub=None, network=None, realtime_provider=None, selector=None, world=None,
+        value_cap=None, conv_speaker=None, names=None, tracker=SimpleNamespace(active=None),
+    )  # fmt: skip
+    host = RuntimeHost()
+    host.bus = bus
+    host.voice_listener = listener  # type: ignore[assignment]
+    with ExitStack() as cleanup:
+        startup.start_voice_output(host, stack, p, cleanup)
+        assert announced.wait(5.0), "the due item never reached the announcer"
+    assert len(turns) == 1 and "pasta" in turns[0]
+    assert host.scheduler is not None and host.scheduler.get(item.id) is None  # fired once

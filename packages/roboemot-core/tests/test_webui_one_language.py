@@ -25,7 +25,7 @@ from roboemot.registry import enrollment
 from roboemot.registry.xmp import CATEGORIES
 from roboemot.runtime.live import STATUSES
 from roboemot.webui import descriptions
-from roboemot.webui.api import CATALOGUE_STATUS, EMOTIONS_STATUS
+from roboemot.webui.api import CATALOGUE_STATUS, EMOTIONS_STATUS, TOOLS_STATUS
 from roboemot.webui.robot_section import RESTART_EFFECTS
 from roboemot.webui.strings import DEFAULT_LANGUAGE, STRINGS
 
@@ -241,6 +241,10 @@ def test_every_api_error_code_is_worded():
     codes = set().union(
         *(error_codes(p) for p in [*SRC.glob("webui/*.py"), *SRC.glob("config/*.py")])
     )
-    codes |= {*CATALOGUE_STATUS, *EMOTIONS_STATUS}  # codes mapped from other modules' errors
+    codes |= {
+        *CATALOGUE_STATUS,
+        *EMOTIONS_STATUS,
+        *TOOLS_STATUS,
+    }  # codes mapped from other modules' errors
     assert {"bad_pin", "csrf", "unknown_field", "live_disabled"} <= codes
     assert must_have("err_", codes) == []

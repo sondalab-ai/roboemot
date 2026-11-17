@@ -3,6 +3,7 @@ out, one shared router, shutdown order, summaries from the world and the registr
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
+from roboemot.skills.host import http_client
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
@@ -266,7 +268,26 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         skills = app.conversation.skills
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
+            "radio_play", "radio_stop", "radio_volume",
+            "go_to_sleep", "timer_set", "timer_cancel", "reminder_set", "reminder_cancel",
+            "schedule_list", "weather",
         ]  # fmt: skip
+        # the Reachy speaker plays media outside the speaking window: the run has a player,
+        # the listener hears when it plays, and radio is an admin opt-in (SPEC 8, 11, 12)
+        assert app.media is not None and not skills.get("radio_play").is_available()
+        radio_host = inspect.getclosurevars(skills.get("radio_play").fn).nonlocals["host"]
+        assert radio_host.media is app.media
+        assert app.voice_listener.media_playing == app.media.playing
+        assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
+        # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
+        assert not skills.get("weather").is_available()
+        weather_host = inspect.getclosurevars(skills.get("weather").fn).nonlocals["host"]
+        assert weather_host.http is http_client  # the run's HTTP client is wired
+        # the run's scheduler is wired and its runner publishes tools.due (SPEC 11, Voice tools)
+        assert skills.get("timer_set").is_available() and app.scheduler is not None
+        assert app.scheduler_runner is not None and app.scheduler_runner.alive
+        # the announcer consumes tools.due (SPEC 11, Due items): the runner no longer fires items
+        assert app.scheduler_runner.consumer_attached and app.announcer is not None
         gestures = skills.get("play").resolved_choices()["gesture"]
         assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None

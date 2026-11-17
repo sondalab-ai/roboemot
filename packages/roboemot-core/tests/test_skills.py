@@ -19,6 +19,7 @@ from roboemot.skills import (
     SkillContext,
     SkillRegistry,
     SkillResult,
+    ToolOutcome,
     execute,
     skill,
 )
@@ -258,6 +259,27 @@ class Env:
         self.reg = default_skills(self.env)
 
 
+def test_the_default_llm_skills_are_the_five_and_the_voice_tools():
+    """SPEC 11: the voice tools add their skills to the default conversation.llm_skills."""
+    assert RoboEmotConfig().conversation.llm_skills == [
+        "play",
+        "look_at",
+        "express_emotion",
+        "remember_preference",
+        "stop_talking",
+        "go_to_sleep",
+        "timer_set",
+        "timer_cancel",
+        "reminder_set",
+        "reminder_cancel",
+        "schedule_list",
+        "weather",
+        "radio_play",
+        "radio_stop",
+        "radio_volume",
+    ]
+
+
 def test_the_default_skills_are_the_five_of_the_spec_and_all_visible():
     reg = Env().reg
     assert reg.names() == [
@@ -423,3 +445,34 @@ def test_a_truncated_list_of_choices_is_logged(caplog):
     with caplog.at_level(logging.WARNING):
         play.resolved_choices(5)
     assert not caplog.text
+
+
+async def test_unavailable_skill_is_not_offered_and_refused():
+    flag = True
+
+    @skill(llm_visible=True, inline=True, available=lambda: flag)
+    def gated() -> str:
+        return "done"
+
+    reg = SkillRegistry([gated])
+    assert [s.name for s in reg.offered(["gated"])] == ["gated"]
+    out = await execute(reg, ["gated"], "gated", {}, CTX, **EXEC)
+    assert out.ok and out.content == "done"
+    flag = False
+    assert reg.offered(["gated"]) == []
+    out = await execute(reg, ["gated"], "gated", {}, CTX, **EXEC)
+    refused = json.dumps({"error": "unavailable"})
+    assert out == ToolOutcome(refused, False, False, "gated", "unavailable")
+
+
+async def test_an_available_check_that_raises_counts_as_unavailable(caplog):
+    @skill(llm_visible=True, inline=True, available=lambda: 1 / 0)
+    def broken() -> str:
+        return "done"
+
+    reg = SkillRegistry([broken])
+    with caplog.at_level(logging.WARNING):
+        assert reg.offered(["broken"]) == []
+    out = await execute(reg, ["broken"], "broken", {}, CTX, **EXEC)
+    assert out.code == "unavailable"
+    assert "broken" in caplog.text and "ZeroDivisionError" in caplog.text

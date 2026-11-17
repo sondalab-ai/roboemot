@@ -12,7 +12,7 @@ from typing import Any
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController, InterestMod, interest_mod
 from roboemot.circadian import CircadianModel, in_window
-from roboemot.conversation.phase import SPEAKING, THINKING, ConversationPhase
+from roboemot.conversation.phase import IDLE, SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import PersonaEffects
 from roboemot.persona import effects as persona_effects
@@ -251,6 +251,23 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     or ``awake`` while no model is attached (circadian disabled)."""
     effects = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
     return effects.vision_rate_scale
+
+
+def conversation_idle(host: Any, now: float) -> bool:
+    """Whether the conversation is idle at ``now`` (SPEC 11, Voice tools, Due items): the phase
+    is ``idle``, the robot is not speaking, nobody's speech is in progress or starting, and no
+    turn (a tool round included) is open or waiting. A part the run lacks does not count."""
+    phase = host.phase
+    if phase is not None and phase.current()[0] != IDLE:
+        return False
+    speech = host.speech
+    if speech is not None and speech.speaking(now):
+        return False
+    listener = host.voice_listener
+    if listener is not None and listener.voice_active():
+        return False
+    conversation = host.conversation
+    return conversation is None or not conversation.busy()
 
 
 def conversing(phase: ConversationPhase | None) -> bool:

@@ -12,24 +12,35 @@ import random
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
-from roboemot import paths
+from roboemot import paths, timezones
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
+from roboemot.media.player import MediaPlayer
 from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.skills.bridge import SkillBridge
-from roboemot.skills.defaults import default_skills
+from roboemot.skills.host import http_client, tool_host
+from roboemot.skills.plugins import (
+    build_skill_registry,
+    load_plugin_skill_sets,
+    warn_hidden_core_skills,
+)
+from roboemot.skills.registry import SkillRegistry
 from roboemot.soothe import SootheRunner
+from roboemot.tools.announce import Announcer
+from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import AUDIO_DROPPED, AUDIO_NOT_HEARD, AUDIO_SENT
+from roboemot.voice.speech import MediaSink
 from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
@@ -128,6 +139,7 @@ def start_voice_output(
     cues = host.cues = build_cues(host, stack, p, output)
     cues.events = host.events
     p.responder.cue = offline_cue(host, stack, p)
+    start_media(host, stack, output, listener, cleanup)
     if listener is None:
         return
     cut_own = own_sound_cut(output, soothe)
@@ -145,6 +157,7 @@ def start_voice_output(
     )
     if realtime is not None:
         realtime.events = host.events
+    start_scheduler(host, stack, p, cleanup)  # stops after the conversation that sets items
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
     registry = p.perception.registry
@@ -167,11 +180,7 @@ def start_voice_output(
         speaker=p.conv_speaker,
         names=p.names,
         name_source=host.name_source,  # one alias per name with traits and route checks
-        skills=default_skills(
-            SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
-                p.runner.engine
-            )
-        ),
+        skills=skill_registry(stack, p, registry, host),
         preferences=(
             RegistryPreferences(
                 registry,
@@ -193,10 +202,111 @@ def start_voice_output(
         bind_realtime_input(host, realtime, listener, cleanup, p.sleep, cues)
     cleanup.callback(conv.close)
     conv.start()
+    start_announcer(host, stack, p, cleanup)
     if realtime is not None:
         realtime.start()
     if bargein is not None:
         bind_barge_in(bargein, output, conv, listener, cut_own)
+
+
+def start_media(
+    host: RuntimeHost, stack: ConfigStack, output: Any, listener: Any, cleanup: ExitStack
+) -> MediaPlayer | None:
+    """The media player the radio plays through (SPEC 8, Radio playback; SPEC 11, Media
+    player), only when the speaker can play media outside the speaking window (``MediaSink``):
+    never through the speech path, which would make the listener deaf to the wake word. It
+    listens for a nap and ``robot.asleep`` on the bus and for config changes (radio turned off,
+    station removed), closes before the speech output, and
+    tells the listener when it plays (the lyrics gate and ``tools.radio.dance``). Sets
+    ``host.media``; None (and no radio) otherwise."""
+    if not isinstance(output.sink, MediaSink):
+        return None
+    player = host.media = MediaPlayer(output, host, stack.effective)
+    cleanup.callback(player.close)  # before the output goes away (callbacks run last in first)
+    cleanup.callback(stack.subscribe(player.on_config))  # radio off or station gone: stop
+    player.start()
+    if listener is not None:
+        listener.media_playing = player.playing
+    return player
+
+
+def skill_registry(
+    stack: ConfigStack, p: Pipeline, registry: Any, runtime: RuntimeHost
+) -> SkillRegistry:
+    """The conversation's skills (SPEC 11): the default skills over the robot's pipeline plus
+    every ``roboemot.skills`` plugin, each plugin loaded once. The tools' host gets the run's
+    parts (``nap``: ``runtime.request_nap``, SPEC 7A; ``scheduler``: ``runtime.scheduler``,
+    SPEC 11; ``http``: ``http_client``, a fresh client per call, SPEC 11, 12; ``media``:
+    ``runtime.media``, SPEC 11). Warns once when the merged ``conversation.llm_skills`` hides one
+    of core's own voice tools."""
+    host = tool_host(stack.effective, p.bus)
+    host.nap = runtime.request_nap
+    host.scheduler = runtime.scheduler
+    host.http = http_client
+    host.media = runtime.media
+    plugins = load_plugin_skill_sets(host)
+    warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
+    env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
+        p.runner.engine
+    )
+    return build_skill_registry(env, host, plugins)
+
+
+def start_scheduler(
+    host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
+) -> Scheduler:
+    """The run's timers and reminders (SPEC 11, Voice tools): the store in the data folder,
+    loaded with the restart grace, and its runner publishing ``tools.due``, stopped by
+    ``cleanup``. The runner is not started here: ``start_announcer`` starts it once the
+    announcer has attached, so no tick marks an item due at start fired unannounced (review C1);
+    ``start_scheduler_runner`` starts it at the end of startup when no announcer was built.
+    Recurrence uses ``circadian.timezone`` (this machine's zone when null), read live. Sets
+    ``host.scheduler`` and ``host.scheduler_runner``."""
+
+    def now() -> datetime:
+        return datetime.now(UTC)
+
+    def zone() -> tzinfo:
+        return timezones.zone_or_local(stack.effective().circadian.timezone)
+
+    scheduler = host.scheduler = Scheduler(
+        paths.schedule_path(p.cfg.data_dir),
+        lambda: stack.effective().tools.scheduler,
+        now,
+        zone,
+    )
+    scheduler.load(now())
+    runner = host.scheduler_runner = SchedulerRunner(scheduler, p.bus, scheduler.cfg)
+    cleanup.callback(runner.close)  # registered now: it stops after the conversation
+    return scheduler
+
+
+def start_scheduler_runner(host: RuntimeHost) -> None:
+    """Start the scheduler runner when the run has one and it is not running yet: after the
+    announcer attached, or at the end of startup with none (each due item is then logged and
+    marked fired, SPEC 11, Due items)."""
+    runner = host.scheduler_runner
+    if runner is not None and not runner.alive:
+        runner.start()
+
+
+def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:
+    """The announcer of due timers and reminders (SPEC 11, Voice tools; SPEC 8, robot-initiated
+    turn), once the conversation runs: it attaches to the scheduler runner (which then stops
+    marking items fired itself), then the runner starts, and it is closed before the
+    conversation. Sets ``host.announcer``; nothing without a scheduler or a conversation."""
+    if host.scheduler is None or host.conversation is None:
+        return
+    announcer = host.announcer = Announcer(
+        host.scheduler,
+        host.conversation,
+        host,
+        stack.effective,
+        asleep=lambda: p.sleep.asleep,
+    )
+    cleanup.callback(announcer.close)  # before the conversation it hands turns to
+    announcer.start()
+    start_scheduler_runner(host)  # attached first: its first tick reaches the announcer
 
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
@@ -329,6 +439,7 @@ def start_all(
     cleanup.callback(p.light_reader.stop)  # stopped before the camera thread
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
+    start_scheduler_runner(host)  # no announcer was built: the log-only fallback
     for world_source in p.plugin.sources:
         world_source.speaking = p.speech.sounding  # no turning towards its own sound
         cleanup.callback(world_source.stop)

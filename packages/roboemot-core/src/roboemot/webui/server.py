@@ -47,6 +47,7 @@ from .api import (
     RoutesPort,
     SecretsPort,
     SettingsPort,
+    ToolsPort,
     WebApi,
 )
 from .auth import PinStore, check_pin_format
@@ -62,6 +63,7 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/static/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
     "/static/live.js": ("live.js", "text/javascript; charset=utf-8"),
     "/static/emotions.js": ("emotions.js", "text/javascript; charset=utf-8"),
+    "/static/tools.js": ("tools.js", "text/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
     "/static/fx.js": ("fx.js", "text/javascript; charset=utf-8"),
@@ -521,6 +523,7 @@ def make_server(
     secrets: SecretsPort | None = None,
     live: LivePort | None = None,
     emotions: EmotionsPort | None = None,
+    tools: ToolsPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -546,6 +549,7 @@ def make_server(
         secrets=secrets,
         live=live,
         emotions=emotions,
+        tools=tools,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)

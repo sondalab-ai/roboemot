@@ -28,6 +28,7 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
+from roboemot.media.player import MediaPlayer
 from roboemot.persona.llm_traits import TraitsWorker
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.reflex import ReflexEngine
@@ -35,6 +36,8 @@ from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
 from roboemot.soothe import SootheRunner
+from roboemot.tools.announce import Announcer
+from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
@@ -84,6 +87,10 @@ class RuntimeHost:
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
     realtime_route: RealtimeRoute | None = None  # the realtime speech route, when enabled
+    scheduler: Scheduler | None = None  # timers and reminders (SPEC 11, Voice tools); with voice
+    scheduler_runner: SchedulerRunner | None = None  # tools.due; an announcer set_consumer(True)
+    announcer: Announcer | None = None  # announces due items (SPEC 11, robot-initiated turn)
+    media: MediaPlayer | None = None  # the radio's player (SPEC 11); a speaker that can play media
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)
@@ -147,6 +154,35 @@ class RuntimeHost:
         if runner is None:
             raise RuntimeError("the runtime is not running")
         runner.wake()
+
+    def request_nap(self) -> str:
+        """The ``go_to_sleep`` tool's nap (SPEC 7A, Requested nap; SPEC 11): the circadian
+        runner's status now, and when it is ``ok`` the nap is armed and this returns at once.
+        The nap starts after the calling turn's last reply audio (``after_turn``), and its start
+        closes the listener's follow-up window. ``disabled`` while the runtime is not running.
+        An armed nap is never cancelled: speech addressed to the robot during the good night, or
+        a barge-in, only delays it until the open turn (and any queued one) has ended; the
+        robot's name wakes it again. Without a conversation worker it starts at once."""
+        runner = self.circadian_runner
+        if runner is None:
+            return "disabled"
+        status = runner.nap_status()
+        if status != "ok":
+            return status
+
+        def start() -> None:
+            if runner.request_nap(runner.clock.monotonic()) != "ok":
+                return  # the state changed during the good night (quiet hours, a sleep)
+            listener = self.voice_listener
+            if listener is not None:
+                listener.close_follow_up()
+
+        conversation = self.conversation
+        if conversation is None:
+            start()
+        else:
+            conversation.after_turn(start)
+        return status
 
     def detection_period(self) -> float:
         """Seconds between face-stage runs now (infinite while vision is off)."""

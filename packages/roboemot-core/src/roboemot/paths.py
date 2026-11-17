@@ -32,6 +32,7 @@ SECRETS_FILE = "secrets.json"
 REALTIME_UPLOAD_FILE = "realtime_upload.json"
 SETTINGS_OVERRIDES_FILE = "webui_settings.json"
 APP_CONFIG_FILE = "app.yaml"
+SCHEDULE_FILE = "tools_schedule.json"
 
 
 def data_path(configured: str = "") -> Path:
@@ -121,6 +122,13 @@ def settings_overrides_path(configured: str = "") -> Path:
     return data_path(configured) / SETTINGS_OVERRIDES_FILE
 
 
+def schedule_path(configured: str = "") -> Path:
+    """``<data folder>/tools_schedule.json``, the voice tools' timers and reminders (SPEC 11,
+    Voice tools, Scheduler store; 12 Data; not created here). Mode 0o600; inside the data
+    folder, so uninstall removes it."""
+    return data_path(configured) / SCHEDULE_FILE
+
+
 PIPER_VENV_SUBDIR = "piper-venv"
 
 
@@ -142,6 +150,7 @@ __all__ = [
     "PIPER_VENV_SUBDIR",
     "REGISTRY_SUBDIR",
     "ROUTE_CHECKS_FILE",
+    "SCHEDULE_FILE",
     "SECRETS_FILE",
     "SETTINGS_OVERRIDES_FILE",
     "TRAITS_CACHE_FILE",
@@ -154,6 +163,7 @@ __all__ = [
     "piper_venv",
     "registry_dir",
     "route_checks_path",
+    "schedule_path",
     "secrets_path",
     "settings_overrides_path",
     "traits_cache_path",

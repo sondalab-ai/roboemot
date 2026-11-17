@@ -740,6 +740,16 @@ class CircadianConfig(Strict):
         le=3600,
         advanced=True,
     )
+    requested_nap_min_s: float = param(
+        600.0,
+        "A nap the person asked for (the go_to_sleep voice tool): for this long after it starts "
+        "only the wake word or a due timer or reminder wakes the robot; a face, speech without "
+        "the wake word, light, motion and a loud sound do not. After it, the day-nap rules apply",
+        unit="s",
+        ge=60,
+        le=7200,
+        advanced=True,
+    )
     nap_wake_on_light: bool = param(
         True,
         "A day nap ends when the confirmed room light rises (dark to dim or bright, dim to "
@@ -5776,7 +5786,23 @@ class ConversationConfig(Strict):
         advanced=True,
     )
     llm_skills: list[str] = param(
-        ["play", "look_at", "express_emotion", "remember_preference", "stop_talking"],
+        [
+            "play",
+            "look_at",
+            "express_emotion",
+            "remember_preference",
+            "stop_talking",
+            "go_to_sleep",
+            "timer_set",
+            "timer_cancel",
+            "reminder_set",
+            "reminder_cancel",
+            "schedule_list",
+            "weather",
+            "radio_play",
+            "radio_stop",
+            "radio_volume",
+        ],
         "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
         "llm_visible in code; this list can only narrow the set. Empty: no tools",
     )
@@ -6658,6 +6684,29 @@ class EmotionsPageConfig(Strict):
     )
 
 
+class ToolsPageConfig(Strict):
+    """The web UI's Tools tab: the voice tools' switches and settings, the active timers and
+    reminders, the missed items and what the radio plays (SPEC 11, Voice tools; 11A; 12)."""
+
+    poll_ms: int = param(
+        2000,
+        "How often the open Tools tab asks for the timers, reminders and what plays",
+        unit="ms",
+        ge=500,
+        le=10000,
+        advanced=True,
+    )
+    min_interval_s: float = param(
+        3.0,
+        "Shortest time between two place searches, and between two test plays, from the Tools "
+        "tab; one sooner is refused (tools_too_soon) before anything is sent",
+        unit="s",
+        ge=0,
+        le=60,
+        advanced=True,
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -6870,6 +6919,7 @@ class WebUIConfig(Strict):
     )
     live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
     emotions: EmotionsPageConfig = param({}, "SPEC 11A, 12: the Emotions tab")
+    tools: ToolsPageConfig = param({}, "SPEC 11, 11A, 12: the Tools tab")
 
     @field_validator("frame_ancestors")
     @classmethod
@@ -6884,6 +6934,314 @@ class WebUIConfig(Strict):
         if any(re.fullmatch(r"[A-Za-z0-9.-]{1,253}", h) is None for h in value):
             raise ValueError("allowed_hosts holds bare host names (no port, no scheme)")
         return [h.lower().rstrip(".") for h in value]
+
+
+# --------------------------------------------------------------------------- tools (SPEC 11)
+
+
+# The top of tools.scheduler.timer_max_s (a week), shared with the timer skill's argument range.
+TIMER_MAX_CEILING_S = 604800
+
+
+class SchedulerConfig(Strict):
+    """Timers and reminders (SPEC 11, Voice tools: Scheduler store, Limits, Missed items, Due
+    items, Fallback, Repeat; 11A). The limits sit under the Advanced fold of the Tools tab."""
+
+    max_items: int = param(
+        20,
+        "Most timers and reminders active at once; one more is refused (full)",
+        ge=1,
+        le=200,
+        advanced=True,
+    )
+    text_max_chars: int = param(
+        200,
+        "Longest timer label or reminder text, in characters; a longer one is refused (too_long)",
+        unit="chars",
+        ge=10,
+        le=1000,
+        advanced=True,
+    )
+    timer_max_s: int = param(
+        86400,
+        "Longest timer; a longer one is refused (too_far)",
+        unit="s",
+        ge=10,
+        le=TIMER_MAX_CEILING_S,
+        advanced=True,
+    )
+    missed_grace_s: int = param(
+        900,
+        "A timer or reminder that became due while RoboEmot was not running is still announced "
+        "at start when it is late by less than this; an older one is dropped and listed as "
+        "missed. Only across a restart: while RoboEmot runs a due item never expires",
+        unit="s",
+        ge=0,
+        le=86400,
+        advanced=True,
+    )
+    tick_s: float = param(
+        1.0,
+        "How often the scheduler checks for due items and publishes them again until announced",
+        unit="s",
+        ge=0.2,
+        le=10,
+        advanced=True,
+    )
+    announce_timeout_s: float = param(
+        8.0,
+        "When the reply audio of an announcement has not started this long after the route "
+        "could take the request, the robot says a fixed sentence with the local voice (or plays "
+        "the fallback cue). Counted from the open session on a realtime route (its connect "
+        "timeout comes first) and from the request on a chat route",
+        unit="s",
+        ge=1,
+        le=60,
+        advanced=True,
+    )
+    announce_max_wait_s: float = param(
+        60.0,
+        "An announcement waits for the conversation to be idle at most this long; then it waits "
+        "only for the robot's current sentence to end",
+        unit="s",
+        ge=0,
+        le=600,
+        advanced=True,
+    )
+    repeat_after_s: float = param(
+        30.0,
+        "A timer announcement repeats when nobody speaks to the robot within this long after it "
+        "(a reminder does not repeat)",
+        unit="s",
+        ge=5,
+        le=600,
+        advanced=True,
+    )
+    repeat_max: int = param(
+        2,
+        "Most times a timer announcement repeats",
+        ge=0,
+        le=10,
+        advanced=True,
+    )
+
+
+# The top of tools.weather.forecast_days, shared with the weather skill's argument range.
+FORECAST_DAYS_CEILING = 7
+FORECAST_URL_DEFAULT = "https://api.open-meteo.com/v1/forecast"
+GEOCODE_URL_DEFAULT = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHER_SCHEMES = ("https",)  # the request carries the private location (SPEC 12)
+
+
+class WeatherConfig(Strict):
+    """The weather tool through Open-Meteo (SPEC 11, Voice tools, Weather; 11A; 12: an admin
+    opt-in, the location stays private). The location is ``circadian.location``."""
+
+    enabled: bool = param(
+        False,
+        "Let the robot fetch the weather forecast from Open-Meteo when asked. The request sends "
+        "circadian.location (needed, else the tool is off) and the number of days over the "
+        "internet (SPEC 12)",
+        opt_in=True,
+    )
+    place_name: str = param(
+        "",
+        "Name of the place at circadian.location, as the place search found it; private "
+        "because it reveals the home town",
+    )
+    forecast_days: int = param(
+        3,
+        "Most days of daily forecast the weather tool returns, today included",
+        unit="days",
+        ge=1,
+        le=FORECAST_DAYS_CEILING,
+    )
+    cache_s: int = param(
+        600,
+        "A forecast is reused for this long, so a follow-up question costs no extra request; "
+        "0 asks every time",
+        unit="s",
+        ge=0,
+        le=3600,
+        advanced=True,
+    )
+    timeout_s: float = param(
+        3.0,
+        "Longest wait for Open-Meteo; a slower or failed request gives the error unreachable. "
+        "With weather on it must be less than conversation.tool_timeout_s, or the skill is "
+        "abandoned first",
+        unit="s",
+        ge=1,
+        le=30,
+        advanced=True,
+    )
+    base_url: str = param(
+        FORECAST_URL_DEFAULT,
+        "Open-Meteo forecast URL; https, no user info, query or fragment. It receives "
+        "circadian.location",
+        advanced=True,
+        admin_only=True,
+    )
+    geocode_url: str = param(
+        GEOCODE_URL_DEFAULT,
+        "Open-Meteo place search URL, used by the Tools tab; https, no user info, query or "
+        "fragment",
+        advanced=True,
+        admin_only=True,
+    )
+    geocode_results: int = param(
+        5,
+        "Most places a place search returns",
+        ge=1,
+        le=10,
+    )
+
+    @field_validator("base_url", "geocode_url")
+    @classmethod
+    def _plain_https(cls, value: str) -> str:
+        """The location goes to this URL (SPEC 12): https with a host (``route_url_ok``), and
+        no user info, query or fragment."""
+        import httpx  # lazy: keeps the config package light
+
+        if not route_url_ok(value, WEATHER_SCHEMES):
+            raise ValueError("must be an https URL with a host")
+        parsed = httpx.URL(value)
+        if parsed.userinfo or parsed.query or parsed.fragment:
+            raise ValueError("must have no user info, query or fragment")
+        return value
+
+
+# The range of tools.media.volume_db, shared with the player's volume steps (radio_volume).
+MEDIA_VOLUME_MIN_DB = -40.0
+MEDIA_VOLUME_MAX_DB = 0.0
+RADIO_SCHEMES = ("http", "https")  # many radio streams are plain http (SPEC 11, Radio)
+# Characters a station URL may not hold besides space, control characters and the backslash
+# (``route_url_ok``): the decoder passes the URL to gst-launch-1.0 as a double-quoted value of
+# its pipeline description, where a quote would end the value and ``!`` links elements
+# (SPEC 11, 12).
+STATION_URL_FORBIDDEN = frozenset("\"'!`")
+
+
+class MediaConfig(Strict):
+    """The media player that plays radio streams through the robot's speaker (SPEC 8, Radio
+    playback; SPEC 11, Voice tools, Media player; 11A)."""
+
+    volume_db: float = param(
+        -12.0,
+        "Music volume, apart from the voice volume; radio_volume steps it",
+        unit="dB",
+        ge=MEDIA_VOLUME_MIN_DB,
+        le=MEDIA_VOLUME_MAX_DB,
+    )
+    volume_step_db: float = param(
+        3.0,
+        "How much one radio_volume up or down changes the music volume",
+        unit="dB",
+        ge=1,
+        le=12,
+    )
+    chunk_ms: int = param(
+        200,
+        "Audio the player decodes and pushes to the speaker at a time",
+        unit="ms",
+        ge=50,
+        le=1000,
+        advanced=True,
+    )
+    resume_after_s: float = param(
+        1.5,
+        "The music rejoins the live stream after this long with no robot speech and no open "
+        "addressed turn",
+        unit="s",
+        ge=0,
+        le=30,
+        advanced=True,
+    )
+    connect_timeout_s: float = param(
+        8.0,
+        "Longest wait for a stream's first audio, and for more audio while it plays; a slower "
+        "stream gives the error unreachable, or stops the player",
+        unit="s",
+        ge=1,
+        le=30,
+        advanced=True,
+    )
+    max_play_s: int = param(
+        7200,
+        "The player stops after playing this long",
+        unit="s",
+        ge=60,
+        le=43200,
+    )
+
+
+class Station(Strict):
+    """One radio station (SPEC 11, Voice tools, Radio): the model picks it by name or genre;
+    only its URL is ever played."""
+
+    name: str = param("", "Station name, as the model and the person say it")
+    url: str = param(
+        "",
+        "Stream URL: http or https with a host, no user info, spaces, quotes or exclamation "
+        "marks. It is played as written (redirects are not followed) and never logged",
+    )
+    genres: list[str] = param([], "Genres the station plays; a genre picks the first station")
+    language: str | None = param(None, "Language the station speaks in, if any")
+
+    @field_validator("name")
+    @classmethod
+    def _named(cls, value: str) -> str:
+        """A station needs a name: the model picks it by name."""
+        if not value.strip():
+            raise ValueError("a station needs a name")
+        return value.strip()
+
+    @field_validator("url")
+    @classmethod
+    def _plain_stream_url(cls, value: str) -> str:
+        """http or https with a host (``route_url_ok``), no user info, and no character the
+        decoder's pipeline description reads as syntax (SPEC 11, 12). The error never quotes
+        the URL."""
+        import httpx  # lazy: keeps the config package light
+
+        if not route_url_ok(value, RADIO_SCHEMES):
+            raise ValueError("must be an http or https URL with a host")
+        if any(c in STATION_URL_FORBIDDEN for c in value):
+            raise ValueError("must hold no quotes, backquotes or exclamation marks")
+        if httpx.URL(value).userinfo:
+            raise ValueError("must have no user info")
+        return value
+
+
+class RadioConfig(Strict):
+    """Internet radio (SPEC 11, Voice tools, Radio; 11A; 12: an admin opt-in)."""
+
+    enabled: bool = param(
+        False,
+        "Let the robot play internet radio from the station list when asked. The robot "
+        "connects to the station's URL over the internet (SPEC 12)",
+        opt_in=True,
+    )
+    stations: list[Station] = param(
+        [],
+        "Stations the robot may play; the model picks one by name or genre and never passes a URL",
+        admin_only=True,
+    )
+    dance: bool = param(
+        True,
+        "The music detector may start the dance on the robot's own radio; off, it ignores "
+        "music while the radio plays",
+    )
+
+
+class ToolsConfig(Strict):
+    """The voice tools of the ``roboemot.skills`` plugins (SPEC 11, Voice tools; 11A). Each
+    tool adds its own sub-section."""
+
+    scheduler: SchedulerConfig = param({}, "SPEC 11, 11A: timers and reminders")
+    weather: WeatherConfig = param({}, "SPEC 11, 11A, 12: weather forecast (admin opt-in)")
+    media: MediaConfig = param({}, "SPEC 8, 11, 11A: the media player the radio plays through")
+    radio: RadioConfig = param({}, "SPEC 11, 11A, 12: internet radio (admin opt-in)")
 
 
 # --------------------------------------------------------------------------- root
@@ -6952,6 +7310,7 @@ with warnings.catch_warnings():
         )
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
+        tools: ToolsConfig = param({}, "SPEC 11, 11A: voice tools")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
         llm_check: LLMCheckConfig = param({}, "SPEC 8: route conformance test", advanced=True)
         safety: SafetyConfig = param({}, "SPEC 12")
@@ -7128,6 +7487,18 @@ with warnings.catch_warnings():
                     f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
                     "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
                     "(JSON-escaped) has to fit"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _weather_fits_the_tool_timeout(self) -> RoboEmotConfig:
+            # Only with weather on: a weather timeout of 1 s (its floor) must not forbid a
+            # shorter tool timeout while the tool cannot run (SPEC 11, Voice tools, Weather).
+            weather = self.tools.weather
+            if weather.enabled and weather.timeout_s >= self.conversation.tool_timeout_s:
+                raise ValueError(
+                    "tools.weather.timeout_s must be less than conversation.tool_timeout_s, "
+                    "or the skill is abandoned before Open-Meteo answers"
                 )
             return self
 

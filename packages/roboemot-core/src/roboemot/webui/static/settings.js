@@ -22,6 +22,7 @@ const SETTING_ADVANCED = "adv:"; // open/collapsed key prefix of a group's Advan
 const SETTING_PURPOSES = [
   { id: "safety", sections: ["safety"] },
   { id: "voice", sections: ["voice", "conversation"] },
+  { id: "tools", sections: ["tools"] },
   { id: "behaviour", sections: ["personality", "persona", "affect", "appraisal", "register", "expression", "circadian", "soothe"] },
   { id: "perception", sections: ["vision", "attention", "world", "identity", "enrollment", "music", "light", "catalogue"] },
   { id: "motion", sections: ["motion", "reflexes", "speech_motion", "dance", "expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "dance_motion_map"] },
@@ -617,24 +618,25 @@ function writeNotice(result, verbKey) {
 }
 
 // Saves `changes` ([{path, value}]) as one all-or-nothing batch behind one PIN dialog, then announces
-// it like a single save (layer, restart) and reloads the rows. A refusal leaves every path as it was.
-// Returns the response, or null when the dialog was cancelled.
-async function settingsBatchSave(message, changes, verbKey = "saved") {
+// it like a single save (layer, restart) and reloads the rows (`reload`: the settings view's, or the
+// one of the tab that saved). A refusal leaves every path as it was. Returns the response, or null
+// when the dialog was cancelled.
+async function settingsBatchSave(message, changes, verbKey = "saved", reload = settingsReload) {
   const result = await pinnedCall(message, t("settings_save"),
     (pin) => api("POST", "/api/settings/batch", { changes, pin }));
   if (!result) return null;
-  await settingsBatchDone(result, verbKey);
+  await settingsBatchDone(result, verbKey, reload);
   return result;
 }
 
 // After a batch save: the revealed private values it changed kept current, the notice (layer,
 // restart) and the rows read again.
-async function settingsBatchDone(result, verbKey) {
+async function settingsBatchDone(result, verbKey, reload = settingsReload) {
   for (const r of result.results || []) {
     if (r.changed && revealedSettings.has(r.path)) revealedSettings.set(r.path, { ...revealedSettings.get(r.path), value: r.value });
   }
   writeNotice(result, verbKey);
-  await settingsReload(null);
+  await reload(null);
 }
 
 // ---------------------------------------------------------------- voice provider switch
@@ -661,17 +663,24 @@ function voiceRevealed(voice) {
   return { ...voice, revealed: true, value: same ? voice.value : VOICE_CUSTOM };
 }
 
+// The opt-in lines of a batch over `diff` (the batch preview's rows; `wanted`: path → new value):
+// `onKey` names the opt-ins it turns on, `offKey` those it turns off (SPEC 12), each when there is one.
+function optInLines(diff, wanted, onKey, offKey) {
+  const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
+  const parts = [];
+  for (const [on, key] of [[true, onKey], [false, offKey]]) {
+    const paths = optIns(on);
+    if (paths.length) parts.push(t(key, { paths: paths.join(", ") }));
+  }
+  return parts;
+}
+
 // The confirmation text of a switch to `choice` over `diff`: the opt-ins it turns on or off, who
 // receives the audio when the opt-in is on and the receiving route changes (even with no opt-in
 // change), and the unaddressed audio when that consent turns on (SPEC 12).
 function voiceSwitchMessage(choice, diff, wanted) {
   const changed = new Set(diff.changes.map((c) => c.path));
-  const optIns = (on) => diff.changes.filter((c) => c.opt_in && wanted.get(c.path) === on).map((c) => c.path);
-  const parts = [t("voice_switch_diff")];
-  for (const [on, key] of [[true, "voice_switch_opt_in"], [false, "voice_switch_opt_out"]]) {
-    const paths = optIns(on);
-    if (paths.length) parts.push(t(key, { paths: paths.join(", ") }));
-  }
+  const parts = [t("voice_switch_diff"), ...optInLines(diff, wanted, "voice_switch_opt_in", "voice_switch_opt_out")];
   const audioOn = wanted.get("privacy.realtime_audio") === true;
   if (audioOn && choice.audio_to && (changed.has("voice.realtime_route.route") || changed.has("voice.realtime_route.enabled"))) {
     parts.push(t("voice_switch_audio_to", { provider: choice.audio_to }));
@@ -707,41 +716,53 @@ function voiceSwitchRow(data) {
     t("voice_switch_hint") + (data.revealed ? "" : " " + t("voice_switch_unrevealed"))));
 }
 
-// Switches the voice to `choice` behind one PIN: the PIN dialog runs the batch preview, a second
-// dialog lists what changes (the privacy opt-ins named, SPEC 12), and its confirm saves the batch with
-// the same PIN. The PIN lives only in this call; a save refused for the PIN starts again at the PIN
-// dialog. Returns the save's response, or null.
+// Switches the voice to `choice` behind one PIN, the changes and the privacy opt-ins shown first
+// (settingsPreviewedSave). Returns the save's response, or null.
 async function voiceSwitch(choice) {
-  const title = t("voice_switch_pin_title", { choice: voiceChoiceText(choice) });
+  return settingsPreviewedSave({
+    title: t("voice_switch_pin_title", { choice: voiceChoiceText(choice) }),
+    changes: choice.changes, confirm: t("voice_switch_confirm"), same: t("voice_switch_same"),
+    message: (diff, wanted) => voiceSwitchMessage(choice, diff, wanted),
+  });
+}
+
+// Saves `opts.changes` behind one PIN with what changes shown first: the PIN dialog runs the batch
+// preview, a second dialog (`opts.title`) lists each change and `opts.message(diff, wanted)` (the
+// opt-ins it turns on or off, SPEC 12), and its confirm (`opts.confirm`) saves the batch with the
+// same PIN. The PIN lives only in this call; a save refused for the PIN starts again at the PIN
+// dialog. `opts.same` is said when nothing would change; `opts.reload` reads the rows again after
+// the save (default: the settings view's). Returns the save's response, or null.
+async function settingsPreviewedSave(opts) {
+  const { title, changes } = opts;
   let held = null;
   const diff = await pinnedCall(t("voice_switch_pin_message"), t("voice_switch_show"), async (pin) => {
-    const result = await api("POST", "/api/settings/batch/preview", { changes: choice.changes, pin });
+    const result = await api("POST", "/api/settings/batch/preview", { changes, pin });
     held = pin;
     return result;
   }, null, title);
   try {
     if (!diff) return null;
-    if (!diff.changes.length) { notice(t("voice_switch_same")); return null; }
-    const wanted = new Map(choice.changes.map((c) => [c.path, c.value]));
+    if (!diff.changes.length) { notice(opts.same); return null; }
+    const wanted = new Map(changes.map((c) => [c.path, c.value]));
     const items = diff.changes.map((c) => {
       const line = t("voice_switch_line", { path: c.path, old: formatValue(c.old), new: formatValue(wanted.get(c.path)) });
       return c.restart ? line + " (" + t("settings_restart_badge") + ")" : line;
     });
-    const message = voiceSwitchMessage(choice, diff, wanted);
+    const message = opts.message(diff, wanted);
     let result = null;
     let again = false;
-    const done = await ask({ title, message, items, confirm: t("voice_switch_confirm"),
+    const done = await ask({ title, message, items, confirm: opts.confirm,
       run: async () => {
         try {
-          result = await api("POST", "/api/settings/batch", { changes: choice.changes, pin: held });
+          result = await api("POST", "/api/settings/batch", { changes, pin: held });
         } catch (err) {
           if (err.message !== "bad_pin") throw err;
           again = true;
         }
       } });
-    if (again) { held = null; return voiceSwitch(choice); }
+    if (again) { held = null; return settingsPreviewedSave(opts); }
     if (!done || !result) return null;
-    await settingsBatchDone(result, "saved");
+    await settingsBatchDone(result, "saved", opts.reload);
     return result;
   } finally {
     held = null;

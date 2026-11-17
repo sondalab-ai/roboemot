@@ -11,6 +11,7 @@ import pytest
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner
 from roboemot.circadian.model import window_change
+from roboemot.circadian.nap import DayNap
 from roboemot.circadian.replay import RecordingSink, ReplayClock
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.reflex.engine import SoundLoud
@@ -29,7 +30,7 @@ def config(**circadian):
     return ConfigStack(app={"circadian": circadian}).effective()
 
 
-def rig(hour: float = 10.0, *, conversing=None, engaged=None, **circadian):
+def rig(hour: float = 10.0, *, conversing=None, engaged=None, media_playing=None, **circadian):
     cfg = config(**circadian)
     clock, bus, events = FakeClock(), Bus(), []
     clock.set(0.0, hour)
@@ -38,6 +39,8 @@ def rig(hour: float = 10.0, *, conversing=None, engaged=None, **circadian):
         kw["conversing"] = conversing
     if engaged is not None:
         kw["engaged"] = engaged
+    if media_playing is not None:
+        kw["media_playing"] = media_playing
     r = CircadianRunner(
         cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0, **kw
     )
@@ -817,6 +820,35 @@ def test_attention_on_a_person_keeps_a_pending_resume_armed():
     assert x.r.model.reason == "nap" and x.r.snapshot()["nap"]["resumes"] == 1
 
 
+# ---- requested nap (SPEC 7A, Requested nap)
+
+
+def test_a_requested_nap_naps_now_and_holds_its_window():
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    assert nap.napping and nap.started == 100.0 and nap.naps == 1
+    assert nap.requested(100.0) and nap.requested(699.0)
+    assert not nap.requested(700.0)
+
+
+@pytest.mark.parametrize(
+    "end",
+    [lambda n: n.activity(150.0, "speech"), lambda n: n.cancel(150.0)],
+)
+def test_a_requested_nap_that_ends_drops_its_window(end):
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    end(nap)
+    assert not nap.napping and not nap.requested(200.0)
+
+
+def test_quiet_hours_end_a_requested_nap_and_its_window():
+    nap = DayNap()
+    nap.start_requested(100.0, 600.0)
+    nap.step(150.0, after_s=1800.0, resume_after_s=180.0, quiet=True, blocked=False, held=False)
+    assert not nap.napping and not nap.requested(200.0)
+
+
 # ------------------------------------------------- next-nap countdown for the Live tab (2026-11-16)
 
 
@@ -879,6 +911,35 @@ def test_after_a_stimulus_wake_the_countdown_uses_the_resume_time():
     assert not held and 0 < left <= c.nap_resume_after_s
 
 
+def test_no_countdown_and_no_hold_during_a_requested_nap():
+    """SPEC 7A, Requested nap: the robot naps, so the Live tab shows no next nap, even when
+    presence was holding a due nap off at the request and before the next model update."""
+    x = rig()
+    run(x, x.cfg.circadian.nap_after_s - STEP)
+    face(x)
+    run(x, 2 * STEP)
+    assert due(x) == (0.0, True)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    assert due(x) == (None, False)
+    for _ in range(int(x.cfg.circadian.requested_nap_min_s // STEP) - 1):
+        run(x, STEP)
+        assert due(x) == (None, False)
+
+
+def test_after_a_requested_nap_the_usual_countdown_rule_applies():
+    x = rig(requested_nap_min_s=600.0)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    run(x, 601.0)
+    assert x.r.model.reason == "nap" and due(x) == (None, False)  # an ordinary day nap now
+    face(x)
+    face(x, x.clock.t + 0.1)  # a confirmed face wakes it, as after any nap
+    run(x, STEP)
+    assert x.r.model.state == "awake"
+    run(x, x.cfg.circadian.wake_hold_s + 2 * STEP)
+    left, held = due(x)
+    assert not held and 0 < left <= x.cfg.circadian.nap_after_s
+
+
 # ---------------------------------------------- quiet hours indicator for the Live tab (2026-11-17)
 
 
@@ -907,3 +968,32 @@ def test_the_report_carries_the_quiet_hours_window_state_and_countdown():
     y = rig(hour=23.0)
     assert y.r.snapshot()["quiet"]["active"] is True
     assert y.r.snapshot()["quiet"]["change_in_s"] == 8 * 3600.0
+
+
+def test_the_radio_holds_idle_naps_off_and_the_clock_restarts_when_it_stops():
+    """Review I3 (owner decision 2026-11-17): while the radio plays the idle-nap clock does not
+    run, so nobody facing the robot does not end the music; after it stops a nap needs the full
+    nap_after_s again."""
+    playing = [True]
+    x = rig(media_playing=lambda: playing[0])
+    after = x.cfg.circadian.nap_after_s
+    assert set(run(x, 3 * after)) == {"awake"}
+    assert x.r.snapshot()["nap"]["naps"] == 0
+    assert due(x) == (None, False)  # no countdown while it plays
+    playing[0] = False
+    assert set(run(x, after - 2 * STEP)) == {"awake"}
+    run(x, 3 * STEP)
+    assert x.r.model.state == "resting" and x.r.model.reason == "nap"
+
+
+def test_a_requested_nap_still_rests_the_robot_while_the_radio_plays():
+    """Review I3: the radio holds only the idle nap off; a requested nap rests the robot, and
+    its ``circadian.state`` ``resting`` is what stops the player (reason ``nap``)."""
+    seen = []
+    x = rig(media_playing=lambda: True)
+    x.bus.subscribe("circadian.state", lambda m: seen.append(m.payload.state))
+    run(x, STEP)
+    assert x.r.request_nap(x.clock.t) == "ok"
+    run(x, STEP)
+    assert x.r.model.state == "resting" and x.r.model.reason == "nap"
+    assert seen[-1] == "resting"

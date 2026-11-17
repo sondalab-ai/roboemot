@@ -1,7 +1,8 @@
 """Registry of the ``roboemot.*`` entry-point groups and the core contract of each (SPEC 4A, 12A).
 
 A robot package contributes a capability only through a group listed in :data:`GROUPS`, keyed by
-manifest ``robot.id``. A group without a core contract cannot be registered:
+manifest ``robot.id``. ``roboemot.skills`` (SPEC 11, Voice tools) is the one group not keyed by
+``robot.id``: every entry point in it loads. A group without a core contract cannot be registered:
 ``test_robot_hierarchy.py`` fails on any installed ``roboemot.*`` group missing here, and on any
 registered object that does not satisfy its contract.
 """
@@ -20,6 +21,7 @@ from .install import Platform
 from .realtime.session import ENTRY_POINT_GROUP as REALTIME_GROUP
 from .robot_platform import ENTRY_POINT_GROUP as ROBOTS_GROUP
 from .robot_platform import RobotPlatform
+from .skills.plugins import SKILLS_GROUP
 from .voice.cues import ENTRY_POINT_GROUP as CUES_GROUP
 from .webui.robot_section import ENTRY_POINT_GROUP as SETTINGS_GROUP
 from .webui.robot_section import SettingsPlugin
@@ -79,6 +81,11 @@ GROUPS: dict[str, GroupContract] = {
         "factory () or (manifest) -> mapping of cue kind to CueSound: the non-verbal cues' "
         "sounds (SPEC 8, Non-verbal cues)",
         factory_args=(0, 1),
+    ),
+    SKILLS_GROUP: GroupContract(
+        "factory (ToolHost) -> list of @skill functions: voice tools, not keyed by robot.id "
+        "(SPEC 11, Voice tools)",
+        factory_args=1,
     ),
 }
 

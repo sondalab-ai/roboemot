@@ -149,6 +149,14 @@ def open_prompts() -> dict[str, str]:
     return _prompt_files(OPEN_PROMPT)
 
 
+def event_fallback(kind: str, language: str, cfg: RoboEmotConfig) -> str:
+    """The fixed sentence the robot says when no route announces a due ``kind`` (``timer``
+    or ``reminder``), from ``prompts/event_<kind>.<lang>.txt`` (SPEC 11, Voice tools,
+    Fallback): ``language``'s, else ``conversation.language``'s, else English's. It holds a
+    ``{label}`` or ``{text}`` slot the caller fills."""
+    return _in_language(_prompt_files(f"event_{kind}"), language, cfg)
+
+
 @functools.cache
 def _prompt_files(stem: str) -> dict[str, str]:
     """Non-empty ``prompts/<stem>.<lang>.txt`` files by language (shipped with the package;

@@ -39,6 +39,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The radio decoder is the robot's gst-launch-1.0 (SPEC 4A, Installer: Radio decoder): the
+      # decoder test feeds a WAV file through it here (skipped where GStreamer is absent).
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
       - run: pip install -e "packages/roboemot-core[dev,vision,voice]" -e "packages/roboemot-reachymini[dev]"
       - run: pytest -rs
       # The realtime extra allows websockets>=13,<16 and the installer keeps the robot's version:
