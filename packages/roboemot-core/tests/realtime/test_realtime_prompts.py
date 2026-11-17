@@ -17,6 +17,7 @@ from roboemot.llm.prompt_log import PromptRing
 from roboemot.realtime import client as client_mod
 from roboemot.realtime import protocol
 from roboemot.realtime.client import RealtimeClient
+from roboemot.realtime.route import RealtimeRoute
 from roboemot.realtime.session import DirectSession
 from test_gemini_client import gemini_route
 
@@ -134,3 +135,34 @@ def test_a_ring_that_fails_never_fails_a_send(cloud):
             assert c.send(protocol.text_item("ciao")).result(2)
         finally:
             c.close()
+
+
+def test_every_client_the_route_builds_gets_the_ring():
+    from roboemot.health.network import NetworkMonitor
+    from test_realtime_route import CHAT, DIRECT, POLICY, RT, FakeRouter, StubClient, rt_stack
+
+    made: list[dict] = []
+
+    def factory(*a, **kw):
+        made.append(kw)
+        return StubClient(*a, **kw)
+
+    stack = rt_stack()
+    rt = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=factory,
+    )
+    assert rt.ready()
+    assert "prompts" not in made[-1]  # no ring: the client's own default
+    rt.prompts = ring()
+    for port in (8766, 8767):  # a reconfigured route builds a new client: the same ring
+        routes = [CHAT, {**RT, "base_url": f"http://other.local:{port}/v1"}]
+        stack.set("llm_routes", routes, source="test", admin=True)
+        rt.apply_config(stack.effective())
+        assert rt.ready()
+        assert made[-1]["prompts"] is rt.prompts
+    assert len(made) == 3
