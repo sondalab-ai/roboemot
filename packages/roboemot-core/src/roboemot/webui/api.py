@@ -958,6 +958,8 @@ class WebApi:
         data = self._live_source().prompts(*live_cursor(req.query))
         if data is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        if data["prompts"] is None:  # the flag is on but this host keeps no ring
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "live_unavailable")
         return Response(HTTPStatus.OK, data)
 
     def _live_prompts_clear(self, req: Request) -> Response:

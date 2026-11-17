@@ -39,7 +39,7 @@ def served(tmp_path, stack):  # noqa: F811
     )
     srv.set_pin(PIN)
     srv.start()
-    yield SimpleNamespace(client=Client(srv.port), server=srv, ring=ring)
+    yield SimpleNamespace(client=Client(srv.port), server=srv, ring=ring, host=host)
     srv.stop()
 
 
@@ -83,6 +83,17 @@ def test_the_host_without_a_source_answers_unavailable(tmp_path, stack):  # noqa
         assert client.request("POST", "/api/live/prompts/clear", {}).status == 503
     finally:
         srv.stop()
+
+
+def test_a_host_without_a_ring_answers_unavailable_with_the_flag_on(served):
+    c = served.client
+    c.login()
+    switch(c, True)
+    served.host.prompts = None
+    assert prompts(c).json == {"poll_ms": 500, "prompts": NO_PROMPTS}  # off: the hint
+    setting(c, "webui.live.prompts", True)
+    r = prompts(c)
+    assert r.status == 503 and r.json == {"error": "live_unavailable"}
 
 
 def test_the_flag_off_is_an_off_block_and_nothing_is_kept(served):

@@ -177,17 +177,19 @@ class LiveState:
         """The LLM prompts panel's poll: the cloud requests added or changed after revision
         ``after`` (cursor as ``audio``) and the page's poll interval; None while
         ``webui.live.enabled`` is off. With ``webui.live.prompts`` off the ring is cleared and
-        the block is ``NO_PROMPTS``."""
+        the block is ``NO_PROMPTS``; with it on and no ring on the host the block is None (the
+        API answers ``live_unavailable``)."""
         live = self._cfg.webui.live
         if not live.enabled:
             return None
         ring = self._host.prompts
-        if ring is not None and not live.prompts:
-            ring.apply_config(live)  # the flag is off here: whatever it still holds goes
-        on = ring is not None and live.prompts
+        if not live.prompts:
+            if ring is not None:
+                ring.apply_config(live)  # the flag is off here: whatever it still holds goes
+            return {"poll_ms": live.audio_poll_ms, "prompts": NO_PROMPTS}
         return {
             "poll_ms": live.audio_poll_ms,
-            "prompts": ring.snapshot(after, epoch) if on else NO_PROMPTS,
+            "prompts": ring.snapshot(after, epoch) if ring is not None else None,
         }
 
     def clear_prompts(self) -> bool:
