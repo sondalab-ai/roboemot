@@ -16,12 +16,15 @@ must be in ``REASONS``; :func:`clean` keeps only the declared fields (``FIELDS``
 a finite number, a flag a bool, a code field one of its enumerated values (any other string
 becomes ``OTHER``). A word, a name, a key, audio or an embedding never leaves the producer.
 
-One exception, by allow-list too (``TEXT_EVENTS``): the ``unanswered``/``media_unconfirmed``
-event (a wake over the radio the server's transcript did not confirm, SPEC 8) may carry that
-transcript as ``heard``, so the owner can see what the server wrote for the name. The listener
-puts it there only while the Live tab and its transcript are on (``webui.live.transcript``), cut
-to ``webui.live.transcript_max_chars``; the ring keeps it under the transcript's own rules (off,
-asleep, ``transcript_max_age_s``). Nothing here logs an event, and no debug report reads the ring.
+One exception, by allow-list too (``TEXT_EVENTS``): two radio events may carry words as
+``heard``, so the owner can see what a recognizer wrote for the name (SPEC 8). The
+``unanswered``/``media_unconfirmed`` event (a wake over the radio the server's transcript did not
+confirm) carries the server's transcript; the ``unanswered``/``media`` event (the local wake gate
+rejected an utterance over the radio for no wake word) the local recognizer's final, so it can
+hold speech nobody addressed to the robot. The listener puts them there only while the Live tab
+and its transcript are on (``webui.live.transcript``), cut to ``webui.live.transcript_max_chars``;
+the ring keeps them under the transcript's own rules (off, asleep, ``transcript_max_age_s``).
+Nothing here logs an event, and no debug report reads the ring.
 """
 
 from __future__ import annotations
@@ -142,7 +145,9 @@ FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
 PATHS = ("vad", "onset", "keyword")
 NUMBER, FLAG = "number", "flag"  # a field that holds a number, a field that holds a bool
 TEXT = "text"  # a field that holds words: kept only on an event of ``TEXT_EVENTS``
-TEXT_EVENTS = frozenset({("unanswered", "media_unconfirmed")})  # the only ones text rides on
+# the only ones text rides on: the server's words of an unconfirmed radio wake, the local final
+# of a radio rejection
+TEXT_EVENTS = frozenset({("unanswered", "media_unconfirmed"), ("unanswered", "media")})
 
 FIELDS: dict[str, tuple[str, ...] | str] = {
     "cue": CUE_KINDS,
@@ -179,7 +184,7 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "moving": FLAG,
     "ducking": FLAG,
     "request": FLAG,
-    "heard": TEXT,  # the server's words of an unconfirmed wake over the radio (TEXT_EVENTS)
+    "heard": TEXT,  # a recognizer's words of a radio wake or rejection (TEXT_EVENTS)
 }
 TEXT_FIELDS = tuple(key for key, spec in FIELDS.items() if spec == TEXT)
 
@@ -378,8 +383,8 @@ RING_KEYS = ("t", "seq", "_at", "count")  # what the ring adds or what always di
 
 def _labels(event: dict[str, Any]) -> dict[str, Any]:
     """The fields that say what an event was (codes, flags, None), without its numbers and its
-    words (``TEXT_FIELDS``): a run of unconfirmed wakes on a song's lyrics is one row with a
-    count and the newest words, so it cannot push the rest out."""
+    words (``TEXT_FIELDS``): a run of unconfirmed wakes or radio rejections on a song's lyrics
+    is one row with a count and the newest words, so it cannot push the rest out."""
     return {
         k: v
         for k, v in event.items()

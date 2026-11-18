@@ -98,8 +98,9 @@ EN: dict[str, str] = {
     "live_activity_recent": "Last decisions, newest first",
     "live_activity_empty": "Nothing to explain yet.",
     "live_activity_note": (
-        "Reasons and numbers, plus the server's words of a radio wake it did not confirm while "
-        "the live transcript is on; kept in memory while this tab is on."
+        "Reasons and numbers. While the radio plays and the live transcript is on, also the "
+        "words the robot or the server heard but did not answer, from anyone in the room or "
+        "the radio; kept in memory while this tab is on."
     ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motors off",
@@ -162,6 +163,7 @@ EN: dict[str, str] = {
         "Not answered: the radio is playing and the server's words held no wake word"
     ),
     "live_ev_heard": "the server heard: “{heard}”",
+    "live_ev_heard_local": "the robot heard: “{heard}”",
     "live_ev_unanswered_skipped": (
         "Not answered: the cloud model skipped it (conversation: {conversation})"
     ),
@@ -1396,9 +1398,9 @@ IT: dict[str, str] = {
     "live_activity_recent": "Ultime decisioni, dalla più recente",
     "live_activity_empty": "Ancora niente da spiegare.",
     "live_activity_note": (
-        "Motivi e numeri, più le parole del server per un'attivazione con la radio che non ha "
-        "confermato, se la trascrizione dal vivo è attiva; tenuti in memoria finché questa scheda "
-        "è attiva."
+        "Motivi e numeri. Mentre suona la radio e la trascrizione dal vivo è attiva, anche le "
+        "parole che il robot o il server hanno sentito senza rispondere, di chiunque nella "
+        "stanza o della radio; tenuti in memoria finché questa scheda è attiva."
     ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motori spenti",
@@ -1469,6 +1471,7 @@ IT: dict[str, str] = {
         "attivazione"
     ),
     "live_ev_heard": "il server ha sentito: «{heard}»",
+    "live_ev_heard_local": "il robot ha sentito: «{heard}»",
     "live_ev_unanswered_skipped": (
         "Senza risposta: il modello cloud l'ha ignorata (conversazione: {conversation})"
     ),

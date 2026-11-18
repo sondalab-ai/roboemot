@@ -1,7 +1,7 @@
 """Decision events for the Live tab's "What's happening" panel (SPEC 11A, 12, 12A; CV-10): each
 decision point publishes one ``diag.event`` with its reason code, the ring keeps the last ones,
-and nothing in an event is text, audio, an embedding or a key (but the server's words of an
-unconfirmed wake over the radio, under the live transcript's rules)."""
+and nothing in an event is text, audio, an embedding or a key (but a recognizer's words of an
+unconfirmed wake or a rejection over the radio, under the live transcript's rules)."""
 
 from __future__ import annotations
 
@@ -256,22 +256,27 @@ def test_an_own_sound_cut_is_not_the_live_cut_status():
 # ------------------------------------------------------------------ the one text field
 
 UNCONFIRMED = ("unanswered", "media_unconfirmed")
+REJECTED = ("unanswered", "media")  # the local wake gate's rejection over the radio
+RADIO = pytest.mark.parametrize("radio", [UNCONFIRMED, REJECTED], ids=["server", "local"])
 
 
-def test_the_heard_words_ride_only_on_an_unconfirmed_wake_over_the_radio():
-    """SPEC 8, 12: the server's words of an unconfirmed wake are the one text an event may
-    carry; on any other event (``rejected_media`` included) the field is dropped."""
+def test_the_heard_words_ride_only_on_the_two_radio_events():
+    """SPEC 8, 12: a recognizer's words over the radio (the server's of an unconfirmed wake,
+    the local final of ``rejected_media``) are the only text an event may carry; on any other
+    event (another rejection included) the field is dropped."""
     bus = Bus()
     got = published(bus)
     events = BusEvents(bus, wall=lambda: 1.0)
     events(*UNCONFIRMED, heard=TEXT)
-    events("unanswered", "media", heard=TEXT)
+    events(*REJECTED, heard=TEXT)
+    events("unanswered", "music", heard=TEXT)
+    events("unanswered", "no_window", heard=TEXT)
     events("session", "lost", heard=TEXT)
     events(*UNCONFIRMED, heard=["not", "a", "string"])
-    events(*UNCONFIRMED, heard=None)
-    assert got[0]["heard"] == TEXT
-    assert all("heard" not in ev for ev in got[1:4])
-    assert got[4]["heard"] is None
+    events(*REJECTED, heard=None)
+    assert got[0]["heard"] == TEXT and got[1]["heard"] == TEXT
+    assert all("heard" not in ev for ev in got[2:6])
+    assert got[6]["heard"] is None
     assert clean({"heard": TEXT}) == {}
 
 
@@ -282,31 +287,32 @@ def text_ring(clock, **kw) -> tuple[EventRing, BusEvents]:
     return ring, BusEvents(bus, clock=lambda: clock[0])
 
 
-def test_the_ring_keeps_the_words_as_the_live_transcript_does():
+@RADIO
+def test_the_ring_keeps_the_words_as_the_live_transcript_does(radio):
     """The words follow the live transcript (SPEC 12): cut to ``transcript_max_chars``, never
     kept with the transcript off, forgotten when it turns off, when the robot falls asleep and
     past ``transcript_max_age_s``; the event itself stays."""
     clock = [100.0]
     ring, events = text_ring(clock, transcript_max_chars=80)
-    events(*UNCONFIRMED, heard="x" * 200)
+    events(*radio, heard="x" * 200)
     assert ring.events()[0]["heard"] == "x" * 80
     ring.apply_config(live(transcript=False))
     assert "heard" not in ring.events()[0]
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     assert "heard" not in ring.events()[0]  # off: not kept at all
     ring.apply_config(live(transcript=True))
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     ring.set_asleep(True)
     assert "heard" not in ring.events()[0]
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     assert "heard" not in ring.events()[0]  # asleep: not kept
     ring.set_asleep(False)
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     assert ring.events()[0]["heard"] == TEXT
     clock[0] += live().transcript_max_age_s + 1
     rows = ring.events()
     assert rows and all("heard" not in r for r in rows)
-    assert [r["reason"] for r in rows][0] == "media_unconfirmed"
+    assert [r["reason"] for r in rows][0] == radio[1]
 
 
 def test_the_tick_trim_forgets_old_words_with_nobody_polling():
@@ -318,50 +324,55 @@ def test_the_tick_trim_forgets_old_words_with_nobody_polling():
     assert all("heard" not in e for e in ring._events)  # in memory, not only on read
 
 
-def test_a_run_of_unconfirmed_wakes_is_one_row_with_the_newest_words():
-    """A song's lyrics can fail the confirmation again and again: the words are not a label,
-    so the run is one row with a count and cannot push the other events out."""
+@RADIO
+def test_a_run_of_radio_events_is_one_row_with_the_newest_words(radio):
+    """A song's lyrics can fail the confirmation, or the local wake gate, again and again: the
+    words are not a label, so the run is one row with a count and cannot push the other events
+    out."""
     clock = [100.0]
     ring, events = text_ring(clock, activity_events=5)
     events("turn", "ok")
     for i in range(10):
-        events(*UNCONFIRMED, heard=f"lyric line {i}")
+        events(*radio, heard=f"lyric line {i}")
     rows = ring.events()
-    assert [(r["reason"], r["count"]) for r in rows] == [("media_unconfirmed", 10), ("ok", 1)]
+    assert [(r["reason"], r["count"]) for r in rows] == [(radio[1], 10), ("ok", 1)]
     assert rows[0]["heard"] == "lyric line 9"
 
 
-def test_clear_forgets_the_words_and_keeps_the_events():
+@RADIO
+def test_clear_forgets_the_words_and_keeps_the_events(radio):
     clock = [100.0]
     ring, events = text_ring(clock)
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     ring.forget_text()
     [row] = ring.events()
-    assert row["reason"] == "media_unconfirmed" and "heard" not in row
-    events(*UNCONFIRMED, heard=TEXT)  # still on: new words are kept again
+    assert row["reason"] == radio[1] and "heard" not in row
+    events(*radio, heard=TEXT)  # still on: new words are kept again
     assert ring.events()[0]["heard"] == TEXT
 
 
-def test_a_read_without_text_serves_no_words():
+@RADIO
+def test_a_read_without_text_serves_no_words(radio):
     ring, events = text_ring([100.0])
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     assert "heard" not in ring.events(text=False)[0]
     assert ring.events()[0]["heard"] == TEXT
 
 
-def test_the_words_never_reach_the_logs(caplog):
+@RADIO
+def test_the_words_never_reach_the_logs(caplog, radio):
     """SPEC 12: neither the sink, the ring nor the listener's gate logs the words."""
     import logging
 
     caplog.set_level(logging.DEBUG)
     ring, events = text_ring([100.0])
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     ring.events()
     ring.trim()
     ring.forget_text()
     bus = Bus()
     bus.subscribe(TOPIC, lambda m: (_ for _ in ()).throw(RuntimeError(TEXT)))
-    BusEvents(bus)(*UNCONFIRMED, heard=TEXT)  # a failing subscriber is logged by type only
+    BusEvents(bus)(*radio, heard=TEXT)  # a failing subscriber is logged by type only
     assert TEXT not in caplog.text and "ciao" not in caplog.text
 
 

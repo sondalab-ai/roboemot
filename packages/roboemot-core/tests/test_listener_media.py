@@ -4,6 +4,7 @@ music detector ignores music."""
 
 from __future__ import annotations
 
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -77,20 +78,75 @@ def test_policy_and_a_face_do_not_address_while_media_plays():
         assert r.utterances[-1].addressed
 
 
-def test_a_local_media_reject_carries_no_words_even_with_the_live_transcript_on():
-    """``rejected_media`` (no wake word over the radio, decided locally) keeps its own reason
-    and never the heard words: only the server's unconfirmed wake carries them (SPEC 12)."""
-    data = cfg("never").model_dump()
-    data["webui"]["live"].update(enabled=True, transcript=True)
-    r = Rig(["come stai"], cfg=RoboEmotConfig.model_validate(data))
-    r.listener.media_audible = lambda at: True
+LYRIC = "neva ferma la zebracanto"  # a local final over the radio the wake gate rejects
+
+
+def live_rig(enabled=True, transcript=True, policy="never", radio=True, **live):
+    """A rig with ``webui.live`` set, the radio audible or not, and its decision events kept in
+    ``seen`` as ``(kind, reason, fields)``, as the listener passed them (before ``diag``)."""
+    data = cfg(policy).model_dump()
+    data["webui"]["live"].update(enabled=enabled, transcript=transcript, **live)
+    r = Rig([LYRIC], cfg=RoboEmotConfig.model_validate(data))
+    if radio:
+        r.listener.media_audible = lambda at: True
     seen = []
     r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
+    return r, seen
+
+
+def test_a_local_media_reject_carries_the_local_words_with_the_live_transcript_on(caplog):
+    """The owner's robot run (2026-11-18): "neve ferma la musica" over the radio was rejected by
+    the local wake gate and the Live tab could not say what the local recognizer wrote. With the
+    Live tab and its transcript on, ``rejected_media`` carries the local final as ``heard``,
+    cut to ``webui.live.transcript_max_chars``, and no log has it (SPEC 8, 12). It is not the
+    server's ``media_unconfirmed``. Replaces PR 273's test that this event carried no words."""
+    caplog.set_level(logging.DEBUG)
+    r, seen = live_rig(transcript_max_chars=80)
     r.say()
     assert not r.utterances[-1].addressed
     media = [f for k, why, f in seen if (k, why) == ("unanswered", "media")]
-    assert media and all("heard" not in f for f in media)
+    assert media and all(f["heard"] == LYRIC for f in media)
     assert all(why != "media_unconfirmed" for _, why, _ in seen)
+    assert "zebracanto" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("enabled", "transcript"),
+    [(True, False), (False, True), (False, False)],  # the transcript flag alone is not enough
+)
+def test_a_local_media_reject_carries_no_words_without_the_live_tab_and_its_transcript(
+    enabled, transcript
+):
+    r, seen = live_rig(enabled=enabled, transcript=transcript)
+    r.say()
+    media = [f for k, why, f in seen if (k, why) == ("unanswered", "media")]
+    assert media and all(f["heard"] is None for f in media)
+
+
+def test_no_other_rejection_carries_words_even_with_the_live_transcript_on():
+    """SPEC 12: only the radio rejection carries the local final; without the radio the same
+    utterance is rejected for another rule and its event holds no ``heard`` at all."""
+    r, seen = live_rig(policy="always", radio=False)  # the wake word is required: no_window
+    r.say()
+    assert not r.utterances[-1].addressed
+    unanswered = [(why, f) for k, why, f in seen if k == "unanswered"]
+    assert unanswered and all(why != "media" and "heard" not in f for why, f in unanswered)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "transcript", "want"),
+    [(True, True, "ehi neva"), (False, True, None), (True, False, None)],
+)
+def test_the_local_words_need_the_live_tab_and_its_transcript(enabled, transcript, want):
+    data = cfg().model_dump()
+    data["webui"]["live"].update(enabled=enabled, transcript=transcript)
+    r = Rig(["ciao"], cfg=RoboEmotConfig.model_validate(data))
+    assert r.listener._live_words("  ehi neva  ") == want
+
+
+def test_the_local_words_are_cut_as_a_transcript_turn():
+    r, _ = live_rig(transcript_max_chars=80)
+    assert r.listener._live_words("x" * 200) == "x" * 80
 
 
 @pytest.mark.parametrize(
