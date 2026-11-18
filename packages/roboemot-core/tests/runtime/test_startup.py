@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from roboemot.config import ConfigStack
 from roboemot.runtime import RuntimeHost
-from roboemot.runtime.startup import bind_barge_in, offline_cue, start_all
+from roboemot.runtime.startup import bind_barge_in, offline_cue, start_all, start_media
 
 
 class Part:
@@ -84,6 +84,35 @@ def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep():
     p.sleep.asleep, p.sleep.paused = False, True
     cue.say("paused", "it")
     assert len(said) == 1
+
+
+@pytest.mark.parametrize("echo_cancelled", [True, False])
+def test_start_media_wires_the_listeners_speech_to_the_players_duck(echo_cancelled):
+    """SPEC 8, Radio playback: the player learns the manifest's hardware echo cancellation and
+    each utterance's start and end from the listener (the duck over speech)."""
+
+    class Sink:
+        def push_media(self, samples, rate_hz):
+            return 0.0
+
+        def cut_media(self):
+            return False
+
+    host, stack = RuntimeHost(), ConfigStack()
+    listener = SimpleNamespace(hear_media=lambda samples, rate_hz, start: None)
+    with ExitStack() as cleanup:
+        player = start_media(
+            host,
+            stack,
+            SimpleNamespace(sink=Sink()),
+            listener,
+            cleanup,
+            echo_cancelled=echo_cancelled,
+        )
+        assert player is not None and host.media is player
+        assert player.echo_cancelled is echo_cancelled
+        assert listener.media_speech_start == player.duck_from
+        assert listener.media_speech_end == player.release_from
 
 
 def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
@@ -291,6 +320,7 @@ def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slo
         perception=SimpleNamespace(registry=None), sleep=SimpleNamespace(asleep=False),
         hub=None, network=None, realtime_provider=None, selector=None, world=None,
         value_cap=None, conv_speaker=None, names=None, tracker=SimpleNamespace(active=None),
+        echo_cancelled=False,
     )  # fmt: skip
     host = RuntimeHost()
     host.bus = bus

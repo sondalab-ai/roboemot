@@ -55,6 +55,8 @@ def test_the_skill_is_go_to_sleep_visible_and_available_only_with_a_nap_part():
     s = fn.skill
     assert s.name == "go_to_sleep" and s.llm_visible and s.params == ()
     assert "good night" in s.text() and "name wakes you" in s.text()
+    # robot run 2026-11-18: "hey neve dormi" got chat ("sono sempre sveglia"), not the tool
+    assert "even a single word" in s.text() and "Never answer that you do not sleep" in s.text()
     assert not s.is_available()
     h.nap = lambda: "ok"  # read live: set after the factory ran
     assert s.is_available()

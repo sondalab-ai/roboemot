@@ -139,7 +139,7 @@ def start_voice_output(
     cues = host.cues = build_cues(host, stack, p, output)
     cues.events = host.events
     p.responder.cue = offline_cue(host, stack, p)
-    start_media(host, stack, output, listener, cleanup)
+    start_media(host, stack, output, listener, cleanup, echo_cancelled=p.echo_cancelled)
     if listener is None:
         return
     cut_own = own_sound_cut(output, soothe)
@@ -211,7 +211,13 @@ def start_voice_output(
 
 
 def start_media(
-    host: RuntimeHost, stack: ConfigStack, output: Any, listener: Any, cleanup: ExitStack
+    host: RuntimeHost,
+    stack: ConfigStack,
+    output: Any,
+    listener: Any,
+    cleanup: ExitStack,
+    *,
+    echo_cancelled: bool = False,
 ) -> MediaPlayer | None:
     """The media player the radio plays through (SPEC 8, Radio playback; SPEC 11, Media
     player), only when the speaker can play media outside the speaking window (``MediaSink``):
@@ -220,11 +226,13 @@ def start_media(
     station removed), closes before the speech output, and
     tells the listener when the music can be heard (``audible_at``: the lyrics gate and
     ``tools.radio.dance``), lets it record a turn's hold (``hold_from``) and hands it the
-    pieces that played (``on_piece``: the dance's audio behind a hardware echo canceller). Sets
-    ``host.media``; None (and no radio) otherwise."""
+    pieces that played (``on_piece``: the dance's audio behind a hardware echo canceller), and
+    gives it each utterance's start and end (``duck_from``, ``release_from``: the duck over
+    speech, only with the manifest's ``echo_cancelled``). Sets ``host.media``; None (and no
+    radio) otherwise."""
     if not isinstance(output.sink, MediaSink):
         return None
-    player = host.media = MediaPlayer(output, host, stack.effective)
+    player = host.media = MediaPlayer(output, host, stack.effective, echo_cancelled=echo_cancelled)
     cleanup.callback(player.close)  # before the output goes away (callbacks run last in first)
     cleanup.callback(stack.subscribe(player.on_config))  # radio off or station gone: stop
     player.start()
@@ -232,6 +240,8 @@ def start_media(
         listener.media_audible = player.audible_at
         listener.media_hold = player.hold_from
         listener.media_set = player.playing
+        listener.media_speech_start = player.duck_from
+        listener.media_speech_end = player.release_from
         player.on_piece = listener.hear_media
     return player
 
