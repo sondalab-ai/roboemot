@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from .ticks import (
     soothe_tick,
 )
 
+log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
 
 
@@ -144,7 +146,10 @@ def _tick_until_stopped(
         p.speaking.set_register(register)
         p.dance.set_register(register)
         if p.touch_stop is not None:  # before the expression update: the nod starts this tick
-            p.touch_stop.tick(now, p.loop.external, live.tools.radio, p.loop.motors_off)
+            try:
+                p.touch_stop.tick(now, p.loop.external, live.tools.radio, p.loop.motors_off)
+            except Exception as exc:  # the behaviour tick goes on (type only, SPEC 12)
+                log.warning("touch stop: %s", type(exc).__name__)
         if state is not None:
             p.expression.update(state, register, now)
             p.speaking.set_affect(state)
