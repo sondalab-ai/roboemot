@@ -64,12 +64,15 @@ def system_prompt(
     *,
     language: str | None = None,
     robot_name: str = "",
+    extra_names: tuple[str, ...] = (),
 ) -> str:
     """Parts 1 to 4 of the system prompt. ``register`` is the active register as the persona
     shapes it (``roboemot.persona.apply_to_register``); ``language`` defaults to the
     conversation language; ``robot_name`` (``RobotName.prompt_name``, already sanitised) is told to
-    the model when the robot has one."""
-    return _prompt(cfg, register, language, robot_name, cfg.voice.mood_source == "llm_tagged")
+    the model when the robot has one, and ``extra_names`` (``RobotName.prompt_extra_names``,
+    sanitised too) as names it also answers to, which count as its name."""
+    llm_tagged = cfg.voice.mood_source == "llm_tagged"
+    return _prompt(cfg, register, language, _name_rule(robot_name, extra_names), llm_tagged)
 
 
 def realtime_instructions(
@@ -78,6 +81,7 @@ def realtime_instructions(
     *,
     language: str | None = None,
     robot_name: str = "",
+    extra_names: tuple[str, ...] = (),
     skip_rule: bool = True,
     conversation: str | None = None,
     tone_rule: bool = True,
@@ -91,7 +95,7 @@ def realtime_instructions(
     ``ignore_utterance`` rule from the prompt files follows, then the hint of the turn's
     ``conversation`` state (one of ``CONVERSATION_STATES``; None, as in ``session.update``: no
     hint). The rules are English whatever ``language``; only the reply rule names it."""
-    prompt = _prompt(cfg, register, language, robot_name, False)
+    prompt = _prompt(cfg, register, language, _name_rule(robot_name, extra_names), False)
     rt = cfg.voice.realtime_route
     parts = [prompt]
     if tone_rule and rt.tone_tool:
@@ -180,16 +184,29 @@ def _prompt_files(stem: str) -> dict[str, str]:
     return out
 
 
+def _name_rule(robot_name: str, extra_names: tuple[str, ...]) -> str:
+    """The prompt's name line: the robot's name, then the extra names it answers to, each
+    quoted (both already sanitised); the extra names count as its name for the Conversation
+    start rule (SPEC 8). '' without any."""
+    own = f'Your name is "{robot_name}".' if robot_name else ""
+    if not extra_names:
+        return own
+    quoted = ", ".join(f'"{n}"' for n in extra_names)
+    also = "also " if robot_name else ""
+    counts = "it counts" if len(extra_names) == 1 else "they count"
+    return f"{own} You {also}answer to {quoted}: {counts} as your name.".strip()
+
+
 def _prompt(
     cfg: RoboEmotConfig,
     register: RegisterParams,
     language: str | None,
-    robot_name: str,
+    name_rule: str,
     mood_tags: bool,
 ) -> str:
     lang = language or cfg.conversation.language
     rules = [
-        f'Your name is "{robot_name}".' if robot_name else "",
+        name_rule,
         VOCABULARY_RULES[register.vocabulary],
         f"Reply in at most {max_reply_sentences(cfg, register)} sentences.",
         f"Always reply in {LANGUAGE_NAMES.get(lang, lang)}.",
@@ -283,17 +300,23 @@ def trim_history(
 
 def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     """Tokens of the largest system message a request can carry: parts 1 to 4 with a persona
-    fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
-    the longest vocabulary rule and language name, plus the two summaries at their caps (part 5
-    is capped, the affect line is a few words). The persona and body prompts count as written:
-    no person can override them, and every change to them runs this check again."""
+        fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
+        the longest vocabulary rule and language name, the name line with the robot's name and
+    ``voice.extra_names_max`` extra names at ``voice.name_max_chars``, plus the two summaries at
+    their caps (part 5
+        is capped, the affect line is a few words). The persona and body prompts count as written:
+        no person can override them, and every change to them runs this check again."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
     language = max([*LANGUAGE_NAMES.values(), cfg.conversation.language], key=len)
     fragment = "x" * cfg.register.persona_fragment_max_chars
     register = cfg.register.params.model_copy(
         update={"vocabulary": vocabulary, "persona_fragment": fragment}
     )
-    fixed = len(system_prompt(cfg, register, language=language))
+    name = "x" * cfg.voice.name_max_chars
+    extras = (name,) * cfg.voice.extra_names_max
+    fixed = len(
+        system_prompt(cfg, register, language=language, robot_name=name, extra_names=extras)
+    )
     conv = cfg.conversation
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS

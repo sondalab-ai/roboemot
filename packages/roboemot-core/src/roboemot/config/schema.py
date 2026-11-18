@@ -3564,16 +3564,21 @@ class KeywordSet(Strict):
     name_wake_templates: list[str] = param(
         [],
         "Wake phrases built around the robot's name, each with exactly one `{name}` placeholder "
-        "(`ciao {name}`). They apply when the robot has a name (`voice.wake_word`, or the one "
-        "the platform reports) whose words are all in this language's recognizer vocabulary; "
-        "otherwise only `wake_phrases` wake the robot in this language. The bare name is a name "
-        "alias too: it wakes when it opens the final text or in a short final text",
+        "(`ciao {name}`), rendered with the robot's name (`voice.wake_word`, or the one the "
+        "platform reports) and with each of `voice.extra_names`, for a name whose words are all "
+        "in this language's recognizer vocabulary; a phrase already among `wake_phrases` counts "
+        "once. Without such a name only `wake_phrases` wake the robot in this language. A "
+        "template word out of that vocabulary (a model without `hey`, say) leaves the "
+        "phrase out of the local grammar pass only: the server's transcript still matches it. "
+        "The bare name is a name alias too: it wakes when it opens the final text or in a short "
+        "final text",
         advanced=True,
     )
     name_lead_ins: list[str] = param(
         [],
-        "Words that may come before the robot's name when the name opens the final text "
-        "(`ok Neve, ...`, `senti Neve, ...`): the name then wakes the robot at any length. At "
+        "Words that may come before the robot's name (or one of `voice.extra_names`) when the "
+        "name opens the final text (`ok Neve, ...`, `senti Neve, ...`, `hey robot, ...`): the "
+        "name then wakes the robot at any length. At "
         "most one of these phrases, or one `greeting`, before the name. Keep articles and common "
         "sentence openers out: `la neve ...` must not wake the robot",
         advanced=True,
@@ -5102,10 +5107,32 @@ class VoiceConfig(Strict):
         "capped like the other names (`voice.name_max_chars`)",
         advanced=True,
     )
+    extra_names: list[str] = param(
+        ["robot"],
+        "Names the robot answers to on par with its own name (owner decision 2026-11-18), in "
+        "every language and wake rule: the bare name in a short final, opening the final text "
+        "(alone or after one `name_lead_ins` phrase or greeting), rendered in "
+        "`name_wake_templates`, speech.name_called. Over the robot's audible radio one alone does "
+        "not wake the robot nor confirm a wake (a lyric can say it); a rendered template still "
+        "does. The system prompt tells the model it answers to them. Sanitised "
+        "and capped like the robot's name (`voice.name_max_chars`); a name whose words are "
+        "missing from a language's recognizer vocabulary is skipped there and counted with the "
+        "wake phrases out of vocabulary. Empty: only the robot's own name",
+        admin_only=True,
+    )
+    extra_names_max: int = param(
+        4,
+        "At most this many `extra_names`: each is one more name line entry in the system prompt "
+        "and one more set of wake phrases per language",
+        ge=0,
+        le=16,
+        advanced=True,
+    )
     name_max_chars: int = param(
         32,
-        "The robot's name is cut to this many characters (after dropping everything but letters, "
-        "digits, spaces and `'.-`) in the system prompt and the spoken lines",
+        "The robot's name and its `extra_names` are cut to this many characters (after "
+        "dropping everything but letters, digits, spaces and `'.-`) in the system prompt and the "
+        "spoken lines",
         ge=1,
         le=100,
         advanced=True,
@@ -5136,8 +5163,8 @@ class VoiceConfig(Strict):
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
-                "name_wake_templates": ["ciao {name}", "ehi {name}"],
-                "name_lead_ins": ["ok", "okay", "senti", "scusa", "ascolta"],
+                "name_wake_templates": ["ciao {name}", "ehi {name}", "hey {name}"],
+                "name_lead_ins": ["ok", "okay", "senti", "scusa", "ascolta", "hey"],
             },
             "en": {
                 "stop": ["stop", "halt", "enough"],
@@ -5178,6 +5205,15 @@ class VoiceConfig(Strict):
         return self
 
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
+
+    @model_validator(mode="after")
+    def _extra_names_are_bounded(self) -> VoiceConfig:
+        if len(self.extra_names) > self.extra_names_max:
+            raise ValueError(
+                f"voice.extra_names has {len(self.extra_names)} names, more than "
+                f"voice.extra_names_max ({self.extra_names_max})"
+            )
+        return self
 
     @field_validator("voices")
     @classmethod

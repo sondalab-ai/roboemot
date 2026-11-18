@@ -96,7 +96,9 @@ find it held even before the player's feeder saw the turn. Such a wake over the 
 must be confirmed by the server's transcript when one comes: a lyric can match the name in the
 small local grammar, so a server final that holds neither the name nor a wake phrase (the
 server spotter, case-insensitive), nor a close spelling of the name (``FastPath.
-server_name_close``: "Nivea" for "Neve", never "nave"), is handed off not addressed, counted
+server_name_close``: "Nivea" for "Neve", never "nave"; an extra name such as "robot" counts
+for none of these over the radio, nor wakes the robot there by itself), is handed off not
+addressed, counted
 ``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media_unconfirmed``, with the
 server's words while the live transcript is on): the conversation deletes
 its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
@@ -179,7 +181,7 @@ SERVER_GATES = ("music", "other_speaker", "at_face", "facing")  # decided by the
 OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be off
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
 # what in the server's transcript confirms a wake over the audible radio (SPEC 8, Radio playback)
-WAKE_CONFIRMS = frozenset({"name", "wake"})
+WAKE_CONFIRMS = frozenset({"name", "wake"})  # not ``extra_name``: a lyric can say "robot"
 
 
 class VoiceChunkLike(Protocol):
@@ -265,6 +267,7 @@ class _Handoff:
     announced: bool = False  # its stream's opening went, and that was counted
     cued: bool = False  # ... and its listening cue began (AUDIO_SENT; a barge-in's waits, S3)
     media_wake: bool = False  # only the wake word addressed it, over the audible radio
+    media: bool = False  # the radio was audible as it started: extra names do not wake (SPEC 8)
     # a follow-up in the window a media wake opened, decided before that wake's verdict
     media_parent: _Handoff | None = field(default=None, repr=False)
     unconfirmed: bool = False  # the server's words did not confirm its wake: not answered
@@ -1704,13 +1707,15 @@ class VoiceListener:
             return self._deliver_heard(p)
         text = p.text
         if p.addressed is None:
+            # over the audible radio an extra name ("robot", a lyric word) does not wake the
+            # robot by itself: its own name or a wake phrase does (owner decision 2026-11-18)
+            media = p.media = self._media_at(ev.start_stamp)
             kind = self._fast.wake_kind(
-                text, grammar_pass=p.grammar_pass, heard=heard, state=p.state
+                text, grammar_pass=p.grammar_pass, heard=heard, state=p.state, extras=not media
             )
             face = p.face
             at_face = self._checked(p) if face is None else (lambda: face)
             wake = kind == WAKE  # also True below for NAME_FIRST over the radio (SPEC 8)
-            media = self._media_at(ev.start_stamp)
             if kind == NAME_FIRST:
                 # while the robot's own radio is audible the wake word is required anyway and
                 # the sound direction is muted (own sound): the name opening the text wakes it
@@ -1753,12 +1758,13 @@ class VoiceListener:
             p.media_parent = self._media_wake
 
     def _confirms(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
-        """Whether ``p``'s final confirms a wake over the radio: a wake phrase or the name in
-        it, or, in a server's transcript, a close spelling of the name (owner decision
-        2026-11-17: the server wrote "Nivea" for "Neve")."""
+        """Whether ``p``'s final confirms a wake over the radio: a wake phrase or the robot's own
+        name in it, or, in a server's transcript, a close spelling of that name (owner decision
+        2026-11-17: the server wrote "Nivea" for "Neve"). An extra name ("robot") alone never
+        confirms it (owner decision 2026-11-18: a lyric can say "robot")."""
         if fast.keywords & WAKE_CONFIRMS:
             return True
-        return server and self._fast.server_name_close(text, p.language)
+        return server and self._fast.server_name_close(text, p.language, extras=False)
 
     def _heard(self, text: str, server: bool) -> str | None:
         """The server's words of an unconfirmed wake for the Live tab (SPEC 12): only a server
@@ -1880,6 +1886,7 @@ class VoiceListener:
             heard=heard,
             state=p.state,
             server=server,
+            extras=not p.media,
         )
         addressed = bool(p.addressed)
         if server and fast.wake_word:

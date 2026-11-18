@@ -10,6 +10,13 @@ recognizer cannot produce can never be heard, so the language then keeps its gen
 ``wake_phrases`` alone and the gap is logged once. The name is configuration or a device label,
 not speech: it may be logged. It also comes from outside (the owner's phone), so the prompt and
 the spoken lines only get ``prompt_name``: letters, digits, spaces and ``'.-``, capped.
+
+``voice.extra_names`` (default ``robot``, owner decision 2026-11-18) are names the robot answers
+to on par with its own, in every wake rule (over the audible radio one alone does not count,
+SPEC 8): sanitised the same way, checked against each
+recognizer's vocabulary the same way, but a word missing there is never logged, only counted
+(``out_of_vocab``'s one-time log of counts). ``ResolvedName.names_for`` gives every name in force
+for a language: the robot's own name first, then the extra names.
 """
 
 from __future__ import annotations
@@ -33,6 +40,30 @@ NO_THROTTLE_S = 0.0
 
 
 @dataclass(frozen=True)
+class ExtraName:
+    """One of ``voice.extra_names``: ``display`` (sanitised), ``matching`` (normalised) and the
+    ``languages`` whose recognizer vocabulary has its words (None: every language)."""
+
+    display: str
+    matching: str
+    languages: frozenset[str] | None = None
+
+    def usable(self, language: str) -> bool:
+        """Whether the recognizer of ``language`` can produce every word of this name."""
+        return self.languages is None or language in self.languages
+
+
+@dataclass(frozen=True)
+class SpokenName:
+    """A name in force for one language: ``display`` for the grammar, ``matching`` for text;
+    ``extra`` for one of ``voice.extra_names`` (it does not count over the radio, SPEC 8)."""
+
+    display: str
+    matching: str
+    extra: bool = False
+
+
+@dataclass(frozen=True)
 class ResolvedName:
     """The name in force: ``display`` for people and the prompt, ``matching`` (normalised) for
     spotting, ``languages`` where its words are recognisable (None: no vocabulary information,
@@ -42,10 +73,25 @@ class ResolvedName:
     matching: str = ""
     languages: frozenset[str] | None = None
     own: str = ""  # the manifest's default name, normalised: the name the aliases are spellings of
+    extras: tuple[ExtraName, ...] = ()  # ``voice.extra_names``, without the robot's own name
 
     def usable(self, language: str) -> bool:
         """Whether a name exists and the recognizer of ``language`` can produce it."""
         return bool(self.matching) and (self.languages is None or language in self.languages)
+
+    def names_for(self, language: str) -> tuple[SpokenName, ...]:
+        """Every name the robot answers to in ``language``: its own name when ``usable``, then
+        the extra names whose words that recognizer can produce."""
+        own = (SpokenName(self.display, self.matching),) if self.usable(language) else ()
+        extra = tuple(
+            SpokenName(e.display, e.matching, True) for e in self.extras if e.usable(language)
+        )
+        return own + extra
+
+    def unchecked(self) -> ResolvedName:
+        """This resolution with no vocabulary limit: every name usable in every language."""
+        extras = tuple(replace(e, languages=None) for e in self.extras)
+        return replace(self, languages=None, extras=extras)
 
     def aliases_apply(self) -> bool:
         """Whether the manifest's name aliases are in force: the robot has no name, or its name
@@ -92,6 +138,7 @@ class RobotName:
         self._poll_every_s = NO_THROTTLE_S
         self._max_chars = 0
         self._default = ""
+        self._extras: tuple[str, ...] = ()
         self._missing = missing
         self._generation = 0
         self._warned: set[tuple[str, str]] = set()
@@ -101,12 +148,13 @@ class RobotName:
         self._polled_at = clock()
 
     def configure(self, voice: Any) -> None:
-        """Take ``voice.name_poll_interval_s``, ``voice.name_max_chars`` and
-        ``voice.default_name`` (alias gating only; idempotent)."""
+        """Take ``voice.name_poll_interval_s``, ``voice.name_max_chars``,
+        ``voice.default_name`` (alias gating only) and ``voice.extra_names`` (idempotent)."""
         with self._lock:
             self._poll_every_s = voice.name_poll_interval_s
             self._max_chars = voice.name_max_chars
             self._default = display_name(voice.default_name)
+            self._extras = tuple(voice.extra_names)
 
     def _poll(self) -> str | None:
         """Ask the platform for its name; a failure is no name (the platform may not be ready)."""
@@ -167,6 +215,14 @@ class RobotName:
             limit = self._max_chars
         return sanitise_name(shown, limit) if limit > 0 else ""
 
+    def prompt_extra_names(self, configured: str | None) -> tuple[str, ...]:
+        """The extra names (``voice.extra_names``) made safe for the prompt like ``prompt_name``,
+        without one that is the robot's own name; none without ``voice.name_max_chars``."""
+        own = normalise(self.display(configured))
+        with self._lock:
+            limit, raw = self._max_chars, self._extras
+        return tuple(e.display for e in _extras(raw, limit, own))
+
     def unchecked(self) -> UncheckedName:
         """This name as a server's speech recognition hears it: in every language, with no
         recognizer vocabulary check (the realtime route's transcript, SPEC 8)."""
@@ -177,20 +233,34 @@ class RobotName:
         Cached until the configuration, the platform name or the loaded models change."""
         platform = self._platform_now()
         with self._lock:
-            key = (configured, languages, self._generation, platform, self._default)
+            key = (
+                configured,
+                languages,
+                self._generation,
+                platform,
+                self._default,
+                self._extras,
+                self._max_chars,
+            )
             if self._cache is not None and self._cache[0] == key:
                 return self._cache[1]
             shown = display_name(configured) or platform
             matching = normalise(shown)
             own = normalise(self._default)
             missing = self._missing
+            extras = _extras(self._extras, self._max_chars, matching)
+            if missing is not None:
+                extras = tuple(
+                    replace(e, languages=_in_vocabulary(missing, e.matching, languages))
+                    for e in extras
+                )
             if not matching:
-                resolved = ResolvedName(own=own)
+                resolved = ResolvedName(own=own, extras=extras)
             elif missing is None:
-                resolved = ResolvedName(shown, matching, None, own)
+                resolved = ResolvedName(shown, matching, None, own, extras)
             else:
                 resolved = ResolvedName(
-                    shown, matching, self._recognisable(missing, matching, languages), own
+                    shown, matching, self._recognisable(missing, matching, languages), own, extras
                 )
             self._cache = (key, resolved)
             return resolved
@@ -248,6 +318,29 @@ class RobotName:
         return frozenset(ok)
 
 
+def _extras(raw: tuple[str, ...], max_chars: int, own: str) -> tuple[ExtraName, ...]:
+    """``voice.extra_names`` sanitised like the robot's name (``display_name``, then
+    ``sanitise_name``), without empty ones, repeats and the robot's own name (``own``,
+    normalised); none without ``voice.name_max_chars``."""
+    out: dict[str, ExtraName] = {}
+    for name in raw:
+        shown = sanitise_name(display_name(name), max_chars) if max_chars > 0 else ""
+        matching = normalise(shown)
+        if matching and matching != own and matching not in out:
+            out[matching] = ExtraName(shown, matching)
+    return tuple(out.values())
+
+
+def _in_vocabulary(
+    missing: MissingWords, matching: str, languages: tuple[str, ...]
+) -> frozenset[str]:
+    """Languages whose recognizer vocabulary has every word of ``matching``. Nothing is logged:
+    an extra name left out is counted with the wake phrases (``RobotName.out_of_vocab``)."""
+    words = matching.split()
+    found = ((lang, missing(lang, words)) for lang in languages)
+    return frozenset(lang for lang, absent in found if absent is not None and not absent)
+
+
 class UncheckedName:
     """A :class:`RobotName` resolved without the vocabulary check (``RobotName.unchecked``):
     the same name, usable in every language; nothing is out of vocabulary."""
@@ -256,7 +349,7 @@ class UncheckedName:
         self._names = names
 
     def resolve(self, configured: str | None, languages: tuple[str, ...]) -> ResolvedName:
-        return replace(self._names.resolve(configured, languages), languages=None)
+        return self._names.resolve(configured, languages).unchecked()
 
     def out_of_vocab(self, language: str, phrases: list[str]) -> int | None:
         return None
