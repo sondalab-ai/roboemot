@@ -953,5 +953,5 @@
  "Lower the music while someone speaks over it; only on a robot whose manifest declares hardware echo cancellation": "Abbassa la musica mentre qualcuno ci parla sopra; solo su un robot il cui manifest dichiara la cancellazione dell'eco hardware",
  "Music level change while someone speaks over it (0: no change)": "Variazione del livello della musica mentre qualcuno ci parla sopra (0: nessuna variazione)",
  "Time the music takes to go down to the ducked level, and back up": "Tempo che la musica impiega a scendere al livello abbassato, e a risalire",
- "The music comes back up this long after the speech over it ended": "La musica risale dopo questo tempo dalla fine del parlato sopra di essa"
+ "The music comes back up this long after the speech over it ended and was decided": "La musica risale dopo questo tempo dalla fine del parlato sopra di essa, una volta deciso"
 }

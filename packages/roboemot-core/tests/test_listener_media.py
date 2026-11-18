@@ -16,6 +16,8 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.media.player import MediaPlayer
 from roboemot.voice.wake import WakeGate
 from test_media_player import JAZZ, FakeOutput, FakeStream
+from test_voice_grammar_handoff import WAKE, SlowDecoder, wait_for
+from test_voice_grammar_handoff import rig as grammar_rig
 from test_voice_listener import (
     FACE_RAD,
     RATE,
@@ -495,6 +497,38 @@ def test_speech_over_the_radio_ducks_it_from_its_start_to_after_its_end():
     assert not player.ducked()
     assert player.snapshot()["ducks"] == 1
     assert player.audible()
+
+
+def test_the_duck_holds_until_a_slow_wake_decision_and_the_hold_takes_over_with_no_swell():
+    """Review 1: on the CM4 the decision (the grammar pass here, the server's transcript on the
+    realtime path) can come seconds after the endpoint. The music stays ducked until the
+    utterance is decided, then the wake word's hold takes over: no piece goes up in between."""
+    dec = SlowDecoder(WAKE, hold_s=30.0)
+    r = grammar_rig(dec, handoff_timeout_s=10.0)  # far longer than duck_release_s
+    player, turn = with_player(r, steps=False, echo_cancelled=True)
+    output = player.output
+    try:
+        r.feed(silence(0.5))
+        r.say(1.0)
+        assert dec.started.wait(2.0) and r.utterances == []  # the pass still runs
+        r.now += r.cfg.tools.media.duck_release_s + 1.0  # long past the release after the end
+        r.listener.poll_handoff()
+        assert r.utterances == [] and player.ducked()
+        player.step()
+        player.step()
+        low = 0.25 * 10 ** (r.cfg.tools.media.duck_db / 20)
+        assert np.allclose(output.samples[-1], low)  # still down: no swell before the decision
+        dec.release.set()
+        assert wait_for(lambda: r.listener.poll_handoff() or r.utterances)
+        assert r.utterances[-1].wake_word and r.utterances[-1].addressed
+        turn.open = True
+        pushed = len(output.samples)
+        player.step()
+        assert len(output.samples) == pushed  # the hold took over: nothing pushed
+        assert not player.ducked()
+    finally:
+        dec.release.set()
+        r.listener.stop()
 
 
 def test_no_duck_over_the_radio_without_a_hardware_echo_canceller():

@@ -863,3 +863,65 @@ def test_the_dance_hears_the_radio_unducked():
     r.step(2)
     assert not np.allclose(r.output.samples[-1], LEVEL)
     assert all(np.allclose(p, LEVEL) for p in heard)
+
+
+def media_rig(**media) -> Rig:
+    """A rig behind an echo canceller with ``tools.media`` overrides."""
+    radio = {"enabled": True, "stations": [JAZZ.model_dump()]}
+    return Rig({"tools": {"radio": radio, "media": media}}, echo_cancelled=True)
+
+
+@pytest.mark.parametrize("media", [{"duck_db": 0.0}, {"duck_on_speech": False}])
+def test_a_reload_that_turns_the_duck_off_brings_the_music_back_in_about_one_ramp(media):
+    """A level left low by a reload (``duck_db`` 0, or the opt-in off) slews back at the
+    distance still to go, not at the new zero span, and the report says not ducked."""
+    r = media_rig()
+    r.player.play(JAZZ)
+    r.player.duck_from(r.clock.t)
+    r.step(2)
+    r.cfg = RoboEmotConfig.model_validate(
+        {"tools": {"radio": r.cfg.tools.radio.model_dump(), "media": media}}
+    )
+    assert r.player.snapshot()["ducked"] is False
+    r.step(1)
+    piece = r.output.samples[-1]
+    n = ramp_samples(r)
+    assert np.all(np.diff(piece) >= 0)
+    assert piece[n] == pytest.approx(LEVEL, rel=1e-3) and np.allclose(piece[n + 1 :], LEVEL)
+
+
+def test_an_open_duck_never_released_ends_after_the_longest_utterance_and_its_decision():
+    """A lost release (a listener that never decides) does not keep the music down beyond
+    ``voice.vad.max_utterance_s`` plus the longest wait for the decision."""
+    r = media_rig()
+    r.player.play(JAZZ)
+    start = r.clock.t
+    r.player.duck_from(start)
+    voice = r.cfg.voice
+    cap = voice.vad.max_utterance_s + max(
+        voice.grammar.handoff_timeout_s, voice.realtime_route.transcript_timeout_s
+    )
+    r.clock.t = start + cap - r.chunk_s
+    assert r.player.ducked()
+    r.clock.t = start + cap
+    assert not r.player.ducked()
+    r.step(2)
+    assert np.allclose(r.output.samples[-1], LEVEL)  # back up, ramped in the piece before
+
+
+def test_a_release_in_the_middle_of_the_ramp_turns_back_from_the_level_reached():
+    """A duck released before its ramp ended goes back up from the last sample's level, with
+    no jump between pieces."""
+    r = media_rig(duck_ramp_ms=500.0, duck_release_s=0.0)
+    r.player.play(JAZZ)
+    r.player.duck_from(r.clock.t)
+    r.step(1)
+    down = r.output.samples[-1]
+    assert LEVEL * duck_gain(r) < down[-1] < LEVEL  # still on the way down
+    r.player.release_from(r.clock.t)
+    r.step(1)
+    up = r.output.samples[-1]
+    level = down[-1] / LEVEL
+    step = max(1.0 - duck_gain(r), 1.0 - level) * LEVEL / ramp_samples(r)
+    assert up[0] - down[-1] == pytest.approx(step, rel=1e-3)  # one slew step on: continuous
+    assert np.all(np.diff(up) >= 0)

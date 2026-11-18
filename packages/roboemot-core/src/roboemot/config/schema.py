@@ -7230,7 +7230,7 @@ class MediaConfig(Strict):
     )
     duck_release_s: float = param(
         1.5,
-        "The music comes back up this long after the speech over it ended",
+        "The music comes back up this long after the speech over it ended and was decided",
         unit="s",
         ge=0,
         le=10,

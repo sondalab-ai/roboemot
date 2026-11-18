@@ -108,9 +108,10 @@ music detector ignores the radio while it is audible: its chunks are holes to it
 ``music_state`` and the wake gate's music predicate say no music.
 
 The duck over speech (SPEC 8, Radio playback, owner decision 2026-11-18): each utterance's start
-and end also go to the player (``media_speech_start`` at the VAD start, ``media_speech_end`` at
-its endpoint or when it is dropped). The player decides: it ducks the audible music only on a
-robot with hardware echo cancellation.
+and end also go to the player: ``media_speech_start`` at the VAD start, ``media_speech_end``
+once no utterance is in progress or waiting for its decision (the local final, the grammar pass,
+the server's transcript), so the duck never ends before an addressed turn's hold takes over.
+The player decides: it ducks the audible music only on a robot with hardware echo cancellation.
 
 Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
 not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
@@ -346,8 +347,8 @@ class VoiceListener:
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
         self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
-        # an utterance's VAD start and its end, for the player's duck (``duck_from`` and
-        # ``release_from``; the player applies the guard)
+        # an utterance's VAD start, and the moment every utterance is decided, for the
+        # player's duck (``duck_from`` and ``release_from``; the player applies the guard)
         self.media_speech_start: Callable[[float], None] = lambda at: None
         self.media_speech_end: Callable[[float], None] = lambda at: None
         # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
@@ -685,6 +686,8 @@ class VoiceListener:
         it changes. A raising hook is logged, never allowed to break the audio path."""
         changed = self._active != active
         self._active = active
+        if changed and not active:  # every utterance is decided (handed off or dropped)
+            self._media_speech(False, self._clock())
         if changed and self._on_activity is not None:
             try:
                 self._on_activity(active)
@@ -699,8 +702,6 @@ class VoiceListener:
         the recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
         self._settle(wait)
         self._cut_stream()
-        if self._hearing:  # the speech in progress is dropped: the duck must not stay
-            self._media_speech(False, self._clock())
         self._recording = self._hearing = False
         if self._before_asr_reset is not None:
             try:
@@ -1122,7 +1123,6 @@ class VoiceListener:
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
         self._hearing = True  # before the hand-offs below: their blip must not cover this speech
-        self._media_speech(True, ev.stamp)
         self._settle(wait=True)  # the per-utterance state below is the pending one's until then
         try:
             speaker = self._speaker_language()
@@ -1141,6 +1141,7 @@ class VoiceListener:
             self._count_audio("vosk_skipped")  # its audio goes if the gate addresses it
         self._recording = True
         self._set_active(True)
+        self._media_speech(True, ev.stamp)  # after the settle: its end must not release this
         if self._direction is not None:
             self._direction.begin()
         self._sample_direction(audio_end)
@@ -1364,7 +1365,6 @@ class VoiceListener:
         if not self._recording:
             return
         self._recording = self._hearing = False
-        self._media_speech(False, ev.endpoint_stamp)
         if self._playback:  # the barge-in's segment ended: back to dropping (_process)
             self._playback_ended = True
         s, self._stream = self._stream, None
