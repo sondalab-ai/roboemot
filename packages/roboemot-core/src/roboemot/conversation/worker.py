@@ -1055,13 +1055,15 @@ class ConversationWorker:
         *,
         line: bool = False,
         generation: int | None = None,
+        tone_rule: bool = True,
     ) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
         out the skip rule and the conversation hint (the server must say it, not judge it), and
         the tone rule too, as do the round after a tone-only response and every tool round
         after the first. ``generation``: the session the replay is for (default: the
-        current one)."""
+        current one). ``tone_rule`` False leaves the tone rule out too (an update that leaves
+        the tools as they are, while the session does not hold ``note_tone``)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -1072,7 +1074,7 @@ class ConversationWorker:
                 robot_name=self._prompt_name(cfg),
                 skip_rule=not (line or turn.event),
                 conversation=None if line else turn.conversation,
-                tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
+                tone_rule=tone_rule and not (line or turn.tone_retry or turn.rounds or turn.event),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -1404,7 +1406,13 @@ class ConversationWorker:
         if cfg.voice.realtime_route.skip_tool:
             turn.conversation = self._conversation_state(utterance, cfg, now)
         offered, choices, functions, toned = self._rt_tools(turn)
-        instructions = self._rt_instructions(turn, self._delivery(turn), generation=generation)
+        # a burst's update leaves the tools as they are: the tone rule only while the session
+        # holds the tool (SPEC 8, Tone tool)
+        burst = job is not None and not getattr(job, "stream", True)
+        held = self.realtime is not None and TONE_TOOL in self.realtime.tools_offered
+        instructions = self._rt_instructions(
+            turn, self._delivery(turn), generation=generation, tone_rule=held or not burst
+        )
         if job is not None:
             job.shown = (offered, choices, turn.conversation)
         return instructions, functions + toned

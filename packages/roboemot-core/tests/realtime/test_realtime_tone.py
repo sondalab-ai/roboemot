@@ -420,3 +420,25 @@ def test_the_rule_follows_the_tool_on_updates_that_keep_the_tools(rigs):
         rig.turn()  # the reply has no call: the session keeps the tool
         assert TONE_TOOL in rig.route.tools_offered
         assert rule in rig.route.base_instructions()
+
+
+def test_a_bursts_turn_instructions_carry_the_rule_only_while_the_session_holds_the_tool(rigs):
+    """A burst's update carries the turn's instructions but leaves the tools as they are: the
+    tone rule goes only while the session holds ``note_tone``; a stream's opening sends the
+    tools, so it always has the rule."""
+    import numpy as np
+    from roboemot.realtime.input import InputJob
+
+    with TurnServer(["tool", "reply"], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
+        rig = rigs(srv, rt=TONE)
+        rule = tone_prompts()["it"]
+        burst = InputJob(np.zeros(0, np.float32), 16000)
+        stream = InputJob(np.zeros(0, np.float32), 16000)
+        stream.stream = True
+        rig.turn()
+        assert TONE_TOOL not in rig.route.tools_offered
+        assert rule not in rig.worker._stream_session(burst)[0]
+        assert rule in rig.worker._stream_session(stream)[0]
+        rig.turn()
+        assert TONE_TOOL in rig.route.tools_offered
+        assert rule in rig.worker._stream_session(burst)[0]
