@@ -201,13 +201,13 @@ def test_a_job_cancelled_while_it_is_prepared_is_never_sent(rig_for):
     with TurnServer() as server:
         rig = rig_for(server)
         jobs = []
-        base = rig.route.base_instructions
+        base = rig.route.burst_instructions
 
-        def slow():
+        def slow(job):
             rig.input.cancel(jobs[0])  # the listener's deadline passes right now
-            return base()
+            return base(job)
 
-        rig.route.base_instructions = slow
+        rig.route.burst_instructions = slow
         jobs.append(rig.input.submit(speech(0.5), RATE))
         assert wait_for(lambda: rig.route.snapshot()["audio_refused"] == 1)
         assert rig.route.snapshot()["audio_blocked"] == "cancelled"
@@ -389,6 +389,7 @@ def test_items_of_an_older_session_are_not_deleted_on_the_new_one():
         connected=True,
         stack=SimpleNamespace(effective=lambda: cfg),
         base_instructions=lambda: "",
+        burst_instructions=lambda job: "",
         send_audio=send_audio,
         delete_items=lambda gen, items: deletes.append((gen, items)) or len(items),
         count=lambda *a: None,
@@ -452,6 +453,7 @@ def stub_input(generations, resets=False):
         connected=True,
         stack=SimpleNamespace(effective=lambda: cfg),
         base_instructions=lambda: "",
+        burst_instructions=lambda job: "",
         send_audio=send_audio,
         delete_items=lambda gen, items: len(items),
         count=lambda key, n=1: counts.__setitem__(key, counts.get(key, 0) + n),
@@ -460,6 +462,51 @@ def stub_input(generations, resets=False):
         reset_session=lambda gen: resets,
     )
     return RealtimeInput(route), sent, counts
+
+
+def test_a_burst_held_behind_a_turn_takes_the_instructions_built_after_the_hold():
+    """A burst waits while a realtime turn runs; its instructions are built when it is sent,
+    so it carries the conversation state that turn left (``in_progress``), not the one from
+    before the hold."""
+    import threading
+    from types import SimpleNamespace
+
+    from roboemot.config.schema import RoboEmotConfig
+
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"realtime_route": {"input": "audio"}}, "privacy": {"realtime_audio": True}}
+    )
+    replies, built, sent = iter(["turn", "turn", None]), iter(["before", "during", "after"]), []
+    done = threading.Event()
+
+    def send_audio(pcm, *, gate, instructions, hold, track):
+        why = next(replies)
+        if why is None:
+            track(1)
+            sent.append(instructions)
+            done.set()
+        return why
+
+    route = SimpleNamespace(
+        generation=1,
+        connected=True,
+        stack=SimpleNamespace(effective=lambda: cfg),
+        burst_instructions=lambda job: next(built),
+        send_audio=send_audio,
+        delete_items=lambda gen, items: len(items),
+        count=lambda *a: None,
+        input_held=lambda: False,
+        opening=lambda: False,
+        reset_session=lambda gen: False,
+    )
+    inp = RealtimeInput(route)
+    try:
+        job = inp.submit(speech(0.5), RATE)
+        assert done.wait(5)
+        assert sent == ["after"]
+        inp.cancel(job)
+    finally:
+        inp.close()
 
 
 def test_an_id_less_transcript_that_may_be_a_cancelled_bursts_is_never_joined():

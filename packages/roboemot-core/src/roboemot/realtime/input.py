@@ -152,6 +152,8 @@ class InputJob:
         self.sent = False  # its burst (or a stream's opening piece) left the robot
         self.cancelled = False
         self.stream = False  # a live stream's job (turns: server), not a burst's
+        # a burst's: the local wake gate's wake decision held for it (its turn is addressed)
+        self.wake_word = False
         self.epoch = 0  # a stream's: the input's revocation epoch when it was opened
         # a stream's segment as the listener heard it: its start and its last speech (stamps of
         # the listener's clock), set when it ended; the server turn's latency starts there
@@ -462,11 +464,14 @@ class RealtimeInput:
         *,
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
+        wake_word: bool = False,
     ) -> InputJob:
         """Queue one utterance's audio (float samples at ``rate_hz``, the robot's rate); never
         blocks. The returned job ends with the server's transcript, or without one; past
-        ``deadline`` (``clock``'s time) it is not sent."""
+        ``deadline`` (``clock``'s time) it is not sent. ``wake_word``: the local wake gate's
+        wake decision held for it, so its burst's instructions say it is addressed."""
         job = InputJob(samples, rate_hz, deadline, clock)
+        job.wake_word = wake_word
         with self._lock:
             if self._closed:
                 job._end(refused="closed")
@@ -571,7 +576,6 @@ class RealtimeInput:
         self._dead_limit = rt.transcript_max_items
         zeros = np.zeros(round(job.rate_hz * rt.close_silence_ms / MS_PER_S), np.float32)
         pcm = to_int16(np.concatenate([samples, zeros]))
-        instructions = self.route.base_instructions()
         burst = _Burst(
             job,
             -1,
@@ -603,6 +607,9 @@ class RealtimeInput:
             if self._reopening and not self.route.connected and self.route.opening():
                 why: str | None = "reopening"  # this input's reset reconnects: not a refusal
             else:
+                # built at each attempt, after any wait: a burst held behind a turn sees the
+                # state that turn left (a server answering the commit reads only these)
+                instructions = self.route.burst_instructions(job)
                 why = self.route.send_audio(
                     pcm, gate=GATE, instructions=instructions, hold=hold, track=track
                 )

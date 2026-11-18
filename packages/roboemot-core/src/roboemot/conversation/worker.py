@@ -401,6 +401,7 @@ class ConversationWorker:
         self._after_tasks: set[asyncio.Task] = set()  # after_turn waits (kept from the GC)
         if realtime is not None:
             realtime.base_instructions = self._base_instructions
+            realtime.burst_instructions = self._burst_instructions
             realtime.server_turn = self._server_response
             realtime.stream_session = self._stream_session
             realtime.connect_session = self._connect_session
@@ -1013,7 +1014,11 @@ class ConversationWorker:
         phrase, or the bare name in a short final: never the name inside a longer sentence),
         ``in_progress`` while a confirmation waits or the robot's last spoken answer ended at
         most ``conversation_span_s`` ago, else ``none``."""
-        if utterance.wake_word:
+        return self._state_of(utterance.wake_word, cfg, now)
+
+    def _state_of(self, wake_word: bool, cfg: RoboEmotConfig, now: float) -> str:
+        """``_conversation_state`` from the wake decision alone (no loop: any thread)."""
+        if wake_word:
             return ADDRESSED
         span = cfg.voice.realtime_route.conversation_span_s
         with self._lock:
@@ -1031,6 +1036,27 @@ class ConversationWorker:
         cfg = self.stack.effective()
         return realtime_instructions(
             cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg), tone_rule=tone_rule
+        )
+
+    def _burst_instructions(self, job: Any) -> str:
+        """An audio burst's ``session.update`` instructions (asked on the input thread, no
+        loop): parts 1 to 4 as ``_base_instructions`` gives them, plus, with ``skip_tool``, the
+        conversation hint of the burst's state: ``addressed`` when the local wake decision held
+        for it (``job.wake_word``), else ``in_progress`` or ``none``. A server that answers the
+        commit by itself (Gemini) reads only these; the mood, the summaries and the replay stay
+        in ``response.create``, so the text changes only with the state (SPEC 8)."""
+        route = self.realtime
+        tone_rule = route is not None and TONE_TOOL in route.tools_offered
+        cfg = self.stack.effective()
+        state = None
+        if cfg.voice.realtime_route.skip_tool:
+            state = self._state_of(job.wake_word, cfg, self.clock())
+        return realtime_instructions(
+            cfg,
+            self._register_for(cfg),
+            robot_name=self._prompt_name(cfg),
+            tone_rule=tone_rule,
+            conversation=state,
         )
 
     def _delivery(self, turn: _Turn) -> Delivery:

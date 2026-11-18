@@ -222,6 +222,57 @@ def test_later_session_update_is_context_before_the_next_activity():
     assert "clientContent" not in burst(w)[0]
 
 
+def test_an_addressed_burst_sends_the_open_hint_before_its_activity():
+    """Robot run 2026-11-18: the setup held state ``none``; a burst the wake word addressed
+    goes with the ``addressed`` instructions, so the open hint reaches Gemini as context right
+    before the activity it answers (and the start rule is not in it)."""
+    from roboemot.config import ConfigStack
+    from roboemot.config.schema import RegisterParams
+    from roboemot.llm.prompt import (
+        ADDRESSED,
+        NO_CONVERSATION,
+        open_prompt,
+        realtime_instructions,
+        start_prompt,
+    )
+
+    cfg = ConfigStack(
+        app={"voice": {"realtime_route": {"skip_tool": True}}, "conversation": {"language": "it"}}
+    ).effective()
+    reg = RegisterParams()
+    w = GeminiWire(MODEL, MAX)
+    w.encode(update(instructions=realtime_instructions(cfg, reg, conversation=NO_CONVERSATION)))
+    w.decode(frame({"setupComplete": {}}))
+    send(w, update(instructions=realtime_instructions(cfg, reg, conversation=ADDRESSED)))
+    frames = burst(w)
+    assert frames[1] == {"realtimeInput": {"activityStart": {}}}
+    context = frames[0]["clientContent"]["turns"][0]["parts"][0]["text"]
+    assert context.startswith("[Updated instructions]\n")
+    assert open_prompt() in context and start_prompt() not in context
+
+
+def test_two_bursts_in_the_same_state_send_no_second_context_turn_after_a_mood_change():
+    """A burst's update is the base instructions plus its hint: the turn's own instructions
+    between them (a new mood) are superseded by the next burst's update, so no line piles up
+    as context on a radio session."""
+    from roboemot.config import ConfigStack
+    from roboemot.config.schema import RegisterParams
+    from roboemot.llm.prompt import NO_CONVERSATION, realtime_instructions
+
+    cfg = ConfigStack(
+        app={"voice": {"realtime_route": {"skip_tool": True}}, "conversation": {"language": "it"}}
+    ).effective()
+    burst_text = realtime_instructions(cfg, RegisterParams(), conversation=NO_CONVERSATION)
+    w = GeminiWire(MODEL, MAX)
+    w.encode(update(instructions=burst_text + "\nMood: joy, intensity 0.6"))
+    w.decode(frame({"setupComplete": {}}))
+    send(w, update(instructions=burst_text))
+    assert "clientContent" not in burst(w)[0]
+    send(w, p.response_create(instructions=burst_text + "\nMood: anger, intensity 0.9"))
+    send(w, update(instructions=burst_text))
+    assert all("clientContent" not in f for f in burst(w))
+
+
 def test_unchanged_instructions_send_no_context():
     w = wire()
     send(w, update(instructions="Sei Neve."))

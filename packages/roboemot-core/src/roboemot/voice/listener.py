@@ -1452,14 +1452,19 @@ class VoiceListener:
         self.poll_handoff()
         return True
 
-    def _send(self, p: _Handoff) -> None:
+    def _send(self, p: _Handoff, *, wake_word: bool = False) -> None:
         """Hand ``p``'s audio to the realtime input (never blocks); its final now waits for the
-        server's transcript until ``transcript_timeout_s``."""
+        server's transcript until ``transcript_timeout_s``. ``wake_word``: the wake gate's wake
+        decision held for it (its burst then says the conversation is open)."""
         rate = self._cfg.voice.sample_rate_hz
         p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s
         # past its deadline it is never sent: the listener has decoded it locally by then
         p.rt = self._realtime.submit(
-            self._speech_audio(p.ev), rate, deadline=p.deadline, clock=self._clock
+            self._speech_audio(p.ev),
+            rate,
+            deadline=p.deadline,
+            clock=self._clock,
+            wake_word=wake_word,
         )
         self._count_audio("sent")
         self._audio_event(AUDIO_SENT, p)
@@ -1676,7 +1681,7 @@ class VoiceListener:
             )
             face = p.face
             at_face = self._checked(p) if face is None else (lambda: face)
-            wake = kind == WAKE
+            wake = kind == WAKE  # also True below for NAME_FIRST over the radio (SPEC 8)
             media = self._media_at(ev.start_stamp)
             if kind == NAME_FIRST:
                 # while the robot's own radio is audible the wake word is required anyway and
@@ -1702,7 +1707,7 @@ class VoiceListener:
             self._note_wake(p, outcome)
             if p.addressed and self._wants_audio():
                 p.heard = heard
-                self._send(p)
+                self._send(p, wake_word=wake)
                 return p
         if not text:  # decoded to nothing after the decision
             self._count("empty")

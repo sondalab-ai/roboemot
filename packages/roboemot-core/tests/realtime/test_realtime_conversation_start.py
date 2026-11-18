@@ -169,6 +169,87 @@ def test_without_the_skip_tool_no_hint_and_no_count(rigs):
         assert snap["turns_by_state"] == zero() and snap["skipped_by_state"] == zero()
 
 
+# ------------------------------------------------------------------ the burst's update
+
+
+def burst_instructions(server) -> str:
+    """The instructions of the ``session.update`` right before the first audio append: what a
+    server that answers the commit by itself (Gemini) reads for that turn."""
+    kinds = server.kinds()
+    first = kinds.index("input_audio_buffer.append")
+    assert kinds[first - 1] == "session.update"
+    return server.received[first - 1]["session"]["instructions"]
+
+
+def heard_burst(server, *, policy: str, script: list[str], bearing=None) -> str:
+    from test_realtime_listener import Ear
+
+    app = {"privacy": {"realtime_audio": True}, "voice": {"wake_word_policy": policy}}
+    rig = build_rt(server, rt={"input": "audio", **SKIP}, app=app)
+    ear = Ear(rig, script=script, bearing=bearing)
+    try:
+        ear.say()
+        assert ear.settle(lambda: len(server.of("input_audio_buffer.commit")) == 1)
+        return burst_instructions(server)
+    finally:
+        ear.close()
+        rig.close()
+
+
+def test_a_burst_the_wake_word_addressed_says_the_conversation_is_open():
+    """Robot run 2026-11-18 (Gemini, radio playing): "hey neve ferma la musica" was addressed
+    by the local wake word, but its burst went with the start rule, so Gemini, which answers
+    the commit before the route's response.create, skipped it. The burst's own update now
+    carries the open hint."""
+    with TurnServer(heard=[["ciao robot accendi la luce"]]) as server:
+        text = heard_burst(server, policy="always", script=["ciao robot accendi"])
+    assert open_prompt() in text and start_prompt() not in text
+
+
+def test_a_burst_addressed_without_the_wake_word_keeps_the_start_rule():
+    from test_realtime_listener import FACE_RAD
+
+    with TurnServer(heard=[["accendi la luce"]]) as server:
+        text = heard_burst(server, policy="never", script=["accendi la luce"], bearing=FACE_RAD)
+    assert start_prompt() in text and open_prompt() not in text
+
+
+def burst_job(wake_word: bool):
+    import numpy as np
+    from roboemot.realtime.input import InputJob
+
+    job = InputJob(np.zeros(0, np.float32), RATE)
+    job.wake_word = wake_word
+    return job
+
+
+def test_a_wake_bursts_hint_needs_no_worker_loop(rigs):
+    """The burst's instructions are built on the input thread without the worker's loop, so
+    a busy or missing loop never sends a wake-addressed burst with the start rule."""
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        loop, rig.worker._loop = rig.worker._loop, None
+        try:
+            text = rig.worker._burst_instructions(burst_job(True))
+        finally:
+            rig.worker._loop = loop
+    assert open_prompt() in text and start_prompt() not in text
+
+
+def test_a_bursts_instructions_change_only_with_its_state(rigs):
+    """Gemini keeps every new line of an update as a context turn: a burst's text holds the
+    base instructions and the hint only (no mood, summaries or replay), so two bursts in the
+    same state send the same text whatever the mood did in between."""
+    from roboemot.affect import AffectState
+
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        first = rig.worker._burst_instructions(burst_job(False))
+        rig.worker.affect.state = lambda now: AffectState(-0.6, 0.7, "anger", 0.9)
+        assert rig.worker._burst_instructions(burst_job(False)) == first
+        assert "anger" not in first and "joy" not in first
+
+
 class Spoken:
     """The speech output as ``_finish`` reads it: which jobs played, and when each ended."""
 
