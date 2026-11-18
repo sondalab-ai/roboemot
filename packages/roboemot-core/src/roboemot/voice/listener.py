@@ -1679,7 +1679,7 @@ class VoiceListener:
             )
             face = p.face
             at_face = self._checked(p) if face is None else (lambda: face)
-            wake = kind == WAKE
+            wake = kind == WAKE  # also True below for NAME_FIRST over the radio (SPEC 8)
             media = self._media_at(ev.start_stamp)
             if kind == NAME_FIRST:
                 # while the robot's own radio is audible the wake word is required anyway and

@@ -401,6 +401,7 @@ class ConversationWorker:
         self._after_tasks: set[asyncio.Task] = set()  # after_turn waits (kept from the GC)
         if realtime is not None:
             realtime.base_instructions = self._base_instructions
+            realtime.burst_instructions = self._burst_instructions
             realtime.server_turn = self._server_response
             realtime.stream_session = self._stream_session
             realtime.connect_session = self._connect_session
@@ -1013,7 +1014,11 @@ class ConversationWorker:
         phrase, or the bare name in a short final: never the name inside a longer sentence),
         ``in_progress`` while a confirmation waits or the robot's last spoken answer ended at
         most ``conversation_span_s`` ago, else ``none``."""
-        if utterance.wake_word:
+        return self._state_of(utterance.wake_word, cfg, now)
+
+    def _state_of(self, wake_word: bool, cfg: RoboEmotConfig, now: float) -> str:
+        """``_conversation_state`` from the wake decision alone (no loop: any thread)."""
+        if wake_word:
             return ADDRESSED
         span = cfg.voice.realtime_route.conversation_span_s
         with self._lock:
@@ -1031,6 +1036,27 @@ class ConversationWorker:
         cfg = self.stack.effective()
         return realtime_instructions(
             cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg), tone_rule=tone_rule
+        )
+
+    def _burst_instructions(self, job: Any) -> str:
+        """An audio burst's ``session.update`` instructions (asked on the input thread, no
+        loop): parts 1 to 4 as ``_base_instructions`` gives them, plus, with ``skip_tool``, the
+        conversation hint of the burst's state: ``addressed`` when the local wake decision held
+        for it (``job.wake_word``), else ``in_progress`` or ``none``. A server that answers the
+        commit by itself (Gemini) reads only these; the mood, the summaries and the replay stay
+        in ``response.create``, so the text changes only with the state (SPEC 8)."""
+        route = self.realtime
+        tone_rule = route is not None and TONE_TOOL in route.tools_offered
+        cfg = self.stack.effective()
+        state = None
+        if cfg.voice.realtime_route.skip_tool:
+            state = self._state_of(job.wake_word, cfg, self.clock())
+        return realtime_instructions(
+            cfg,
+            self._register_for(cfg),
+            robot_name=self._prompt_name(cfg),
+            tone_rule=tone_rule,
+            conversation=state,
         )
 
     def _delivery(self, turn: _Turn) -> Delivery:
@@ -1055,15 +1081,13 @@ class ConversationWorker:
         *,
         line: bool = False,
         generation: int | None = None,
-        tone_rule: bool = True,
     ) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
         out the skip rule and the conversation hint (the server must say it, not judge it), and
         the tone rule too, as do the round after a tone-only response and every tool round
         after the first. ``generation``: the session the replay is for (default: the
-        current one). ``tone_rule`` False leaves the tone rule out too (an update that leaves
-        the tools as they are, while the session does not hold ``note_tone``)."""
+        current one)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -1074,7 +1098,7 @@ class ConversationWorker:
                 robot_name=self._prompt_name(cfg),
                 skip_rule=not (line or turn.event),
                 conversation=None if line else turn.conversation,
-                tone_rule=tone_rule and not (line or turn.tone_retry or turn.rounds or turn.event),
+                tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -1354,8 +1378,7 @@ class ConversationWorker:
         (``shown``) for its server turn. Whatever fails here, or a loop busy past the
         active route's ``connect_timeout_s`` (else the shared one), the opening goes with parts
         1 to 4 and the session's tools as they are (counted ``stream_session_fallbacks``): a
-        stream never stops on it. A robot-turn burst's update asks it too (on the input thread;
-        its tools are not sent): Gemini answers the burst's commit with these instructions."""
+        stream never stops on it."""
         return self._session_parts(lambda: self._stream_session_on_loop(job))
 
     def _connect_session(self, generation: int, wait_s: float) -> tuple[str, Any]:
@@ -1394,25 +1417,16 @@ class ConversationWorker:
         self, job: Any, generation: int | None = None
     ) -> tuple[str, list[dict[str, Any]]]:
         """The instructions and tools a fresh turn would send now (``_stream_session``); the
-        skills shown go on ``job`` when there is one; the replay is for ``generation``. A burst
-        job the local wake word addressed (``wake_word``) is in state ``addressed``; a stream
-        opens before any wake decision, so it never is."""
+        skills shown go on ``job`` when there is one; the replay is for ``generation``."""
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
-        wake = job is not None and job.wake_word  # a burst the wake word addressed
-        utterance = Utterance("", language, now, now, now, True, wake, frozenset(), quiet)
+        utterance = Utterance("", language, now, now, now, True, False, frozenset(), quiet)
         turn = _Turn(utterance, cfg, language, self._register_for(cfg), 0, 0)
         if cfg.voice.realtime_route.skip_tool:
             turn.conversation = self._conversation_state(utterance, cfg, now)
         offered, choices, functions, toned = self._rt_tools(turn)
-        # a burst's update leaves the tools as they are: the tone rule only while the session
-        # holds the tool (SPEC 8, Tone tool)
-        burst = job is not None and not job.stream
-        held = self.realtime is not None and TONE_TOOL in self.realtime.tools_offered
-        instructions = self._rt_instructions(
-            turn, self._delivery(turn), generation=generation, tone_rule=held or not burst
-        )
+        instructions = self._rt_instructions(turn, self._delivery(turn), generation=generation)
         if job is not None:
             job.shown = (offered, choices, turn.conversation)
         return instructions, functions + toned

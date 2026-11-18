@@ -576,9 +576,6 @@ class RealtimeInput:
         self._dead_limit = rt.transcript_max_items
         zeros = np.zeros(round(job.rate_hz * rt.close_silence_ms / MS_PER_S), np.float32)
         pcm = to_int16(np.concatenate([samples, zeros]))
-        # what a turn would send (its conversation state included): a server that answers the
-        # commit by itself (Gemini) reads only these; the route's response.create comes later
-        instructions, _tools = self.route.stream_session(job)
         burst = _Burst(
             job,
             -1,
@@ -610,6 +607,9 @@ class RealtimeInput:
             if self._reopening and not self.route.connected and self.route.opening():
                 why: str | None = "reopening"  # this input's reset reconnects: not a refusal
             else:
+                # built at each attempt, after any wait: a burst held behind a turn sees the
+                # state that turn left (a server answering the commit reads only these)
+                instructions = self.route.burst_instructions(job)
                 why = self.route.send_audio(
                     pcm, gate=GATE, instructions=instructions, hold=hold, track=track
                 )

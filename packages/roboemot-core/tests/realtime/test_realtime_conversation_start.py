@@ -209,6 +209,42 @@ def test_a_burst_addressed_without_the_wake_word_keeps_the_start_rule():
     assert start_prompts()["it"] in text and open_prompts()["it"] not in text
 
 
+def burst_job(wake_word: bool):
+    import numpy as np
+    from roboemot.realtime.input import InputJob
+
+    job = InputJob(np.zeros(0, np.float32), RATE)
+    job.wake_word = wake_word
+    return job
+
+
+def test_a_wake_bursts_hint_needs_no_worker_loop(rigs):
+    """The burst's instructions are built on the input thread without the worker's loop, so
+    a busy or missing loop never sends a wake-addressed burst with the start rule."""
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        loop, rig.worker._loop = rig.worker._loop, None
+        try:
+            text = rig.worker._burst_instructions(burst_job(True))
+        finally:
+            rig.worker._loop = loop
+    assert open_prompts()["it"] in text and start_prompts()["it"] not in text
+
+
+def test_a_bursts_instructions_change_only_with_its_state(rigs):
+    """Gemini keeps every new line of an update as a context turn: a burst's text holds the
+    base instructions and the hint only (no mood, summaries or replay), so two bursts in the
+    same state send the same text whatever the mood did in between."""
+    from roboemot.affect import AffectState
+
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        first = rig.worker._burst_instructions(burst_job(False))
+        rig.worker.affect.state = lambda now: AffectState(-0.6, 0.7, "anger", 0.9)
+        assert rig.worker._burst_instructions(burst_job(False)) == first
+        assert "anger" not in first and "joy" not in first
+
+
 class Spoken:
     """The speech output as ``_finish`` reads it: which jobs played, and when each ended."""
 

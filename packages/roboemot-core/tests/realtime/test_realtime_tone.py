@@ -422,10 +422,9 @@ def test_the_rule_follows_the_tool_on_updates_that_keep_the_tools(rigs):
         assert rule in rig.route.base_instructions()
 
 
-def test_a_bursts_turn_instructions_carry_the_rule_only_while_the_session_holds_the_tool(rigs):
-    """A burst's update carries the turn's instructions but leaves the tools as they are: the
-    tone rule goes only while the session holds ``note_tone``; a stream's opening sends the
-    tools, so it always has the rule."""
+def test_a_bursts_instructions_carry_the_rule_only_while_the_session_holds_the_tool(rigs):
+    """A burst's update leaves the tools as they are: the tone rule goes only while the
+    session holds ``note_tone``."""
     import numpy as np
     from roboemot.realtime.input import InputJob
 
@@ -433,12 +432,9 @@ def test_a_bursts_turn_instructions_carry_the_rule_only_while_the_session_holds_
         rig = rigs(srv, rt=TONE)
         rule = tone_prompts()["it"]
         burst = InputJob(np.zeros(0, np.float32), 16000)
-        stream = InputJob(np.zeros(0, np.float32), 16000)
-        stream.stream = True
         rig.turn()
         assert TONE_TOOL not in rig.route.tools_offered
-        assert rule not in rig.worker._stream_session(burst)[0]
-        assert rule in rig.worker._stream_session(stream)[0]
+        assert rule not in rig.worker._burst_instructions(burst)
         rig.turn()
         assert TONE_TOOL in rig.route.tools_offered
-        assert rule in rig.worker._stream_session(burst)[0]
+        assert rule in rig.worker._burst_instructions(burst)
