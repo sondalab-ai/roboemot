@@ -81,3 +81,41 @@ def test_the_microphone_stays_closed_with_the_engine_off_and_no_voice():
         assert p.listener is None  # so start_all does not start the hub
     finally:
         p.perception.stop()
+
+
+def test_the_decision_events_lose_their_words_on_sleep_and_on_the_transcript_off():
+    """SPEC 12: the assembled ring forgets the server's words of an unconfirmed radio wake when
+    the robot falls asleep (``robot.asleep``) and when the transcript turns off through the
+    stack's hot reload; the events stay."""
+    from roboemot.runtime.assembly import assemble
+
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    stack.set("webui.live.enabled", True, source="test", admin=True)
+    stack.set("webui.live.transcript", True, source="test", admin=True)
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    host = DaytimeHost()
+    p = assemble(host, stack, manifest, platform, platform.bind(object()))
+    try:
+        ring = host.activity
+
+        def heard():
+            return [e.get("heard") for e in ring.events() if e["reason"] == "media_unconfirmed"]
+
+        host.events("unanswered", "media_unconfirmed", heard=SECRET)
+        assert heard() == [SECRET]
+        host.bus.publish("robot.asleep", None, time.monotonic())
+        assert heard() == [None]
+        host.events("unanswered", "media_unconfirmed", heard=SECRET)
+        assert heard() == [None]  # asleep: not kept (one row: the words are not a label)
+        host.bus.publish("robot.awake", None, time.monotonic())
+        host.events("unanswered", "media_unconfirmed", heard=SECRET)
+        assert heard() == [SECRET]
+        stack.set("webui.live.transcript", False, source="test", admin=True)
+        assert heard() == [None]
+    finally:
+        p.perception.stop()

@@ -92,6 +92,8 @@ def _tick_until_stopped(
         now = time.monotonic()
         if host.transcript is not None:
             host.transcript.trim()  # the age bound holds when nobody polls or speaks
+        if host.activity is not None:
+            host.activity.trim()  # the same for the words a decision event carries
         if host.live_video is not None:
             host.live_video.expire()  # the same for the preview's frame and JPEG
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake

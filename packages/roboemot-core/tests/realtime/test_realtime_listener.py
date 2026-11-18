@@ -6,6 +6,7 @@ that does not come goes to a local decode and the chat routes."""
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -982,7 +983,7 @@ def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears,
         ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
         holds = radio_audible(ear)
         seen = []
-        ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason))
+        ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
         ear.say()
         assert ear.settle(lambda: len(ear.utterances) == 1)
         u = ear.utterances[0]
@@ -990,11 +991,33 @@ def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears,
         assert len(holds) == 1  # the local wake held the radio from its last speech
         audio = ear.r.listener.snapshot()["realtime_audio"]
         assert audio["wake_unconfirmed_media"] == 1 and audio["wake_word_heard"] == 0
-        assert ("unanswered", "media") in seen
+        # the live transcript is off by default: the event carries no words
+        assert ("unanswered", "media_unconfirmed", {"heard": None}) in seen
         assert not ear.r.listener.awaiting_transcript()  # the player's hold ends normally
         assert not ear.rt.worker.busy()
         assert ear.settle(lambda: len(server.of("conversation.item.delete")) == 1)
         assert server.of("response.create") == []
+
+
+def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on(ears, caplog):
+    """The owner (2026-11-18): "hey neve ferma la musica" was dropped as unconfirmed, and the
+    Live tab did not say what the server wrote. With the live transcript on, the event carries
+    the server's words, cut to ``webui.live.transcript_max_chars``, and no log has them
+    (SPEC 12)."""
+    caplog.set_level(logging.DEBUG)
+    lyric = "ehi neva ferma la musica " * 10
+    app = {**NEVE_ALWAYS, "webui": {"live": {"enabled": True, "transcript": True}}}
+    app["webui"]["live"]["transcript_max_chars"] = 80
+    with TurnServer(heard=[[lyric]]) as server:
+        ear = ears(server, script=["neve"], app=app, to_worker=True)
+        radio_audible(ear)
+        seen = []
+        ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert ("unanswered", "media_unconfirmed", {"heard": lyric.strip()[:80]}) in seen
+    assert "neva" not in caplog.text
 
 
 @pytest.mark.parametrize(

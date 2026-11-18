@@ -96,7 +96,8 @@ must be confirmed by the server's transcript when one comes: a lyric can match t
 small local grammar, so a server final that holds neither the name nor a wake phrase (the
 server spotter, case-insensitive), nor a close spelling of the name (``FastPath.
 server_name_close``: "Nivea" for "Neve", never "nave"), is handed off not addressed, counted
-``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media``): the conversation deletes
+``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media_unconfirmed``, with the
+server's words while the live transcript is on): the conversation deletes
 its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
 closes. A follow-up in that window decided before the verdict (the lyric's next line starts
 inside the span the hold back-dates) goes with it when its own final holds neither either.
@@ -109,7 +110,8 @@ Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the 
 not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
 check's numbers (the facing check's median head yaw and its limit); a facing check that did not
 trust the yaw on a busy CPU publishes ``facing``/``cpu_high``; a transcript that did not come
-publishes ``audio``/``transcript_timeout``. No speaker id, no text.
+publishes ``audio``/``transcript_timeout``. No speaker id, no text, except the server's words
+of an unconfirmed wake over the radio (``heard``, ``_heard``: only with the live transcript on).
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
 per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
@@ -1730,6 +1732,15 @@ class VoiceListener:
             return True
         return server and self._fast.server_name_close(text, p.language)
 
+    def _heard(self, text: str, server: bool) -> str | None:
+        """The server's words of an unconfirmed wake for the Live tab (SPEC 12): only a server
+        final, only while the Live tab and its transcript are on, cut as a transcript turn;
+        None otherwise. They go to the in-memory event ring only, never to a log."""
+        live = self._cfg.webui.live
+        if not (server and live.enabled and live.transcript):
+            return None
+        return text.strip()[: live.transcript_max_chars]
+
     def _unconfirmed(self, p: _Handoff, server: bool) -> bool:
         """Whether ``p``'s wake over the radio is not confirmed (its final holds neither the
         name nor a wake phrase, checked by the caller): its own server final, or the media wake
@@ -1845,7 +1856,8 @@ class VoiceListener:
             addressed = p.addressed = False
             p.unconfirmed = True
             self._count_audio("wake_unconfirmed_media")
-            self.events("unanswered", "media")  # the Live tab: the wake word was not heard
+            # the Live tab: the server did not hear the name, and what it heard instead
+            self.events("unanswered", "media_unconfirmed", heard=self._heard(text, server))
             if self._media_wake is p:  # no wake since: the window it opened was a lyric's
                 self._gate.close_window()
         if self._media_wake is p:  # its verdict is in
