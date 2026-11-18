@@ -37,7 +37,8 @@ language model of the conversation route understands the request and calls the m
       location and the place name.
    2. Turn the switch on and confirm with the PIN.
 5. For radio:
-   1. On the Radio card, add a station: a name, its stream URL and optional genres.
+   1. On the Radio card, add a station from the **Station catalogue**, or add your own: a name,
+      its stream URL and optional genres.
    2. Press the test play button to check that the stream plays.
    3. Turn the switch on and confirm with the PIN.
 
@@ -115,6 +116,14 @@ The robot plays internet radio streams from your station list through its speake
 - **Stations.** Each station has a name, a stream URL (http or https), optional genres and an
   optional language. The model picks a station by its name or by a genre ("play some jazz" plays
   the first jazz station). It can never play a URL that is not on your list.
+- **Station catalogue.** The Radio card has a closed **Station catalogue** section with checked
+  streams that ship with RoboEmot, in six groups: Jazz; Ambient, chillout; Funk, soul, R&B;
+  Hip-hop, rap; Rock; Metal, progressive. **Add** puts one station on your list, and **Add all**
+  puts every station of a group on it after one PIN. An added station is a normal station: you
+  can edit or remove it. Nothing in the catalogue plays until you add it. A station already on
+  your list, by name (case ignored) or by URL, shows as added. Radio France (FIP, Mouv') and
+  SomaFM streams carry an "unofficial stream" note: their operators publish no permission for
+  players like this one. Each station links its operator's page.
 - **No station yet.** If the radio is on but the list is empty, the robot still knows the tool.
   When you ask for music, it says that no station is set up. It tells you to add one in the Tools
   tab. It plays nothing.
@@ -203,7 +212,7 @@ the model is not offered: ...`. Add the names, or reset the setting to its defau
 | The robot talks about a timer but none is set | The route does not pass tool calls (possibly Pollen's server) | Use a chat route, OpenAI realtime or Gemini Live |
 | "Timers need the voice listener" in the Tools tab | Voice is off | Turn voice on |
 | Weather: "Set a place first" | No `circadian.location` | Use the place search in the Tools tab |
-| The robot says no station or no place is set up | Radio or weather is on, but the station list is empty or no place is set | Add a station or set the place in the Tools tab |
+| The robot says no station or no place is set up | Radio or weather is on, but the station list is empty or no place is set | Add a station from the Station catalogue on the Radio card (or your own), or set the place in the Tools tab |
 | Weather: "unreachable" | No internet, or Open-Meteo slower than 3 s | Check the network |
 | The test play says "could not be reached" | Wrong URL, a redirect, or a playlist URL | Use the final direct stream URL |
 | Radio: "this robot's speaker cannot play music" | The robot platform has no media output | Radio needs a speaker that supports media (Reachy Mini does) |

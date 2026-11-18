@@ -21,7 +21,7 @@ from roboemot.webui.settings import SettingsEditor
 from .emotions import EmotionsState
 from .host import RuntimeHost
 from .live import LiveState
-from .tools_state import ToolsState
+from .tools_state import ToolsState, check_catalogue
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +136,7 @@ def start_webui(
         undo.append(stack.subscribe(emotions.apply_config))
         emotions.apply_config(SimpleNamespace(config=stack.effective()))
         tools = ToolsState(host, stack.effective())  # reads host.scheduler / media per call
+        check_catalogue()  # a broken shipped catalogue is logged at start-up, not on first click
         undo.append(stack.subscribe(tools.apply_config))
         tools.apply_config(SimpleNamespace(config=stack.effective()))
         server = make_server(

@@ -15,8 +15,10 @@ HTTP error's text quotes the URL with the query).
 
 The writes (the API checks the PIN session, CSRF and the PIN first): ``cancel`` and
 ``clear_missed`` on the scheduler, ``radio_stop`` and ``radio_test`` on the player, and
-``geocode``, the admin's place search. A test play needs ``tools.radio.enabled`` like the
-``radio_play`` skill, so no stream leaves the robot before the admin opt-in.
+``geocode``, the admin's place search. ``catalogue`` is read-only: the shipped station
+catalogue with the stations already added marked (SPEC 11, Radio). A test play needs
+``tools.radio.enabled`` like the ``radio_play`` skill, so no stream leaves the robot before the
+admin opt-in.
 """
 
 from __future__ import annotations
@@ -24,11 +26,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import yaml
+from pydantic import ValidationError
+
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.skills.host import http_client
+from roboemot.tools.radio_catalogue import radio_catalogue
 from roboemot.tools.schedule import Item
 from roboemot.tools.timers import LOCAL_FORMAT
 from roboemot.tools.weather import BadResponse, ProviderError, coordinates, geocode
@@ -50,6 +57,26 @@ TOOL_SKILLS: dict[str, tuple[str, ...]] = {
     "radio": ("radio_play", "radio_stop", "radio_volume"),
 }
 STOP_REASON = "webui"  # ``media.stopped``'s reason for the tab's Stop button
+
+
+def check_catalogue() -> bool:
+    """Read the shipped station catalogue once (web UI start-up): False, with one error line that
+    names the failure type only (a validation message would quote the file's URLs), when it
+    cannot be read. The tab then gets ``radio_catalogue_unavailable`` and hides the section."""
+    try:
+        radio_catalogue()
+    except (OSError, yaml.YAMLError, ValidationError) as exc:
+        log.error(
+            "radio station catalogue unusable (%s); the Tools tab hides it", type(exc).__name__
+        )
+        return False
+    return True
+
+
+def folded_name(name: str) -> str:
+    """A station name compared for the catalogue's ``added`` mark: NFC, runs of whitespace as one
+    space, no edge spaces (the add route's ``clean_label`` shape) and case folded."""
+    return " ".join(unicodedata.normalize("NFC", name).split()).casefold()
 
 
 class ToolsState:
@@ -130,6 +157,37 @@ class ToolsState:
             {"name": name, "enabled": switch[name], "available": switch[name] and has[name]}
             for name in TOOL_SKILLS
         ]
+
+    def catalogue(self) -> dict[str, Any]:
+        """The shipped station catalogue (SPEC 11, Radio) for the tab's Add buttons: ``groups``,
+        each ``{id, stations}``, every station with its fields and ``added`` when
+        ``tools.radio.stations`` already holds a station of that name or URL. Names compare
+        folded (``folded_name``), which is more conservative than the add route's exact match: a
+        case variant shows as added although the route would take it. Served behind the PIN
+        session, like the station editor's rows; the configured stations' own URLs are compared
+        here and never returned."""
+        try:
+            groups = radio_catalogue().groups
+        except (OSError, yaml.YAMLError, ValidationError):
+            raise ToolsError("radio_catalogue_unavailable") from None
+        stations = self._cfg.tools.radio.stations
+        names = {folded_name(s.name) for s in stations}
+        urls = {s.url for s in stations}
+        return {
+            "groups": [
+                {
+                    "id": group.id,
+                    "stations": [
+                        {
+                            **s.model_dump(),
+                            "added": folded_name(s.name) in names or s.url in urls,
+                        }
+                        for s in group.stations
+                    ],
+                }
+                for group in groups
+            ]
+        }
 
     def _item(self, item: Item) -> dict[str, Any]:
         """One timer or reminder as the tab lists it, due time in ``circadian.timezone``."""

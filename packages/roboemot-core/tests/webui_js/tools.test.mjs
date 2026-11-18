@@ -269,3 +269,166 @@ test("repeating days show as weekday names", async (t) => {
   const p = await toolsPage(t, { state: { ...STATE, items } });
   assert.ok(p.document.querySelector("#tools-items li").textContent.includes("on Monday, Wednesday"));
 });
+
+// ---------------------------------------------------------------- the station catalogue (SPEC 11, Radio)
+
+const shipped = (name, url, extra = {}) => ({
+  name, url, genres: ["rock"], language: null, operator: "Op " + name, policy_url: "https://op.example.org/terms",
+  official: true, bitrate_kbps: 128, added: false, ...extra,
+});
+
+const CATALOGUE = {
+  groups: [
+    { id: "jazz", stations: [shipped("Jazz One", "https://a.example.org/j1")] },
+    {
+      id: "rock",
+      stations: [
+        shipped("Rock Here", "https://a.example.org/r0", { added: true }),
+        shipped("Rock New", "https://a.example.org/r1"),
+        shipped("Rock Taken", "https://a.example.org/r2", { official: false }),
+      ],
+    },
+  ],
+};
+
+const CATALOGUE_EN = {
+  tools_catalogue_unofficial: "Unofficial stream.", tools_catalogue_added_n: "{n} stations added.",
+  tools_catalogue_added_n_one: "{n} station added.", tools_catalogue_skipped_n: "{n} already in the list.",
+  tools_catalogue_group_rock: "Rock", tools_catalogue_stopped_one: "Stopped: {reason} {n} station was not tried.",
+  tools_catalogue_stopped: "Stopped: {reason} {n} stations were not tried.",
+  err_unauthorized: "Please log in.", err_locked: "Too many PIN attempts.",
+};
+
+async function catalogueOpen(t, routes = {}) {
+  const p = await toolsPage(t, { routes: { "GET /api/tools/radio/catalogue": CATALOGUE, ...routes } });
+  p.run(`Object.assign(state.strings, ${JSON.stringify(CATALOGUE_EN)})`);
+  p.document.querySelector("#tools-catalogue-toggle").click();
+  return p;
+}
+
+test("the catalogue is a closed section of the radio card, grouped by genre", async (t) => {
+  const p = await toolsPage(t, { routes: { "GET /api/tools/radio/catalogue": CATALOGUE } });
+  const radio = p.document.querySelector('[data-tools-card="radio"]');
+  const toggle = radio.querySelector("#tools-catalogue-toggle");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(radio.querySelector("#tools-catalogue").hidden, true);
+  toggle.click();
+  assert.equal(radio.querySelector("#tools-catalogue").hidden, false);
+  assert.deepEqual([...radio.querySelectorAll("[data-catalogue-group]")].map((g) => g.dataset.catalogueGroup), ["jazz", "rock"]);
+  const here = radio.querySelector('[data-catalogue-station="Rock Here"]');
+  assert.ok(here.querySelector("[data-added]"), "a station already listed shows as added");
+  assert.equal(here.querySelector('[data-action="add"]'), null, "and has no second Add");
+});
+
+test("Add posts exactly the station's fields behind the PIN and keeps the section open", async (t) => {
+  let added = null;
+  const p = await catalogueOpen(t, { "POST /api/settings/entry": (b) => { added = b; return { changed: true, layer: "runtime" }; } });
+  p.document.querySelector('[data-catalogue-station="Jazz One"] [data-action="add"]').click();
+  await settle();
+  await submitDialog(p, "123456");
+  assert.deepEqual(added, {
+    path: "tools.radio.stations",
+    value: { name: "Jazz One", url: "https://a.example.org/j1", genres: ["rock"], language: null },
+    pin: "123456",
+  });
+  assert.equal(p.document.querySelector("#tools-catalogue").hidden, false, "the rebuild keeps the section open");
+  assert.ok(p.calls.filter((c) => c.path === "/api/tools/radio/catalogue").length >= 2, "read again after the add");
+});
+
+test("Add all asks for the PIN once, skips the listed station and counts a server duplicate", async (t) => {
+  const sent = [];
+  const p = await catalogueOpen(t, {
+    "POST /api/settings/entry": (b) => {
+      sent.push(b);
+      return b.value.name === "Rock Taken" ? reply(422, { error: "entry_exists", field: "value" }) : { changed: true, layer: "runtime" };
+    },
+  });
+  p.document.querySelector('[data-catalogue-group="rock"] [data-action="add-all"]').click();
+  await settle();
+  await submitDialog(p, "123456");
+  assert.deepEqual(sent.map((b) => [b.value.name, b.pin]), [["Rock New", "123456"], ["Rock Taken", "123456"]]);
+  assert.equal(p.document.querySelector("dialog[open]"), null, "one PIN dialog for the group");
+  assert.equal(p.document.getElementById("notice").textContent, "1 station added. 2 already in the list.");
+});
+
+test("Add all stops at a wrong PIN without trying the other stations", async (t) => {
+  const sent = [];
+  const p = await catalogueOpen(t, { "POST /api/settings/entry": (b) => { sent.push(b); return reply(401, { error: "bad_pin" }); } });
+  p.document.querySelector('[data-catalogue-group="rock"] [data-action="add-all"]').click();
+  await settle();
+  await submitDialog(p, "000000");
+  assert.equal(sent.length, 1);
+});
+
+test("an unofficial stream carries its note and every station links its operator's terms", async (t) => {
+  const p = await catalogueOpen(t);
+  const notes = [...p.document.querySelectorAll("[data-unofficial]")].map((n) => n.closest("[data-catalogue-station]").dataset.catalogueStation);
+  assert.deepEqual(notes, ["Rock Taken"]);
+  assert.equal(p.document.querySelector("[data-unofficial]").textContent, "Unofficial stream.");
+  const links = [...p.document.querySelectorAll("#tools-catalogue a")];
+  assert.equal(links.length, 4);
+  for (const a of links) {
+    assert.equal(a.getAttribute("href"), "https://op.example.org/terms");
+    assert.equal(a.getAttribute("target"), "_blank");
+    assert.equal(a.getAttribute("rel"), "noopener noreferrer");
+  }
+});
+
+test("without the catalogue the station editor still works", async (t) => {
+  const p = await toolsPage(t, { routes: { "GET /api/tools/radio/catalogue": reply(503, { error: "tools_unavailable" }) } });
+  assert.equal(p.document.querySelector("#tools-catalogue-toggle"), null);
+  assert.ok(p.document.querySelector("#tools-station-add"));
+});
+
+for (const [status, code, said] of [[401, "unauthorized", "Please log in."], [429, "locked", "Too many PIN attempts."]]) {
+  test(`Add all stops at ${code} after a station went in and reports the cause`, async (t) => {
+    const sent = [];
+    let expired = false; // after the 401 the server has no session: boot shows the login, which keeps the notice
+    const p = await catalogueOpen(t, {
+      "GET /api/session": () => (expired ? { authenticated: false, pin_set: true } : { authenticated: true, csrf: "tok", pin_set: true, status_poll_ms: 60000 }),
+      "POST /api/settings/entry": (b) => {
+        sent.push(b.value.name);
+        if (sent.length === 1) return { changed: true, layer: "runtime" };
+        expired = status === 401;
+        return reply(status, { error: code });
+      },
+    });
+    p.document.querySelector('[data-catalogue-group="rock"] [data-action="add-all"]').click();
+    await settle();
+    await submitDialog(p, "123456");
+    assert.deepEqual(sent, ["Rock New", "Rock Taken"]);
+    assert.equal(p.document.querySelector("dialog[open]"), null);
+    const text = p.document.getElementById("notice").textContent;
+    assert.ok(text.startsWith("1 station added. 1 already in the list."), text);
+    assert.ok(text.includes("Stopped: " + said), text);
+    assert.ok(!text.includes("could not be added"), "not reported as failed stations");
+    if (status === 401) assert.ok(p.document.querySelector("#login-pin, input[type=password]"), "the login is shown after the counts");
+  });
+}
+
+test("Add all does not go on after a stop", async (t) => {
+  const three = { groups: [{ id: "rock", stations: [shipped("A", "https://a.example.org/a"), shipped("B", "https://a.example.org/b"), shipped("C", "https://a.example.org/c")] }] };
+  const sent = [];
+  const p = await catalogueOpen(t, {
+    "GET /api/tools/radio/catalogue": three,
+    "POST /api/settings/entry": (b) => { sent.push(b.value.name); return sent.length === 1 ? { changed: true } : reply(429, { error: "locked" }); },
+  });
+  p.document.querySelector('[data-catalogue-group="rock"] [data-action="add-all"]').click();
+  await settle();
+  await submitDialog(p, "123456");
+  assert.deepEqual(sent, ["A", "B"]);
+  const text = p.document.getElementById("notice").textContent;
+  assert.ok(text.includes("1 station added.") && text.includes("Stopped: Too many PIN attempts. 2 stations were not tried."), text);
+});
+
+test("a 500 from the catalogue hides the section like a 503", async (t) => {
+  const p = await toolsPage(t, { routes: { "GET /api/tools/radio/catalogue": reply(500, { error: "generic" }) } });
+  assert.equal(p.document.querySelector("#tools-catalogue-toggle"), null);
+  assert.ok(p.document.querySelector("#tools-station-add"));
+});
+
+test("a policy page that is not https is not a link", async (t) => {
+  const odd = { groups: [{ id: "rock", stations: [shipped("A", "https://a.example.org/a", { policy_url: "javascript:alert(1)" })] }] };
+  const p = await catalogueOpen(t, { "GET /api/tools/radio/catalogue": odd });
+  assert.equal(p.document.querySelectorAll("#tools-catalogue a").length, 0);
+});

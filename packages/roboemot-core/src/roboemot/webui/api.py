@@ -98,6 +98,7 @@ TOOLS_STATUS = {
     "geocode_unreachable": HTTPStatus.BAD_GATEWAY,
     "geocode_failed": HTTPStatus.BAD_GATEWAY,
     "tools_too_soon": HTTPStatus.TOO_MANY_REQUESTS,
+    "radio_catalogue_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
 }
 # A timer or reminder id as the scheduler gives them (``t<n>``, ``r<n>``) or a hand edit made.
 TOOLS_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
@@ -283,7 +284,8 @@ class ToolsError(Exception):
 class ToolsPort(Protocol):
     """``roboemot.runtime.tools_state.ToolsState`` (SPEC 11, 11A, 12): ``state()`` is the Tools
     tab's payload (station names, never URLs); the writes raise an error with a ``code`` when
-    refused. ``geocode`` is the admin's place search, its query never logged."""
+    refused. ``geocode`` is the admin's place search, its query never logged. ``catalogue()`` is
+    the shipped station catalogue with its own URLs (for the Add buttons) and ``added`` marks."""
 
     def state(self) -> dict[str, Any]: ...
     def cancel(self, item_id: str) -> bool: ...
@@ -291,6 +293,7 @@ class ToolsPort(Protocol):
     def radio_stop(self) -> None: ...
     def radio_test(self, name: str) -> str: ...
     def geocode(self, query: str) -> list[dict[str, Any]]: ...
+    def catalogue(self) -> dict[str, Any]: ...
 
 
 class DebugReport(Protocol):
@@ -566,6 +569,7 @@ class WebApi:
             ("POST", "/api/emotions/play"): self._emotions_play,
             ("POST", "/api/emotions/inject"): self._emotions_inject,
             ("GET", TOOLS_STATE): self._tools_state,
+            ("GET", "/api/tools/radio/catalogue"): self._tools_catalogue,
             ("POST", "/api/tools/cancel"): self._tools_cancel,
             ("POST", "/api/tools/missed/clear"): self._tools_missed_clear,
             ("POST", "/api/tools/radio/stop"): self._tools_radio_stop,
@@ -1028,6 +1032,14 @@ class WebApi:
         """The Tools tab's state (SPEC 11A): tools, timers and reminders with their text,
         missed items and what plays. Behind the PIN session only; read-only."""
         return Response(HTTPStatus.OK, self._tools_source().state())
+
+    def _tools_catalogue(self, req: Request) -> Response:
+        """The shipped station catalogue (SPEC 11, Radio; 11A) with the stations already added
+        marked. Behind the PIN session only; read-only and not a poll. Adding one is the settings
+        entry route."""
+        return Response(
+            HTTPStatus.OK, self._tools_call(lambda _: self._tools_source().catalogue(), None)
+        )
 
     def _tools_body(self, req: Request, keys: set[str]) -> dict[str, Any]:
         """A Tools write's body with exactly ``keys`` plus ``pin`` allowed; the PIN is checked

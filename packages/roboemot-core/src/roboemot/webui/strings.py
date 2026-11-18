@@ -1256,6 +1256,34 @@ EN: dict[str, str] = {
     "tools_station_add": "Add",
     "tools_station_add_message": "Add the station {name}.",
     "tools_station_added": "{name} was added.",
+    "err_radio_catalogue_unavailable": "The station catalogue cannot be read; see the robot's log.",
+    "tools_catalogue": "Station catalogue",
+    "tools_catalogue_intro": (
+        "Checked streams that ship with RoboEmot, grouped by genre. Nothing plays until you add a "
+        "station; an added station is a normal station you can edit or remove."
+    ),
+    "tools_catalogue_group_jazz": "Jazz",
+    "tools_catalogue_group_ambient_chillout": "Ambient, chillout",
+    "tools_catalogue_group_funk_soul_rnb": "Funk, soul, R&B",
+    "tools_catalogue_group_hiphop_rap": "Hip-hop, rap",
+    "tools_catalogue_group_rock": "Rock",
+    "tools_catalogue_group_metal_progressive": "Metal, progressive",
+    "tools_catalogue_add_all": "Add all",
+    "tools_catalogue_add_all_message": "Add {n} stations of {group}.",
+    "tools_catalogue_add_all_message_one": "Add {n} station of {group}.",
+    "tools_catalogue_added": "Added",
+    "tools_catalogue_all_added": "Every station of {group} is already in the list.",
+    "tools_catalogue_added_n": "{n} stations added.",
+    "tools_catalogue_added_n_one": "{n} station added.",
+    "tools_catalogue_skipped_n": "{n} already in the list.",
+    "tools_catalogue_failed_n": "{n} could not be added.",
+    "tools_catalogue_failed_n_one": "{n} could not be added.",
+    "tools_catalogue_stopped": "Stopped: {reason} {n} stations were not tried.",
+    "tools_catalogue_stopped_one": "Stopped: {reason} {n} station was not tried.",
+    "tools_catalogue_unofficial": (
+        "Unofficial stream: the operator publishes no permission for players like this one."
+    ),
+    "tools_catalogue_policy": "{operator}: streaming terms",
     "err_tools_unavailable": "The Tools tab is not available on this robot.",
     "err_scheduler_unavailable": "Timers and reminders are not available on this run.",
     "err_radio_unavailable": "This robot's speaker cannot play the radio.",
@@ -2582,6 +2610,37 @@ IT: dict[str, str] = {
     "tools_station_add": "Aggiungi",
     "tools_station_add_message": "Aggiungi la stazione {name}.",
     "tools_station_added": "{name} è stata aggiunta.",
+    "err_radio_catalogue_unavailable": (
+        "Il catalogo delle stazioni non si legge; guarda il log del robot."
+    ),
+    "tools_catalogue": "Catalogo delle stazioni",
+    "tools_catalogue_intro": (
+        "Stream verificati che arrivano con RoboEmot, divisi per genere. Non suona nulla finché "
+        "non aggiungi una stazione; una stazione aggiunta è una stazione normale, che puoi "
+        "modificare o rimuovere."
+    ),
+    "tools_catalogue_group_jazz": "Jazz",
+    "tools_catalogue_group_ambient_chillout": "Ambient, chillout",
+    "tools_catalogue_group_funk_soul_rnb": "Funk, soul, R&B",
+    "tools_catalogue_group_hiphop_rap": "Hip-hop, rap",
+    "tools_catalogue_group_rock": "Rock",
+    "tools_catalogue_group_metal_progressive": "Metal, progressive",
+    "tools_catalogue_add_all": "Aggiungi tutte",
+    "tools_catalogue_add_all_message": "Aggiungi {n} stazioni di {group}.",
+    "tools_catalogue_add_all_message_one": "Aggiungi {n} stazione di {group}.",
+    "tools_catalogue_added": "Aggiunta",
+    "tools_catalogue_all_added": "Tutte le stazioni di {group} sono già nell'elenco.",
+    "tools_catalogue_added_n": "{n} stazioni aggiunte.",
+    "tools_catalogue_added_n_one": "{n} stazione aggiunta.",
+    "tools_catalogue_skipped_n": "{n} già nell'elenco.",
+    "tools_catalogue_failed_n": "{n} non aggiunte.",
+    "tools_catalogue_failed_n_one": "{n} non aggiunta.",
+    "tools_catalogue_stopped": "Interrotto: {reason} {n} stazioni non provate.",
+    "tools_catalogue_stopped_one": "Interrotto: {reason} {n} stazione non provata.",
+    "tools_catalogue_unofficial": (
+        "Stream non ufficiale: chi lo gestisce non pubblica un permesso per lettori come questo."
+    ),
+    "tools_catalogue_policy": "{operator}: condizioni dello streaming",
     "err_tools_unavailable": "La scheda Strumenti non è disponibile su questo robot.",
     "err_scheduler_unavailable": "Timer e promemoria non sono disponibili in questa esecuzione.",
     "err_radio_unavailable": "L'altoparlante di questo robot non può suonare la radio.",

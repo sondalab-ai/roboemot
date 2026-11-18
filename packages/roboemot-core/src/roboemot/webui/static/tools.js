@@ -6,8 +6,10 @@
 // the place search are POSTs of their own (the query travels in the body, never in a URL). The
 // switches and the settings are saved through the batch settings save, an admin opt-in confirmed
 // through the batch preview first (settingsPreviewedSave). The station editor adds and removes an
-// entry through the settings entry routes and saves its fields through the batch. A station URL
-// shows only in the editor, never in the polled state. Shares the helpers of app.js, settings.js
+// entry through the settings entry routes and saves its fields through the batch; the station
+// catalogue (GET /api/tools/radio/catalogue, read with the settings, not polled) adds through the
+// same entry route. A station URL shows only in the editor and the catalogue, never in the polled
+// state. Shares the helpers of app.js, settings.js
 // and live.js, so it loads before app.js and calls them at run time.
 //
 // Polling: the timer is `state.timer` (stopPolling clears it), only while the tab is open and the
@@ -29,7 +31,7 @@ const TOOLS_CARDS = {
 };
 // Rows a card shows in a control of its own, not among its settings.
 const TOOLS_OWN_ROWS = new Set(["tools.weather.enabled", "tools.radio.enabled", TOOLS_PLACE_NAME, TOOLS_STATIONS]);
-const toolsState = { serial: 0, rows: null, cards: null, live: null, tools: [] };
+const toolsState = { serial: 0, rows: null, cards: null, live: null, tools: [], catalogue: null, catalogueOpen: false };
 
 const toolsId = (path) => "tools-" + path.replace(/[^A-Za-z0-9]+/g, "-");
 const toolsName = (name) => t("tools_name_" + name);
@@ -392,7 +394,124 @@ function toolsRadioExtra() {
   const removable = new Set(list.removable || []);
   return [markedEyebrow("h3", t("tools_stations")), el("p", { class: "hint" }, t("tools_stations_intro")),
     keys.length ? keys.map((k) => toolsStation(k, removable.has(k))) : el("p", { class: "hint" }, t("tools_stations_none")),
-    toolsStationAdd()];
+    toolsStationAdd(), toolsCatalogue()];
+}
+
+// ---------------------------------------------------------------- radio: the station catalogue
+
+// The shipped catalogue (GET /api/tools/radio/catalogue, SPEC 11, Radio), grouped by genre. Add
+// posts one station through the settings entry route like the add form; it becomes a normal
+// runtime station (editable, removable). A station already listed (by name or URL) shows as added.
+// null when the catalogue cannot be read: the section is then left out.
+async function toolsCatalogueFetch() {
+  try {
+    return await api("GET", "/api/tools/radio/catalogue");
+  } catch (err) {
+    if (err.status === 401) throw err;
+    return null;
+  }
+}
+
+// What the add route takes: exactly a station's fields, never the catalogue-only ones.
+const toolsCatalogueValue = (s) => ({ name: s.name, url: s.url, genres: s.genres, language: s.language });
+const toolsCatalogueAdd = (s, pin) => api("POST", "/api/settings/entry", { path: TOOLS_STATIONS, value: toolsCatalogueValue(s), pin });
+// A refusal about the PIN or the session, not the station: Add all stops on it at any station. At the
+// first one the dialog shows it (nothing went in); later, the notice reports what went in, the cause
+// and how many were not tried.
+const TOOLS_PIN_ERRORS = new Set(["bad_pin", "locked", "busy", "unauthorized", "csrf", "pin_not_set"]);
+
+async function toolsCatalogueAddOne(s) {
+  const out = await pinnedCall(t("tools_station_add_message", { name: s.name }), t("tools_station_add"), (pin) => toolsCatalogueAdd(s, pin));
+  if (!out) return;
+  notice(t("tools_station_added", { name: s.name }));
+  await toolsReload();
+}
+
+// One PIN for the group, then one add per station not yet listed. A station the server already
+// has (entry_exists) counts as skipped; another station refusal counts as failed and the rest go
+// on. A PIN or session refusal stops the run (TOOLS_PIN_ERRORS). An expired session after some
+// adds shows the counts first, then the login (boot), so the partial result is not lost silently.
+async function toolsCatalogueAddAll(group) {
+  const label = t("tools_catalogue_group_" + group.id);
+  const pending = group.stations.filter((s) => !s.added);
+  const counts = { added: 0, skipped: group.stations.length - pending.length, failed: 0, stopped: null, untried: 0 };
+  if (!pending.length) { notice(t("tools_catalogue_all_added", { group: label })); return; }
+  const out = await pinnedCall(tn("tools_catalogue_add_all_message", pending.length, { group: label }), t("tools_catalogue_add_all"), async (pin) => {
+    for (const [i, s] of pending.entries()) {
+      try {
+        await toolsCatalogueAdd(s, pin);
+        counts.added += 1;
+      } catch (err) {
+        if (TOOLS_PIN_ERRORS.has(err.message)) {
+          if (i === 0) throw err;
+          counts.stopped = err;
+          counts.untried = pending.length - i;
+          break;
+        }
+        if (err.message === "entry_exists") counts.skipped += 1;
+        else counts.failed += 1;
+      }
+    }
+    return counts;
+  });
+  if (!out) return;
+  const parts = [tn("tools_catalogue_added_n", out.added)];
+  if (out.skipped) parts.push(tn("tools_catalogue_skipped_n", out.skipped));
+  if (out.failed) parts.push(tn("tools_catalogue_failed_n", out.failed));
+  if (out.stopped) parts.push(tn("tools_catalogue_stopped", out.untried, { reason: explain(out.stopped) }));
+  notice(parts.join(" "), out.failed > 0 || out.stopped !== null);
+  if (out.stopped && out.stopped.status === 401 && out.stopped.message === "unauthorized") { await boot(); return; }
+  await toolsReload();
+}
+
+// Only an https policy page becomes a link (the server checks it at load too).
+function toolsHttps(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (e) {
+    return false;
+  }
+}
+
+function toolsCatalogueStation(s) {
+  const facts = [s.operator, s.genres.join(", "), s.language, s.bitrate_kbps + " kbps"].filter(Boolean).join(" · ");
+  const action = s.added
+    ? el("span", { class: "sl-tag sl-tag--plain", "data-added": "" }, t("tools_catalogue_added"))
+    : button(t("tools_station_add"), "plain", () => guarded(() => toolsCatalogueAddOne(s)),
+      { small: true, attrs: { "data-action": "add", "aria-label": rowName(t("tools_station_add"), s.name) } });
+  return el("li", { "data-catalogue-station": s.name },
+    el("div", { class: "row" }, el("strong", {}, s.name), action),
+    el("p", { class: "hint" }, facts),
+    s.official ? [] : el("p", { class: "hint", "data-unofficial": "" }, t("tools_catalogue_unofficial")),
+    toolsHttps(s.policy_url)
+      ? el("p", { class: "hint" }, el("a", { href: s.policy_url, target: "_blank", rel: "noopener noreferrer" }, t("tools_catalogue_policy", { operator: s.operator })))
+      : []);
+}
+
+function toolsCatalogueGroup(group) {
+  const label = t("tools_catalogue_group_" + group.id);
+  return el("div", { class: "stack", "data-catalogue-group": group.id },
+    el("div", { class: "row" }, el("h4", { class: "setting-entry" }, label),
+      button(t("tools_catalogue_add_all"), "plain", () => guarded(() => toolsCatalogueAddAll(group)),
+        { small: true, attrs: { "data-action": "add-all", "aria-label": rowName(t("tools_catalogue_add_all"), label) } })),
+    el("ul", { class: "stack" }, group.stations.map(toolsCatalogueStation)));
+}
+
+// The collapsible section; its open state outlives the rebuild after each add.
+function toolsCatalogue() {
+  const data = toolsState.catalogue;
+  if (!data || !data.groups.length) return [];
+  const id = "tools-catalogue";
+  const open = toolsState.catalogueOpen;
+  const body = el("div", { class: "stack", id, hidden: !open },
+    el("p", { class: "hint" }, t("tools_catalogue_intro")), data.groups.map(toolsCatalogueGroup));
+  const toggle = el("button", { type: "button", class: "sl-disclosure", id: "tools-catalogue-toggle", "aria-expanded": String(open), "aria-controls": id }, t("tools_catalogue"));
+  toggle.addEventListener("click", () => {
+    toolsState.catalogueOpen = toggle.getAttribute("aria-expanded") !== "true";
+    toggle.setAttribute("aria-expanded", String(toolsState.catalogueOpen));
+    body.hidden = !toolsState.catalogueOpen;
+  });
+  return el("div", { class: "stack" }, el("h3", { class: "setting-entry" }, toggle), body);
 }
 
 // ---------------------------------------------------------------- view
@@ -431,9 +550,10 @@ async function toolsRowsFetch() {
 // After a settings write from this tab: the rows read again, the cards rebuilt and the state polled.
 async function toolsReload() {
   const current = viewToken();
-  const rows = await toolsRowsFetch();
+  const [rows, catalogue] = await Promise.all([toolsRowsFetch(), toolsCatalogueFetch()]);
   if (!current()) return;
   toolsState.rows = rows;
+  toolsState.catalogue = catalogue;
   toolsBuild();
   await toolsRefresh();
 }
@@ -447,9 +567,10 @@ async function toolsView() {
   pollForget();
   view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("tools_intro")), staleNote("tools-stale", ["tools-live"]),
     toolsState.live, el("div", { class: "stack", id: "tools-cards" })));
-  const rows = await toolsRowsFetch();
+  const [rows, catalogue] = await Promise.all([toolsRowsFetch(), toolsCatalogueFetch()]);
   if (!current()) return;
   toolsState.rows = rows;
+  toolsState.catalogue = catalogue;
   toolsBuild();
   await toolsRefresh();
 }
