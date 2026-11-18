@@ -40,7 +40,7 @@ dynamics:               # velocity and acceleration caps, measured in M0; requir
   antennas: {max_vel_dps: 500, max_acc_dps2: 6000}
 sensors:
   camera_main: {driver: reachy_mini_media}
-  mic_array:   {driver: reachy_mini_media, doa: true}
+  mic_array:   {driver: reachy_mini_media, doa: true, echo_cancelled: true}   # XMOS echo canceller
   imu:         {driver: reachy_mini_imu}      # Wireless only
 expressive_channels:
   voice: {type: speaker, driver: reachy_mini_media}

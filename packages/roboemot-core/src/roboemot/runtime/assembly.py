@@ -34,7 +34,7 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.prompt_log import PromptRing
 from roboemot.llm.pseudonyms import NameSource
-from roboemot.manifest import Manifest
+from roboemot.manifest import ECHO_CANCELLED, Manifest
 from roboemot.motion import MotionLoop
 from roboemot.motion.beat import Beat, BeatSource, room_beat
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
@@ -117,6 +117,7 @@ class Pipeline:
     alone: AloneWatch
     realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
     cue_sounds: dict[str, CueSound] = field(default_factory=dict)  # the robot's (SPEC 8)
+    echo_cancelled: bool = False  # the manifest's hardware echo cancellation (the radio's duck)
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
@@ -496,6 +497,7 @@ def assemble(
     bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
 
     return Pipeline(
+        echo_cancelled=ECHO_CANCELLED in manifest.capabilities(),
         voice_heard=voice_heard,
         cue_sounds=cue_sounds,
         realtime_provider=realtime_provider,

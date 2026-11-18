@@ -79,6 +79,21 @@ def test_capabilities_and_negotiation():
     assert "mirror" in no_cam.disabled
 
 
+def test_only_a_manifest_that_declares_it_has_hardware_echo_cancellation():
+    """SPEC 4, 8 (Radio playback): ``sensors.mic_array.echo_cancelled`` is the radio duck's
+    guard. Reachy Mini Wireless declares it (its XMOS echo canceller), the desk head does not,
+    and a value that is not a boolean is refused rather than read as off."""
+    reachy = load_manifest(REACHY, allow_unmeasured_dynamics=True)
+    assert "echo_cancelled" in reachy.capabilities()
+    assert "echo_cancelled" not in load_manifest(DESK).capabilities()
+    raw = yaml.safe_load(DESK.read_text())
+    raw["sensors"]["mic_array"]["echo_cancelled"] = False
+    assert "echo_cancelled" not in load_manifest(raw).capabilities()
+    raw["sensors"]["mic_array"]["echo_cancelled"] = "yes"
+    with pytest.raises(ManifestError, match="echo_cancelled"):
+        load_manifest(raw)
+
+
 def test_joint_without_dynamics_rejected():
     raw = yaml.safe_load(DESK.read_text())
     bad = copy.deepcopy(raw)

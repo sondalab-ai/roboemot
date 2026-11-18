@@ -7208,6 +7208,34 @@ class MediaConfig(Strict):
         le=30,
         advanced=True,
     )
+    duck_on_speech: bool = param(
+        True,
+        "Lower the music while someone speaks over it; only on a robot whose manifest declares "
+        "hardware echo cancellation",
+    )
+    duck_db: float = param(
+        -18.0,
+        "Music level change while someone speaks over it (0: no change)",
+        unit="dB",
+        ge=MEDIA_VOLUME_MIN_DB,
+        le=0,
+    )
+    duck_ramp_ms: float = param(
+        30.0,
+        "Time the music takes to go down to the ducked level, and back up",
+        unit="ms",
+        ge=1,
+        le=500,
+        advanced=True,
+    )
+    duck_release_s: float = param(
+        1.5,
+        "The music comes back up this long after the speech over it ended",
+        unit="s",
+        ge=0,
+        le=10,
+        advanced=True,
+    )
     connect_timeout_s: float = param(
         8.0,
         "Longest wait for a stream's first audio, and for more audio while it plays; a slower "

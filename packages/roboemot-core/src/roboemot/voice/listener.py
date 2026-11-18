@@ -107,6 +107,11 @@ confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
+The duck over speech (SPEC 8, Radio playback, owner decision 2026-11-18): each utterance's start
+and end also go to the player (``media_speech_start`` at the VAD start, ``media_speech_end`` at
+its endpoint or when it is dropped). The player decides: it ducks the audible music only on a
+robot with hardware echo cancellation.
+
 Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
 not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
 check's numbers (the facing check's median head yaw and its limit); a facing check that did not
@@ -341,6 +346,10 @@ class VoiceListener:
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
         self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
+        # an utterance's VAD start and its end, for the player's duck (``duck_from`` and
+        # ``release_from``; the player applies the guard)
+        self.media_speech_start: Callable[[float], None] = lambda at: None
+        self.media_speech_end: Callable[[float], None] = lambda at: None
         # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
         # thread only; sized in apply_config to the detector's window
         self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
@@ -690,6 +699,8 @@ class VoiceListener:
         the recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
         self._settle(wait)
         self._cut_stream()
+        if self._hearing:  # the speech in progress is dropped: the duck must not stay
+            self._media_speech(False, self._clock())
         self._recording = self._hearing = False
         if self._before_asr_reset is not None:
             try:
@@ -941,6 +952,14 @@ class VoiceListener:
         except Exception as exc:
             log.warning("voice listener: media player: %s", type(exc).__name__)
 
+    def _media_speech(self, started: bool, at: float) -> None:
+        """Tell the media player an utterance started (``started``) or ended at ``at``: it
+        ducks the music over the speech where the robot's echo canceller allows it."""
+        try:
+            (self.media_speech_start if started else self.media_speech_end)(at)
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+
     def _own_sound_cut(self) -> bool:
         """Someone's speech is in progress or starting as the speaking window opens: cut the
         robot's own sound if only such a sound plays (``bind_own_sound``); True when it did."""
@@ -1103,6 +1122,7 @@ class VoiceListener:
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
         self._hearing = True  # before the hand-offs below: their blip must not cover this speech
+        self._media_speech(True, ev.stamp)
         self._settle(wait=True)  # the per-utterance state below is the pending one's until then
         try:
             speaker = self._speaker_language()
@@ -1344,6 +1364,7 @@ class VoiceListener:
         if not self._recording:
             return
         self._recording = self._hearing = False
+        self._media_speech(False, ev.endpoint_stamp)
         if self._playback:  # the barge-in's segment ended: back to dropping (_process)
             self._playback_ended = True
         s, self._stream = self._stream, None
