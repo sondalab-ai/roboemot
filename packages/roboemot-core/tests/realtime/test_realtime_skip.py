@@ -8,10 +8,9 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from roboemot.config import ConfigError, ConfigStack
+from roboemot.config import ConfigStack
 from roboemot.config.schema import RegisterParams
-from roboemot.llm import prompt as prompt_module
-from roboemot.llm.prompt import realtime_instructions, skip_prompts
+from roboemot.llm.prompt import realtime_instructions, skip_prompt
 from roboemot.realtime.turn import SKIP_TOOL
 from rt_rig import build_rt, wait_for
 from test_conversation_tools import Env
@@ -75,7 +74,7 @@ def test_a_skip_before_any_audio_plays_nothing_and_deletes_the_items(rigs):
         create = srv.of("response.create")[0]["response"]
         assert create["tool_choice"] == "auto"  # offered without any skill
         assert SKIP_TOOL in tool_names(srv.of("session.update")[-1])
-        assert skip_prompts()["it"] in create["instructions"]
+        assert skip_prompt() in create["instructions"]
 
 
 def test_audio_after_the_skip_call_never_plays(rigs):
@@ -137,7 +136,7 @@ def test_skip_tool_off_sends_neither_the_tool_nor_the_instruction(rigs):
     with TurnServer() as srv:
         rig = rigs(srv)
         rig.turn()
-        rule = skip_prompts()["it"]
+        rule = skip_prompt()
         for update in srv.of("session.update"):
             assert SKIP_TOOL not in tool_names(update)
             assert rule not in update["session"].get("instructions", "")
@@ -159,9 +158,9 @@ def test_a_skip_call_with_the_option_off_is_not_a_skip(rigs):
 
 
 @pytest.mark.parametrize("language", ["it", "en"])
-def test_the_instruction_loads_from_the_prompt_files(language):
-    rule = skip_prompts()[language]
-    assert SKIP_TOOL in rule  # a translation keeps the tool's name
+def test_the_instruction_is_english_for_each_language(language):
+    rule = skip_prompt()
+    assert SKIP_TOOL in rule  # the rule names the tool
     cfg = ConfigStack(
         app={"voice": {"realtime_route": SKIP}, "conversation": {"language": "it"}}
     ).effective()
@@ -171,25 +170,13 @@ def test_the_instruction_loads_from_the_prompt_files(language):
     assert rule not in line
 
 
-def test_the_instruction_follows_the_option_and_falls_back_by_language():
+def test_the_instruction_follows_the_option():
     off = ConfigStack(app={}).effective()
-    assert all(
-        r not in realtime_instructions(off, RegisterParams()) for r in skip_prompts().values()
-    )
+    assert skip_prompt() not in realtime_instructions(off, RegisterParams())
     cfg = ConfigStack(
         app={"voice": {"realtime_route": SKIP}, "conversation": {"language": "it"}}
     ).effective()
-    assert realtime_instructions(cfg, RegisterParams(), language="de").endswith(
-        skip_prompts()["it"]
-    )
-
-
-def test_a_missing_prompt_file_fails_loud_at_load(monkeypatch):
-    """The tool is never offered without its rule: the configuration is rejected."""
-    monkeypatch.setattr(prompt_module, "skip_prompts", lambda: {"en": "x ignore_utterance"})
-    with pytest.raises(ConfigError, match="ignore_utterance.it.txt"):
-        ConfigStack(app={"voice": {"realtime_route": SKIP}, "conversation": {"language": "it"}})
-    ConfigStack(app={"conversation": {"language": "it"}})  # off: no file needed
+    assert realtime_instructions(cfg, RegisterParams(), language="de").endswith(skip_prompt())
 
 
 # ------------------------------------------------------------------ fix round 1
@@ -307,7 +294,7 @@ def test_a_hot_reload_turns_the_tool_and_the_rule_off_for_the_next_turn(rigs):
     with TurnServer() as srv:
         rig = rigs(srv, rt=SKIP)
         rig.turn()
-        rule = skip_prompts()["it"]
+        rule = skip_prompt()
         assert SKIP_TOOL in tool_names(srv.of("session.update")[-1])
         assert rule in srv.of("response.create")[-1]["response"]["instructions"]
         rig.stack.set("voice.realtime_route.skip_tool", False, source="test")
@@ -325,5 +312,5 @@ def test_a_fixed_line_in_a_skip_session_has_no_rule_and_no_skip_tool(rigs):
         assert wait_for(lambda: srv.of("response.create"))
         line = srv.of("response.create")[-1]["response"]
         assert line["tool_choice"] == "none"
-        assert skip_prompts()["it"] not in line["instructions"]
+        assert skip_prompt() not in line["instructions"]
         assert "tools" not in line
