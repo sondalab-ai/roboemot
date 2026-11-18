@@ -7278,6 +7278,14 @@ class RadioConfig(Strict):
         "Stations the robot may play; the model picks one by name or genre and never passes a URL",
         admin_only=True,
     )
+    max_choices: int = param(
+        50,
+        "Most genres and station names offered to the model for radio_play, genres first; "
+        "it replaces conversation.tool_enum_max_items for the radio",
+        ge=1,
+        le=200,
+        advanced=True,
+    )
     dance: bool = param(
         True,
         "The music detector may start the dance on the robot's own radio; off, it ignores "

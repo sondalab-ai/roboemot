@@ -13,6 +13,7 @@ import pytest
 from roboemot.affect import AffectEngine
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.skills import (
+    ChoiceCap,
     Desc,
     MaxLen,
     Range,
@@ -445,6 +446,40 @@ def test_a_truncated_list_of_choices_is_logged(caplog):
     with caplog.at_level(logging.WARNING):
         play.resolved_choices(5)
     assert not caplog.text
+
+
+def test_a_choices_cap_replaces_the_global_cap_for_its_parameter_only(caplog):
+    names = [f"n{i}" for i in range(6)]
+    own = {"cap": 4}
+
+    @skill(
+        llm_visible=True,
+        choices={"who": lambda: names, "other": lambda: names},
+        choice_caps={"who": ChoiceCap("tools.demo.max_choices", lambda: own["cap"])},
+    )
+    def pick(who: str, other: str) -> str:
+        return who
+
+    with caplog.at_level(logging.WARNING):
+        assert pick.skill.resolved_choices(2) == {"who": names[:4], "other": names[:2]}
+    assert "only the first 4" in caplog.text and "(tools.demo.max_choices)" in caplog.text
+    assert "only the first 2" in caplog.text and "(conversation.tool_enum_max_items)" in caplog.text
+    own["cap"] = 10  # read at resolve time
+    assert pick.skill.resolved_choices(2)["who"] == names
+    assert pick.skill.resolved_choices() == {"who": names, "other": names}  # no cap asked
+
+
+def test_a_choices_cap_without_choices_is_refused():
+    with pytest.raises(TypeError):
+
+        @skill(choice_caps={"who": ChoiceCap("x", lambda: 1)})
+        def pick(who: str) -> str:
+            return who
+
+
+def test_look_at_keeps_the_global_cap():
+    look = Env().reg.get("look_at")
+    assert look.resolved_choices(3) == {"target": ["speaker", "person", "animal"]}
 
 
 async def test_unavailable_skill_is_not_offered_and_refused():
