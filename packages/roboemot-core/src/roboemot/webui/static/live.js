@@ -383,14 +383,15 @@ function liveEventText(ev) {
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
   if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);
-  return liveHeard(text, heard);
+  const local = ev.kind === "unanswered" && ev.reason === "media";
+  return liveHeard(text, heard, local ? "live_ev_heard_local" : "live_ev_heard");
 }
 
-// The server's words an event carries (`heard`: only an unconfirmed wake over the radio, only with
-// the live transcript on) appended as they are, filled alone so no word is read as a placeholder
-// or a code.
-function liveHeard(text, heard) {
-  return typeof heard === "string" && heard ? text + "; " + t("live_ev_heard", { heard }) : text;
+// A recognizer's words an event carries (`heard`, only with the live transcript on: the server's
+// of an unconfirmed wake over the radio, the local final of a radio rejection, worded by `key`)
+// appended as they are, filled alone so no word is read as a placeholder or a code.
+function liveHeard(text, heard, key) {
+  return typeof heard === "string" && heard ? text + "; " + t(key, { heard }) : text;
 }
 
 function liveEventRow(ev) {

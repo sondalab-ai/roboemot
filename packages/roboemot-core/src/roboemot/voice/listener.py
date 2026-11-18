@@ -83,7 +83,8 @@ hole.
 
 The robot's own radio (``media_audible``, the media player's ``audible_at``, SPEC 8, Radio
 playback): while it can be heard as an utterance starts, only the wake word addresses the robot
-(``WakeGate``, ``rejected_media``: the follow-up window, a face and the policy do not count),
+(``WakeGate``, ``rejected_media``: the follow-up window, a face and the policy do not count;
+the Live tab's ``unanswered``/``media``, with the local final while the live transcript is on),
 and with server turns no segment streams (the ``media`` gate, always on: the wake gate decides
 each one locally). While the player holds the radio (robot speech, an open addressed turn, an
 announcement's reply window, ``open_follow_up``, ``reply_window_open``, and
@@ -110,8 +111,10 @@ Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the 
 not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
 check's numbers (the facing check's median head yaw and its limit); a facing check that did not
 trust the yaw on a busy CPU publishes ``facing``/``cpu_high``; a transcript that did not come
-publishes ``audio``/``transcript_timeout``. No speaker id, no text, except the server's words
-of an unconfirmed wake over the radio (``heard``, ``_heard``: only with the live transcript on).
+publishes ``audio``/``transcript_timeout``. No speaker id, no text, except a recognizer's words
+over the radio as ``heard``, only with the live transcript on: the server's of an unconfirmed
+wake (``_heard``, a server final only) and the local final of a ``rejected_media``
+(``_live_words``); no other rejection carries words.
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
 per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
@@ -1396,7 +1399,9 @@ class VoiceListener:
 
     def _decided(self, p: _Handoff, outcome: str, text: str) -> None:
         """Publish the wake decision of an utterance with words: ``unanswered`` with the rule
-        when it was rejected, and the facing check's CPU fallback when it took one."""
+        when it was rejected, and the facing check's CPU fallback when it took one. ``text`` is
+        the local final; a rejection over the radio (``rejected_media``) carries it as ``heard``
+        under the live transcript's gate (``_live_words``), no other rejection carries words."""
         info = p.face_info
         if info.get("facing") == "cpu_high":
             self.events(
@@ -1408,6 +1413,7 @@ class VoiceListener:
             )
         if not text.strip() or not outcome.startswith("rejected_"):
             return
+        words = {"heard": self._live_words(text)} if outcome == "rejected_media" else {}
         self.events(
             "unanswered",
             outcome.removeprefix("rejected_"),
@@ -1415,6 +1421,7 @@ class VoiceListener:
             facing=info.get("facing"),
             yaw_deg=info.get("yaw_deg"),
             limit_deg=info.get("limit_deg"),
+            **words,
         )
 
     def _send_unheard(self, ev: SpeechEnd, face: str | None) -> bool:
@@ -1736,8 +1743,14 @@ class VoiceListener:
         """The server's words of an unconfirmed wake for the Live tab (SPEC 12): only a server
         final, only while the Live tab and its transcript are on, cut as a transcript turn;
         None otherwise. They go to the in-memory event ring only, never to a log."""
+        return self._live_words(text) if server else None
+
+    def _live_words(self, text: str) -> str | None:
+        """``text`` for a decision event's ``heard`` (SPEC 12): only while the Live tab and its
+        transcript are on, stripped and cut to ``webui.live.transcript_max_chars``; None
+        otherwise. The caller picks which recognizer's words may go (``_heard``, ``_decided``)."""
         live = self._cfg.webui.live
-        if not (server and live.enabled and live.transcript):
+        if not (live.enabled and live.transcript):
             return None
         return text.strip()[: live.transcript_max_chars]
 

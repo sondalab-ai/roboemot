@@ -202,9 +202,13 @@ def test_nothing_private_is_in_the_answer_and_nothing_is_logged(served, caplog):
 HEARD = "ehi neva ferma la musica"
 
 
-def words_ring(served):
-    """The served host with a decision ring and the live transcript on; one unconfirmed radio
-    wake with the server's words in it."""
+# the two radio events that may carry words: the server's unconfirmed wake, the local rejection
+RADIO_REASONS = pytest.mark.parametrize("reason", ["media_unconfirmed", "media"])
+
+
+def words_ring(served, reason):
+    """The served host with a decision ring and the live transcript on; one radio event
+    (``reason``) with a recognizer's words in it."""
     from roboemot.bus import Bus
     from roboemot.diag import BusEvents, EventRing
 
@@ -219,7 +223,7 @@ def words_ring(served):
     served.host.transcript = None  # no transcript ring: only the decision events hold words
     ring = served.host.activity = EventRing(served.stack.effective().webui.live)
     ring.attach(bus)
-    BusEvents(bus)("unanswered", "media_unconfirmed", heard=HEARD)
+    BusEvents(bus)("unanswered", reason, heard=HEARD)
     return ring
 
 
@@ -227,10 +231,11 @@ def served_events(client):
     return client.request("GET", "/api/live/state").json["activity"]["events"]
 
 
-def test_the_feed_serves_the_words_only_while_the_transcript_is_on(served):
-    """SPEC 12: with ``webui.live.transcript`` off the state serves the unconfirmed wake
-    without its words, whatever the ring still holds (as ``/api/live/audio`` does)."""
-    words_ring(served)
+@RADIO_REASONS
+def test_the_feed_serves_the_words_only_while_the_transcript_is_on(served, reason):
+    """SPEC 12: with ``webui.live.transcript`` off the state serves the radio event without
+    its words, whatever the ring still holds (as ``/api/live/audio`` does)."""
+    words_ring(served, reason)
     c = served.client
     assert served_events(c)[0]["heard"] == HEARD
     r = c.request(
@@ -238,16 +243,17 @@ def test_the_feed_serves_the_words_only_while_the_transcript_is_on(served):
     )
     assert r.status == 200, r.json
     [ev] = served_events(c)  # the ring here does not follow the stack: the view drops them
-    assert ev["reason"] == "media_unconfirmed" and "heard" not in ev
+    assert ev["reason"] == reason and "heard" not in ev
     assert HEARD.encode() not in c.request("GET", "/api/live/state").body
 
 
-def test_the_transcript_clear_forgets_the_words_of_the_decision_events(served):
-    words_ring(served)
+@RADIO_REASONS
+def test_the_transcript_clear_forgets_the_words_of_the_decision_events(served, reason):
+    words_ring(served, reason)
     c = served.client
     assert c.request("POST", "/api/live/transcript/clear", {}).status == 200
     [ev] = served_events(c)
-    assert ev["reason"] == "media_unconfirmed" and "heard" not in ev
+    assert ev["reason"] == reason and "heard" not in ev
 
 
 def test_only_get_is_served(served):

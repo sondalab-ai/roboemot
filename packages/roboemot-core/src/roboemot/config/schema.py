@@ -6531,8 +6531,9 @@ class LiveConfig(Strict):
     transcript: bool = param(
         False,
         "Keep the recent conversation (what was heard and said, text only) in memory for the "
-        "Live tab; off by default and then nothing at all is kept. Never saved, logged or put "
-        "in the debug report",
+        "Live tab; while the robot's radio plays, also the words the robot heard but did not "
+        "answer (anyone in the room, the radio). Off by default and then nothing at all is "
+        "kept. Never saved, logged or put in the debug report",
         opt_in=True,
     )
     transcript_max_turns: int = param(
