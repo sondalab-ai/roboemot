@@ -123,14 +123,27 @@ def test_a_local_media_reject_carries_no_words_without_the_live_tab_and_its_tran
     assert media and all(f["heard"] is None for f in media)
 
 
-def test_no_other_rejection_carries_words_even_with_the_live_transcript_on():
+@pytest.mark.parametrize(
+    ("policy", "room_music", "reason"),
+    [
+        ("always", False, "no_window"),  # the wake word is required
+        ("never", True, "music"),  # music in the room (the microphone), not the radio
+    ],
+)
+def test_no_other_rejection_carries_words_even_with_the_live_transcript_on(
+    policy, room_music, reason
+):
     """SPEC 12: only the radio rejection carries the local final; without the radio the same
     utterance is rejected for another rule and its event holds no ``heard`` at all."""
-    r, seen = live_rig(policy="always", radio=False)  # the wake word is required: no_window
+    r, seen = live_rig(policy=policy, radio=False)
+    if room_music:
+        r.feed(drum_loop(120, 10.0, RATE) * 0.5)
+        assert r.listener.music_state(r.now).playing
     r.say()
     assert not r.utterances[-1].addressed
     unanswered = [(why, f) for k, why, f in seen if k == "unanswered"]
-    assert unanswered and all(why != "media" and "heard" not in f for why, f in unanswered)
+    assert [why for why, _ in unanswered] == [reason]
+    assert all("heard" not in f for _, f in unanswered)
 
 
 @pytest.mark.parametrize(

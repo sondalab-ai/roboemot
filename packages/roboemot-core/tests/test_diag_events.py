@@ -315,10 +315,11 @@ def test_the_ring_keeps_the_words_as_the_live_transcript_does(radio):
     assert [r["reason"] for r in rows][0] == radio[1]
 
 
-def test_the_tick_trim_forgets_old_words_with_nobody_polling():
+@RADIO
+def test_the_tick_trim_forgets_old_words_with_nobody_polling(radio):
     clock = [100.0]
     ring, events = text_ring(clock)
-    events(*UNCONFIRMED, heard=TEXT)
+    events(*radio, heard=TEXT)
     clock[0] += live().transcript_max_age_s + 1
     ring.trim()
     assert all("heard" not in e for e in ring._events)  # in memory, not only on read

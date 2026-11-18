@@ -383,7 +383,8 @@ function liveEventText(ev) {
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
   if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);
-  return liveHeard(text, heard, ev.reason === "media" ? "live_ev_heard_local" : "live_ev_heard");
+  const local = ev.kind === "unanswered" && ev.reason === "media";
+  return liveHeard(text, heard, local ? "live_ev_heard_local" : "live_ev_heard");
 }
 
 // A recognizer's words an event carries (`heard`, only with the live transcript on: the server's
