@@ -1,7 +1,8 @@
 """The radio voice tools (SPEC 11, Voice tools, Radio; SPEC 12).
 
 ``radio_play(station)`` plays a station of ``tools.radio.stations`` through the run's media
-player (``ToolHost.media``). The model picks a station name or a genre from ``choices``; a genre
+player (``ToolHost.media``). The model picks a station name or a genre from ``choices`` (genres
+first, cut to ``tools.radio.max_choices``, not ``conversation.tool_enum_max_items``); a genre
 plays the first station that lists it. The model never passes a URL: only a listed URL plays.
 ``radio_stop`` stops it and ``radio_volume(change)`` steps the music volume up or down by
 ``tools.media.volume_step_db``. ``radio_play`` is available while ``tools.radio.enabled`` is on
@@ -24,7 +25,7 @@ from typing import Annotated, Any, Literal
 
 from ..config.schema import RoboEmotConfig, Station
 from ..skills.host import ToolHost
-from ..skills.registry import SkillResult, skill
+from ..skills.registry import ChoiceCap, SkillResult, skill
 from ..skills.schema import Desc
 
 log = logging.getLogger(__name__)
@@ -49,14 +50,16 @@ TOOL_TIMEOUT_MARGIN_S = 0.5
 
 
 def names_and_genres(cfg: RoboEmotConfig) -> list[str]:
-    """The ``radio_play`` choices: every station name, then every genre, each once, in the
-    order of the list."""
+    """The ``radio_play`` choices: every genre, then every station name, each once, in the
+    order of the list. Genres come first so a cut (``tools.radio.max_choices``) drops station
+    names, never the genres ("play some ambient"). A genre equal to a station name appears
+    once, in the genre position; ``pick`` still plays the station of that name."""
     out: list[str] = []
+    for station in cfg.tools.radio.stations:
+        out.extend(g for g in station.genres if g not in out)
     for station in cfg.tools.radio.stations:
         if station.name not in out:
             out.append(station.name)
-    for station in cfg.tools.radio.stations:
-        out.extend(g for g in station.genres if g not in out)
     return out
 
 
@@ -89,6 +92,11 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         description=PLAY_DESCRIPTION,
         available=available,
         choices={"station": lambda: names_and_genres(host.config())},
+        choice_caps={
+            "station": ChoiceCap(
+                "tools.radio.max_choices", lambda: host.config().tools.radio.max_choices
+            )
+        },
         offer_without_choices=True,
     )
     def radio_play(station: StationArg) -> SkillResult:
