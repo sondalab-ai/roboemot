@@ -6,9 +6,10 @@ utterance its audio is decoded a second time by a recognizer limited to a gramma
 time from configuration and the robot's state, never from literals:
 
 - the phrases of ``voice.keywords.<language>`` per category (``KeywordSpotter.grammar_phrases``):
-  wake phrases, ``name_wake_templates`` rendered with the robot's name, the bare name and its
-  aliases, stop, yes, no and greetings. A phrase with a word the recognizer vocabulary lacks can
-  never be heard: it is left out and counted (``out_of_vocab``), never matched;
+  wake phrases, ``name_wake_templates`` rendered with the robot's name and each of
+  ``voice.extra_names``, those bare names and the aliases, stop, yes, no and greetings. A phrase
+  with a word the recognizer vocabulary lacks can never be heard: it is left out and counted
+  (``out_of_vocab``), never matched;
 - the words of the utterance's free-text result, as competitors;
 - the recognizer's unknown-word filler.
 

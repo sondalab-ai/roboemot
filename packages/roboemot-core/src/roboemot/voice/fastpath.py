@@ -25,7 +25,8 @@ anywhere in a final of at most ``voice.fastpath.alias_wake_max_words`` words (a 
 "Neve" is also a word), is ``WAKE``; otherwise the robot's name or an alias opening the final
 text (``KeywordSpotter.name_first``, or the grammar pass's ``NAME_FIRST`` flag), at any length,
 is ``NAME_FIRST``: the wake gate addresses it only when its voice came from a visible face (a
-television's "Neve fino a 1000 metri" must not wake the robot, SPEC 8).
+television's "Neve fino a 1000 metri" must not wake the robot, SPEC 8). "The name" is any name
+the robot answers to: its own and each of ``voice.extra_names`` ("robot"), the same in every rule.
 
 With a ``grammar`` (``roboemot.voice.grammar``), the end of an utterance also gets a grammar pass
 on its audio (``grammar_pass``, run on the grammar worker thread): the categories it hears
