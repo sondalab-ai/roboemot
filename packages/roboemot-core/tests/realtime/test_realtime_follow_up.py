@@ -12,7 +12,7 @@ import time
 import pytest
 from roboemot.affect import AffectEngine
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.llm.prompt import tone_prompts
+from roboemot.llm.prompt import tone_prompt
 from roboemot.realtime.turn import SKIP_TOOL, TONE_TOOL
 from roboemot.skills import skill
 from roboemot.skills.defaults import SkillEnv, default_skills
@@ -211,7 +211,7 @@ def test_the_tone_tool_and_its_rule_are_offered_in_the_first_response_only(rigs)
     with TurnServer(["tool", "reply", "reply"], tool_name="recall", strict_calls=True) as srv:
         rig, _ = tooled(rigs, srv, rt={"tone_tool": True})
         rig.turn()
-        rule = tone_prompts()["it"]
+        rule = tone_prompt()
         first, second = creates(srv)
         assert rule in first["response"]["instructions"]
         assert rule not in second["response"]["instructions"]
