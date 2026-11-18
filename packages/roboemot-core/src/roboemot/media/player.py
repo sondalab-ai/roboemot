@@ -9,13 +9,30 @@ or an announcement is queued or playing (``SpeechOutput.media_blocked``, and ``p
 refuses it under the output's lock anyway), and while an addressed turn is open: the conversation
 holds a turn open, served or waiting from the moment ``submit`` accepts an addressed utterance
 (the wake word's included) until its reply ends (``ConversationWorker.busy``), and the phase is
-``thinking`` or ``speaking``. It never reads the VAD, ``voice_active()`` or the ``listening``
-phase: a robot without hardware echo cancellation hears the radio itself, and the music must
-not pause on its own lyrics. While held it keeps reading and drops what it reads, so the stream
-stays live, and it rejoins ``tools.media.resume_after_s`` after the last hold. ``pause(reason)``
-(the announcer's) holds it now and cuts what is still in the speaker. An announcement's reply
-window (``VoiceListener.reply_window_open``) holds it too, so the person can answer the robot
-without its name (owner decision 2026-11-17).
+``thinking`` or ``speaking``. The hold never reads the VAD, ``voice_active()`` or the
+``listening`` phase: a robot without hardware echo cancellation hears the radio itself, and the
+music must not pause on its own lyrics. While held it keeps reading and drops what it reads,
+so the stream stays live, and it rejoins ``tools.media.resume_after_s`` after the last hold.
+``pause(reason)`` (the announcer's) holds it now and cuts what is still in the speaker. An
+announcement's reply window (``VoiceListener.reply_window_open``) holds it too, so the person
+can answer the robot without its name (owner decision 2026-11-17).
+
+Duck (owner decision 2026-11-18): the one exception to the VAD rule. On a robot whose manifest
+declares hardware echo cancellation (``echo_cancelled``: the microphone does not hear the radio,
+so the VAD cannot fire on its lyrics) and with ``tools.media.duck_on_speech`` on, speech that
+starts while the music is audible (the listener's ``duck_from``, at the VAD start) lowers the
+music by ``tools.media.duck_db``, so the radio's residue after the echo canceller masks the
+voice less. It comes back up ``tools.media.duck_release_s`` after the listener's last
+utterance was decided (``release_from``: handed off or dropped, so it never swells before an
+addressed turn's hold). An open duck that is never released ends anyway after the longest
+utterance plus the longest wait for its decision (``voice.vad.max_utterance_s`` plus the larger
+of ``voice.grammar.handoff_timeout_s`` and ``voice.realtime_route.transcript_timeout_s``). The
+feeder applies the gain to each piece it pushes, moving at the larger of ``(1 - gain)`` and the
+distance still to go per ``tools.media.duck_ramp_ms`` from the level of the last sample, so it
+never steps and a reload that turns the duck off recovers in about one ramp; a piece already in
+the speaker keeps its level. A hold (an addressed turn,
+robot speech, ``pause``) ends the duck: the music rejoins at the normal level after it. The
+dance's pieces (``on_piece``) are the unducked ones. ``ducks`` counts the ducks (``snapshot``).
 
 Audible (SPEC 8, Radio playback): the music can be heard while a station is set and no hold
 covers the moment, from a hold's start to its last moment plus ``resume_after_s``
@@ -69,6 +86,7 @@ from ..bus import Message
 from ..circadian.model import CircadianState
 from ..config.schema import MEDIA_VOLUME_MAX_DB, MEDIA_VOLUME_MIN_DB, RoboEmotConfig, Station
 from ..conversation.phase import SPEAKING, THINKING
+from ..soothe.synth import db_to_gain
 from . import decode
 from .decode import PcmStream
 
@@ -79,6 +97,7 @@ STOPPED_TOPIC = "media.stopped"
 RESTING = "resting"
 MS_PER_S = 1000.0
 JOIN_TIMEOUT_S = 2.0
+MIN_DUCK_SPAN = 1e-3  # smallest gain span for the duck's slew (a level at its target)
 PlayStatus = Literal["ok", "unreachable", "disabled"]
 Opener = Callable[[str, int, float], PcmStream]
 
@@ -88,7 +107,8 @@ class MediaPlayer:
     ``media_blocked``, ``media_ahead_s``, ``cut_media``); ``host`` gives ``bus``,
     ``conversation`` and ``phase`` (each may be None); ``cfg`` reads the live configuration.
     ``opener`` (``decode.open_stream``), ``clock`` and ``wait`` (seconds -> whether the player
-    closed) are injectable for tests."""
+    closed) are injectable for tests. ``echo_cancelled``: the robot's manifest declares
+    hardware echo cancellation (the ``echo_cancelled`` capability), the duck's guard."""
 
     def __init__(
         self,
@@ -99,8 +119,10 @@ class MediaPlayer:
         opener: Opener = decode.open_stream,
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
+        echo_cancelled: bool = False,
     ) -> None:
         self.output, self.host, self.cfg = output, host, cfg
+        self.echo_cancelled = echo_cancelled
         self._opener, self._clock = opener, clock
         self._closed = threading.Event()
         self._wait = wait if wait is not None else self._closed.wait
@@ -122,6 +144,13 @@ class MediaPlayer:
         # each piece that went to the speaker, with its rate and play stamp (the dance's audio)
         self.on_piece: Callable[[np.ndarray, int, float], None] | None = None
         self._piece_errors = 0  # consecutive on_piece failures (feeder thread)
+        # the duck (lock held): speech over the music in progress, the moment it comes back up
+        # once that speech ended, and the gain of the last sample pushed
+        self._duck_open = False
+        self._duck_cap = -math.inf  # an open duck ends here even with no release (a stuck end)
+        self._duck_until = -math.inf
+        self._level = 1.0
+        self._ducks = 0
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -194,6 +223,7 @@ class MediaPlayer:
                 self._gen += 1
                 self._started, self._held_at = self._clock(), -math.inf
                 self._quiet = []
+                self._end_duck()
         if gone is not None:
             gone.close()  # never handed to the feeder: this thread is its only reader
             return "disabled"
@@ -219,6 +249,7 @@ class MediaPlayer:
                 return
             self._stream = self._station = None
             self._gen += 1
+            self._end_duck()
         self._retire(stream)
         self.output.cut_media()
         assert station is not None
@@ -291,9 +322,13 @@ class MediaPlayer:
         under its own lock. A hold is known from the feeder's next step (at most one piece
         later) or from ``hold_from``."""
         with self._lock:
-            if self._station is None or at < self._started:
-                return False
-            return not any(lo <= at <= hi for lo, hi in self._quiet)
+            return self._audible_locked(at)
+
+    def _audible_locked(self, at: float) -> bool:
+        """``audible_at`` with the lock held."""
+        if self._station is None or at < self._started:
+            return False
+        return not any(lo <= at <= hi for lo, hi in self._quiet)
 
     def hold_from(self, at: float) -> None:
         """Record a hold from ``at`` (the monotonic clock, possibly past): an addressed
@@ -307,6 +342,86 @@ class MediaPlayer:
             if self._station is None:
                 return
             self._note_hold(at, cfg)
+
+    def duck_from(self, at: float) -> None:
+        """Speech started at ``at`` (the monotonic clock, the VAD start): duck the music when
+        it is audible then, the robot's microphone is behind a hardware echo canceller and
+        ``tools.media.duck_on_speech`` is on (SPEC 8, Radio playback). The feeder lowers the
+        next piece it pushes. Any thread (the listener's): it only flips state under the lock."""
+        cfg = self.cfg()
+        if not self._duck_allowed(cfg):
+            return
+        with self._lock:
+            if not self._audible_locked(at):
+                return
+            if not self._ducked_locked():
+                self._ducks += 1
+            self._duck_open = True
+            self._duck_cap = at + _duck_cap_s(cfg)
+
+    def release_from(self, at: float) -> None:
+        """The speech over the music is over at ``at``: the listener's last utterance was
+        handed off or dropped. The music comes back up ``tools.media.duck_release_s`` later.
+        Any thread."""
+        cfg = self.cfg()
+        with self._lock:
+            if not self._duck_open:
+                return
+            self._duck_open = False
+            self._duck_until = at + cfg.tools.media.duck_release_s
+
+    def ducked(self) -> bool:
+        """Whether the music is ducked now (speech over it, or within its release), with the
+        duck allowed by the live config."""
+        cfg = self.cfg()
+        with self._lock:
+            return self._ducked_locked() and self._duck_allowed(cfg)
+
+    def snapshot(self) -> dict[str, Any]:
+        """The debug report's counts (SPEC 12A): ``ducks`` and whether it is ``ducked`` now."""
+        ducked = self.ducked()
+        with self._lock:
+            return {"ducks": self._ducks, "ducked": ducked}
+
+    def _duck_allowed(self, cfg: RoboEmotConfig) -> bool:
+        """The duck's guard: hardware echo cancellation, the opt-in, and a real depth."""
+        media = cfg.tools.media
+        return self.echo_cancelled and media.duck_on_speech and media.duck_db < 0
+
+    def _ducked_locked(self) -> bool:
+        now = self._clock()
+        return (self._duck_open and now < self._duck_cap) or now < self._duck_until
+
+    def _end_duck(self) -> None:
+        """Forget the duck (lock held): a hold, a play or a stop; the music rejoins at the
+        normal level."""
+        self._duck_open, self._duck_until, self._level = False, -math.inf, 1.0
+        self._duck_cap = -math.inf
+
+    def _duck_gain(self, pcm: np.ndarray, rate: int, cfg: RoboEmotConfig) -> np.ndarray:
+        """``pcm`` at the duck's level (feeder thread): towards ``tools.media.duck_db`` while
+        ducked, towards full gain otherwise, at the larger of ``(1 - gain)`` and the distance
+        to full gain per ``tools.media.duck_ramp_ms`` from the last sample's level, so the level
+        never steps and a level left low by a reload (``duck_db`` 0, the opt-in off) comes back
+        in about one ramp. ``pcm`` itself is not changed (it is the dance's piece)."""
+        media = cfg.tools.media
+        gain = db_to_gain(media.duck_db)
+        ramp_samples = max(1.0, media.duck_ramp_ms * rate / MS_PER_S)
+        with self._lock:  # a hold's reset lands before or after, never in the middle
+            ducked = self._ducked_locked() and self._duck_allowed(cfg)
+            target = gain if ducked else 1.0
+            level = self._level
+            if level == target:
+                return pcm if target == 1.0 else pcm * np.float32(target)
+            slew = max(1.0 - gain, 1.0 - level, MIN_DUCK_SPAN) / ramp_samples
+            moves = slew * np.arange(1, pcm.size + 1, dtype=np.float64)
+            if target < level:
+                envelope = np.maximum(level - moves, target)
+            else:
+                envelope = np.minimum(level + moves, target)
+            if envelope.size:
+                self._level = float(envelope[-1])
+        return pcm * envelope.astype(np.float32)
 
     # ----------------------------------------------------------------- feeder
 
@@ -346,7 +461,7 @@ class MediaPlayer:
         while self.output.media_ahead_s() > piece_s:
             if self._wait(self.output.media_ahead_s() - piece_s) or gen != self._gen:
                 return
-        until = self.output.play_media(pcm, rate, self.volume_db())
+        until = self.output.play_media(self._duck_gain(pcm, rate, cfg), rate, self.volume_db())
         if not until:
             self._hold()  # speech came between the check and the push
             return
@@ -388,8 +503,11 @@ class MediaPlayer:
         """Something held the music at ``at`` (lock held): it rejoins ``resume_after_s`` after
         the last hold, and ``[at, at + resume_after_s]`` joins the quiet spans, merged with any
         it touches. Spans that ended over ``music.history_s`` ago are dropped: the listener
-        asks about an utterance's start no further back (as the music detector's intervals)."""
+        asks about an utterance's start no further back (as the music detector's intervals).
+        It ends a duck: the music rejoins at the normal level. A back-dated hold (``hold_from``)
+        ends a duck that opened after ``at`` too: the turn holds the music from then anyway."""
         self._held_at = max(self._held_at, at)
+        self._end_duck()
         lo, hi = at, at + cfg.tools.media.resume_after_s
         quiet = self._quiet
         if not quiet or lo > quiet[-1][1]:
@@ -411,7 +529,7 @@ class MediaPlayer:
         waiting, an addressed utterance's audio waits for the server's transcript (the wake
         decision is taken, the final not yet), an announcement's reply window is open (owner
         decision 2026-11-17), or the phase is thinking or speaking. Never the VAD or the
-        listening phase."""
+        listening phase (only the duck, behind a hardware echo canceller, follows the VAD)."""
         conversation = self.host.conversation
         if conversation is not None and conversation.busy():
             return True
@@ -449,6 +567,14 @@ class MediaPlayer:
             bus.publish(topic, payload, self._clock())
         except Exception as exc:
             log.warning("media: %s subscriber raised %s", topic, type(exc).__name__)
+
+
+def _duck_cap_s(cfg: RoboEmotConfig) -> float:
+    """How long an open duck may last with no release: the longest utterance plus the longest
+    wait for its decision (the grammar pass, or the server's transcript)."""
+    voice = cfg.voice
+    wait_s = max(voice.grammar.handoff_timeout_s, voice.realtime_route.transcript_timeout_s)
+    return voice.vad.max_utterance_s + wait_s
 
 
 def _clamp(level_db: float) -> float:

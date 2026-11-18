@@ -417,11 +417,19 @@ of common words in the final text, per language (`voice.keywords.<language>.wake
 - English: `hey robot`, `hello robot`
 
 When the robot has a name (`voice.wake_word`, or the platform's name), each language adds its
-`voice.keywords.<language>.name_wake_templates`: `ciao {name}` and `ehi {name}` in Italian,
-`hey {name}` and `hello {name}` in English. This happens only when every word of the name is in
-that recognizer's vocabulary. The Reachy Mini manifest adds the spellings Vosk produces for
+`voice.keywords.<language>.name_wake_templates`: `ciao {name}`, `ehi {name}` and `hey {name}` in
+Italian, `hey {name}` and `hello {name}` in English. This happens only when every word of the name
+is in that recognizer's vocabulary (the shipped small Italian model has `hey`; with a model that lacks
+it, only the server's transcript matches it). The Reachy Mini manifest adds the spellings Vosk produces for
 "Reachy" as name aliases: `reati` in Italian, `riyadh she` in English. The bare name wakes the
-robot only in a short final text, at most `voice.fastpath.alias_wake_max_words` words (default 4).
+robot when it opens the final text, or anywhere in a short final text, at most
+`voice.fastpath.alias_wake_max_words` words (default 4).
+
+The robot also answers to `voice.extra_names` (default `robot`) exactly as to its own name, in
+every language: "robot", "senti robot, ...", "hey robot". Set it to `[]` to keep the name alone.
+A side effect: a short sentence that mentions a robot ("il robot è rotto") wakes it. While
+the robot's own radio plays, "robot" alone does not wake it (a song can say it): say its name
+or a wake phrase such as "ehi robot".
 
 Changing the name from the web UI needs the admin confirmation. The robot cleans the name before
 it goes into the prompt.

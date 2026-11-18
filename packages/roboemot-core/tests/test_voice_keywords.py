@@ -41,7 +41,7 @@ def test_normalise(text, expected):
         ("certo, volentieri", "it", {"yes"}),
         ("si chiama Luca", "it", set()),  # the pronoun is not a yes (accents are folded)
         ("stop it now", "en", {"stop"}),
-        ("good morning robot", "en", {"greeting"}),
+        ("good morning robot", "en", {"greeting", "extra_name"}),  # an extra name
         ("hello reachy", "en", {"greeting", "name", "wake"}),  # "hello {name}"
         ("hello riyadh she how are you", "en", {"greeting", "name"}),
         ("ciao reati", "it", {"greeting", "name"}),
@@ -150,8 +150,8 @@ def test_apply_changes_policy_and_window():
 
 def test_wake_phrases_are_their_own_category():
     s = spotter()
-    assert s.spot("ehi robot dimmi", "it") == {"wake"}
-    assert s.spot("Hello, ROBOT!", "en") == {"wake", "greeting"}
+    assert s.spot("ehi robot dimmi", "it") == {"wake", "extra_name"}  # "robot": an extra name
+    assert s.spot("Hello, ROBOT!", "en") == {"wake", "greeting", "extra_name"}
     assert "wake" not in s.spot("ehi", "it") and "wake" not in s.spot("robot", "it")
 
 

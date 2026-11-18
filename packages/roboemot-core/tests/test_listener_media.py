@@ -16,6 +16,8 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.media.player import MediaPlayer
 from roboemot.voice.wake import WakeGate
 from test_media_player import JAZZ, FakeOutput, FakeStream
+from test_voice_grammar_handoff import WAKE, SlowDecoder, wait_for
+from test_voice_grammar_handoff import rig as grammar_rig
 from test_voice_listener import (
     FACE_RAD,
     RATE,
@@ -24,6 +26,7 @@ from test_voice_listener import (
     direction_rig,
     say_text,
     silence,
+    voice,
 )
 
 
@@ -400,7 +403,7 @@ class DrumStream:
         pass
 
 
-def with_player(r, steps=True, stream=FakeStream):
+def with_player(r, steps=True, stream=FakeStream, echo_cancelled=False):
     """A real ``MediaPlayer`` on the rig's clock, wired to the listener as the run wires it
     (``runtime.startup.start_media``), playing a fake endless ``stream``; with ``steps`` its
     feeder steps while the rig feeds, at most as fast as the speaker plays (once the speaker
@@ -415,11 +418,14 @@ def with_player(r, steps=True, stream=FakeStream):
         opener=lambda url, rate_hz, timeout_s: stream(),
         clock=lambda: r.now,
         wait=lambda seconds: False,
+        echo_cancelled=echo_cancelled,
     )
     piece_s = r.cfg.tools.media.chunk_ms / 1000.0
     r.listener.media_audible = player.audible_at
     r.listener.media_hold = player.hold_from
     r.listener.media_set = player.playing
+    r.listener.media_speech_start = player.duck_from
+    r.listener.media_speech_end = player.release_from
     player.on_piece = r.listener.hear_media
     process = r.listener.process
 
@@ -473,6 +479,96 @@ def test_the_turn_holds_the_radio_from_the_names_last_speech():
     assert not player.audible_at(first.last_speech_stamp)
     say_text(r, "stoppa la musica")  # starts before the feeder saw the turn
     assert r.utterances[-1].addressed and not r.utterances[-1].wake_word
+
+
+def test_speech_over_the_radio_ducks_it_from_its_start_to_after_its_end():
+    """The robot run of 2026-11-18 (owner decision): behind a hardware echo canceller the VAD
+    start ducks the audible radio, and it comes back up ``duck_release_s`` after the endpoint.
+    A lyric line it rejects (no wake word) still ducked the music: the VAD cannot tell."""
+    r = Rig(["amore mio"], final="amore mio", cfg=cfg("always"))
+    player, _ = with_player(r, echo_cancelled=True)
+    r.feed(silence(0.5))
+    r.feed(voice(seconds=0.6))
+    assert player.ducked()  # the VAD start reached the player
+    r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
+    assert not r.utterances[-1].addressed
+    assert player.ducked()  # within duck_release_s of the endpoint
+    r.feed(silence(r.cfg.tools.media.duck_release_s + 0.2))
+    assert not player.ducked()
+    assert player.snapshot()["ducks"] == 1
+    assert player.audible()
+
+
+def test_the_duck_holds_until_a_slow_wake_decision_and_the_hold_takes_over_with_no_swell():
+    """Review 1: on the CM4 the decision (the grammar pass here, the server's transcript on the
+    realtime path) can come seconds after the endpoint. The music stays ducked until the
+    utterance is decided, then the wake word's hold takes over: no piece goes up in between."""
+    dec = SlowDecoder(WAKE, hold_s=30.0)
+    r = grammar_rig(dec, handoff_timeout_s=10.0)  # far longer than duck_release_s
+    player, turn = with_player(r, steps=False, echo_cancelled=True)
+    output = player.output
+    try:
+        r.feed(silence(0.5))
+        r.say(1.0)
+        assert dec.started.wait(2.0) and r.utterances == []  # the pass still runs
+        r.now += r.cfg.tools.media.duck_release_s + 1.0  # long past the release after the end
+        r.listener.poll_handoff()
+        assert r.utterances == [] and player.ducked()
+        player.step()
+        player.step()
+        low = 0.25 * 10 ** (r.cfg.tools.media.duck_db / 20)
+        assert np.allclose(output.samples[-1], low)  # still down: no swell before the decision
+        dec.release.set()
+        assert wait_for(lambda: r.listener.poll_handoff() or r.utterances)
+        assert r.utterances[-1].wake_word and r.utterances[-1].addressed
+        turn.open = True
+        pushed = len(output.samples)
+        player.step()
+        assert len(output.samples) == pushed  # the hold took over: nothing pushed
+        assert not player.ducked()
+    finally:
+        dec.release.set()
+        r.listener.stop()
+
+
+def test_no_duck_over_the_radio_without_a_hardware_echo_canceller():
+    r = Rig(["amore mio"], final="amore mio", cfg=cfg("always"))
+    player, _ = with_player(r)
+    r.feed(silence(0.5))
+    r.feed(voice(seconds=0.6))
+    assert not player.ducked()
+    assert player.snapshot()["ducks"] == 0
+
+
+def test_a_dropped_utterance_releases_the_duck():
+    """An audio gap drops the speech in progress (no endpoint will come): the duck must not
+    stay down."""
+    r = Rig(["amore mio"], final="amore mio", cfg=cfg("always"))
+    player, _ = with_player(r, echo_cancelled=True)
+    r.feed(silence(0.5))
+    r.feed(voice(seconds=0.6))
+    assert player.ducked()
+    r.feed(silence(0.1), gap=True)
+    r.feed(silence(r.cfg.tools.media.duck_release_s + 0.2))
+    assert not player.ducked()
+
+
+def test_the_wake_word_over_a_ducked_radio_holds_it_and_it_rejoins_at_the_normal_level():
+    r = Rig(["reati"], final="reati", cfg=cfg("always"))
+    player, turn = with_player(r, echo_cancelled=True)
+    output = player.output
+    r.feed(silence(0.5))
+    r.say()
+    assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+    assert not player.ducked()  # the hold took over from the duck
+    turn.open = True
+    r.feed(silence(1.0))
+    turn.open = False
+    pushed = len(output.samples)
+    r.feed(silence(r.cfg.tools.media.resume_after_s + 1.0))
+    rejoined = output.samples[pushed:]
+    assert rejoined and all(np.allclose(p, 0.25) for p in rejoined)  # FakeStream's level
+    assert player.snapshot()["ducks"] == 1
 
 
 def test_an_utterance_inside_a_reply_window_over_a_station_never_deadlocks():

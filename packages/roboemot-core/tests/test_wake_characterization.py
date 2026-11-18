@@ -30,10 +30,11 @@ def decide(text, language, platform=None, configured=None, with_vocab=True):
 @pytest.mark.parametrize(
     "text,language,cats,wakes",
     [
-        ("ehi robot che ora e", "it", {"wake"}, True),
-        ("ciao robot", "it", {"greeting", "wake"}, True),
-        ("hey robot", "en", {"greeting", "wake"}, True),
-        ("hello robot what time is it", "en", {"greeting", "wake"}, True),
+        # "robot" is also an extra name (voice.extra_names, owner decision 2026-11-18)
+        ("ehi robot che ora e", "it", {"wake", "extra_name"}, True),
+        ("ciao robot", "it", {"greeting", "wake", "extra_name"}, True),
+        ("hey robot", "en", {"greeting", "wake", "extra_name"}, True),
+        ("hello robot what time is it", "en", {"greeting", "wake", "extra_name"}, True),
         ("ciao reati", "it", {"greeting", "name"}, True),
         ("reati", "it", {"name"}, True),
         ("hello riyadh she", "en", {"greeting", "name"}, True),
@@ -54,7 +55,7 @@ def test_reachy_names_and_generic_phrases(platform, text, language, cats, wakes)
     "text,language,cats,wakes",
     [
         ("ciao neve", "it", {"greeting", "wake", "name"}, True),
-        ("ehi robot", "it", {"wake"}, True),
+        ("ehi robot", "it", {"wake", "extra_name"}, True),
         ("ciao reati", "it", {"greeting"}, False),  # a renamed robot ignores the Reachy spellings
         ("hello riyadh she", "en", {"greeting"}, False),
     ],

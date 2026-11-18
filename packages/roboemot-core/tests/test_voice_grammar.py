@@ -95,6 +95,7 @@ def test_the_grammar_is_built_from_config_name_and_free_text_words():
     (grammar,) = dec.grammars
     assert set(grammar) == {
         "fermati", "certo", "no", "ciao", "ehi robot", "ciao neve", "neve", "che", "cadeva",
+        "robot", "ciao robot",  # the extra name "robot" (SPEC 8, owner decision 2026-11-18)
     }  # fmt: skip
     assert "reati" not in grammar  # the robot is renamed: the Reachy spellings do not apply
 
@@ -244,9 +245,26 @@ def test_a_model_without_a_runtime_graph_skips_the_pass():
     assert grammar.snapshot()["skipped"]["no_grammar_graph"] == 1
 
 
-def test_a_wake_phrase_whose_words_the_free_text_heard_is_not_rescued():
+def test_robot_in_a_short_final_wakes_by_the_extra_name_not_by_a_rescued_phrase():
+    """Default config: "robot" is an extra name (SPEC 8, owner decision 2026-11-18), so this
+    short final wakes the robot by the short-final rule; the guard still keeps the grammar's
+    "ehi robot" out, since the free text heard "robot"."""
     dec = Decoder([("ehi", 1.0), ("robot", 1.0), ("sono", 1.0), ("utili", 1.0)])
     fast, grammar, _ = build(config(), dec)
+    result = end(fast, "i robot sono utili")
+    assert result.wake_word and result.wake == "wake"
+    assert "extra_name" in result.keywords
+    snap = grammar.snapshot()
+    assert snap["guarded"]["wake"] == 1 and snap["hits"]["wake"] == 0
+
+
+def test_a_wake_phrase_whose_words_the_free_text_heard_is_not_rescued():
+    dec = Decoder([("ehi", 1.0), ("robot", 1.0), ("sono", 1.0), ("utili", 1.0)])
+    # "robot" as an extra name would wake this short final by itself (SPEC 8)
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"keywords": KEYWORDS, "default_name": "Reachy", "extra_names": []}}
+    )
+    fast, grammar, _ = build(cfg, dec)
     result = end(fast, "i robot sono utili")
     assert not result.wake_word
     snap = grammar.snapshot()

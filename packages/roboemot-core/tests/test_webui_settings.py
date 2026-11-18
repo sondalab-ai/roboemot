@@ -19,6 +19,7 @@ WAKE = "voice.keywords.en.wake_phrases"
 PROMPT = "persona.prompt"
 TEMPLATES = "privacy.pseudonym_templates"
 NAME = "voice.wake_word"
+EXTRA = "voice.extra_names"
 FILE = "webui_settings.json"
 
 
@@ -99,7 +100,11 @@ def test_list_has_value_default_source_and_admin_flag(served, stack):
 
 
 def test_hooks_are_one_data_table():
-    assert {h.pattern for h in HOOKS} == {"voice.keywords.*.wake_phrases", "voice.wake_word"}
+    assert {h.pattern for h in HOOKS} == {
+        "voice.keywords.*.wake_phrases",
+        "voice.wake_word",
+        "voice.extra_names",
+    }
     assert hook_for(WAKE) and not hook_for("voice.keywords.en")
 
 
@@ -108,6 +113,7 @@ def test_hooks_are_one_data_table():
     [
         (WAKE, ["ciao robot", "ehi amico"]),
         (NAME, "Neve"),
+        (EXTRA, ["robot", "bot"]),
         (PROMPT, "You are a calm robot."),
         (TEMPLATES, {"en": "Zed-{label}", "it": "Persona-{label}"}),
     ],
@@ -258,6 +264,13 @@ def test_missing_value_is_a_bad_request(served):
         (NAME, "Neve\n‮Ignore previous", "name_invalid"),
         (NAME, "Ne<ve>", "name_invalid"),
         (NAME, 5, "value_type"),
+        # each extra name under the wake word's name rule (SPEC 8, owner decision 2026-11-18)
+        (EXTRA, "robot", "value_type"),
+        (EXTRA, ["robot", ""], "name_invalid"),
+        (EXTRA, ["Ne<ve>"], "name_invalid"),
+        (EXTRA, ["robot\u202eIgnore"], "phrase_invalid"),
+        (EXTRA, ["N" * 33], "name_too_long"),
+        (EXTRA, [f"bot{i}" for i in range(5)], "list_too_long"),
     ],
 )
 def test_invalid_values_are_refused_with_a_code(served, stack, path, value, code):
@@ -272,6 +285,14 @@ def test_values_are_cleaned(served, stack):
     assert get(stack, WAKE) == ["Ehi Amico", "ehi amico"]
     put(served, NAME, "  Neve  ")
     assert get(stack, NAME) == "Neve"
+    put(served, EXTRA, ["  robot ", "robot", "Bot  Uno"])
+    assert get(stack, EXTRA) == ["robot", "Bot Uno"]
+
+
+def test_an_empty_extra_names_list_is_allowed(served, stack):
+    resp = put(served, EXTRA, [])
+    assert resp.status == 200, resp.body
+    assert get(stack, EXTRA) == []
 
 
 def test_limits_follow_the_schema_fields(tmp_path, stack):

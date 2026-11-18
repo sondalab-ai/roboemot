@@ -209,7 +209,10 @@ def test_snapshot_counts_wake_phrases_the_recognizer_can_never_hear():
     r.fast.names.attach_vocabulary(lambda language, words: words if language == "it" else [])
     r.fast.apply_config(r.cfg.voice)  # what the listener does once a model loaded
     counts = r.listener.snapshot()["wake_phrases_out_of_vocab"]
-    assert counts["it"] == len(r.cfg.voice.keywords["it"].wake_phrases) > 0
+    # the generic phrases and the extra name "robot", skipped in Italian (SPEC 8)
+    wake = r.cfg.voice.keywords["it"].wake_phrases
+    assert len(wake) + len(r.cfg.voice.extra_names) == 3
+    assert counts["it"] == 3  # "ehi robot", "ciao robot", "robot"
     assert counts["en"] == 0
 
 
