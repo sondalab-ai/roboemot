@@ -27,6 +27,17 @@ from .schema import ArgError, Param, Signature, json_schema, signature_of, valid
 
 log = logging.getLogger(__name__)
 Choices = Mapping[str, Callable[[], Sequence[Any]]]
+GLOBAL_CAP_KEY = "conversation.tool_enum_max_items"
+
+
+@dataclass(frozen=True)
+class ChoiceCap:
+    """A parameter's own choices cap: ``read()`` gives it from the merged config at resolve
+    time, ``key`` names that config field in the truncation warning. It replaces the caller's
+    ``enum_max`` (``conversation.tool_enum_max_items``) for that parameter."""
+
+    key: str
+    read: Callable[[], int]
 
 
 @dataclass
@@ -65,6 +76,7 @@ class Skill:
     follow_up: bool = True  # False: its result never changes what the robot says
     available: Callable[[], bool] | None = None  # checked per request and per call
     offer_without_choices: bool = False  # an empty choice list becomes a plain string
+    choice_caps: Mapping[str, ChoiceCap] = field(default_factory=dict)  # own caps per parameter
 
     def is_available(self) -> bool:
         """Whether the skill may be offered and run now: ``available()`` when set, else True.
@@ -87,22 +99,28 @@ class Skill:
         return self.signature.params
 
     def resolved_choices(self, enum_max: int | None = None) -> dict[str, list[Any]]:
-        """The run-time choices of each parameter that has them, cut to ``enum_max`` items.
-        With ``offer_without_choices`` an empty list is left out, so that parameter is a plain
-        string in the schema and the executor checks only its length: the skill decides
-        (owner decision 2026-11-17, SPEC 11, LLM tools)."""
+        """The run-time choices of each parameter that has them, cut to ``enum_max`` items, or
+        to the parameter's own ``choice_caps`` entry when it has one (read now; only when a cap
+        is asked for at all: ``enum_max`` None cuts nothing). With ``offer_without_choices`` an
+        empty list is left out, so that parameter is a plain string in the schema and the
+        executor checks only its length: the skill decides (owner decision 2026-11-17, SPEC 11,
+        LLM tools)."""
         out = {}
         for name, source in self.choices.items():
             items = list(source())
             if not items and self.offer_without_choices:
                 continue
-            if enum_max is not None and len(items) > enum_max:
+            if enum_max is None:
+                out[name] = items
+                continue
+            own = self.choice_caps.get(name)
+            cap, key = (own.read(), own.key) if own is not None else (enum_max, GLOBAL_CAP_KEY)
+            if len(items) > cap:
                 log.warning(
-                    "skill %s: %d choices for %s, only the first %d are offered "
-                    "(conversation.tool_enum_max_items)",
-                    self.name, len(items), name, enum_max,
+                    "skill %s: %d choices for %s, only the first %d are offered (%s)",
+                    self.name, len(items), name, cap, key,
                 )  # fmt: skip
-            out[name] = items if enum_max is None else items[:enum_max]
+            out[name] = items[:cap]
         return out
 
 
@@ -118,6 +136,7 @@ def skill(
     follow_up: bool = True,
     available: Callable[[], bool] | None = None,
     offer_without_choices: bool = False,
+    choice_caps: Mapping[str, ChoiceCap] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
@@ -135,14 +154,20 @@ def skill(
     (SPEC 11, LLM tools). ``offer_without_choices`` keeps the skill offered while a ``choices``
     list is empty: that parameter is then a plain string within its cap and the skill answers
     for a value it does not know (a tool turned on but not set up says ``not_configured``).
-    Without it, an empty list hides the skill."""
+    Without it, an empty list hides the skill. ``choice_caps`` gives a parameter its own cap on
+    the choices offered and accepted (a config field read at resolve time), in place of
+    ``conversation.tool_enum_max_items``."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
         sig = signature_of(fn, SkillContext)
+        known = {p.name for p in sig.params}
         for param in choices or {}:
-            if param not in {p.name for p in sig.params}:
+            if param not in known:
                 raise TypeError(f"skill {fn.__name__}: choices for unknown parameter {param}")
+        for param in choice_caps or {}:
+            if param not in (choices or {}):
+                raise TypeError(f"skill {fn.__name__}: a choices cap without choices: {param}")
         fn.skill = Skill(  # type: ignore[attr-defined]
             name or fn.__name__,
             fn,
@@ -156,6 +181,7 @@ def skill(
             follow_up=follow_up,
             available=available,
             offer_without_choices=offer_without_choices,
+            choice_caps=dict(choice_caps or {}),
         )
         return fn
 

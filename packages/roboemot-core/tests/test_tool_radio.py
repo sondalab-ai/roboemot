@@ -15,6 +15,7 @@ from roboemot.skills.plugins import load_plugin_skill_sets
 from roboemot.skills.registry import SkillContext, SkillRegistry, execute
 from roboemot.skills.schema import ArgError, validate
 from roboemot.tools import radio
+from roboemot.tools.radio_catalogue import radio_catalogue
 
 NAMES = ["radio_play", "radio_stop", "radio_volume"]
 CTX = SkillContext(speaker="p1", language="it", now=10.0)
@@ -52,10 +53,12 @@ class FakePlayer:
         return self.playing
 
 
-def rig(enabled=True, stations=(JAZZ, ROCK), player=None, **conv):
+def rig(enabled=True, stations=(JAZZ, ROCK), player=None, radio_cfg=None, **conv):
     cfg = {"cfg": RoboEmotConfig.model_validate(
         {
-            "tools": {"radio": {"enabled": enabled, "stations": list(stations)}},
+            "tools": {
+                "radio": {"enabled": enabled, "stations": list(stations), **(radio_cfg or {})}
+            },
             "conversation": conv,
         }
     )}  # fmt: skip
@@ -95,7 +98,7 @@ def test_radio_play_accepts_only_configured_names_or_genres():
     _, fns, _ = rig()
     play = fns["radio_play"].skill
     options = play.resolved_choices()
-    assert options["station"] == ["Jazz FM", "Rock One", "jazz", "swing", "rock"]  # deduped
+    assert options["station"] == ["jazz", "swing", "rock", "Jazz FM", "Rock One"]  # deduped
     for bad in (JAZZ["url"], "http://evil.example.test/x", "Classic"):
         with pytest.raises(ArgError) as err:
             validate(play.params, {"station": bad}, options)
@@ -183,3 +186,57 @@ def test_radio_results_are_known_result_keys():
     from roboemot.skills.registry import RESULT_KEYS
 
     assert {"station", "volume_db"} <= set(RESULT_KEYS)
+
+
+def offered_station_enum(fns, enum_max=EXEC["enum_max"]):
+    """The ``station`` enum a request shows and the snapshot the executor checks."""
+    reg = SkillRegistry(list(fns.values()))
+    snap = SkillRegistry.snapshot_choices(reg.offered(NAMES), enum_max)
+    [tool] = [t for t in SkillRegistry.tools(reg.offered(NAMES), choices=snap)
+              if t["function"]["name"] == "radio_play"]  # fmt: skip
+    return reg, snap, tool["function"]["parameters"]["properties"]["station"]["enum"]
+
+
+def test_the_whole_catalogue_offers_every_genre_and_every_name_genres_first():
+    """Robot run 2026-11-18: with the shipped catalogue added, "ambient" and "chill out" were
+    not understood: names came first and the global cap (20) cut every genre away."""
+    stations = [
+        {"name": s.name, "url": s.url, "genres": list(s.genres)}
+        for g in radio_catalogue().groups
+        for s in g.stations
+    ]
+    _, fns, cfg = rig(stations=stations)
+    names = [s["name"] for s in stations]
+    genres = list(dict.fromkeys(x for s in stations for x in s["genres"]))
+    assert len(names) > EXEC["enum_max"] and {"ambient", "chillout"} <= set(genres)
+    _, _, enum = offered_station_enum(fns)
+    assert enum == genres + names
+    assert len(enum) <= cfg["cfg"].tools.radio.max_choices
+
+
+async def test_a_small_radio_cap_keeps_genres_first_and_the_executor_matches_the_cut(caplog):
+    _, fns, _ = rig(radio_cfg={"max_choices": 3})
+    with caplog.at_level(logging.WARNING):
+        reg, snap, enum = offered_station_enum(fns)
+    assert enum == ["jazz", "swing", "rock"]
+    assert "tools.radio.max_choices" in caplog.text
+    ok = await execute(reg, NAMES, "radio_play", {"station": "rock"}, CTX, choices=snap, **EXEC)
+    assert json.loads(ok.content) == {"status": "ok", "station": "Rock One"}
+    cut = {"station": "Jazz FM"}  # past the cut: not offered, so not accepted
+    out = await execute(reg, NAMES, "radio_play", cut, CTX, choices=snap, **EXEC)
+    assert out.code == "invalid_arguments"
+    out = await execute(reg, NAMES, "radio_play", cut, CTX, **EXEC)  # resolved now: same cut
+    assert out.code == "invalid_arguments"
+
+
+def test_the_radio_cap_replaces_the_global_one_only_for_the_radio():
+    _, fns, _ = rig(radio_cfg={"max_choices": 5})
+    _, _, enum = offered_station_enum(fns, enum_max=1)
+    assert len(enum) == 5
+
+
+def test_a_genre_equal_to_a_station_name_is_offered_once_and_plays_that_station():
+    jazz = {**JAZZ, "genres": ["Rock One"]}
+    host, fns, _ = rig(stations=(jazz, ROCK))
+    assert radio.names_and_genres(host.config()) == ["Rock One", "rock", "jazz", "Jazz FM"]
+    assert fns["radio_play"](station="Rock One").content["station"] == "Rock One"
