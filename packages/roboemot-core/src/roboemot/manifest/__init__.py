@@ -17,6 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config.schema import SafetyConfig
 
+# The capability (and sensors.mic_array flag) of a microphone behind a hardware echo canceller
+ECHO_CANCELLED = "echo_cancelled"
+
 
 class ManifestError(ValueError):
     """The manifest is invalid or unsafe."""
@@ -137,6 +140,15 @@ class ManifestModel(_M):
     kinematics: str | None = None
     behaviour: dict[str, Any] = {}  # config layer 2 (SPEC 11A)
 
+    @model_validator(mode="after")
+    def _mic_flags(self) -> ManifestModel:
+        """``sensors.mic_array.echo_cancelled`` (the microphone goes through a hardware echo
+        canceller, SPEC 4, 8 Radio playback) must be a boolean: a typo never reads as off."""
+        mic = self.sensors.get("mic_array")
+        if isinstance(mic, dict) and not isinstance(mic.get(ECHO_CANCELLED, False), bool):
+            raise ValueError(f"sensors.mic_array.{ECHO_CANCELLED} must be true or false")
+        return self
+
 
 @dataclass(frozen=True)
 class Dof:
@@ -179,6 +191,8 @@ class Manifest:
             mic = sensor_types.get("mic_array")
             if isinstance(mic, dict) and mic.get("doa"):
                 caps.add("doa")
+            if isinstance(mic, dict) and mic.get(ECHO_CANCELLED) is True:
+                caps.add(ECHO_CANCELLED)
         if "imu" in sensor_types:
             caps.add("imu")
         if "proximity" in sensor_types:

@@ -135,6 +135,10 @@ The robot plays internet radio streams from your station list through its speake
 - **It pauses when someone speaks.** The radio pauses while the robot speaks, and while you talk
   to it from its name until its reply ends. Then the radio rejoins the live stream after 1.5 s
   (`tools.media.resume_after_s`).
+- **It gets quieter while you speak over it.** On a robot with a hardware echo canceller (Reachy
+  Mini Wireless), the music drops by 18 dB (`tools.media.duck_db`) as soon as someone starts
+  speaking over it, so the robot hears you better. It comes back up 1.5 s after you stop
+  (`tools.media.duck_release_s`). Turn it off with `tools.media.duck_on_speech`.
 - **Say the name first.** While the radio plays, only the robot's name (or a wake phrase)
   addresses it, so it never answers song lyrics. The only exception is the reply to an
   announcement.

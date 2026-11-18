@@ -107,6 +107,12 @@ confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
+The duck over speech (SPEC 8, Radio playback, owner decision 2026-11-18): each utterance's start
+and end also go to the player: ``media_speech_start`` at the VAD start, ``media_speech_end``
+once no utterance is in progress or waiting for its decision (the local final, the grammar pass,
+the server's transcript), so the duck never ends before an addressed turn's hold takes over.
+The player decides: it ducks the audible music only on a robot with hardware echo cancellation.
+
 Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
 not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
 check's numbers (the facing check's median head yaw and its limit); a facing check that did not
@@ -341,6 +347,10 @@ class VoiceListener:
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
         self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
+        # an utterance's VAD start, and the moment every utterance is decided, for the
+        # player's duck (``duck_from`` and ``release_from``; the player applies the guard)
+        self.media_speech_start: Callable[[float], None] = lambda at: None
+        self.media_speech_end: Callable[[float], None] = lambda at: None
         # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
         # thread only; sized in apply_config to the detector's window
         self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
@@ -676,6 +686,8 @@ class VoiceListener:
         it changes. A raising hook is logged, never allowed to break the audio path."""
         changed = self._active != active
         self._active = active
+        if changed and not active:  # every utterance is decided (handed off or dropped)
+            self._media_speech(False, self._clock())
         if changed and self._on_activity is not None:
             try:
                 self._on_activity(active)
@@ -941,6 +953,14 @@ class VoiceListener:
         except Exception as exc:
             log.warning("voice listener: media player: %s", type(exc).__name__)
 
+    def _media_speech(self, started: bool, at: float) -> None:
+        """Tell the media player an utterance started (``started``) or ended at ``at``: it
+        ducks the music over the speech where the robot's echo canceller allows it."""
+        try:
+            (self.media_speech_start if started else self.media_speech_end)(at)
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+
     def _own_sound_cut(self) -> bool:
         """Someone's speech is in progress or starting as the speaking window opens: cut the
         robot's own sound if only such a sound plays (``bind_own_sound``); True when it did."""
@@ -1121,6 +1141,7 @@ class VoiceListener:
             self._count_audio("vosk_skipped")  # its audio goes if the gate addresses it
         self._recording = True
         self._set_active(True)
+        self._media_speech(True, ev.stamp)  # after the settle: its end must not release this
         if self._direction is not None:
             self._direction.begin()
         self._sample_direction(audio_end)

@@ -51,6 +51,7 @@ def build_diagnostics(
                     **({"speech": o.snapshot()} if (o := host.speech_output) else {}),
                     **({"cues": q.snapshot()} if (q := host.cues) else {}),
                     **({"soothe": r.snapshot()} if (r := host.soothe_runner) else {}),
+                    **({"media_player": m.snapshot()} if (m := host.media) else {}),
                     "speaking": p.speaking.snapshot(),
                     "dance": p.dance.snapshot(),
                 }
