@@ -29,7 +29,7 @@ def pipeline():
     people = {SECRET_ID: SimpleNamespace(display_name="Mia", status="active")}
     face = Entry(
         entry_id="entry-5", kind="person", category="face", identity=SECRET_ID,
-        azimuth_rad=0.31, elevation_rad=0.0, distance_m=1.4, uncertainty_rad=0.1,
+        azimuth_rad=0.3179, elevation_rad=0.0, distance_m=1.4627, uncertainty_rad=0.1,
         confidence=0.9, first_seen=0.0, last_seen=NOW, embedding=np.full(64, 0.5),
     )  # fmt: skip
     engine = SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5), history_cap=None)
@@ -194,7 +194,7 @@ def test_nothing_private_is_in_the_answer_and_nothing_is_logged(served, caplog):
     c.login()
     switch(c, True)
     resp = c.request("GET", "/api/live/state")
-    for secret in (SECRET_ID.encode(), b"entry-5", b"0.31", b"1.4", b"embedding", b"azimuth"):
+    for secret in (SECRET_ID.encode(), b"entry-5", b"0.3179", b"1.4627", b"embedding", b"azimuth"):
         assert secret not in resp.body, secret
     assert "Mia" not in caplog.text and SECRET_ID not in caplog.text
 
