@@ -211,7 +211,8 @@ def test_snapshot_counts_wake_phrases_the_recognizer_can_never_hear():
     counts = r.listener.snapshot()["wake_phrases_out_of_vocab"]
     # the generic phrases and the extra name "robot", skipped in Italian (SPEC 8)
     wake = r.cfg.voice.keywords["it"].wake_phrases
-    assert counts["it"] == len(wake) + len(r.cfg.voice.extra_names) > 1
+    assert len(wake) + len(r.cfg.voice.extra_names) == 3
+    assert counts["it"] == 3  # "ehi robot", "ciao robot", "robot"
     assert counts["en"] == 0
 
 

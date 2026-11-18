@@ -50,7 +50,7 @@ import numpy as np
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
 from .grammar import GrammarSpotter
-from .keywords import NAME_FIRST, KeywordSpotter
+from .keywords import EXTRA_FIRST, EXTRA_NAME, NAME_FIRST, KeywordSpotter
 from .robot_name import RobotName
 from .speech_features import Prosody, analyse
 
@@ -63,8 +63,10 @@ EVENT_FOR = {
     "no": "speech.keyword.no",
     "greeting": "speech.keyword.greeting",
     "name": "speech.name_called",
+    EXTRA_NAME: "speech.name_called",
     "wake": "speech.name_called",
 }
+FLAGS = frozenset({NAME_FIRST, EXTRA_FIRST})  # grammar pass flags, never categories
 
 
 class HintSink(Protocol):
@@ -179,14 +181,15 @@ class FastPath:
         if self._grammar is not None:
             self._grammar.apply_config(cfg.grammar)
 
-    def server_name_close(self, text: str, language: str) -> bool:
+    def server_name_close(self, text: str, language: str, extras: bool = True) -> bool:
         """Whether a server's transcript ``text`` holds the robot's name or a close spelling of
         it (``KeywordSpotter.name_close`` with ``voice.fastpath.server_name_max_edits`` and
         ``server_name_min_letters``): a wake over the robot's radio is confirmed by it (SPEC 8,
-        Radio playback). Never the local recognizer's text."""
+        Radio playback; there with ``extras`` off: an extra name does not confirm). Never the
+        local recognizer's text."""
         fp = self.cfg.fastpath
         return self._server_spotter.name_close(
-            text, language, fp.server_name_max_edits, fp.server_name_min_letters
+            text, language, fp.server_name_max_edits, fp.server_name_min_letters, extras
         )
 
     def wake_out_of_vocab(self) -> dict[str, int]:
@@ -276,10 +279,13 @@ class FastPath:
         grammar_pass: GrammarPass | None = None,
         heard: frozenset[str] = frozenset(),
         state: UtteranceState | None = None,
+        extras: bool = True,
     ) -> bool:
         """Whether final ``text`` (with what the grammar pass ``heard``) wakes the robot by
         either rule (``wake_kind`` is not None), with no event sent and nothing recorded."""
-        kind = self.wake_kind(text, grammar_pass=grammar_pass, heard=heard, state=state)
+        kind = self.wake_kind(
+            text, grammar_pass=grammar_pass, heard=heard, state=state, extras=extras
+        )
         return kind is not None
 
     def wake_kind(
@@ -289,14 +295,16 @@ class FastPath:
         grammar_pass: GrammarPass | None = None,
         heard: frozenset[str] = frozenset(),
         state: UtteranceState | None = None,
+        extras: bool = True,
     ) -> str | None:
         """How final ``text`` (with what the grammar pass ``heard``) wakes the robot, as ``end``
         decides it: ``WAKE``, ``NAME_FIRST`` (it needs the voice at a face) or None. No event
-        is sent and nothing is recorded."""
+        is sent and nothing is recorded. ``extras`` off (the robot's radio is audible, SPEC 8):
+        an extra name does not wake by itself; a wake phrase rendered with it still does."""
         u = state if state is not None else self._u
         spotter = self._spotter_for(grammar_pass, server=False)
-        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
-        return self._wake(spotter, text, u.language, cats, heard)
+        cats = (spotter.spot(text, u.language) | heard) - FLAGS
+        return self._wake(spotter, text, u.language, cats, heard, extras)
 
     def _spotter_for(self, grammar_pass: GrammarPass | None, server: bool) -> KeywordSpotter:
         """The grammar pass's spotter (fixed at the utterance's end), else the server
@@ -312,18 +320,22 @@ class FastPath:
         language: str,
         cats: set[str] | frozenset[str],
         heard: frozenset[str],
+        extras: bool = True,
     ) -> str | None:
         """The wake decision on final ``text`` with categories ``cats``: ``WAKE`` for a wake
         phrase or the name in a final of at most ``alias_wake_max_words`` words; else
         ``NAME_FIRST`` for the name opening the text (or heard first by the grammar pass), at
-        any length; else None."""
+        any length; else None. "The name" is the robot's own or, with ``extras``, an extra
+        name."""
         if "wake" in cats:
             return WAKE
-        if "name" not in cats:
+        names = {"name", EXTRA_NAME} if extras else {"name"}
+        if not names & cats:
             return None
         if len(text.split()) <= self.cfg.fastpath.alias_wake_max_words:
             return WAKE
-        if NAME_FIRST in heard or spotter.name_first(text, language):
+        first = {NAME_FIRST, EXTRA_FIRST} if extras else {NAME_FIRST}
+        if first & heard or spotter.name_first(text, language, extras):
             return NAME_FIRST
         return None
 
@@ -339,6 +351,7 @@ class FastPath:
         heard: frozenset[str] = frozenset(),
         state: UtteranceState | None = None,
         server: bool = False,
+        extras: bool = True,
     ) -> FastResult:
         """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames.
         ``heard`` is what its ``grammar_pass`` heard (empty when it was not run or not waited
@@ -349,12 +362,13 @@ class FastPath:
         keyword) and the first keyword against ``last_speech_stamp``. Call ``impulses`` next.
         ``state`` is a held utterance's (``hold``), else the one in progress. ``server``: the
         text is the realtime route's transcript, so the robot's name counts in every language
-        (no recognizer vocabulary limits it).
+        (no recognizer vocabulary limits it). ``extras`` off (over the radio): an extra name
+        does not make the wake word (``wake_kind``); it still emits speech.name_called.
         """
         u = state if state is not None else self._u
         words = len(text.split())
         spotter = self._spotter_for(grammar_pass, server)
-        cats = (spotter.spot(text, u.language) | heard) - {NAME_FIRST}
+        cats = (spotter.spot(text, u.language) | heard) - FLAGS
         before = u.keyword_at
         self._fire(cats, u)
         if before is None and u.keyword_at is not None:
@@ -366,7 +380,7 @@ class FastPath:
             self.stats.record("reaction_vs_last_speech", min(reactions) - last_speech_stamp)
         if u.keyword_at is not None:
             self.stats.record("keyword_vs_last_speech", u.keyword_at - last_speech_stamp)
-        wake = self._wake(spotter, text, u.language, cats, heard)
+        wake = self._wake(spotter, text, u.language, cats, heard, extras)
         said = cats & {"yes", "no"}
         answer = next(iter(said)) if len(said) == 1 and words <= fp.gesture_max_words else None
         return FastResult(frozenset(cats), wake is not None, prosody, answer, wake)

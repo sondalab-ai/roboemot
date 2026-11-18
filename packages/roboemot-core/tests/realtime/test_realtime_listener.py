@@ -1029,9 +1029,7 @@ def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on
         "Nivea",  # the robot, 2026-11-17: a close spelling of the name (owner decision)
         "Nieve stoppa la musica",
         "ehi robot stoppa la musica",  # a wake phrase without the name
-        # the extra name "robot" and a close spelling (owner decision 2026-11-18)
-        "robot, stoppa la musica",
-        "rubot stoppa la musica",
+        "ehi robot ferma la musica",  # a template rendered with the extra name "robot"
         "hey neve ferma la musica",  # the Italian "hey {name}" (no vocabulary on the server)
     ],
 )
@@ -1049,11 +1047,14 @@ def test_a_wake_over_the_radio_the_server_confirms_is_answered(ears, heard):
         assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)
 
 
-def test_without_extra_names_robot_does_not_confirm_a_wake_over_the_radio(ears):
-    """An empty ``voice.extra_names`` restores the name alone: "rubot" is no name then."""
-    app = {"voice": {**NEVE_ALWAYS["voice"], "extra_names": []}}
-    with TurnServer(heard=[["rubot stoppa la musica"]]) as server:
-        ear = ears(server, script=["neve"], app=app, to_worker=True)
+@pytest.mark.parametrize(
+    "heard", ["il robot balla", "robot, stoppa la musica", "rubot stoppa la musica"]
+)
+def test_an_extra_name_alone_does_not_confirm_a_wake_over_the_radio(ears, heard):
+    """Owner decision 2026-11-18: over the radio "robot" (or a close spelling) in the server's
+    words is not the robot's name: a lyric can say it. Only the name or a wake phrase confirms."""
+    with TurnServer(heard=[[heard]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
         radio_audible(ear)
         ear.say()
         assert ear.settle(lambda: len(ear.utterances) == 1)

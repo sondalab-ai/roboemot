@@ -4,9 +4,10 @@ Text and phrases are normalised the same way (lower case, accents removed, anyth
 a Unicode letter or digit becomes a space) and a phrase matches only as whole words, so ``stop``
 does not match ``stopped`` and ``hi`` is not found inside ``history``. There is no stemming: list
 the inflections you want. Categories are ``stop``, ``yes``, ``no``, ``greeting``, ``name``
-(the robot's name or one of ``voice.extra_names``, see ``robot_name``, or one of the language's
-``name_aliases``) and ``wake`` (one of its ``wake_phrases``, or a ``name_wake_templates`` phrase
-rendered with each of those names; a rendered phrase that repeats a wake phrase, such as
+(the robot's name, see ``robot_name``, or one of the language's ``name_aliases``),
+``extra_name`` (one of ``voice.extra_names``: kept apart because over the robot's radio it does
+not count, SPEC 8) and ``wake`` (one of its ``wake_phrases``, or a ``name_wake_templates`` phrase
+rendered with the name or an extra name; a rendered phrase that repeats a wake phrase, such as
 ``ciao robot``, is listed once). It runs on every partial, so it is a few substring tests.
 
 ``name_first`` tells whether a text *opens* with a name (the robot's own, an extra name, an
@@ -49,11 +50,12 @@ from typing import TYPE_CHECKING
 from ..config.schema import KeywordSet
 
 if TYPE_CHECKING:
-    from .robot_name import ResolvedName, RobotName
+    from .robot_name import ResolvedName, RobotName, SpokenName
 
 NON_WORD = re.compile(r"[\W_]+")
 FOLD_SPLIT = re.compile(r"[^\w']+|_")
-CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
+EXTRA_NAME = "extra_name"  # one of ``voice.extra_names`` (the robot's own name is ``name``)
+CATEGORIES = ("stop", "yes", "no", "greeting", "name", EXTRA_NAME, "wake")
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ SPELLING = {
     ),
 }
 NAME_FIRST = "name_first"  # grammar pass flag in what it heard: the name opened the utterance
+EXTRA_FIRST = "extra_name_first"  # the same for an extra name
 
 
 def normalise(text: str) -> str:
@@ -118,6 +121,7 @@ class KeywordSpotter:
         self._names = names if names is not None else RobotName()
         self._resolved: ResolvedName | None = None
         self._phrases: dict[str, dict[str, list[str]]] = {}
+        self._names_by_language: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
         self._folded: dict[str, dict[str, tuple[str, ...]]] = {}
         self._oov: dict[str, int] = {}
         self._leads = {
@@ -136,12 +140,14 @@ class KeywordSpotter:
             return
         self._resolved = resolved
         self._phrases = {}
+        by_language: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
         folded: dict[str, dict[str, tuple[str, ...]]] = {}
         oov: dict[str, int] = {}  # assigned once below: a report never reads a partial dict
         aliases = resolved.aliases_apply()
         extras = [e.matching for e in resolved.extras]
         for language, ks in self._sets.items():
             names = resolved.names_for(language)
+            by_language[language] = _split(names)
             lists = {
                 "stop": ks.stop,
                 "yes": ks.yes,
@@ -165,7 +171,8 @@ class KeywordSpotter:
             grammar = {cat: _distinct([fold(x) for x in items]) for cat, items in lists.items()}
             spoken = [fold(n.display) for n in names]
             grammar["wake"] += [fold(t.replace("{name}", n)) for n in spoken for t in templates]
-            grammar["name"] += spoken
+            grammar["name"] += [fold(n.display) for n in names if not n.extra]
+            grammar[EXTRA_NAME] = [fold(n.display) for n in names if n.extra]
             folded[language] = {cat: tuple(_distinct(items)) for cat, items in grammar.items()}
             # an extra name out of this vocabulary is counted with the wake phrases, never named
             bad = self._names.out_of_vocab(language, [*listed["wake"], *extras])
@@ -173,6 +180,7 @@ class KeywordSpotter:
                 oov[language] = bad
         self._oov = oov
         self._folded = folded
+        self._names_by_language = by_language
 
     def grammar_phrases(self, language: str) -> dict[str, tuple[str, ...]]:
         """Per category, the phrases of ``language`` folded (accents kept) for a recognizer
@@ -192,25 +200,31 @@ class KeywordSpotter:
         plain = normalise(words)
         return not plain or plain in self._leads.get(language, ())
 
-    def name_first(self, text: str, language: str) -> bool:
+    def name_first(self, text: str, language: str, extras: bool = True) -> bool:
         """Whether ``text`` opens with a name the robot answers to or one of its aliases (whole
-        words), alone or after one lead-in phrase of ``language`` (``lead_in``)."""
+        words), alone or after one lead-in phrase of ``language`` (``lead_in``). ``extras``
+        off: the robot's own name and its aliases only (over the radio, SPEC 8)."""
         padded = f" {normalise(text)} "
         if padded == "  ":
             return False
         self._rebuild()
-        names = [*self._phrases.get(language, {}).get("name", []), *self._names_in(language)]
+        names = [
+            *self._phrases.get(language, {}).get("name", []),
+            *self._names_in(language, extras),
+        ]
         starts = [" ", *(f" {lead} " for lead in self._leads.get(language, ()))]
         return any(padded.startswith(f"{s}{n} ") for s in starts for n in names)
 
-    def name_close(self, text: str, language: str, max_edits: int, min_letters: int) -> bool:
+    def name_close(
+        self, text: str, language: str, max_edits: int, min_letters: int, extras: bool = True
+    ) -> bool:
         """Whether ``text`` holds a name the robot answers to, or a close spelling of it, as whole
         words in order (module docstring): for a server's transcript only. False without a
-        usable name."""
+        usable name. ``extras`` off: the robot's own name only (over the radio, SPEC 8)."""
         self._rebuild()
         words = normalise(text).split()
         spelling = SPELLING.get(language, DEFAULT_SPELLING)
-        for name in self._names_in(language):
+        for name in self._names_in(language, extras):
             targets = name.split()
             for i in range(len(words) - len(targets) + 1):
                 pairs = zip(words[i : i + len(targets)], targets, strict=True)
@@ -218,10 +232,20 @@ class KeywordSpotter:
                     return True
         return False
 
-    def _names_in(self, language: str) -> list[str]:
-        """The normalised names usable in ``language`` (``ResolvedName.names_for``)."""
+    def _names_in(self, language: str, extras: bool = True) -> tuple[str, ...]:
+        """The normalised names usable in ``language`` (``ResolvedName.names_for``), computed
+        once per rebuild: the robot's own name, then (with ``extras``) the extra names."""
+        own, extra = self._split_names(language)
+        return own + extra if extras else own
+
+    def _split_names(self, language: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The robot's own and the extra names usable in ``language``: from the rebuild for a
+        listed language, else resolved now (a name with no vocabulary check works in any)."""
+        found = self._names_by_language.get(language)
+        if found is not None:
+            return found
         name = self._resolved
-        return [] if name is None else [n.matching for n in name.names_for(language)]
+        return ((), ()) if name is None else _split(name.names_for(language))
 
     def spot(self, text: str, language: str) -> set[str]:
         """The categories whose phrases occur as whole words in ``text``."""
@@ -230,12 +254,21 @@ class KeywordSpotter:
             return set()
         self._rebuild()
         found: set[str] = set()
-        if any(f" {n} " in padded for n in self._names_in(language)):
+        own, extra = self._split_names(language)
+        if any(f" {n} " in padded for n in own):
             found.add("name")
+        if any(f" {n} " in padded for n in extra):
+            found.add(EXTRA_NAME)
         for cat, phrases in self._phrases.get(language, {}).items():
             if any(f" {p} " in padded for p in phrases):
                 found.add(cat)
         return found
+
+
+def _split(names: tuple[SpokenName, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The normalised own names and the extra names of ``names``."""
+    own = tuple(n.matching for n in names if not n.extra)
+    return own, tuple(n.matching for n in names if n.extra)
 
 
 def _distinct(phrases: list[str]) -> list[str]:

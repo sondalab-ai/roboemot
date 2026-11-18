@@ -62,13 +62,14 @@ import numpy as np
 
 from ..config.schema import GrammarConfig
 from .asr import VOSK_UNKNOWN, GrammarUnsupported, HeardWord
-from .keywords import CATEGORIES, NAME_FIRST, KeywordSpotter, fold
+from .keywords import CATEGORIES, EXTRA_FIRST, EXTRA_NAME, NAME_FIRST, KeywordSpotter, fold
 from .robot_name import MissingWords
 
 log = logging.getLogger(__name__)
 
 MS_PER_S = 1000.0
-WAKE_CLASSES = frozenset({"wake", "name"})
+WAKE_CLASSES = frozenset({"wake", "name", EXTRA_NAME})
+FIRST_FLAG = {"name": NAME_FIRST, EXTRA_NAME: EXTRA_FIRST}  # a name that opened the utterance
 SKIPS = (
     "no_vocabulary",
     "no_competitors",
@@ -121,7 +122,7 @@ class _Match:
     rejected: dict[str, float] = field(default_factory=dict)
     guarded: set[str] = field(default_factory=set)
     gapped: set[str] = field(default_factory=set)
-    name_first: bool = False  # an accepted name or alias opened the decoded words
+    first: set[str] = field(default_factory=set)  # FIRST_FLAG of an accepted opening name
 
 
 @dataclass
@@ -209,7 +210,7 @@ class GrammarSpotter:
         lead = functools.partial(spotter.lead_in, language=language)
         result = self._match(built.targets, words, set(free), found, cfg, lead)
         self._record(spent, audio.size, result, found)
-        return frozenset(result.hits) | ({NAME_FIRST} if result.name_first else frozenset())
+        return frozenset(result.hits) | frozenset(result.first)
 
     def snapshot(self) -> dict[str, Any]:
         """Counts, confidences and cost for the debug report (no phrase, word or text)."""
@@ -315,13 +316,16 @@ class GrammarSpotter:
             floor = cfg.wake_min_word_conf if wake else cfg.keyword_min_word_conf
             bucket = out.hits if best >= floor else out.rejected
             bucket[category] = max(bucket.get(category, 0.0), best)
-            if category == "name" and "name" not in found and not out.name_first:
-                out.name_first = any(
+            flag = FIRST_FLAG.get(category)
+            if flag is not None and category not in found and flag not in out.first:
+                opened = any(
                     min(w.conf for w in span) >= floor
                     and span[0].start_s <= cfg.name_first_max_start_s
                     and _opens(seq[:i], lead)
                     for i, span in close
                 )
+                if opened:
+                    out.first.add(flag)
         for category in out.hits:
             out.rejected.pop(category, None)
             out.guarded.discard(category)
@@ -355,7 +359,7 @@ class GrammarSpotter:
                 s.guarded[category] += 1
             for category in result.gapped:
                 s.gapped[category] += 1
-            s.name_first += result.name_first
+            s.name_first += bool(result.first)
             for category in found - result.hits.keys():
                 if category in s.missed:
                     s.missed[category] += 1

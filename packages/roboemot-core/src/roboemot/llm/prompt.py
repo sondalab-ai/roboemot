@@ -300,17 +300,23 @@ def trim_history(
 
 def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     """Tokens of the largest system message a request can carry: parts 1 to 4 with a persona
-    fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
-    the longest vocabulary rule and language name, plus the two summaries at their caps (part 5
-    is capped, the affect line is a few words). The persona and body prompts count as written:
-    no person can override them, and every change to them runs this check again."""
+        fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
+        the longest vocabulary rule and language name, the name line with the robot's name and
+    ``voice.extra_names_max`` extra names at ``voice.name_max_chars``, plus the two summaries at
+    their caps (part 5
+        is capped, the affect line is a few words). The persona and body prompts count as written:
+        no person can override them, and every change to them runs this check again."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
     language = max([*LANGUAGE_NAMES.values(), cfg.conversation.language], key=len)
     fragment = "x" * cfg.register.persona_fragment_max_chars
     register = cfg.register.params.model_copy(
         update={"vocabulary": vocabulary, "persona_fragment": fragment}
     )
-    fixed = len(system_prompt(cfg, register, language=language))
+    name = "x" * cfg.voice.name_max_chars
+    extras = (name,) * cfg.voice.extra_names_max
+    fixed = len(
+        system_prompt(cfg, register, language=language, robot_name=name, extra_names=extras)
+    )
     conv = cfg.conversation
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS

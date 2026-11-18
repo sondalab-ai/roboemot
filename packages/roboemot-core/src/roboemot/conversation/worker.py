@@ -1035,7 +1035,11 @@ class ConversationWorker:
             tone_rule = route is not None and TONE_TOOL in route.tools_offered
         cfg = self.stack.effective()
         return realtime_instructions(
-            cfg, self._register_for(cfg), **self._prompt_names(cfg), tone_rule=tone_rule
+            cfg,
+            self._register_for(cfg),
+            robot_name=self._prompt_name(cfg),
+            extra_names=self._prompt_extra_names(cfg),
+            tone_rule=tone_rule,
         )
 
     def _burst_instructions(self, job: Any) -> str:
@@ -1054,7 +1058,8 @@ class ConversationWorker:
         return realtime_instructions(
             cfg,
             self._register_for(cfg),
-            **self._prompt_names(cfg),
+            robot_name=self._prompt_name(cfg),
+            extra_names=self._prompt_extra_names(cfg),
             tone_rule=tone_rule,
             conversation=state,
         )
@@ -1095,7 +1100,8 @@ class ConversationWorker:
                 cfg,
                 turn.register,
                 language=turn.language,
-                **self._prompt_names(cfg),
+                robot_name=self._prompt_name(cfg),
+                extra_names=self._prompt_extra_names(cfg),
                 skip_rule=not (line or turn.event),
                 conversation=None if line else turn.conversation,
                 tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
@@ -2149,7 +2155,8 @@ class ConversationWorker:
                 cfg,
                 turn.register,
                 language=turn.language,
-                **self._prompt_names(cfg),
+                robot_name=self._prompt_name(cfg),
+                extra_names=self._prompt_extra_names(cfg),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -2556,12 +2563,11 @@ class ConversationWorker:
         self.names.configure(cfg.voice)
         return self.names.prompt_name(cfg.voice.wake_word)
 
-    def _prompt_names(self, cfg: RoboEmotConfig) -> dict[str, Any]:
-        """The prompt's name arguments: the robot's name (``_prompt_name``) and the extra names
-        it answers to (``voice.extra_names``, sanitised; SPEC 8)."""
-        robot_name = self._prompt_name(cfg)
-        extra_names = self.names.prompt_extra_names(cfg.voice.wake_word)
-        return {"robot_name": robot_name, "extra_names": extra_names}
+    def _prompt_extra_names(self, cfg: RoboEmotConfig) -> tuple[str, ...]:
+        """The extra names the robot answers to (``voice.extra_names``), as safe to put in a
+        prompt as ``_prompt_name``, without the robot's own name (SPEC 8)."""
+        self.names.configure(cfg.voice)
+        return self.names.prompt_extra_names(cfg.voice.wake_word)
 
     def _say_fallback(self, turn: _Turn) -> None:
         """No route answered: the "can't think right now" line, or its cue where no voice can

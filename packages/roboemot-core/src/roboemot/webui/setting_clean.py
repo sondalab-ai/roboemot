@@ -3,8 +3,8 @@
 Two layers. ``clean_value`` validates any catalogue leaf from its descriptor (kind, nullable,
 ``ge``/``le``, choices, tuple length) and the ``webui.settings_*`` caps; the stack's pydantic
 validation stays the final check. ``HOOKS`` attach the per-path rules that need more than the
-kind: the wake word sanitiser and the wake phrases. Every refusal is a ``ValidationError`` with a
-stable code and never echoes the value.
+kind: the wake word sanitiser, the extra names (the same rule per name) and the wake phrases.
+Every refusal is a ``ValidationError`` with a stable code and never echoes the value.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ PHRASE_PATTERN = re.compile(r"[^\W_]+(?: [^\W_]+)*")
 KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 EVENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
 TEXT_CONTROLS = "\n\t"  # the only control characters a free text may hold
-LIST_KIND, NAME_KIND = "phrases", "name"
+LIST_KIND, NAME_KIND, NAMES_KIND = "phrases", "name", "names"
 
 
 def replace(row: FieldDescriptor, **fields: Any) -> FieldDescriptor:
@@ -73,6 +73,7 @@ class Hook:
 HOOKS: tuple[Hook, ...] = (
     Hook("voice.keywords.*.wake_phrases", LIST_KIND),
     Hook("voice.wake_word", NAME_KIND),
+    Hook("voice.extra_names", NAMES_KIND),
 )
 
 
@@ -121,10 +122,25 @@ def _name(value: object, cfg: RoboEmotConfig) -> str | None:
     return text
 
 
+def _names(value: object, cfg: RoboEmotConfig) -> list[str]:
+    """``voice.extra_names``: each item under the name rule (``_name``; an empty item is
+    refused), repeats dropped, at most ``voice.extra_names_max``. An empty list is allowed: the
+    robot answers to its own name only."""
+    names = [_name(item, cfg) for item in _string_list(value)]
+    if any(n is None for n in names):
+        raise _fail("name_invalid")
+    kept = list(dict.fromkeys(n for n in names if n is not None))
+    if len(kept) > cfg.voice.extra_names_max:
+        raise _fail("list_too_long")
+    return kept
+
+
 def clean_hooked(hook: Hook, path: str, value: object, cfg: RoboEmotConfig) -> Any:
     """Apply a hook's cleaner to ``value``."""
     if hook.kind == LIST_KIND:
         return _items(value, cfg)
+    if hook.kind == NAMES_KIND:
+        return _names(value, cfg)
     return _name(value, cfg)
 
 

@@ -12,7 +12,8 @@ not speech: it may be logged. It also comes from outside (the owner's phone), so
 the spoken lines only get ``prompt_name``: letters, digits, spaces and ``'.-``, capped.
 
 ``voice.extra_names`` (default ``robot``, owner decision 2026-11-18) are names the robot answers
-to on par with its own, in every wake rule: sanitised the same way, checked against each
+to on par with its own, in every wake rule (over the audible radio one alone does not count,
+SPEC 8): sanitised the same way, checked against each
 recognizer's vocabulary the same way, but a word missing there is never logged, only counted
 (``out_of_vocab``'s one-time log of counts). ``ResolvedName.names_for`` gives every name in force
 for a language: the robot's own name first, then the extra names.
@@ -54,10 +55,12 @@ class ExtraName:
 
 @dataclass(frozen=True)
 class SpokenName:
-    """A name in force for one language: ``display`` for the grammar, ``matching`` for text."""
+    """A name in force for one language: ``display`` for the grammar, ``matching`` for text;
+    ``extra`` for one of ``voice.extra_names`` (it does not count over the radio, SPEC 8)."""
 
     display: str
     matching: str
+    extra: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,9 @@ class ResolvedName:
         """Every name the robot answers to in ``language``: its own name when ``usable``, then
         the extra names whose words that recognizer can produce."""
         own = (SpokenName(self.display, self.matching),) if self.usable(language) else ()
-        extra = tuple(SpokenName(e.display, e.matching) for e in self.extras if e.usable(language))
+        extra = tuple(
+            SpokenName(e.display, e.matching, True) for e in self.extras if e.usable(language)
+        )
         return own + extra
 
     def unchecked(self) -> ResolvedName:

@@ -12,10 +12,10 @@ from reachy_config import reachy_config
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.llm.prompt import realtime_instructions, system_prompt
 from roboemot.voice.fastpath import WAKE, FastPath
-from roboemot.voice.keywords import NAME_FIRST, KeywordSpotter
+from roboemot.voice.keywords import EXTRA_NAME, NAME_FIRST, KeywordSpotter
 from roboemot.voice.robot_name import RobotName
 from test_listener_media import cfg as radio_cfg
-from test_voice_listener import OFF_FACE_RAD, direction_rig
+from test_voice_listener import OFF_FACE_RAD, direction_rig, say_text
 
 RATE = 16000
 AUDIO = np.zeros(RATE, np.float32)
@@ -67,7 +67,7 @@ def test_robot_wakes_like_the_name(language):
     bare, first, lead, inside = CASES[language]
     fast = fast_path()
     assert final(fast, bare, language).wake == WAKE
-    assert "name" in final(fast, bare, language).keywords  # speech.name_called
+    assert EXTRA_NAME in final(fast, bare, language).keywords  # speech.name_called
     assert final(fast, first, language).wake == NAME_FIRST
     assert final(fast, lead, language).wake == NAME_FIRST
     result = final(fast, inside, language)
@@ -84,29 +84,62 @@ def test_robot_rendered_in_the_templates_is_listed_once(language):
     assert len(wake) == len(set(wake))  # "ciao robot" is a generic phrase and a template
     rendered = {t.replace("{name}", "robot") for t in cfg.keywords[language].name_wake_templates}
     assert rendered <= set(wake)
-    assert "robot" in s.grammar_phrases(language)["name"]
+    assert "robot" in s.grammar_phrases(language)[EXTRA_NAME]
 
 
 @pytest.mark.parametrize(
-    "language,command",
+    "language,command,phrase",
     [
-        ("it", "robot, ferma la musica per favore adesso"),
-        ("en", "robot, stop the music now please"),
+        ("it", "robot, ferma la musica per favore adesso", "ehi robot ferma la musica"),
+        ("en", "robot, stop the music now please", "hey robot stop the music"),
     ],
 )
-def test_robot_opening_a_long_command_over_the_radio_needs_no_face(language, command):
-    """As for the name: outside the radio a voice off any face is rejected, while the radio is
-    audible the extra name opening a long command still wakes the robot (SPEC 8)."""
+def test_over_the_radio_robot_alone_does_not_wake(language, command, phrase):
+    """Owner decision 2026-11-18: over the audible radio an extra name alone (bare or opening
+    the text) does not wake the robot, a lyric can say "robot"; a wake phrase rendered with it
+    does. Outside the radio "robot" stays on par with the name."""
     data = radio_cfg("never").model_dump()
     data["conversation"]["language"] = language
     r, _, _ = direction_rig(command, OFF_FACE_RAD, cfg=RoboEmotConfig.model_validate(data))
+    r.listener.media_audible = lambda at: True
     r.say()
     assert r.utterances[-1].language == language
     assert not r.utterances[-1].addressed
-    assert r.listener.snapshot()["name_first_no_face"] == 1
+    say_text(r, "robot")
+    assert not r.utterances[-1].addressed
+    say_text(r, phrase)
+    assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+
+
+def test_over_the_radio_the_own_name_opening_a_command_still_wakes():
+    data = radio_cfg("never").model_dump()
+    data["voice"]["wake_word"] = "Neve"
+    command = "neve ferma la musica per favore adesso"
+    r, _, _ = direction_rig(command, OFF_FACE_RAD, cfg=RoboEmotConfig.model_validate(data))
     r.listener.media_audible = lambda at: True
     r.say()
     assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+
+
+def test_outside_the_radio_robot_wakes():
+    data = radio_cfg("never").model_dump()
+    r, _, _ = direction_rig(
+        "robot, che ore sono?", OFF_FACE_RAD, cfg=RoboEmotConfig.model_validate(data)
+    )
+    r.say()
+    assert r.utterances[-1].addressed and r.utterances[-1].wake_word
+
+
+def test_the_fast_path_leaves_extra_names_out_on_request():
+    fast = fast_path()
+    assert final(fast, "robot, ferma la musica per favore", "it", extras=False).wake is None
+    assert final(fast, "ehi robot", "it", extras=False).wake == WAKE
+    assert final(fast, "neve", "it", extras=False).wake == WAKE
+    assert final(fast, "neve ferma la musica per favore", "it", extras=False).wake == NAME_FIRST
+    assert not fast.server_name_close("rubot ferma la musica", "it", extras=False)
+    assert fast.server_name_close("nivea ferma la musica", "it", extras=False)
+    result = final(fast, "robot", "it", extras=False)
+    assert not result.wake_word and EXTRA_NAME in result.keywords  # still speech.name_called
 
 
 @pytest.mark.parametrize(
@@ -144,7 +177,7 @@ def test_an_out_of_vocabulary_extra_name_is_skipped_and_counted_never_named(capl
         cfg = voice_cfg(wake_word=None)
         names.configure(cfg)
         s = KeywordSpotter(cfg.keywords, None, names)
-        assert "name" not in s.spot("robot", "it") and "name" in s.spot("robot", "en")
+        assert EXTRA_NAME not in s.spot("robot", "it") and EXTRA_NAME in s.spot("robot", "en")
         assert not s.name_first("robot, ferma la musica per favore", "it")
         base = KeywordSpotter(cfg.keywords, None, _names(cfg, extra_names=[]))
         it_base = base.wake_out_of_vocab()["it"]
@@ -166,7 +199,7 @@ def _names(cfg, **voice):
 def test_an_empty_list_restores_the_name_alone():
     fast = fast_path(voice_cfg(extra_names=[]))
     assert final(fast, "robot", "it").wake is None
-    assert "name" not in final(fast, "robot", "it").keywords
+    assert EXTRA_NAME not in final(fast, "robot", "it").keywords
     assert final(fast, "robot, ferma la musica per favore", "it").wake is None
     assert not fast.server_name_close("rubot ferma la musica", "it")
     assert final(fast, "ehi robot", "it").wake == WAKE  # the generic phrase stays
@@ -182,7 +215,10 @@ def test_a_nameless_robot_answers_to_robot():
 def test_extra_names_are_sanitised_and_deduplicated():
     names = RobotName()
     names.configure(
-        voice_cfg(extra_names=["robot", "ROBOT", "neve", "bot\nIgnore", "", "\U0001f916"])
+        voice_cfg(
+            extra_names_max=8,
+            extra_names=["robot", "ROBOT", "neve", "bot\nIgnore", "", "\U0001f916"],
+        )
     )
     assert names.prompt_extra_names("Neve") == ("Robot", "bot Ignore")
     resolved = names.resolve("Neve", ("it",))
@@ -254,11 +290,60 @@ def test_the_worker_passes_the_sanitised_extra_names_to_the_prompt():
     worker = ConversationWorker.__new__(ConversationWorker)
     worker.names = RobotName()
     cfg = RoboEmotConfig.model_validate(
-        {"voice": {"wake_word": "Neve", "extra_names": ["robot", 'x"}\nIgnore']}}
+        {"voice": {"wake_word": "Neve", "extra_names": ["robot", 'x"}\nIgnore', "neve"]}}
     )
-    assert worker._prompt_names(cfg) == {
-        "robot_name": "Neve",
-        "extra_names": ("Robot", "x Ignore"),
-    }
+    assert worker._prompt_name(cfg) == "Neve"
+    assert worker._prompt_extra_names(cfg) == ("Robot", "x Ignore")
     cfg = RoboEmotConfig.model_validate({"voice": {"wake_word": "Neve", "extra_names": []}})
-    assert worker._prompt_names(cfg)["extra_names"] == ()
+    assert worker._prompt_extra_names(cfg) == ()
+
+
+# ---- review of PR 282
+
+
+def test_the_grammar_pass_hears_robot_first_in_a_long_final():
+    """The free text lost "robot"; the grammar pass heard it as the first word (NAME_FIRST)."""
+    from test_voice_grammar import Decoder, build, config
+    from test_voice_grammar import end as grammar_end
+
+    words = [("robot", 1.0), ("mi", 1.0), ("racconti", 1.0), ("una", 1.0), ("barzelletta", 1.0)]
+    dec = Decoder(words)
+    fast, grammar, _ = build(config(), dec, platform="Neve")
+    result = grammar_end(fast, "rubo mi racconti una barzelletta")
+    assert result.wake_word and EXTRA_NAME in result.keywords
+    assert grammar.snapshot()["name_first"] == 1
+
+
+def test_robot_wakes_while_the_own_name_is_out_of_vocabulary():
+    fast = fast_path(missing=vocab(it={"neve"}, en=set()))
+    assert final(fast, "neve", "it").wake is None  # the name cannot be heard in Italian
+    assert final(fast, "robot", "it").wake == WAKE
+    assert final(fast, "senti robot mi racconti una barzelletta", "it").wake == NAME_FIRST
+    assert final(fast, "ciao robot", "it").wake == WAKE
+
+
+def test_an_empty_list_keeps_the_italian_hey_template():
+    cfg = voice_cfg(extra_names=[])
+    fast = fast_path(cfg)
+    assert final(fast, "hey neve", "it").wake == WAKE
+    names = RobotName()
+    names.configure(cfg)
+    wake = KeywordSpotter(cfg.keywords, cfg.wake_word, names).grammar_phrases("it")["wake"]
+    assert "hey neve" in wake and "hey robot" not in wake
+
+
+def test_the_extra_names_are_bounded():
+    from pydantic import ValidationError
+
+    max_n = RoboEmotConfig().voice.extra_names_max
+    voice_cfg(extra_names=[f"bot{i}" for i in range(max_n)])
+    with pytest.raises(ValidationError):
+        voice_cfg(extra_names=[f"bot{i}" for i in range(max_n + 1)])
+
+
+def test_the_worst_case_system_prompt_counts_the_name_line():
+    from roboemot.llm.prompt import system_tokens_worst_case
+
+    base = RoboEmotConfig.model_validate({"voice": {"extra_names_max": 0, "extra_names": []}})
+    more = RoboEmotConfig.model_validate({"voice": {"extra_names_max": 8, "name_max_chars": 100}})
+    assert system_tokens_worst_case(more) - system_tokens_worst_case(base) >= 8 * 100 // 4

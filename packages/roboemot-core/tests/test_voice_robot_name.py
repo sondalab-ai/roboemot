@@ -51,7 +51,7 @@ def test_templates_are_rendered_with_the_normalised_name():
 
 def test_without_a_name_only_the_generic_phrases_wake():
     names = RobotName()
-    assert spot(names, "hey robot", "en") == {"greeting", "wake", "name"}  # an extra name
+    assert spot(names, "hey robot", "en") == {"greeting", "wake", "extra_name"}  # an extra name
     assert "wake" not in spot(names, "hey neve")
     assert "name" not in spot(names, "neve")
     s = KeywordSpotter(SETS, None, names)
