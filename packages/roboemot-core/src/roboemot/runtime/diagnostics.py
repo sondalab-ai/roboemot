@@ -40,6 +40,10 @@ def build_diagnostics(
         FnSource("roboemot.register", lambda: register_report(p.tracker)),
         FnSource("roboemot.circadian", p.circ.snapshot),
         FnSource("roboemot.alone", lambda: p.alone.snapshot(time.monotonic())),
+        FnSource(
+            "roboemot.touch_stop",
+            lambda: p.touch_stop.snapshot() if p.touch_stop is not None else {"state": "off"},
+        ),
         FnSource("roboemot.reflexes", p.reflexes.snapshot),
         FnSource(
             "roboemot.voice",
