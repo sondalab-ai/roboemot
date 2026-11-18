@@ -100,6 +100,8 @@ def _tick_until_stopped(
             if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
                 host.cues.release_listening("asleep")
             p.selector.sleep(now)  # a shown-object episode ends (SPEC 5A)
+            if p.touch_stop is not None:  # no nod is left for the wake (SPEC 11, Radio)
+                p.touch_stop.forget()
             if p.perception.pipeline is not None:
                 episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
             p.circ.tick(now)
@@ -141,6 +143,8 @@ def _tick_until_stopped(
         p.expression.set_register(register)
         p.speaking.set_register(register)
         p.dance.set_register(register)
+        if p.touch_stop is not None:  # before the expression update: the nod starts this tick
+            p.touch_stop.tick(now, p.loop.external, live.tools.radio, p.loop.motors_off)
         if state is not None:
             p.expression.update(state, register, now)
             p.speaking.set_affect(state)

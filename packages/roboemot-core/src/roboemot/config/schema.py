@@ -7283,6 +7283,20 @@ class RadioConfig(Strict):
         "The music detector may start the dance on the robot's own radio; off, it ignores "
         "music while the radio plays",
     )
+    touch_stop: bool = param(
+        True,
+        "A hand on the robot stops the radio: external control of the robot while the music "
+        "can be heard stops the station, then the robot nods; only where the motion loop "
+        "detects external control",
+    )
+    touch_stop_min_s: float = param(
+        0.3,
+        "How long external control must last, after the loop detected it, before it stops "
+        "the radio",
+        unit="s",
+        ge=0,
+        le=10,
+    )
 
 
 class ToolsConfig(Strict):

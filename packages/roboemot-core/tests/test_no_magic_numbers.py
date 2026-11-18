@@ -98,6 +98,7 @@ BEHAVIOUR_MODULES = [
     "runtime/runtime.py",
     "runtime/startup.py",
     "runtime/ticks.py",
+    "runtime/touch_stop.py",
     "runtime/webui.py",
     "conversation/lines.py",
     "conversation/confirm.py",

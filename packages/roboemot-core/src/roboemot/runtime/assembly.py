@@ -67,6 +67,7 @@ from .levels import AudioLevels
 from .reports import register_overrides
 from .sleep import SleepGate, mic_needed_asleep
 from .ticks import dance_calm, in_conversation
+from .touch_stop import TouchStop
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -120,6 +121,7 @@ class Pipeline:
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
+    touch_stop: TouchStop | None = None  # a hand on the robot stops the radio (SPEC 11)
 
 
 def make_yes_no(
@@ -495,7 +497,12 @@ def assemble(
     voice_heard = [-math.inf]  # monotonic time of the last utterance, addressed or not (SPEC 7B)
     bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
 
+    # A hand on the robot stops the radio (SPEC 4A, 11 Radio): the player is built at start-up.
+    touch_stop = TouchStop(lambda: host.media, expression.request)
+    touch_stop.events = host.events
+
     return Pipeline(
+        touch_stop=touch_stop,
         voice_heard=voice_heard,
         cue_sounds=cue_sounds,
         realtime_provider=realtime_provider,
