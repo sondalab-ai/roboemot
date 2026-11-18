@@ -97,7 +97,10 @@ EN: dict[str, str] = {
     "live_activity_now": "Now",
     "live_activity_recent": "Last decisions, newest first",
     "live_activity_empty": "Nothing to explain yet.",
-    "live_activity_note": "Reasons and numbers only, kept in memory while this tab is on.",
+    "live_activity_note": (
+        "Reasons and numbers, plus the server's words of a radio wake it did not confirm while "
+        "the live transcript is on; kept in memory while this tab is on."
+    ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motors off",
     "live_status_answering": "Answering",
@@ -1392,7 +1395,11 @@ IT: dict[str, str] = {
     "live_activity_now": "Adesso",
     "live_activity_recent": "Ultime decisioni, dalla più recente",
     "live_activity_empty": "Ancora niente da spiegare.",
-    "live_activity_note": "Solo motivi e numeri, tenuti in memoria finché questa scheda è attiva.",
+    "live_activity_note": (
+        "Motivi e numeri, più le parole del server per un'attivazione con la radio che non ha "
+        "confermato, se la trascrizione dal vivo è attiva; tenuti in memoria finché questa scheda "
+        "è attiva."
+    ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motori spenti",
     "live_status_answering": "Sta rispondendo",

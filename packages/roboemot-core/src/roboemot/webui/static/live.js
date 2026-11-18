@@ -382,7 +382,7 @@ function liveEventText(ev) {
   if (ev.voice !== undefined) extra.voice = liveWord("live_voice_", ev.voice);
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
-  if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, ev);
+  if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);
   return liveHeard(text, heard);
 }
 

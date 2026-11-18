@@ -93,6 +93,24 @@ def test_a_local_media_reject_carries_no_words_even_with_the_live_transcript_on(
     assert all(why != "media_unconfirmed" for _, why, _ in seen)
 
 
+@pytest.mark.parametrize(
+    ("enabled", "transcript", "server", "want"),
+    [
+        (True, True, True, "ehi neva"),
+        (False, True, True, None),  # the Live tab off: the transcript flag alone is not enough
+        (True, False, True, None),
+        (True, True, False, None),  # a local final carries no words
+    ],
+)
+def test_the_heard_words_need_the_live_tab_its_transcript_and_a_server_final(
+    enabled, transcript, server, want
+):
+    data = cfg().model_dump()
+    data["webui"]["live"].update(enabled=enabled, transcript=transcript)
+    r = Rig(["ciao"], cfg=RoboEmotConfig.model_validate(data))
+    assert r.listener._heard("  ehi neva  ", server) == want
+
+
 def test_the_wake_word_addresses_the_robot_while_media_plays():
     """The robot's name and a generic wake phrase both still work."""
     for final in ("reati spegni la radio", "ehi robot spegni la radio"):

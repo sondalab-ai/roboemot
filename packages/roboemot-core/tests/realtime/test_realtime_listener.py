@@ -6,6 +6,7 @@ that does not come goes to a local decode and the chat routes."""
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -998,10 +999,12 @@ def test_a_wake_over_the_radio_the_server_does_not_confirm_is_not_answered(ears,
         assert server.of("response.create") == []
 
 
-def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on(ears):
+def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on(ears, caplog):
     """The owner (2026-11-18): "hey neve ferma la musica" was dropped as unconfirmed, and the
     Live tab did not say what the server wrote. With the live transcript on, the event carries
-    the server's words, cut to ``webui.live.transcript_max_chars`` (SPEC 12)."""
+    the server's words, cut to ``webui.live.transcript_max_chars``, and no log has them
+    (SPEC 12)."""
+    caplog.set_level(logging.DEBUG)
     lyric = "ehi neva ferma la musica " * 10
     app = {**NEVE_ALWAYS, "webui": {"live": {"enabled": True, "transcript": True}}}
     app["webui"]["live"]["transcript_max_chars"] = 80
@@ -1014,6 +1017,7 @@ def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on
         assert ear.settle(lambda: len(ear.utterances) == 1)
         assert not ear.utterances[0].addressed
         assert ("unanswered", "media_unconfirmed", {"heard": lyric.strip()[:80]}) in seen
+    assert "neva" not in caplog.text
 
 
 @pytest.mark.parametrize(

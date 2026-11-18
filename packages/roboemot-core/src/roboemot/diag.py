@@ -264,8 +264,8 @@ class EventRing:
     field (``TEXT_FIELDS``) follows the live transcript's rules (SPEC 12): kept only while
     ``webui.live.transcript`` is on and the robot is awake, cut to ``transcript_max_chars``, and
     forgotten past ``transcript_max_age_s`` (on append, on read and on the app tick's ``trim``),
-    when the transcript turns off or the robot falls asleep; its event stays, without the
-    words."""
+    when the transcript turns off, on its Clear (``forget_text``) or when the robot falls asleep;
+    its event stays, without the words."""
 
     def __init__(self, live_cfg: Any, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
@@ -299,8 +299,14 @@ class EventRing:
         as the live transcript is cleared) or woke up."""
         with self._lock:
             self._asleep = asleep
-            if asleep:
-                self._forget_text_locked(None)
+        if asleep:
+            self.forget_text()
+
+    def forget_text(self) -> None:
+        """Drop the words of every kept event; the events stay (the transcript's Clear, a
+        sleep)."""
+        with self._lock:
+            self._forget_text_locked(None)
 
     def trim(self) -> None:
         """Forget the words of events older than ``transcript_max_age_s``. Called from the app
@@ -347,13 +353,15 @@ class EventRing:
                 events.pop()
             events.append(event)
 
-    def events(self) -> list[dict[str, Any]]:
+    def events(self, *, text: bool = True) -> list[dict[str, Any]]:
         """The events, newest first, without the internal monotonic stamp (and without the
-        words of one older than ``transcript_max_age_s``)."""
+        words of one older than ``transcript_max_age_s``); with ``text`` False, without any
+        words at all."""
         with self._lock:
             self._forget_text_locked(self._clock() - self._max_age_s)
             rows = list(self._events)
-        return [{k: v for k, v in e.items() if k != "_at"} for e in reversed(rows)]
+        drop = ("_at",) if text else ("_at", *TEXT_FIELDS)
+        return [{k: v for k, v in e.items() if k not in drop} for e in reversed(rows)]
 
     def age_of(self, kind: str, reason: str) -> float | None:
         """Seconds since the newest ``kind``/``reason`` event, None when none is kept."""
@@ -369,11 +377,13 @@ RING_KEYS = ("t", "seq", "_at", "count")  # what the ring adds or what always di
 
 
 def _labels(event: dict[str, Any]) -> dict[str, Any]:
-    """The fields that say what an event was (codes, flags, None), without its numbers."""
+    """The fields that say what an event was (codes, flags, None), without its numbers and its
+    words (``TEXT_FIELDS``): a run of unconfirmed wakes on a song's lyrics is one row with a
+    count and the newest words, so it cannot push the rest out."""
     return {
         k: v
         for k, v in event.items()
-        if k not in RING_KEYS and (v is None or isinstance(v, bool | str))
+        if k not in RING_KEYS and k not in TEXT_FIELDS and (v is None or isinstance(v, bool | str))
     }
 
 

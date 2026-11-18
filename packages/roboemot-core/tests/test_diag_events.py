@@ -318,13 +318,51 @@ def test_the_tick_trim_forgets_old_words_with_nobody_polling():
     assert all("heard" not in e for e in ring._events)  # in memory, not only on read
 
 
-def test_two_unconfirmed_wakes_with_other_words_are_two_rows():
+def test_a_run_of_unconfirmed_wakes_is_one_row_with_the_newest_words():
+    """A song's lyrics can fail the confirmation again and again: the words are not a label,
+    so the run is one row with a count and cannot push the other events out."""
+    clock = [100.0]
+    ring, events = text_ring(clock, activity_events=5)
+    events("turn", "ok")
+    for i in range(10):
+        events(*UNCONFIRMED, heard=f"lyric line {i}")
+    rows = ring.events()
+    assert [(r["reason"], r["count"]) for r in rows] == [("media_unconfirmed", 10), ("ok", 1)]
+    assert rows[0]["heard"] == "lyric line 9"
+
+
+def test_clear_forgets_the_words_and_keeps_the_events():
     clock = [100.0]
     ring, events = text_ring(clock)
-    events(*UNCONFIRMED, heard="ehi neva")
-    events(*UNCONFIRMED, heard="ehi nave")
-    events(*UNCONFIRMED, heard="ehi nave")
-    assert [(r["heard"], r["count"]) for r in ring.events()] == [("ehi nave", 2), ("ehi neva", 1)]
+    events(*UNCONFIRMED, heard=TEXT)
+    ring.forget_text()
+    [row] = ring.events()
+    assert row["reason"] == "media_unconfirmed" and "heard" not in row
+    events(*UNCONFIRMED, heard=TEXT)  # still on: new words are kept again
+    assert ring.events()[0]["heard"] == TEXT
+
+
+def test_a_read_without_text_serves_no_words():
+    ring, events = text_ring([100.0])
+    events(*UNCONFIRMED, heard=TEXT)
+    assert "heard" not in ring.events(text=False)[0]
+    assert ring.events()[0]["heard"] == TEXT
+
+
+def test_the_words_never_reach_the_logs(caplog):
+    """SPEC 12: neither the sink, the ring nor the listener's gate logs the words."""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    ring, events = text_ring([100.0])
+    events(*UNCONFIRMED, heard=TEXT)
+    ring.events()
+    ring.trim()
+    ring.forget_text()
+    bus = Bus()
+    bus.subscribe(TOPIC, lambda m: (_ for _ in ()).throw(RuntimeError(TEXT)))
+    BusEvents(bus)(*UNCONFIRMED, heard=TEXT)  # a failing subscriber is logged by type only
+    assert TEXT not in caplog.text and "ciao" not in caplog.text
 
 
 # ------------------------------------------------------------------ cues

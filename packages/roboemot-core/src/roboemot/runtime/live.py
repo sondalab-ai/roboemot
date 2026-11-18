@@ -165,13 +165,17 @@ class LiveState:
         }
 
     def clear_transcript(self) -> bool:
-        """The Clear button. False while ``webui.live.enabled`` is off (the API answers
+        """The Clear button: the transcript, and the words the decision events carry. False
+        while ``webui.live.enabled`` is off (the API answers
         ``live_disabled``)."""
         if not self._cfg.webui.live.enabled:
             return False
         ring = self._host.transcript
         if ring is not None:
             ring.clear()
+        activity = self._host.activity
+        if activity is not None:
+            activity.forget_text()  # the words a decision event carries go with the transcript
         return True
 
     def prompts(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:
@@ -209,7 +213,8 @@ class LiveState:
         return {
             "status": self._status(cfg, notes, rest),
             "notes": notes,
-            "events": ring.events() if ring is not None else [],
+            # with the transcript off no words are served, whatever the ring still holds
+            "events": ring.events(text=cfg.webui.live.transcript) if ring is not None else [],
         }
 
     def _notes(self, cfg: RoboEmotConfig) -> list[dict[str, Any]]:
