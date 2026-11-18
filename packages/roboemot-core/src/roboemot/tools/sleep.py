@@ -15,8 +15,10 @@ from ..skills.host import ToolHost
 from ..skills.registry import SkillResult, skill
 
 DESCRIPTION = (
-    "Take a nap now because the person asked; say a short good night in the same turn; "
-    "the robot's name wakes you"
+    "Take a nap now. Call it whenever the person tells you to sleep, rest or take a nap, in "
+    "any words and in any language, even a single word such as 'dormi'. Never answer that you "
+    "do not sleep or are always awake: call it and say a short good night in the same turn. "
+    "The robot's name wakes you"
 )
 
 
