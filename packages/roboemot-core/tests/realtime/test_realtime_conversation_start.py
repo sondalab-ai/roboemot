@@ -289,3 +289,20 @@ def test_the_instruction_rules_ship_in_english_only():
     for stem in (SKIP_PROMPT, TONE_PROMPT, START_PROMPT, OPEN_PROMPT):
         assert (prompt_module.PROMPTS_DIR / f"{stem}.en.txt").read_text(encoding="utf-8").strip()
         assert [f for f in files if f.startswith(f"{stem}.")] == [f"{stem}.en.txt"]
+
+
+@pytest.mark.parametrize("content", [None, "  \n"])
+def test_a_missing_or_empty_rule_file_fails_loud(monkeypatch, tmp_path, content):
+    """A broken package never offers the tool without its rule: the first use raises."""
+    if content is not None:
+        (tmp_path / f"{SKIP_PROMPT}.en.txt").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(prompt_module, "PROMPTS_DIR", tmp_path)
+    prompt_module._prompt_files.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match=f"{SKIP_PROMPT}.en.txt"):
+            skip_prompt()
+        cfg = ConfigStack(app={"voice": {"realtime_route": SKIP}}).effective()
+        with pytest.raises(RuntimeError, match=f"{SKIP_PROMPT}.en.txt"):
+            realtime_instructions(cfg, RegisterParams())
+    finally:
+        prompt_module._prompt_files.cache_clear()  # the shipped files again for later tests

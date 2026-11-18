@@ -116,8 +116,13 @@ def _in_language(texts: dict[str, str], lang: str, cfg: RoboEmotConfig) -> str:
 
 def _instruction(stem: str) -> str:
     """The English instruction rule ``prompts/<stem>.en.txt`` (shipped with the package;
-    cached). Prompt text is data, not code (SPEC 8, 11A); "" when the file is missing."""
-    return _prompt_files(stem).get(INSTRUCTION_LANGUAGE, "")
+    cached). Prompt text is data, not code (SPEC 8, 11A). A missing or empty file raises
+    ``RuntimeError``: a broken package never offers a tool without its rule."""
+    text = _prompt_files(stem).get(INSTRUCTION_LANGUAGE)
+    if not text:
+        path = PROMPTS_DIR / f"{stem}.{INSTRUCTION_LANGUAGE}.txt"
+        raise RuntimeError(f"instruction rule {path} is missing or empty")
+    return text
 
 
 def skip_prompt() -> str:
@@ -133,9 +138,9 @@ def tone_prompt() -> str:
 
 def preview_line(cfg: RoboEmotConfig) -> tuple[str, str]:
     """The voice preview's sentence and its language (SPEC 8, Voice preview), from
-    ``prompts/voice_preview.<lang>.txt``: ``conversation.language``'s, else English's, as
-    ``_in_language`` falls back. The language is the file's, so the server is never asked
-    to say an English line in another language."""
+    ``prompts/voice_preview.<lang>.txt``: ``conversation.language``'s, else English's (the
+    same fallback as ``event_fallback``, with no turn language). The language is the file's,
+    so the server is never asked to say an English line in another language."""
     texts = _prompt_files(PREVIEW_PROMPT)
     lang = cfg.conversation.language
     if not texts.get(lang):
