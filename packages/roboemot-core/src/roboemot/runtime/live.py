@@ -18,8 +18,9 @@ most once per ``webui.live.system_cache_s``.
 ``activity`` is the "What's happening" panel (``webui.live.activity``): a status code for what the
 robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
-Codes and numbers only: the page builds the sentences in its language. A host without voice has
-no route or listener (None): the status then comes from the other parts.
+Codes and numbers only (but the server's words of an unconfirmed radio wake, ``diag.TEXT_EVENTS``,
+with the live transcript on): the page builds the sentences in its language. A host without voice
+has no route or listener (None): the status then comes from the other parts.
 
 ``prompts`` is the LLM prompts panel (``webui.live.prompts``, opt-in): the host's ``PromptRing``
 of cloud requests as they left, read behind the same cursor as the transcript.
@@ -164,13 +165,17 @@ class LiveState:
         }
 
     def clear_transcript(self) -> bool:
-        """The Clear button. False while ``webui.live.enabled`` is off (the API answers
+        """The Clear button: the transcript, and the words the decision events carry. False
+        while ``webui.live.enabled`` is off (the API answers
         ``live_disabled``)."""
         if not self._cfg.webui.live.enabled:
             return False
         ring = self._host.transcript
         if ring is not None:
             ring.clear()
+        activity = self._host.activity
+        if activity is not None:
+            activity.forget_text()  # the words a decision event carries go with the transcript
         return True
 
     def prompts(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:
@@ -208,7 +213,8 @@ class LiveState:
         return {
             "status": self._status(cfg, notes, rest),
             "notes": notes,
-            "events": ring.events() if ring is not None else [],
+            # with the transcript off no words are served, whatever the ring still holds
+            "events": ring.events(text=cfg.webui.live.transcript) if ring is not None else [],
         }
 
     def _notes(self, cfg: RoboEmotConfig) -> list[dict[str, Any]]:

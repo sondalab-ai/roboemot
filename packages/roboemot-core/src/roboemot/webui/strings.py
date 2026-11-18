@@ -97,7 +97,10 @@ EN: dict[str, str] = {
     "live_activity_now": "Now",
     "live_activity_recent": "Last decisions, newest first",
     "live_activity_empty": "Nothing to explain yet.",
-    "live_activity_note": "Reasons and numbers only, kept in memory while this tab is on.",
+    "live_activity_note": (
+        "Reasons and numbers, plus the server's words of a radio wake it did not confirm while "
+        "the live transcript is on; kept in memory while this tab is on."
+    ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motors off",
     "live_status_answering": "Answering",
@@ -155,6 +158,10 @@ EN: dict[str, str] = {
     "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
     "live_ev_unanswered_music": "Not answered: music is playing, the wake word is needed",
     "live_ev_unanswered_media": "Not answered: the radio is playing, the wake word is needed",
+    "live_ev_unanswered_media_unconfirmed": (
+        "Not answered: the radio is playing and the server's words held no wake word"
+    ),
+    "live_ev_heard": "the server heard: “{heard}”",
     "live_ev_unanswered_skipped": (
         "Not answered: the cloud model skipped it (conversation: {conversation})"
     ),
@@ -1388,7 +1395,11 @@ IT: dict[str, str] = {
     "live_activity_now": "Adesso",
     "live_activity_recent": "Ultime decisioni, dalla più recente",
     "live_activity_empty": "Ancora niente da spiegare.",
-    "live_activity_note": "Solo motivi e numeri, tenuti in memoria finché questa scheda è attiva.",
+    "live_activity_note": (
+        "Motivi e numeri, più le parole del server per un'attivazione con la radio che non ha "
+        "confermato, se la trascrizione dal vivo è attiva; tenuti in memoria finché questa scheda "
+        "è attiva."
+    ),
     "live_activity_count": "x{n}",
     "live_status_asleep": "Motori spenti",
     "live_status_answering": "Sta rispondendo",
@@ -1453,6 +1464,11 @@ IT: dict[str, str] = {
     ),
     "live_ev_unanswered_music": "Senza risposta: c'è musica, serve la parola di attivazione",
     "live_ev_unanswered_media": "Senza risposta: suona la radio, serve la parola di attivazione",
+    "live_ev_unanswered_media_unconfirmed": (
+        "Senza risposta: suona la radio e nelle parole del server non c'era la parola di "
+        "attivazione"
+    ),
+    "live_ev_heard": "il server ha sentito: «{heard}»",
     "live_ev_unanswered_skipped": (
         "Senza risposta: il modello cloud l'ha ignorata (conversazione: {conversation})"
     ),

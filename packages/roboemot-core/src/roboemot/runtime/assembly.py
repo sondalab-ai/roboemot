@@ -267,6 +267,8 @@ def assemble(
     host.events = BusEvents(bus)
     activity = host.activity = EventRing(cfg.webui.live)
     activity.attach(bus)
+    bus.subscribe("robot.asleep", lambda msg: activity.set_asleep(True))  # words go, as above
+    bus.subscribe("robot.awake", lambda msg: activity.set_asleep(False))
     stack.subscribe(lambda change: activity.apply_config(change.config.webui.live))
     audio = host.audio = session.audio(cfg, levels.offer if reflex_audio else None)
     reflexes.audio_status = audio.snapshot

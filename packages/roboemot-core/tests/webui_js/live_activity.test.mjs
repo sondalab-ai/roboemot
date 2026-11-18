@@ -173,3 +173,25 @@ test("a new event is added above the rows already shown, which stay the same nod
   assert.ok(after[0].textContent.includes("Fallback sound"), "newest first");
   assert.ok(after.slice(1).every((row, i) => row === before[i]), "the older rows are kept");
 });
+
+test("an unconfirmed wake over the radio shows the server's words as they are, the radio reject none", async (t) => {
+  const strings = {
+    ...EN,
+    live_ev_unanswered_media: "Not answered: the radio is playing, the wake word is needed",
+    live_ev_unanswered_media_unconfirmed: "Not answered: the server's words held no wake word",
+    live_ev_heard: "the server heard: “{heard}”",
+    "live_code_hey {seq} neve <b>ferma</b>": "CODE",
+  };
+  const events = [
+    { kind: "unanswered", reason: "media_unconfirmed", heard: "hey {seq} neve <b>ferma</b>", t: T0 + 2, seq: 3, count: 1 },
+    { kind: "unanswered", reason: "media_unconfirmed", t: T0 + 1, seq: 2, count: 1 },
+    { kind: "unanswered", reason: "media", t: T0, seq: 1, count: 1 },
+  ];
+  const page = await livePage(t, { strings, activity: { status: "listening", notes: [], events } });
+  const [words, none, media] = rows(page);
+  const said = "Not answered: the server's words held no wake word; the server heard: “hey {seq} neve <b>ferma</b>”";
+  assert.ok(words.includes(said), words);
+  assert.equal(page.document.querySelector("#live-events b"), null, "the words are text, never markup");
+  assert.ok(none.includes("held no wake word") && !none.includes("the server heard"), none);
+  assert.ok(media.includes("the wake word is needed") && !media.includes("the server heard"), media);
+});
