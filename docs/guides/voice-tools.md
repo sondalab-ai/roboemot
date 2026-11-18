@@ -141,8 +141,10 @@ The robot plays internet radio streams from your station list through its speake
 - **Dancing.** The robot may dance to its own radio (`tools.radio.dance`, on by default).
 - **When it stops.**
   - "stop the radio"
-  - a hand on the robot's head (`tools.radio.touch_stop`, on by default): hold it for a moment
-    while the music plays and the radio stops; the robot nods once it takes control back
+  - a hand on the robot (`tools.radio.touch_stop`, on by default): hold the head or an antenna
+    away from where it was for about a second (`tools.radio.touch_stop_check_s`) while the music
+    plays and the radio stops; the robot nods once it takes control back, a few seconds after
+    you let go
   - the admin turns the radio off
   - the playing station is removed from the list
   - a requested nap, platform sleep, or the circadian rest (night, quiet hours)

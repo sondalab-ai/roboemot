@@ -7285,17 +7285,19 @@ class RadioConfig(Strict):
     )
     touch_stop: bool = param(
         True,
-        "A hand on the robot stops the radio: external control of the robot while the music "
-        "can be heard stops the station, then the robot nods; only where the motion loop "
-        "detects external control",
+        "A hand on the robot stops the radio: a hand that holds part of the robot away from "
+        "its last move while the music can be heard stops the station, then the robot nods; "
+        "only where the motion loop detects external control",
     )
-    touch_stop_min_s: float = param(
-        0.3,
-        "How long external control must last, after the loop detected it, before it stops "
-        "the radio",
+    touch_stop_check_s: float = param(
+        1.0,
+        "How long after the robot starts yielding to external control the radio's touch stop "
+        "looks at it once: it stops the radio only if some, not all, parts are still held away "
+        "from their last move (a hand); a lag that settled or a move of the whole robot does not "
+        "stop it. Keep it below motion.platform_move_grace_s",
         unit="s",
-        ge=0,
-        le=10,
+        ge=0.2,
+        le=4,
     )
 
 

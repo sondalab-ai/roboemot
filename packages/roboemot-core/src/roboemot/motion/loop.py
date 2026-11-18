@@ -57,7 +57,7 @@ from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, Limiter, MotionCore
-from .external import ExternalControl, Unit
+from .external import ExternalControl, Unit, YieldView
 from .ramps import CommandRamps
 from .state import MeasuredPair, MotionSample, MotionState
 
@@ -154,6 +154,14 @@ class MotionLoop:
     def unreachable_held(self) -> bool:
         """A unit holds on an unreachable target (read without the lock, like ``external``)."""
         return self.external_ctl.holding
+
+    def yield_view(self) -> YieldView | None:
+        """The current yield seen against the last written targets (``ExternalControl.view``),
+        None while the loop does not yield or has no fresh sample. Any thread: takes the lock."""
+        with self._lock:
+            if not self.external_ctl.yielding or not self._measured:
+                return None
+            return self.external_ctl.view(self._written, self._measured[-1])
 
     def motion_sample(self) -> MotionSample | None:
         """Raw movement values (``MotionProbe``), read without the lock from any thread: a copy
@@ -387,6 +395,9 @@ class MotionLoop:
         if enabled and self.motors_off:
             self._resync()  # resume from wherever the platform's wake-up left the robot
         if not enabled:
+            # motors_off first: a lock-free reader that sees ``external`` cleared must also see
+            # the motors off, so the end of a yield is never taken for a resume
+            self.motors_off = True
             self.external_ctl.clear()
         self.motors_off = not enabled
 

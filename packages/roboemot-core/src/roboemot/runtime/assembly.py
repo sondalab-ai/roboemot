@@ -498,7 +498,7 @@ def assemble(
     bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
 
     # A hand on the robot stops the radio (SPEC 4A, 11 Radio): the player is built at start-up.
-    touch_stop = TouchStop(lambda: host.media, expression.request)
+    touch_stop = TouchStop(lambda: host.media, loop.yield_view, expression.request)
     touch_stop.events = host.events
 
     return Pipeline(

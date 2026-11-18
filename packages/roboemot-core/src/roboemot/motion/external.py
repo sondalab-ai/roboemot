@@ -95,6 +95,18 @@ class Unit:
 
 
 @dataclass(frozen=True)
+class YieldView:
+    """What a consumer of a yield may know about it (the radio's touch stop, SPEC 11, Radio):
+    how many units the robot has, how many are away now (a joint further than its tolerance
+    from the last target the loop wrote to it), and whether an away joint is a known
+    unreachable stop or a unit holds on one (our own target meeting the body, not a hand)."""
+
+    units: int
+    away: int
+    unreachable: bool
+
+
+@dataclass(frozen=True)
 class Stop:
     """Where a joint stopped short of the target it was driven to: the place, the side the
     target lay on (+1 or -1) and that target."""
@@ -638,6 +650,21 @@ class ExternalControl:
             self._ref[name] = None
             self._steady.pop(name, None)
         self._update_held()
+
+    def view(self, written: dict[str, float], measured: dict[str, float]) -> YieldView:
+        """The yield as :class:`YieldView` sees it, against ``written`` (the last target the
+        loop wrote per dof) and ``measured`` (the newest sample). A dof never written is not
+        away. Caller holds the loop's lock."""
+        away, unreachable = 0, False
+        for unit in self.units:
+            joints = [
+                n
+                for n in unit.dofs
+                if n in written and n in measured and abs(measured[n] - written[n]) > self._tol[n]
+            ]
+            away += bool(joints)
+            unreachable = unreachable or unit.holding or any(n in self._blocked for n in joints)
+        return YieldView(len(self.units), away, unreachable)
 
     # ---- report (SPEC 12A)
 
