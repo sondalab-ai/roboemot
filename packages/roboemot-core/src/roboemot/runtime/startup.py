@@ -218,7 +218,9 @@ def start_media(
     never through the speech path, which would make the listener deaf to the wake word. It
     listens for a nap and ``robot.asleep`` on the bus and for config changes (radio turned off,
     station removed), closes before the speech output, and
-    tells the listener when it plays (the lyrics gate and ``tools.radio.dance``). Sets
+    tells the listener when the music can be heard (``audible_at``: the lyrics gate and
+    ``tools.radio.dance``), lets it record a turn's hold (``hold_from``) and hands it the
+    pieces that played (``on_piece``: the dance's audio behind a hardware echo canceller). Sets
     ``host.media``; None (and no radio) otherwise."""
     if not isinstance(output.sink, MediaSink):
         return None
@@ -227,7 +229,10 @@ def start_media(
     cleanup.callback(stack.subscribe(player.on_config))  # radio off or station gone: stop
     player.start()
     if listener is not None:
-        listener.media_playing = player.playing
+        listener.media_audible = player.audible_at
+        listener.media_hold = player.hold_from
+        listener.media_set = player.playing
+        player.on_piece = listener.hear_media
     return player
 
 

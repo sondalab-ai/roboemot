@@ -1409,7 +1409,8 @@ class MediaSink(FakeSink):
 def test_media_plays_outside_the_queue_at_its_volume(make):
     sink = MediaSink()
     out = make(sink=sink)
-    assert out.play_media(blip(0.2), RATE, volume_db=-6.0)
+    until = out.play_media(blip(0.2), RATE, volume_db=-6.0)
+    assert until == sink.media_until  # the stamp the piece will have played by (the dance)
     assert sink.media == [(3200, RATE, pytest.approx(0.5 * 10 ** (-6 / 20), rel=1e-4))]
     assert sink.pushed == [] and out.waiting() == 0  # never a job of the speech queue
     assert not out.speaking_at(time.monotonic())  # the music is not the robot's voice

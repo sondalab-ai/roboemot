@@ -715,9 +715,11 @@ class SpeechOutput:
             return "busy"
         return None
 
-    def play_media(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> bool:
+    def play_media(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> float:
         """Push a piece of media (the radio, SPEC 8, Radio playback) to the sink now, outside the
-        queue, at ``volume_db``; whether it went. Speech always wins: refused while any job
+        queue, at ``volume_db``; the monotonic stamp until which it will have played (the sink's
+        ``playing_until`` after the push, so the piece starts its length before), 0.0 when it
+        did not go. Speech always wins: refused while any job
         (a sentence, a stream, a cue or another raw sound) is queued or in flight, a stop is
         pending, or a sentence is on the speech timeline; and on a sink that is no
         :class:`MediaSink` (never a raw job, which would open the speaking window). The check
@@ -726,13 +728,13 @@ class SpeechOutput:
         thread."""
         sink = self.sink
         if not isinstance(sink, MediaSink):
-            return False
+            return 0.0
         x = np.asarray(samples, np.float32)
         louder = np.clip(x * np.float32(db_to_gain(volume_db)), -1.0, 1.0)
         with self._lock:
             if self._media_refused():
                 self._media["refused"] += 1
-                return False
+                return 0.0
             try:
                 until = sink.push_media(louder, rate_hz)
             except Exception as exc:  # a sink bug costs the piece, never the output
@@ -740,10 +742,10 @@ class SpeechOutput:
                 until = 0.0
             if until <= 0.0:
                 self._media["failed"] += 1
-                return False
+                return 0.0
             self._media_until = until
             self._media["pushed"] += 1
-        return True
+        return until
 
     def media_blocked(self) -> bool:
         """Whether ``play_media`` would refuse now: robot speech, a cue or a raw sound is

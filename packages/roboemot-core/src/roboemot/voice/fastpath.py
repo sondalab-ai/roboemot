@@ -178,6 +178,16 @@ class FastPath:
         if self._grammar is not None:
             self._grammar.apply_config(cfg.grammar)
 
+    def server_name_close(self, text: str, language: str) -> bool:
+        """Whether a server's transcript ``text`` holds the robot's name or a close spelling of
+        it (``KeywordSpotter.name_close`` with ``voice.fastpath.server_name_max_edits`` and
+        ``server_name_min_letters``): a wake over the robot's radio is confirmed by it (SPEC 8,
+        Radio playback). Never the local recognizer's text."""
+        fp = self.cfg.fastpath
+        return self._server_spotter.name_close(
+            text, language, fp.server_name_max_edits, fp.server_name_min_letters
+        )
+
     def wake_out_of_vocab(self) -> dict[str, int]:
         """Per language, the wake phrases the recognizer can never produce (report only)."""
         return self._spotter.wake_out_of_vocab()

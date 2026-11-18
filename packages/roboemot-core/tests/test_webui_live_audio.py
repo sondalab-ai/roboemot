@@ -16,6 +16,7 @@ from roboemot.runtime.levels import AudioLevels
 from roboemot.runtime.live import LiveState
 from roboemot.webui import make_server
 from roboemot.webui.settings import SettingsEditor
+from roboemot.webui.strings import STRINGS
 from test_webui import PIN, Client, FakeService
 from test_webui_live import NOW, pipeline, switch
 
@@ -308,3 +309,10 @@ def test_the_endpoint_checks_the_transcript_flag_itself(served):
         served.host.transcript.size == 0
         and SECRET not in c.request("GET", "/api/live/audio").body.decode()
     )
+
+
+def test_the_output_meter_is_labelled_robot_output():
+    """The meter reads the speaker's whole playback reference, the radio included (SPEC 11A),
+    so it is not the robot's voice (robot run 2026-11-17: -26.7 dBFS while only music played)."""
+    assert STRINGS["en"]["live_out"] == "Robot output"
+    assert STRINGS["it"]["live_out"] == "Uscita del robot"

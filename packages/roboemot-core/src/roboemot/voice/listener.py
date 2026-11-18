@@ -71,16 +71,38 @@ speaking chunk and a chunk gap tell it where the hole began. Audio replayed by `
 fed: it is the user's voice after a cut. The wake gate asks it whether music played at any time
 in the utterance (``WakeGate``: the wake word is then required, ``rejected_music`` without it),
 also when an utterance that skipped Vosk ends. ``music.started`` and ``music.stopped`` go on the
-bus with the tempo only.
+bus with the tempo only. While the robot's own radio is audible and ``tools.radio.dance`` is on,
+the detector and the classifier hear the radio's own pieces instead of the microphone: a robot
+with a hardware echo canceller removes its radio from the microphone. The media player hands
+each piece that went to the speaker to ``hear_media`` (its feeder thread: one append to a
+bounded deque, the detector's window of pieces), stamped when it starts to play; this thread
+alone takes them and feeds them, so the detector keeps one feeding thread. The microphone's
+chunks then reach neither (no hole either: the radio's stamps carry their own holes); when the
+radio is held the microphone feeds them again once the radio's last piece has played, after one
+hole.
 
-The robot's own radio (``media_playing``, the media player, SPEC 8, Radio playback): while it
-plays, only the wake word addresses the robot (``WakeGate``, ``rejected_media``: the follow-up
-window, a face and the policy do not count), and with server turns no segment streams (the
-``media`` gate, always on: the wake gate decides each one locally). The one exception is an
-announcement's reply window (``open_follow_up``, ``reply_window_open``; owner decision
-2026-11-17): the media player keeps the radio paused while it is open, and the normal rules
-apply in it, the ``media`` gate and the name-first shortcut included. With ``tools.radio.dance``
-off the music detector ignores music while it plays: its chunks are holes to it, and
+The robot's own radio (``media_audible``, the media player's ``audible_at``, SPEC 8, Radio
+playback): while it can be heard as an utterance starts, only the wake word addresses the robot
+(``WakeGate``, ``rejected_media``: the follow-up window, a face and the policy do not count),
+and with server turns no segment streams (the ``media`` gate, always on: the wake gate decides
+each one locally). While the player holds the radio (robot speech, an open addressed turn, an
+announcement's reply window, ``open_follow_up``, ``reply_window_open``, and
+``tools.media.resume_after_s`` after them) no lyric can be heard and the normal rules apply,
+the ``media`` gate and the name-first shortcut included: "Neve" then "stoppa la musica" is a
+follow-up. An utterance the wake word addressed over the audible radio tells the player
+(``media_hold``) that its turn holds the music from its last speech, so the person's next words
+find it held even before the player's feeder saw the turn. Such a wake over the audible radio
+must be confirmed by the server's transcript when one comes: a lyric can match the name in the
+small local grammar, so a server final that holds neither the name nor a wake phrase (the
+server spotter, case-insensitive), nor a close spelling of the name (``FastPath.
+server_name_close``: "Nivea" for "Neve", never "nave"), is handed off not addressed, counted
+``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media``): the conversation deletes
+its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
+closes. A follow-up in that window decided before the verdict (the lyric's next line starts
+inside the span the hold back-dates) goes with it when its own final holds neither either.
+Otherwise a wake in a follow-up window or a reply window (the radio held) needs no
+confirmation. With ``tools.radio.dance`` off the
+music detector ignores the radio while it is audible: its chunks are holes to it, and
 ``music_state`` and the wake gate's music predicate say no music.
 
 Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
@@ -145,6 +167,8 @@ HELD_GATES = frozenset({"at_face", "facing"})
 SERVER_GATES = ("music", "other_speaker", "at_face", "facing")  # decided by the listener
 OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be off
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
+# what in the server's transcript confirms a wake over the audible radio (SPEC 8, Radio playback)
+WAKE_CONFIRMS = frozenset({"name", "wake"})
 
 
 class VoiceChunkLike(Protocol):
@@ -229,6 +253,10 @@ class _Handoff:
     stream: bool = False  # its audio is a live stream's (turns: server)
     announced: bool = False  # its stream's opening went, and that was counted
     cued: bool = False  # ... and its listening cue began (AUDIO_SENT; a barge-in's waits, S3)
+    media_wake: bool = False  # only the wake word addressed it, over the audible radio
+    # a follow-up in the window a media wake opened, decided before that wake's verdict
+    media_parent: _Handoff | None = field(default=None, repr=False)
+    unconfirmed: bool = False  # the server's words did not confirm its wake: not answered
 
 
 @dataclass
@@ -302,10 +330,21 @@ class VoiceListener:
         self._clock = clock
         self._timer = timer
         self._direction = direction
-        # whether the robot's own radio plays (the media player's ``playing``, set at start)
-        self.media_playing: Callable[[], bool] = lambda: False
-        self._gate = WakeGate(  # see apply_config; it applies the reply window itself
-            "always", 0.0, music=self._music_during, media=lambda: bool(self.media_playing())
+        # whether the robot's own radio could be heard at a stamp, and the hold of a turn the
+        # wake word opened over it (the media player's ``audible_at`` and ``hold_from``, set at
+        # start)
+        self.media_audible: Callable[[float], bool] = lambda at: False
+        self.media_hold: Callable[[float], None] = lambda at: None
+        self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
+        # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
+        # thread only; sized in apply_config to the detector's window
+        self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
+        self._music_from_media = False  # the detector's last audio was the radio's pieces
+        self._media_until = -math.inf  # where the last radio piece fed to it ends
+        self._radio_music = False  # the detector's music started on the radio's pieces
+        self._media_wake: _Handoff | None = None  # the media wake whose verdict is still due
+        self._gate = WakeGate(  # see apply_config
+            "always", 0.0, music=self._music_during, media=self._media_at
         )
         self.music: MusicDetector | None = None  # built by apply_config while music.enabled
         self.music_classifier: MusicClassifier | None = None  # set by the pipeline
@@ -336,6 +375,8 @@ class VoiceListener:
             "sent": 0,
             "transcribed": 0,
             "wake_word_heard": 0,  # the server's transcript held a wake phrase or the name
+            # a wake over the audible radio whose server transcript held neither: not answered
+            "wake_unconfirmed_media": 0,
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
             "decodes": 0,
@@ -387,6 +428,7 @@ class VoiceListener:
             "barge_ins": 0,
             "errors": 0,
             "name_first_no_face": 0,  # the name opened a long final, no face at the voice
+            "media_rate_mismatch": 0,  # a radio piece at another rate than the detector's
         }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
@@ -411,6 +453,11 @@ class VoiceListener:
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
+        pieces = max(1, round(cfg.music.window_s * MS_PER_S / cfg.tools.media.chunk_ms))
+        if self._media_pieces.maxlen != pieces or not (cfg.music.enabled and cfg.tools.radio.dance):
+            # a fresh deque, never a copy of the live one: the player's thread appends to it
+            # meanwhile; turned off, nothing stale is fed after it is turned on again
+            self._media_pieces = collections.deque(maxlen=pieces)
         if self.music is not None:  # last: a band above the Nyquist frequency raises here
             self.music.apply_config(cfg.music)
         elif cfg.music.enabled:
@@ -660,8 +707,8 @@ class VoiceListener:
         lost = 0.0
         if chunk.gap and self._last_end is not None:
             lost = max(0.0, chunk.stamp - duration - self._last_end)
-        if chunk.gap and self.music is not None:  # the hole began where the last chunk ended
-            self.music.gap(chunk.stamp - duration - lost)
+        if chunk.gap:  # the hole began where the last chunk ended
+            self._music_gap(chunk.stamp - duration - lost)
         self._last_end = chunk.stamp
         try:
             self._process(chunk, chunk.stamp - duration)
@@ -683,8 +730,7 @@ class VoiceListener:
             self._playback_ended = self._playback_ended or self._playback  # its segment is gone
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
         if self._playback and speaking and not self._playback_ended:
-            if self.music is not None:  # the robot's own sound is never music
-                self.music.gap(start)
+            self._music_gap(start)  # the robot's own sound is never music
             if start >= self._playback_until and not self._playback_confirmed():
                 # its own bound, whatever the barge-in does (S2: confirm_ms, then it ends)
                 self.end_playback()
@@ -705,8 +751,7 @@ class VoiceListener:
                 self._muted = True
                 self._abort()
             self._count("dropped_speaking")
-            if self.music is not None:
-                self.music.gap(start)
+            self._music_gap(start)
             self._speaking_hook(chunk)
             return
         if self._muted and not speaking:
@@ -729,27 +774,111 @@ class VoiceListener:
         cut left open) is a hole to it: the robot's own sound must never count as music. The
         classifier gets the same chunks (the ``music_classifier`` stage), and while it decides
         (``music.classifier.decides``) its scores go to the detector. While the robot's own
-        radio plays with ``tools.radio.dance`` off, every chunk is a hole as well."""
-        speaking = speaking or self._music_hidden()
+        radio is audible with ``tools.radio.dance`` off, every chunk is a hole as well; with it
+        on, the detector hears the radio's own pieces instead (``_hear_media``) and the
+        microphone's chunk not at all: behind a hardware echo canceller it holds the room
+        without the radio, and its stamps would mix two timelines."""
+        if self._media_feeds(start):
+            self._hear_media()
+            return
+        if self._music_from_media:
+            self._media_pieces.clear()
+            if start < self._media_until:  # the radio's last piece is still playing
+                return
+            self._music_from_media = False
+            if not self._media_set():  # the station stopped: room music counts again
+                self._radio_music = False
+            self._music_gap(self._media_until)  # one hole, from the radio's last piece
+        speaking = speaking or self._music_hidden(start)
+        if speaking:
+            self._music_gap(start)
+        self._music_audio(chunk.samples, start, chunk.stamp, heard=not speaking)
+
+    def _music_audio(self, samples: np.ndarray, start: float, end: float, heard: bool) -> None:
+        """One piece of audio for the classifier and the detector (``heard`` False: the
+        classifier skips it; the caller told the detector the hole). Publishes a change, at
+        ``end``: for a radio piece that is when it will have played, so the music state may
+        lead the sound by up to one piece (the player pushes the next piece while the speaker
+        still holds one)."""
         classifier, scores = self.music_classifier, None
-        if not speaking and classifier is not None:
-            scores = self._timed("music_classifier", classifier.feed, chunk.samples, start)
+        if heard and classifier is not None:
+            scores = self._timed("music_classifier", classifier.feed, samples, start)
         music = self.music
         if music is None:
             return
         music.classifier_primary = (
             classifier is not None and classifier.running and self._cfg.music.classifier.decides
         )
-        if speaking:
-            music.gap(start)
+        if not heard:
             return
         if scores is not None:
-            self._publish_music(music, music.classified(*scores, start), chunk.stamp)
-        event = self._timed("music", music.feed, chunk.samples, start)
-        self._publish_music(music, event, chunk.stamp)
+            self._publish_music(music, music.classified(*scores, start), end)
+        event = self._timed("music", music.feed, samples, start)
+        self._publish_music(music, event, end)
+
+    def _media_set(self) -> bool:
+        """Whether a station is set, held or not (the media player's ``playing``): music the
+        detector started on the radio's pieces is ignored only while it is."""
+        try:
+            return bool(self.media_set())
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+            return False
+
+    def _music_gap(self, stamp: float) -> None:
+        """A hole in the microphone's audio at ``stamp`` for the detector; none while it hears
+        the radio's pieces, whose own stamps show their holes."""
+        if self.music is not None and not self._music_from_media:
+            self.music.gap(stamp)
+
+    def _media_feeds(self, at: float) -> bool:
+        """Whether the detector hears the radio's pieces now: a detector, ``music.enabled``,
+        ``tools.radio.dance``, and the radio audible at ``at`` (SPEC 8, Radio playback). At the
+        switch back to the microphone the detector sees one hole, from the end of the radio's
+        last piece to the first microphone chunk after it (microphone chunks before it are
+        skipped: they overlap the radio's timeline); a short hole keeps its envelope, a long
+        one clears it, as any hole."""
+        cfg = self._cfg
+        if self.music is None or not cfg.music.enabled or not cfg.tools.radio.dance:
+            return False
+        return self._media_at(at)
+
+    def hear_media(self, samples: np.ndarray, rate_hz: int, start: float) -> None:
+        """A piece of the robot's own radio that went to the speaker and starts to play at
+        ``start`` (the media player's ``on_piece``, its feeder thread): kept for the music
+        detector while it may dance to the radio (``_media_feeds``), at most the detector's
+        window of pieces. Never blocks: one append to a bounded deque (thread-safe), taken
+        by the listener thread only. A piece at another rate than the detector's is dropped
+        (the player decodes at ``voice.sample_rate_hz``, as the detector runs)."""
+        cfg = self._cfg
+        if self.music is None or not cfg.music.enabled or not cfg.tools.radio.dance:
+            return
+        if rate_hz != cfg.voice.sample_rate_hz:
+            self._count("media_rate_mismatch")
+            return
+        self._media_pieces.append((samples, start))
+
+    def _hear_media(self) -> None:
+        """Feed the detector (and the classifier) the radio's pieces waiting, in play order,
+        on this thread: the same analysis as for a microphone chunk, never a second decode."""
+        self._music_from_media = True
+        rate = self._cfg.voice.sample_rate_hz
+        while self._media_pieces:
+            try:
+                samples, start = self._media_pieces.popleft()
+            except IndexError:  # emptied by a reload meanwhile
+                return
+            end = start + samples.size / rate
+            if end <= self._media_until:  # out of order: never feed the detector backwards
+                continue
+            self._media_until = end
+            self._music_audio(samples, start, end, heard=True)
 
     def _publish_music(self, music: MusicDetector, event: str | None, stamp: float) -> None:
-        """Put a change of the music state on the bus; no change publishes nothing."""
+        """Put a change of the music state on the bus; no change publishes nothing. A start
+        notes whether the detector heard it on the radio's pieces (``_music_during``)."""
+        if event is not None:
+            self._radio_music = event == STARTED and self._music_from_media
         if event is None or self._bus is None:
             return
         topic = "music.started" if event == STARTED else "music.stopped"
@@ -762,11 +891,16 @@ class VoiceListener:
     def _music_during(self, start: float, end: float) -> bool:
         """The wake gate's music predicate: whether music played at any time in [start, end]
         (lock-free, one frozen view of the detector). False without a detector, while
-        ``music.enabled`` is off, or while the radio plays with ``tools.radio.dance`` off."""
+        ``music.enabled`` is off, while the radio is audible with ``tools.radio.dance`` off, and
+        while a station is set and the music the detector holds started on the radio's own
+        pieces: while the radio is audible the media rule covers it, and while the radio is
+        held no lyric can be heard, though the detector carries that music through the hold for
+        the dance (SPEC 8, Radio playback). Music it heard on the microphone counts as ever, and
+        so does music once the station stopped (room music right after the radio)."""
         music = self.music
-        if music is None or not self._cfg.music.enabled or self._music_hidden():
+        if music is None or not self._cfg.music.enabled or self._music_hidden(start):
             return False
-        return music.during(start, end)
+        return not (self._radio_music and self._media_set()) and music.during(start, end)
 
     def music_state(self, now: float) -> MusicState | None:
         """The detector's state at ``now`` for the dance's room beat (lock-free, no blocking);
@@ -775,20 +909,32 @@ class VoiceListener:
         music = self.music
         if music is None or not self._cfg.music.enabled:
             return None
-        if self._music_hidden():
+        if self._music_hidden(now):
             return MusicState(False, None, None, 0.0, now)
         return music.state(now)
 
-    def _media_now(self) -> bool:
-        """Whether the robot's own radio plays now and no announcement's reply window holds it
-        paused (the ``media`` stream gate, the name-first shortcut, the dance switch). Not the
-        wake gate's predicate: the gate applies the reply window under its own lock."""
-        return bool(self.media_playing()) and not self.reply_window_open()
+    def _media_at(self, at: float) -> bool:
+        """Whether the robot's own radio could be heard at ``at`` (the media player's
+        ``audible_at``): the wake gate's media rule, the ``media`` stream gate, the name-first
+        shortcut, the dance switch. Takes only the player's leaf lock, never the wake gate's,
+        so the gate may ask it under its own lock."""
+        try:
+            return bool(self.media_audible(at))
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+            return False
 
-    def _music_hidden(self) -> bool:
-        """Whether the detector ignores music now: the radio plays and ``tools.radio.dance`` is
-        off (SPEC 8, Radio playback)."""
-        return not self._cfg.tools.radio.dance and self._media_now()
+    def _music_hidden(self, at: float) -> bool:
+        """Whether the detector ignores music at ``at``: the radio is audible and
+        ``tools.radio.dance`` is off (SPEC 8, Radio playback)."""
+        return not self._cfg.tools.radio.dance and self._media_at(at)
+
+    def _hold_media(self, at: float) -> None:
+        """Tell the media player an addressed turn holds the radio from ``at``."""
+        try:
+            self.media_hold(at)
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
 
     def _own_sound_cut(self) -> bool:
         """Someone's speech is in progress or starting as the speaking window opens: cut the
@@ -1052,9 +1198,9 @@ class VoiceListener:
         the music detector (``music.enabled``), ``at_face`` and ``facing`` without the voice
         direction, ``facing`` without ``voice.facing.enabled``. The verdict of the voice-at-face
         check is kept, so the wake gate does not ask it again. While the robot's own radio
-        plays, ``media`` keeps every segment local whatever is listed (SPEC 8, Radio playback:
-        only the wake word addresses the robot then)."""
-        if self._media_now():
+        can be heard as the segment starts, ``media`` keeps every segment local whatever is
+        listed (SPEC 8, Radio playback: only the wake word addresses the robot then)."""
+        if self._media_at(s.start):
             return "media"
         gates = self._cfg.voice.realtime_route.server_gates
         if "music" in gates:
@@ -1293,6 +1439,7 @@ class VoiceListener:
         addressed = not outcome.startswith("rejected")
         p = self._handoff_for(ev, face)
         p.addressed = addressed
+        self._note_wake(p, outcome)
         if addressed:
             self._decided(p, outcome, "")  # its CPU fallback; words come with its final
         if addressed:
@@ -1528,11 +1675,12 @@ class VoiceListener:
             face = p.face
             at_face = self._checked(p) if face is None else (lambda: face)
             wake = kind == WAKE
+            media = self._media_at(ev.start_stamp)
             if kind == NAME_FIRST:
-                # while the robot's own radio plays the wake word is required anyway and the
-                # sound direction is muted (own sound): the name opening the text wakes it
+                # while the robot's own radio is audible the wake word is required anyway and
+                # the sound direction is muted (own sound): the name opening the text wakes it
                 # without the voice-at-face check (controller ruling, SPEC 8 Radio playback)
-                if self._media_now():
+                if media:
                     wake = True
                 else:
                     wake, at_face = self._name_first_at_face(at_face)
@@ -1546,6 +1694,10 @@ class VoiceListener:
             )
             p.addressed = not outcome.startswith("rejected")
             self._decided(p, outcome, text)
+            if p.addressed and media:  # its turn holds the radio from its last speech
+                self._hold_media(ev.last_speech_stamp)
+            p.media_wake = media and outcome == "wake_word"
+            self._note_wake(p, outcome)
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)
@@ -1555,6 +1707,33 @@ class VoiceListener:
             return None
         self._finish(p, text, p.grammar_pass, heard, local_only=p.local_only)
         return None
+
+    def _note_wake(self, p: _Handoff, outcome: str) -> None:
+        """Keep the wake decision's media context: a wake opens a new window (the pending media
+        wake is ``p`` when it was one over the audible radio, else none), and a follow-up in the
+        window of a media wake whose server verdict is still due remembers that wake."""
+        if outcome == "wake_word":
+            self._media_wake = p if p.media_wake else None
+        elif outcome == "window" and self._media_wake is not None:
+            p.media_parent = self._media_wake
+
+    def _confirms(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
+        """Whether ``p``'s final confirms a wake over the radio: a wake phrase or the name in
+        it, or, in a server's transcript, a close spelling of the name (owner decision
+        2026-11-17: the server wrote "Nivea" for "Neve")."""
+        if fast.keywords & WAKE_CONFIRMS:
+            return True
+        return server and self._fast.server_name_close(text, p.language)
+
+    def _unconfirmed(self, p: _Handoff, server: bool) -> bool:
+        """Whether ``p``'s wake over the radio is not confirmed (its final holds neither the
+        name nor a wake phrase, checked by the caller): its own server final, or the media wake
+        whose window it followed in was not confirmed (hand-offs keep their order, so that
+        verdict is in)."""
+        if server and p.media_wake:
+            return True
+        parent = p.media_parent
+        return parent is not None and parent.unconfirmed
 
     def _name_first_at_face(self, at_face: AtFace | None) -> tuple[bool, AtFace | None]:
         """The name opened a long final (``NAME_FIRST``): it wakes the robot only when the
@@ -1655,6 +1834,17 @@ class VoiceListener:
         addressed = bool(p.addressed)
         if server and fast.wake_word:
             self._count_audio("wake_word_heard")
+        if addressed and self._unconfirmed(p, server) and not self._confirms(fast, text, p, server):
+            # the local wake over the radio was a lyric the recognizer took for the name: the
+            # server's words hold no name and no wake phrase, so it is not answered (SPEC 8)
+            addressed = p.addressed = False
+            p.unconfirmed = True
+            self._count_audio("wake_unconfirmed_media")
+            self.events("unanswered", "media")  # the Live tab: the wake word was not heard
+            if self._media_wake is p:  # no wake since: the window it opened was a lyric's
+                self._gate.close_window()
+        if self._media_wake is p:  # its verdict is in
+            self._media_wake = None
         self._fast.impulses(fast, addressed, state=p.state)
         utterance = Utterance(
             text,

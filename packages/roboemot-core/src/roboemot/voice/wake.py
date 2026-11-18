@@ -21,17 +21,21 @@ SPEC 8) the wake word is required whatever the policy, and the open window does 
 without the wake word the outcome is ``rejected_music``, before any other rule and without the
 voice-at-face check. An utterance with the wake word is addressed over music as without it.
 
-While the robot's own radio plays (``media()``, the media player, SPEC 8, Radio playback) the
-same holds with the outcome ``rejected_media``: only the wake word (the name or a generic wake
-phrase) addresses the robot, so it never answers the lyrics of its own music. The follow-up
-window, a face in view and the policy do not count. It is asked before the music rule.
+While the robot's own radio can be heard as the utterance starts (``media(start)``, the media
+player's ``audible_at``, SPEC 8, Radio playback) the same holds with the outcome
+``rejected_media``: only the wake word (the name or a generic wake phrase) addresses the robot,
+so it never answers the lyrics of its own music. The follow-up window, a face in view and the
+policy do not count. It is asked before the music rule. While the player holds the radio (robot
+speech, an open addressed turn, an announcement's reply window, and ``resume_after_s`` after
+them) no lyric can be heard, so the normal rules apply: "Neve" then "stoppa la musica" is a
+follow-up in the window the name opened. An utterance is decided by its start stamp, so one that
+started while the radio was held keeps the normal rules.
 
-One window does count while a station is set: the reply window a robot-initiated turn opens
-(``open_window``, an announcement; owner decision 2026-11-17). The media player keeps the radio
-paused while it is open (``reply_window``), so no lyric can be heard in it, and the normal rules
-apply: a follow-up extends it, never past ``window_max_s``. When it closes (on time, or
-``close_window``) the media rule applies again. A window the wake word opened is not a reply
-window, so the radio's lyrics after a turn with the name are still rejected.
+A robot-initiated turn's reply window (``open_window``, an announcement; owner decision
+2026-11-17) is one such hold: the media player keeps the radio paused while it is open
+(``reply_window``), so the media rule does not apply in it and a follow-up extends it, never
+past ``window_max_s``. A window the wake word opened is not a reply window: the radio rejoins
+after the turn, and its lyrics are then rejected.
 """
 
 from __future__ import annotations
@@ -60,7 +64,7 @@ NOT_FACING = "not_facing"
 NO_FACING_DATA = "no_facing_data"
 AtFace = Callable[[], str]
 Music = Callable[[float, float], bool]  # music at any time in [start, end] (audio clock)
-Media = Callable[[], bool]  # the robot's own radio plays now
+Media = Callable[[float], bool]  # the robot's own radio could be heard at a stamp
 
 
 class WakeGate:
@@ -75,8 +79,9 @@ class WakeGate:
         media: Media | None = None,
     ) -> None:
         """``music`` says whether music played in [start, end] (None: never); ``media``
-        whether the robot's own radio plays now (None: never). Both run under this gate's lock,
-        like ``at_face``, so they may take only leaf locks."""
+        whether the robot's own radio could be heard at a stamp (None: never). Both run under
+        this gate's lock, like ``at_face``, so they may take only leaf locks (never this gate's
+        own: ``reply_window`` takes it)."""
         self._lock = threading.Lock()
         self._music = music
         self._media = media
@@ -105,7 +110,7 @@ class WakeGate:
         """Open the follow-up window at ``at`` (audio clock) as an addressed utterance ending
         then would: a robot-initiated turn's reply ended (SPEC 8, Conversation state), so the
         person can answer without the wake word. Any speaker may follow it. It is a reply
-        window: it counts while the robot's own radio is set (module docstring)."""
+        window: the media player holds the radio while it is open (module docstring)."""
         with self._lock:
             self._opened, self._speaker, self._reply = at, None, True
             self._until = at + min(self._window, self._max)
@@ -156,7 +161,7 @@ class WakeGate:
         """``decide`` with its outcome (one of ``DECISIONS``): a ``rejected_*`` one is not
         addressed, and says which rule rejected it (the Live tab's decision event)."""
         with self._lock:
-            media = self._media_now() and not self._reply_at(start)
+            media = self._media_at(start)
             music = media or self._music_in(start, last_speech)
             required = self._required(enrolled_in_view) or music
             if not required:
@@ -193,7 +198,7 @@ class WakeGate:
         Nothing is counted or changed: the listener asks it when speech starts and when it ends
         (SPEC 8, Realtime speech route), ``decide`` still decides."""
         with self._lock:
-            if self._media_now() and not self._reply_at(start):
+            if self._media_at(start):
                 return False
             music = self._music_in(start, start if end is None else end)
             required = self._required(enrolled_in_view) or music
@@ -212,9 +217,10 @@ class WakeGate:
         music predicate. Asked once per decision, so the rule and its reason agree."""
         return self._music is not None and self._music(start, end)
 
-    def _media_now(self) -> bool:
-        """Whether the robot's own radio plays now (lock held); False without a predicate."""
-        return self._media is not None and self._media()
+    def _media_at(self, start: float) -> bool:
+        """Whether the robot's own radio could be heard at ``start`` (lock held); False without
+        a predicate."""
+        return self._media is not None and self._media(start)
 
     def _follow(self, start: float, speaker: str | None, music: bool = False) -> str:
         """Outcome of an utterance without the wake word: ``rejected_music`` while music
