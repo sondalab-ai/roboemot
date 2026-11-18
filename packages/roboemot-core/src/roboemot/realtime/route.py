@@ -486,8 +486,8 @@ class RealtimeRoute:
         # the event ids of the robot's own cancels: an error about one is benign (nothing was
         # active any more, the server's own interrupt came first), never a declined answer
         self._cancel_ids: collections.deque[str] = collections.deque(maxlen=CANCELS_KEPT)
-        # what a stream's opening session.update carries: the instructions and tools a turn
-        # would send (the worker's), so the server's own answer reads them
+        # what a stream's opening (and a burst's) session.update carries: the instructions and
+        # tools a turn would send (the worker's), so the server's own answer reads them
         self.stream_session: Callable[[Any], tuple[str, Any]] = lambda job: (
             self.base_instructions(),
             None,

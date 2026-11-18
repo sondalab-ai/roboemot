@@ -222,6 +222,35 @@ def test_later_session_update_is_context_before_the_next_activity():
     assert "clientContent" not in burst(w)[0]
 
 
+def test_an_addressed_burst_sends_the_open_hint_before_its_activity():
+    """Robot run 2026-11-18: the setup held state ``none``; a burst the wake word addressed
+    goes with the ``addressed`` instructions, so the open hint reaches Gemini as context right
+    before the activity it answers (and the start rule is not in it)."""
+    from roboemot.config import ConfigStack
+    from roboemot.config.schema import RegisterParams
+    from roboemot.llm.prompt import (
+        ADDRESSED,
+        NO_CONVERSATION,
+        open_prompts,
+        realtime_instructions,
+        start_prompts,
+    )
+
+    cfg = ConfigStack(
+        app={"voice": {"realtime_route": {"skip_tool": True}}, "conversation": {"language": "it"}}
+    ).effective()
+    reg = RegisterParams()
+    w = GeminiWire(MODEL, MAX)
+    w.encode(update(instructions=realtime_instructions(cfg, reg, conversation=NO_CONVERSATION)))
+    w.decode(frame({"setupComplete": {}}))
+    send(w, update(instructions=realtime_instructions(cfg, reg, conversation=ADDRESSED)))
+    frames = burst(w)
+    assert frames[1] == {"realtimeInput": {"activityStart": {}}}
+    context = frames[0]["clientContent"]["turns"][0]["parts"][0]["text"]
+    assert context.startswith("[Updated instructions]\n")
+    assert open_prompts()["it"] in context and start_prompts()["it"] not in context
+
+
 def test_unchanged_instructions_send_no_context():
     w = wire()
     send(w, update(instructions="Sei Neve."))

@@ -1352,7 +1352,8 @@ class ConversationWorker:
         (``shown``) for its server turn. Whatever fails here, or a loop busy past the
         active route's ``connect_timeout_s`` (else the shared one), the opening goes with parts
         1 to 4 and the session's tools as they are (counted ``stream_session_fallbacks``): a
-        stream never stops on it."""
+        stream never stops on it. A robot-turn burst's update asks it too (on the input thread;
+        its tools are not sent): Gemini answers the burst's commit with these instructions."""
         return self._session_parts(lambda: self._stream_session_on_loop(job))
 
     def _connect_session(self, generation: int, wait_s: float) -> tuple[str, Any]:
@@ -1391,11 +1392,14 @@ class ConversationWorker:
         self, job: Any, generation: int | None = None
     ) -> tuple[str, list[dict[str, Any]]]:
         """The instructions and tools a fresh turn would send now (``_stream_session``); the
-        skills shown go on ``job`` when there is one; the replay is for ``generation``."""
+        skills shown go on ``job`` when there is one; the replay is for ``generation``. A burst
+        job the local wake word addressed (``wake_word``) is in state ``addressed``; a stream
+        opens before any wake decision, so it never is."""
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
-        utterance = Utterance("", language, now, now, now, True, False, frozenset(), quiet)
+        wake = bool(getattr(job, "wake_word", False))  # a burst the wake word addressed
+        utterance = Utterance("", language, now, now, now, True, wake, frozenset(), quiet)
         turn = _Turn(utterance, cfg, language, self._register_for(cfg), 0, 0)
         if cfg.voice.realtime_route.skip_tool:
             turn.conversation = self._conversation_state(utterance, cfg, now)

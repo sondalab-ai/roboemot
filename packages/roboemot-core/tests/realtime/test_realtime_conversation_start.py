@@ -164,6 +164,51 @@ def test_without_the_skip_tool_no_hint_and_no_count(rigs):
         assert snap["turns_by_state"] == zero() and snap["skipped_by_state"] == zero()
 
 
+# ------------------------------------------------------------------ the burst's update
+
+
+def burst_instructions(server) -> str:
+    """The instructions of the ``session.update`` right before the first audio append: what a
+    server that answers the commit by itself (Gemini) reads for that turn."""
+    kinds = server.kinds()
+    first = kinds.index("input_audio_buffer.append")
+    assert kinds[first - 1] == "session.update"
+    return server.received[first - 1]["session"]["instructions"]
+
+
+def heard_burst(server, *, policy: str, script: list[str], bearing=None) -> str:
+    from test_realtime_listener import Ear
+
+    app = {"privacy": {"realtime_audio": True}, "voice": {"wake_word_policy": policy}}
+    rig = build_rt(server, rt={"input": "audio", **SKIP}, app=app)
+    ear = Ear(rig, script=script, bearing=bearing)
+    try:
+        ear.say()
+        assert ear.settle(lambda: len(server.of("input_audio_buffer.commit")) == 1)
+        return burst_instructions(server)
+    finally:
+        ear.close()
+        rig.close()
+
+
+def test_a_burst_the_wake_word_addressed_says_the_conversation_is_open():
+    """Robot run 2026-11-18 (Gemini, radio playing): "hey neve ferma la musica" was addressed
+    by the local wake word, but its burst went with the start rule, so Gemini, which answers
+    the commit before the route's response.create, skipped it. The burst's own update now
+    carries the open hint."""
+    with TurnServer(heard=[["ciao robot accendi la luce"]]) as server:
+        text = heard_burst(server, policy="always", script=["ciao robot accendi"])
+    assert open_prompts()["it"] in text and start_prompts()["it"] not in text
+
+
+def test_a_burst_addressed_without_the_wake_word_keeps_the_start_rule():
+    from test_realtime_listener import FACE_RAD
+
+    with TurnServer(heard=[["accendi la luce"]]) as server:
+        text = heard_burst(server, policy="never", script=["accendi la luce"], bearing=FACE_RAD)
+    assert start_prompts()["it"] in text and open_prompts()["it"] not in text
+
+
 class Spoken:
     """The speech output as ``_finish`` reads it: which jobs played, and when each ended."""
 
