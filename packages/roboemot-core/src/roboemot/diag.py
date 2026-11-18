@@ -9,12 +9,19 @@ language-free.
 Producers hold a settable ``events`` attribute (an :data:`EventSink`, :func:`no_events` until the
 runtime wires :class:`BusEvents`), so publishing costs one small dict and never raises or waits on
 I/O: the bus calls its subscribers in the publisher's thread and the ring holds a leaf lock only
-for a compare and a deque append.
+for a compare, a deque append and a pass over its small ring.
 
 Privacy (SPEC 12): an event holds codes and numbers only, by allow-list. ``kind`` and ``reason``
 must be in ``REASONS``; :func:`clean` keeps only the declared fields (``FIELDS``): a number field
 a finite number, a flag a bool, a code field one of its enumerated values (any other string
 becomes ``OTHER``). A word, a name, a key, audio or an embedding never leaves the producer.
+
+One exception, by allow-list too (``TEXT_EVENTS``): the ``unanswered``/``media_unconfirmed``
+event (a wake over the radio the server's transcript did not confirm, SPEC 8) may carry that
+transcript as ``heard``, so the owner can see what the server wrote for the name. The listener
+puts it there only while the Live tab and its transcript are on (``webui.live.transcript``), cut
+to ``webui.live.transcript_max_chars``; the ring keeps it under the transcript's own rules (off,
+asleep, ``transcript_max_age_s``). Nothing here logs an event, and no debug report reads the ring.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "no_facing_data",
         "music",
         "media",
+        "media_unconfirmed",  # a wake over the radio the server's transcript did not confirm
         "skipped",
         "skipped_late",
         "stop_consumed",
@@ -133,6 +141,8 @@ CUE_RESULTS = (
 FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
 PATHS = ("vad", "onset", "keyword")
 NUMBER, FLAG = "number", "flag"  # a field that holds a number, a field that holds a bool
+TEXT = "text"  # a field that holds words: kept only on an event of ``TEXT_EVENTS``
+TEXT_EVENTS = frozenset({("unanswered", "media_unconfirmed")})  # the only ones text rides on
 
 FIELDS: dict[str, tuple[str, ...] | str] = {
     "cue": CUE_KINDS,
@@ -169,7 +179,9 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "moving": FLAG,
     "ducking": FLAG,
     "request": FLAG,
+    "heard": TEXT,  # the server's words of an unconfirmed wake over the radio (TEXT_EVENTS)
 }
+TEXT_FIELDS = tuple(key for key, spec in FIELDS.items() if spec == TEXT)
 
 EventSink = Callable[..., None]
 
@@ -188,17 +200,21 @@ def exception_code(exc: BaseException) -> str:
     return EXCEPTIONS.get(type(exc).__name__, OTHER)
 
 
-def clean(fields: dict[str, Any]) -> dict[str, Any]:
+def clean(fields: dict[str, Any], *, text: bool = False) -> dict[str, Any]:
     """The fields that may leave a producer (SPEC 12): only the declared ones (``FIELDS``), a
     number field with a finite number, a flag with a bool, a code field with one of its values
-    (``OTHER`` for any other string); None for any of them. Everything else is dropped."""
+    (``OTHER`` for any other string); None for any of them. A text field is kept, as a string,
+    only with ``text`` (an event of ``TEXT_EVENTS``). Everything else is dropped."""
     out: dict[str, Any] = {}
     for key, value in fields.items():
         spec = FIELDS.get(key) if isinstance(key, str) else None
-        if spec is None:
+        if spec is None or (spec == TEXT and not text):
             continue
         if value is None:
             out[key] = None
+        elif spec == TEXT:
+            if isinstance(value, str):
+                out[key] = value
         elif spec == FLAG:
             if isinstance(value, bool):
                 out[key] = value
@@ -233,7 +249,8 @@ class BusEvents:
     def __call__(self, kind: str, reason: str, **fields: Any) -> None:
         try:
             kind, reason = event_kind(kind, reason)
-            event = {**clean(fields), "kind": kind, "reason": reason, "t": self._wall()}
+            text = (kind, reason) in TEXT_EVENTS
+            event = {**clean(fields, text=text), "kind": kind, "reason": reason, "t": self._wall()}
             self._bus.publish(TOPIC, event, self._clock())
         except Exception as exc:
             log.warning("diag: event not published (%s)", type(exc).__name__)
@@ -241,9 +258,14 @@ class BusEvents:
 
 class EventRing:
     """The last ``webui.live.activity_events`` events, newest first on read, each with a ``seq``.
-    ``on_message`` (a bus subscriber, any thread) appends under a leaf lock held for a compare
-    and an append; ``apply_config`` resizes, and turning the Live tab or the panel off forgets
-    them and stops collecting."""
+    ``on_message`` (a bus subscriber, any thread) appends under a leaf lock held for a compare,
+    an append and a pass over the (small) ring for the text age bound; ``apply_config``
+    resizes, and turning the Live tab or the panel off forgets them and stops collecting. A text
+    field (``TEXT_FIELDS``) follows the live transcript's rules (SPEC 12): kept only while
+    ``webui.live.transcript`` is on and the robot is awake, cut to ``transcript_max_chars``, and
+    forgotten past ``transcript_max_age_s`` (on append, on read and on the app tick's ``trim``),
+    when the transcript turns off or the robot falls asleep; its event stays, without the
+    words."""
 
     def __init__(self, live_cfg: Any, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
@@ -253,10 +275,12 @@ class EventRing:
             maxlen=live_cfg.activity_events
         )
         self._on = False
+        self._asleep = False
         self.apply_config(live_cfg)
 
     def apply_config(self, live_cfg: Any) -> None:
-        """Hot reload of ``webui.live``: collect while ``enabled`` and ``activity`` are on."""
+        """Hot reload of ``webui.live``: collect while ``enabled`` and ``activity`` are on, keep
+        text while ``transcript`` is on too."""
         on = bool(live_cfg.enabled and live_cfg.activity)
         with self._lock:
             if not on:
@@ -264,6 +288,43 @@ class EventRing:
             if self._events.maxlen != live_cfg.activity_events:
                 self._events = collections.deque(self._events, maxlen=live_cfg.activity_events)
             self._on = on
+            self._text = bool(live_cfg.transcript)
+            self._max_chars = live_cfg.transcript_max_chars
+            self._max_age_s = live_cfg.transcript_max_age_s
+            if not self._text:
+                self._forget_text_locked(None)
+
+    def set_asleep(self, asleep: bool) -> None:
+        """The robot fell asleep (True: its events lose their words and no new words are kept,
+        as the live transcript is cleared) or woke up."""
+        with self._lock:
+            self._asleep = asleep
+            if asleep:
+                self._forget_text_locked(None)
+
+    def trim(self) -> None:
+        """Forget the words of events older than ``transcript_max_age_s``. Called from the app
+        tick, so they do not outlive the bound in memory when nobody polls."""
+        if self._events:
+            with self._lock:
+                self._forget_text_locked(self._clock() - self._max_age_s)
+
+    def _forget_text_locked(self, before: float | None) -> None:
+        """Drop the text fields of the kept events (only those stamped before ``before``)."""
+        for event in self._events:
+            if before is None or event["_at"] < before:
+                for key in TEXT_FIELDS:
+                    event.pop(key, None)
+
+    def _text_locked(self, event: dict[str, Any]) -> None:
+        """Cut ``event``'s text fields, or drop them while text is not kept."""
+        for key in TEXT_FIELDS:
+            if key not in event:
+                continue
+            if self._text and not self._asleep and isinstance(event[key], str):
+                event[key] = event[key][: self._max_chars]
+            else:
+                del event[key]
 
     def attach(self, bus: Any) -> Callable[[], None]:
         """Subscribe to ``diag.event`` on ``bus``; returns the unsubscribe."""
@@ -273,10 +334,12 @@ class EventRing:
         """Keep one event. One that repeats the newest one (the same kind, reason and labels;
         its numbers may differ) replaces it with ``count`` one higher, so a run of the same
         rejection (a television) cannot push the rest out."""
-        with self._lock:  # a leaf lock held for a compare and an append
+        with self._lock:  # a leaf lock held for a compare, an append and the text age pass
             if not self._on:
                 return
             event = {**msg.payload, "seq": next(self._seq), "_at": msg.stamp, "count": 1}
+            self._text_locked(event)
+            self._forget_text_locked(msg.stamp - self._max_age_s)
             events = self._events
             last = events[-1] if events else None
             if last is not None and _labels(last) == _labels(event):
@@ -285,8 +348,10 @@ class EventRing:
             events.append(event)
 
     def events(self) -> list[dict[str, Any]]:
-        """The events, newest first, without the internal monotonic stamp."""
+        """The events, newest first, without the internal monotonic stamp (and without the
+        words of one older than ``transcript_max_age_s``)."""
         with self._lock:
+            self._forget_text_locked(self._clock() - self._max_age_s)
             rows = list(self._events)
         return [{k: v for k, v in e.items() if k != "_at"} for e in reversed(rows)]
 
@@ -318,6 +383,8 @@ __all__ = [
     "REASONS",
     "ROUTE_REASONS",
     "SERVER_CODES",
+    "TEXT_EVENTS",
+    "TEXT_FIELDS",
     "TOPIC",
     "BusEvents",
     "EventRing",

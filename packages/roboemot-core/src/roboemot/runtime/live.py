@@ -18,8 +18,9 @@ most once per ``webui.live.system_cache_s``.
 ``activity`` is the "What's happening" panel (``webui.live.activity``): a status code for what the
 robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
-Codes and numbers only: the page builds the sentences in its language. A host without voice has
-no route or listener (None): the status then comes from the other parts.
+Codes and numbers only (but the server's words of an unconfirmed radio wake, ``diag.TEXT_EVENTS``,
+with the live transcript on): the page builds the sentences in its language. A host without voice
+has no route or listener (None): the status then comes from the other parts.
 
 ``prompts`` is the LLM prompts panel (``webui.live.prompts``, opt-in): the host's ``PromptRing``
 of cloud requests as they left, read behind the same cursor as the transcript.

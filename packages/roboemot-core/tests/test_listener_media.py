@@ -77,6 +77,22 @@ def test_policy_and_a_face_do_not_address_while_media_plays():
         assert r.utterances[-1].addressed
 
 
+def test_a_local_media_reject_carries_no_words_even_with_the_live_transcript_on():
+    """``rejected_media`` (no wake word over the radio, decided locally) keeps its own reason
+    and never the heard words: only the server's unconfirmed wake carries them (SPEC 12)."""
+    data = cfg("never").model_dump()
+    data["webui"]["live"].update(enabled=True, transcript=True)
+    r = Rig(["come stai"], cfg=RoboEmotConfig.model_validate(data))
+    r.listener.media_audible = lambda at: True
+    seen = []
+    r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
+    r.say()
+    assert not r.utterances[-1].addressed
+    media = [f for k, why, f in seen if (k, why) == ("unanswered", "media")]
+    assert media and all("heard" not in f for f in media)
+    assert all(why != "media_unconfirmed" for _, why, _ in seen)
+
+
 def test_the_wake_word_addresses_the_robot_while_media_plays():
     """The robot's name and a generic wake phrase both still work."""
     for final in ("reati spegni la radio", "ehi robot spegni la radio"):
