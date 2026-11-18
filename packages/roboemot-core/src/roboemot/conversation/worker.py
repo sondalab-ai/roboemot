@@ -1400,7 +1400,7 @@ class ConversationWorker:
         cfg, now = self.stack.effective(), self.clock()
         language = cfg.conversation.language
         quiet = Prosody(0.0, None, None, 0.0)
-        wake = bool(getattr(job, "wake_word", False))  # a burst the wake word addressed
+        wake = job is not None and job.wake_word  # a burst the wake word addressed
         utterance = Utterance("", language, now, now, now, True, wake, frozenset(), quiet)
         turn = _Turn(utterance, cfg, language, self._register_for(cfg), 0, 0)
         if cfg.voice.realtime_route.skip_tool:
@@ -1408,7 +1408,7 @@ class ConversationWorker:
         offered, choices, functions, toned = self._rt_tools(turn)
         # a burst's update leaves the tools as they are: the tone rule only while the session
         # holds the tool (SPEC 8, Tone tool)
-        burst = job is not None and not getattr(job, "stream", True)
+        burst = job is not None and not job.stream
         held = self.realtime is not None and TONE_TOOL in self.realtime.tools_offered
         instructions = self._rt_instructions(
             turn, self._delivery(turn), generation=generation, tone_rule=held or not burst

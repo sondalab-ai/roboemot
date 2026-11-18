@@ -201,13 +201,13 @@ def test_a_job_cancelled_while_it_is_prepared_is_never_sent(rig_for):
     with TurnServer() as server:
         rig = rig_for(server)
         jobs = []
-        base = rig.route.base_instructions
+        base = rig.route.stream_session
 
-        def slow():
+        def slow(job):
             rig.input.cancel(jobs[0])  # the listener's deadline passes right now
-            return base()
+            return base(job)
 
-        rig.route.base_instructions = slow
+        rig.route.stream_session = slow
         jobs.append(rig.input.submit(speech(0.5), RATE))
         assert wait_for(lambda: rig.route.snapshot()["audio_refused"] == 1)
         assert rig.route.snapshot()["audio_blocked"] == "cancelled"
