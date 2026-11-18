@@ -13,8 +13,7 @@ import pytest
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import RegisterParams
 from roboemot.conversation.worker import TONE_INVALID, TONE_NOTED
-from roboemot.llm import prompt as prompt_module
-from roboemot.llm.prompt import realtime_instructions, skip_prompts, tone_prompts
+from roboemot.llm.prompt import realtime_instructions, skip_prompt, tone_prompt
 from roboemot.realtime.turn import SKIP_TOOL, TONE_TOOL
 from rt_rig import build_rt, wait_for
 from test_conversation_tools import Env
@@ -95,12 +94,12 @@ def test_a_tone_without_speech_gets_one_more_response_without_the_tool(rigs):
         rig.turn()
         first, second = creates(srv)
         assert first["tool_choice"] == "auto"  # offered without any skill
-        assert tone_prompts()["it"] in first["instructions"]
-        assert tone_prompts()["it"] not in second["instructions"]
+        assert tone_prompt() in first["instructions"]
+        assert tone_prompt() not in second["instructions"]
         assert "tool_choice" not in second  # no tool left in the session
         updates = srv.of("session.update")
         assert TONE_TOOL in tool_names(updates[-2]) and TONE_TOOL not in tool_names(updates[-1])
-        assert tone_prompts()["it"] not in updates[-1]["session"]["instructions"]
+        assert tone_prompt() not in updates[-1]["session"]["instructions"]
         assert outputs(srv) == [TONE_NOTED]  # sent before the second response
         assert srv.pending_refusals == 0
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
@@ -159,7 +158,7 @@ def test_tone_tool_off_offers_neither_the_tool_nor_the_rule(rigs):
     with TurnServer() as srv:
         rig = rigs(srv)
         rig.turn()
-        rule = tone_prompts()["it"]
+        rule = tone_prompt()
         for update in srv.of("session.update"):
             assert TONE_TOOL not in tool_names(update)
             assert rule not in update["session"].get("instructions", "")
@@ -250,9 +249,9 @@ def test_a_skip_in_the_extra_response_is_honoured_and_emits_nothing(rigs):
 
 
 @pytest.mark.parametrize("language", ["it", "en"])
-def test_the_rule_loads_from_the_prompt_files(language):
-    rule = tone_prompts()[language]
-    assert TONE_TOOL in rule  # a translation keeps the tool's name
+def test_the_rule_is_english_for_each_language(language):
+    rule = tone_prompt()
+    assert TONE_TOOL in rule  # the rule names the tool
     cfg = ConfigStack(
         app={"voice": {"realtime_route": TONE}, "conversation": {"language": "it"}}
     ).effective()
@@ -265,16 +264,8 @@ def test_the_tone_rule_comes_before_the_skip_rule():
     rt = {**TONE, "skip_tool": True}
     cfg = ConfigStack(app={"voice": {"realtime_route": rt}, "conversation": {"language": "it"}})
     text = realtime_instructions(cfg.effective(), RegisterParams(), language="it")
-    assert text.index(tone_prompts()["it"]) < text.index(skip_prompts()["it"])
-    assert text.endswith(skip_prompts()["it"])
-
-
-def test_a_missing_prompt_file_fails_loud_at_load(monkeypatch):
-    """The tool is never offered without its rule: the configuration is rejected."""
-    monkeypatch.setattr(prompt_module, "tone_prompts", lambda: {"en": "x note_tone"})
-    with pytest.raises(ConfigError, match="note_tone.it.txt"):
-        ConfigStack(app={"voice": {"realtime_route": TONE}, "conversation": {"language": "it"}})
-    ConfigStack(app={"conversation": {"language": "it"}})  # off: no file needed
+    assert text.index(tone_prompt()) < text.index(skip_prompt())
+    assert text.endswith(skip_prompt())
 
 
 # ------------------------------------------------------------------ configuration
@@ -396,7 +387,7 @@ def test_after_a_reconnect_the_rule_comes_back_with_the_tool(rigs):
     with TurnServer() as srv:
         rig = rigs(srv, rt=TONE)
         rig.turn()
-        rule = tone_prompts()["it"]
+        rule = tone_prompt()
         assert rig.worker.expire(time.monotonic() + 3600)
         assert wait_for(lambda: rig.route.snapshot()["state"] == "closed")
         before = len(srv.of("session.update"))
@@ -414,7 +405,7 @@ def test_the_rule_follows_the_tool_on_updates_that_keep_the_tools(rigs):
     with TurnServer(["tool", "reply"], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
         rig = rigs(srv, rt=TONE)
         rig.turn()
-        rule = tone_prompts()["it"]
+        rule = tone_prompt()
         assert TONE_TOOL not in rig.route.tools_offered
         assert rule not in rig.route.base_instructions()
         rig.turn()  # the reply has no call: the session keeps the tool
@@ -430,7 +421,7 @@ def test_a_bursts_instructions_carry_the_rule_only_while_the_session_holds_the_t
 
     with TurnServer(["tool", "reply"], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
         rig = rigs(srv, rt=TONE)
-        rule = tone_prompts()["it"]
+        rule = tone_prompt()
         burst = InputJob(np.zeros(0, np.float32), 16000)
         rig.turn()
         assert TONE_TOOL not in rig.route.tools_offered

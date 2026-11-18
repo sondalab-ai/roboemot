@@ -231,9 +231,9 @@ def test_an_addressed_burst_sends_the_open_hint_before_its_activity():
     from roboemot.llm.prompt import (
         ADDRESSED,
         NO_CONVERSATION,
-        open_prompts,
+        open_prompt,
         realtime_instructions,
-        start_prompts,
+        start_prompt,
     )
 
     cfg = ConfigStack(
@@ -248,7 +248,7 @@ def test_an_addressed_burst_sends_the_open_hint_before_its_activity():
     assert frames[1] == {"realtimeInput": {"activityStart": {}}}
     context = frames[0]["clientContent"]["turns"][0]["parts"][0]["text"]
     assert context.startswith("[Updated instructions]\n")
-    assert open_prompts()["it"] in context and start_prompts()["it"] not in context
+    assert open_prompt() in context and start_prompt() not in context
 
 
 def test_two_bursts_in_the_same_state_send_no_second_context_turn_after_a_mood_change():
