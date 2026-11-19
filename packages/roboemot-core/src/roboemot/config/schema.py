@@ -7410,28 +7410,12 @@ class RadioConfig(Strict):
         "The music detector may start the dance on the robot's own radio; off, it ignores "
         "music while the radio plays",
     )
-    touch_stop: bool = param(
-        True,
-        "A hand on the robot stops the radio: a hand that holds part of the robot away from "
-        "its last move while the music can be heard stops the station, then the robot nods; "
-        "only where the motion loop detects external control",
-    )
     stop_without_name: bool = param(
         True,
         "Stop the radio by voice without the name: when a wake over the radio is not confirmed "
         "by the server's words but they hold a stop phrase or a media_stop verb and a media "
         "word (voice.keywords: `ferma la musica`, `spegni la radio`), the station stops and the "
         "robot nods; nothing else is answered without the name",
-    )
-    touch_stop_check_s: float = param(
-        1.0,
-        "How long after the robot starts yielding to external control the radio's touch stop "
-        "looks at it once: it stops the radio only if some, not all, parts are still held away "
-        "from their last move (a hand); a lag that settled or a move of the whole robot does not "
-        "stop it. Keep it below motion.platform_move_grace_s",
-        unit="s",
-        ge=0.2,
-        le=4,
     )
 
 

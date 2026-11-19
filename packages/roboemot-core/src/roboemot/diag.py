@@ -86,10 +86,7 @@ REASONS: dict[str, tuple[str, ...]] = {
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw
     "alone": ("start", "face", "sound"),  # the robot holds still, or what ended it (SPEC 5A)
     "nap": ("start", "face", "speech", "light", "motion", "loud"),  # began, or what woke it (7A)
-    "media": (
-        "touch_stop",  # a hand on the robot stopped the radio (SPEC 11, Radio)
-        "voice_stop",  # a stop said over the radio without the name stopped it (SPEC 8, 11)
-    ),
+    "media": ("voice_stop",),  # a stop said over the radio without the name stopped it (SPEC 8, 11)
     "turn": (  # a turn ended (its outcome), the model's skip was refused or its tone was invalid
         "ok",
         "skip_refused",
@@ -184,7 +181,6 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "in_row": NUMBER,
     "delay_s": NUMBER,
     "rounds": NUMBER,
-    "held_s": NUMBER,
     "robot_playing": FLAG,
     "moving": FLAG,
     "ducking": FLAG,
