@@ -45,9 +45,8 @@ from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
 from .host import RuntimeHost
+from .radio_stop import stop_and_nod
 from .webui import WebAdmin, start_webui
-
-VOICE_STOP_GESTURE = "nod"  # the robot's answer to a stop said over the radio (SPEC 11, Radio)
 
 
 def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
@@ -210,17 +209,6 @@ def start_voice_output(
         realtime.start()
     if bargein is not None:
         bind_barge_in(bargein, output, conv, listener, cut_own)
-
-
-def stop_and_nod(host: RuntimeHost, player: Any, reason: str) -> None:
-    """The listener's voice stop over the radio (SPEC 8, 11 Radio; owner decision 2026-11-19):
-    stop the station for ``reason``, then nod once (the ``play`` skill's path, with the time,
-    so the renderer refuses it rather than play it late). Runs on the listener thread; the
-    renderer's request is thread-safe."""
-    player.stop(reason)
-    expression = host.expression
-    if expression is not None:
-        expression.request(VOICE_STOP_GESTURE, time.monotonic())
 
 
 def start_media(

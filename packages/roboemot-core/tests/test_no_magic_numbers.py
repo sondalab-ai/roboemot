@@ -92,6 +92,7 @@ BEHAVIOUR_MODULES = [
     "conversation/transcript.py",
     "conversation/phase.py",
     "runtime/loop.py",
+    "runtime/radio_stop.py",
     "runtime/reload.py",
     "runtime/sleep.py",
     "runtime/reports.py",

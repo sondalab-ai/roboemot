@@ -760,8 +760,9 @@ def load_stages(
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads, DINOv2-S
     ``vision.appearance_threads`` (SPEC 13: two cores are shared by vision, audio and core) at
-    ``vision.appearance_input_px``. ``profile`` (the robot manifest's) is
-    accepted for callers and not used. Sets the OpenCV and ONNX Runtime globals once.
+    ``vision.appearance_input_px``, the hand models ``vision.hands.threads``. ``profile`` (the
+    robot manifest's) is accepted for callers and not used. Sets the OpenCV and ONNX Runtime
+    globals once.
     """
     configure(cfg.threads)
     detector, embedder, unavailable = None, None, None
@@ -793,7 +794,7 @@ def load_stages(
     palm, pose, hands_unavailable = None, None, None
     if hands and cfg.hands.enabled:
         try:
-            palm, pose = load_hands(root, cfg.hands, cfg.threads)
+            palm, pose = load_hands(root, cfg.hands, cfg.hands.threads)
         except Exception as exc:
             hands_unavailable = f"{type(exc).__name__}: {exc}"
             log.warning("hand check unavailable, running without it (%s)", exc)

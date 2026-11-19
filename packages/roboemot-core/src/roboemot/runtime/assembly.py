@@ -64,6 +64,7 @@ from roboemot.world.autoenroll import open_autoenroll, purge_stored
 
 from .host import RuntimeHost
 from .levels import AudioLevels
+from .radio_stop import FistStop, stop_and_nod
 from .reports import register_overrides
 from .sleep import SleepGate, mic_needed_asleep
 from .ticks import dance_calm, in_conversation
@@ -121,6 +122,7 @@ class Pipeline:
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
+    fist_stop: FistStop | None = None  # a fist stops the radio (SPEC 5, 11 Radio)
 
 
 def make_yes_no(
@@ -496,7 +498,21 @@ def assemble(
     voice_heard = [-math.inf]  # monotonic time of the last utterance, addressed or not (SPEC 7B)
     bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
 
+    # A fist stops the radio (SPEC 5, Hand check; 11, Radio): the player is built at start-up;
+    # awake is the sleep gate's own rule, read from the loop (no wait for the app tick).
+    fist_stop = FistStop(
+        lambda: host.media,
+        lambda: not (loop.motors_off and loop.link.online),
+        stack.effective,
+        lambda player, reason: stop_and_nod(host, player, reason),
+    )
+    fist_stop.events = host.events
+    if perception.pipeline is not None:
+        perception.pipeline.hands_wanted = fist_stop.wanted
+    bus.subscribe("percept.hand", fist_stop.on_hand)
+
     return Pipeline(
+        fist_stop=fist_stop,
         echo_cancelled=ECHO_CANCELLED in manifest.capabilities(),
         voice_heard=voice_heard,
         cue_sounds=cue_sounds,
