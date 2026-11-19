@@ -2651,10 +2651,11 @@ class HandsConfig(Strict):
     best palm, and the fist rule on its points. It runs only while a caller asks for it."""
 
     enabled: bool = param(
-        False,
+        True,
         "Load the hand models (MediaPipe palm detector and hand model, roboemot models fetch) "
-        "at start, so the hand check can run while a caller asks for it; off, nothing is "
-        "loaded and the check never runs",
+        "at start for the radio's fist stop: they load only when this, tools.radio.enabled and "
+        "tools.radio.fist_stop are all on, read at start (turning one on later needs a "
+        "restart); otherwise nothing is loaded and the check never runs",
         restart=True,
     )
     rate_hz: float = param(
@@ -2725,6 +2726,15 @@ class HandsConfig(Strict):
         "Weights of the hand model: fp32 (147 ms of CPU per run on the CM4) or the int8 file "
         "(60 ms, with a large accuracy drop by the model's own notes); the palm detector is "
         "always int8",
+        restart=True,
+        advanced=True,
+    )
+    threads: int = param(
+        1,
+        "CPU threads of each hand model's ONNX Runtime session (palm detector, hand model); "
+        "they run beside the face detector on a busy CPU, so one thread by default",
+        ge=1,
+        le=4,
         restart=True,
         advanced=True,
     )
@@ -7522,6 +7532,14 @@ class RadioConfig(Strict):
         "by the server's words but they hold a stop phrase or a media_stop verb and a media "
         "word (voice.keywords: `ferma la musica`, `spegni la radio`), the station stops and the "
         "robot nods; nothing else is answered without the name",
+    )
+    fist_stop: bool = param(
+        True,
+        "Stop the radio with a fist: while the music can be heard and the robot is awake the "
+        "hand check runs (vision.hands), and a fist held up to the camera for "
+        "vision.hands.fist_hold_s stops the station, then the robot nods; off, the hand check "
+        "does not run. The hand models load at start only with this, tools.radio.enabled and "
+        "vision.hands.enabled on: turning it on later needs a restart if they were not loaded",
     )
 
 

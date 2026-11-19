@@ -8,6 +8,7 @@ import json
 import math
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -258,7 +259,7 @@ def test_off_without_models_or_with_the_switch_off():
     off = HandWatch(HANDS)
     assert feed(off, 1.0) == [] and off.snapshot(1.0)["state"] == "off"
     palm = FakePalm()
-    disabled = HandWatch(RoboEmotConfig().vision.hands, palm, FakePose())
+    disabled = HandWatch(HandsConfig(enabled=False), palm, FakePose())
     assert feed(disabled, 1.0) == [] and palm.calls == 0
     missing = HandWatch(HANDS, unavailable="ModelError: mediapipe-palm: not verified")
     snap = missing.snapshot(None)
@@ -405,7 +406,8 @@ def test_the_hand_check_is_off_by_default(tmp_path):
 
 def test_hand_defaults():
     cfg = RoboEmotConfig().vision.hands
-    assert cfg.enabled is False  # slice 3 turns it on with the radio
+    assert cfg.enabled is True  # the radio's fist stop ships on (owner decision 2026-11-19)
+    assert cfg.threads == 1
     assert (cfg.rate_hz, cfg.fist_hold_s, cfg.pose_model) == (2.0, 1.0, "fp32")
     assert cfg.fist_ratio_max < cfg.open_ratio_min
 
@@ -415,6 +417,8 @@ def test_hand_defaults():
     [
         ("rate_hz", 0.1),
         ("rate_hz", 11),
+        ("threads", 0),
+        ("threads", 5),
         ("palm_score_min", 1.1),
         ("presence_min", -0.1),
         ("fist_ratio_max", 0.2),
@@ -462,7 +466,8 @@ def test_the_hand_models_load_only_with_the_switch_on(monkeypatch, tmp_path):
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     onnx, built = _hands_rig(monkeypatch, tmp_path)
-    cfg = RoboEmotConfig().vision.model_copy(update={"objects_enabled": False})
+    off = HandsConfig(enabled=False)
+    cfg = RoboEmotConfig().vision.model_copy(update={"objects_enabled": False, "hands": off})
     stages = onnx.load_stages(tmp_path, cfg, appearance=False)
     assert (stages.palm_detector, stages.hand_pose, stages.hands_unavailable) == (None, None, None)
     assert built == []
@@ -472,9 +477,13 @@ def test_the_hand_models_load_only_with_the_switch_on(monkeypatch, tmp_path):
     assert loaded == ("MediaPipePalmDetector", "MediaPipeHandPose")
     spin = {"spinning": HANDS.spinning}
     assert built == [
-        ("MediaPipePalmDetector", "mediapipe-palm-0", (cfg.threads,), spin),
-        ("MediaPipeHandPose", "mediapipe-handpose-0", (cfg.threads,), spin),
+        ("MediaPipePalmDetector", "mediapipe-palm-0", (HANDS.threads,), spin),
+        ("MediaPipeHandPose", "mediapipe-handpose-0", (HANDS.threads,), spin),
     ]
+    built.clear()
+    three = on.model_copy(update={"hands": HANDS.model_copy(update={"threads": 3})})
+    onnx.load_stages(tmp_path, three, appearance=False)
+    assert [a for _, _, a, _ in built] == [(3,), (3,)]  # their own field, not vision.threads
     built.clear()
     int8 = on.model_copy(update={"hands": HANDS.model_copy(update={"pose_model": "int8"})})
     onnx.load_stages(tmp_path, int8, appearance=False)
@@ -494,6 +503,61 @@ def test_a_missing_hand_model_keeps_vision_and_says_why(monkeypatch, tmp_path, c
     assert stages.palm_detector is None and stages.hand_pose is None
     assert "mediapipe-handpose" in stages.hands_unavailable
     assert "hand check unavailable" in caplog.text
+
+
+def test_the_hand_threads_reach_both_session_options(monkeypatch, tmp_path):
+    """SPEC 5, 13: vision.hands.threads is each hand session's intra-op pool, not
+    vision.threads."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from types import SimpleNamespace
+
+    from roboemot.vision import onnx
+
+    seen: list[tuple[str, int, int]] = []
+    anchors = len(onnx.palm_anchors())
+    outputs = {
+        "palm": [
+            SimpleNamespace(name="boxes", shape=[1, anchors, onnx.PALM_COLUMNS]),
+            SimpleNamespace(name="scores", shape=[1, anchors, 1]),
+        ],
+        "handpose": [
+            SimpleNamespace(name=onnx.HANDPOSE_PRESENCE, shape=[1, 1]),
+            SimpleNamespace(name=onnx.HANDPOSE_POINTS, shape=[1, onnx.HANDPOSE_POINT_VALUES]),
+        ],
+    }
+
+    def session(model, options, providers):
+        seen.append((Path(model).name, options.intra_op_num_threads, options.inter_op_num_threads))
+        kind = "palm" if "palm" in Path(model).name else "handpose"
+        return SimpleNamespace(
+            get_inputs=lambda: [SimpleNamespace(name="input")],
+            get_outputs=lambda: outputs[kind],
+        )
+
+    def side(sess, name):
+        return onnx.PALM_SIZE if "palm" in name else onnx.HANDPOSE_SIZE
+
+    monkeypatch.setattr(onnx.ort, "InferenceSession", session)
+    monkeypatch.setattr(onnx, "_nhwc_side", side)
+    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: tmp_path / f"{name}-{index}")
+    vision = RoboEmotConfig().vision
+    cfg = vision.hands.model_copy(update={"threads": 3})
+    onnx.load_hands(tmp_path, cfg, cfg.threads)
+    assert seen == [("mediapipe-palm-0", 3, 1), ("mediapipe-handpose-0", 3, 1)]
+    assert vision.threads != cfg.threads
+
+
+def test_the_installer_and_fetch_all_get_the_hand_models():
+    """SPEC 4A Installer, 5: with vision the installer fetches every vision model, the hand
+    models included (``models fetch --all``, or the names without the TTS voices)."""
+    from roboemot.install import fetch_args
+
+    assert {"mediapipe-palm", "mediapipe-handpose"} <= set(models.load_manifest())
+    assert fetch_args(vision=True, tts=True) == "models fetch --all"
+    names = fetch_args(vision=True, tts=False).split()
+    assert "mediapipe-palm" in names and "mediapipe-handpose" in names
+    assert "mediapipe-palm" not in fetch_args(vision=False, tts=False).split()
 
 
 def test_the_hand_models_are_pinned_to_the_zoo_commit():
@@ -563,7 +627,7 @@ def test_the_real_hand_models_load_and_run(variant):
     if any(models.status(specs[n], CACHE) != "ok" for n in (onnx.PALM_NAME, onnx.HANDPOSE_NAME)):
         pytest.skip(f"hand models missing in {CACHE} (roboemot models fetch --all)")
     cfg = HANDS.model_copy(update={"pose_model": variant})
-    palm_detector, pose = onnx.load_hands(CACHE, cfg, RoboEmotConfig().vision.threads)
+    palm_detector, pose = onnx.load_hands(CACHE, cfg, cfg.threads)
     grey = np.full((720, 1280, 3), 128, np.uint8)
     palm = palm_detector.best(grey)
     assert palm is not None and palm.score < cfg.palm_score_min  # nothing in a grey frame
@@ -704,3 +768,63 @@ def test_a_huge_palm_logit_does_not_overflow():
         scores = np.full(2016, logit, np.float32)
         _, _, score = onnx.decode_palm(raw, scores, anchors)
         assert score == pytest.approx(expected, abs=1e-12)
+
+
+def test_the_hand_models_load_only_for_the_radio_fist_stop(monkeypatch, tmp_path, caplog):
+    """SPEC 5, Hand check: the models load only with vision.hands.enabled, tools.radio.enabled
+    and tools.radio.fist_stop all on; otherwise no session, no thread, no warning, state off."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.service import hands_load_wanted
+
+    onnx, built = _hands_rig(monkeypatch, tmp_path)
+    radio_on = {"tools": {"radio": {"enabled": True}}}
+    assert hands_load_wanted(RoboEmotConfig.model_validate(radio_on)) is True
+    for off in (
+        {},  # the default: the radio is an admin opt-in
+        {"tools": {"radio": {"enabled": True, "fist_stop": False}}},
+        {**radio_on, "vision": {"hands": {"enabled": False}}},
+    ):
+        cfg = RoboEmotConfig.model_validate(off)
+        assert hands_load_wanted(cfg) is False
+        stages = onnx.load_stages(
+            tmp_path, cfg.vision, appearance=False, objects=False, hands=hands_load_wanted(cfg)
+        )
+        assert built == [] and stages.hands_unavailable is None
+        watch = HandWatch(cfg.vision.hands, stages.palm_detector, stages.hand_pose, threaded=True)
+        watch.start()
+        assert watch.snapshot(None)["state"] == "off"
+        assert not any(t.name == "roboemot-hands" for t in threading.enumerate())
+    assert "hand check" not in caplog.text
+
+
+def test_missing_hand_models_keep_vision_up_and_never_ask_the_seam(monkeypatch, tmp_path):
+    """SPEC 5, Hand check: the default config with the radio on and no hand model files: the
+    pipeline runs, the report says unavailable, and hands_wanted is never consulted."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.service import hands_load_wanted
+
+    onnx, _ = _hands_rig(monkeypatch, tmp_path, missing="mediapipe-palm")
+    cfg = RoboEmotConfig.model_validate({"tools": {"radio": {"enabled": True}}})
+    vision = cfg.vision.model_copy(update={"objects_enabled": False})
+    stages = onnx.load_stages(tmp_path, vision, appearance=False, hands=hands_load_wanted(cfg))
+    assert "mediapipe-palm" in stages.hands_unavailable
+    _, bus, pipe, _, _ = rig(
+        tmp_path,
+        lambda i: [],
+        vision=vision,
+        palm_detector=stages.palm_detector,
+        hand_pose=stages.hand_pose,
+        hands_unavailable=stages.hands_unavailable,
+    )
+
+    def never() -> bool:
+        raise AssertionError("hands_wanted consulted without the hand models")
+
+    pipe.hands_wanted = never
+    got = []
+    bus.subscribe("percept.hand", got.append)
+    run_frames(pipe, 2.0)
+    assert got == []
+    assert pipe.hands.snapshot(2.0)["state"] == "unavailable"

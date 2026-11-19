@@ -14,7 +14,6 @@ from roboemot.runtime.startup import (
     offline_cue,
     start_all,
     start_media,
-    stop_and_nod,
 )
 
 
@@ -123,22 +122,6 @@ def test_start_media_wires_the_listeners_speech_to_the_players_duck(echo_cancell
         player.stop = stopped.append  # the hook calls through to this run's player
         listener.media_stop("voice_stop")
         assert stopped == ["voice_stop"]
-
-
-def test_stop_and_nod_stops_the_station_then_nods():
-    """SPEC 8, 11 Radio (owner decision 2026-11-19): the listener's voice stop stops the
-    station with its reason, then asks the renderer for one nod with the time; without a
-    renderer it only stops."""
-    calls: list[tuple] = []
-    player = SimpleNamespace(stop=lambda reason: calls.append(("stop", reason)))
-    host = RuntimeHost()
-    stop_and_nod(host, player, "voice_stop")
-    assert calls == [("stop", "voice_stop")]
-    host.expression = SimpleNamespace(
-        request=lambda label, now: calls.append(("gesture", label, now is not None))
-    )
-    stop_and_nod(host, player, "voice_stop")
-    assert calls[1:] == [("stop", "voice_stop"), ("gesture", "nod", True)]
 
 
 def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():

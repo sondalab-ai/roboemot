@@ -260,13 +260,29 @@ class Perception:
         }
 
 
+def hands_load_wanted(cfg: RoboEmotConfig) -> bool:
+    """Whether the hand models load at start (SPEC 5, Hand check): only with
+    ``vision.hands.enabled`` and its one caller, the radio's fist stop, on
+    (``tools.radio.enabled`` and ``tools.radio.fist_stop``). Read once at start: turning any
+    of them on later needs a restart for the load."""
+    radio = cfg.tools.radio
+    return cfg.vision.hands.enabled and radio.enabled and radio.fist_stop
+
+
 def default_stages(cfg: RoboEmotConfig, profile: str | None) -> Any:
-    """Load the ONNX backends from the models folder (needs the ``vision`` extra)."""
+    """Load the ONNX backends from the models folder (needs the ``vision`` extra); the hand
+    models only when ``hands_load_wanted``."""
     from . import models
     from .onnx import load_stages
 
     root = models.models_dir(cfg.vision.models_dir, cfg.data_dir)
-    return load_stages(root, cfg.vision, profile=profile, appearance=cfg.vision.objects_enabled)
+    return load_stages(
+        root,
+        cfg.vision,
+        profile=profile,
+        appearance=cfg.vision.objects_enabled,
+        hands=hands_load_wanted(cfg),
+    )
 
 
 def open_perception(

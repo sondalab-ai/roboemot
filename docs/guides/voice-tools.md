@@ -149,6 +149,12 @@ The robot plays internet radio streams from your station list through its speake
     wake and the words hold a stop word and a music word (`voice.keywords`: `stop` or
     `media_stop`, and `media`), the radio stops and the robot nods, but nothing else is
     answered (`tools.radio.stop_without_name`, on by default)
+  - a fist held up to the camera for about a second (`vision.hands.fist_hold_s`) while
+    the music plays: the radio stops and the robot nods (`tools.radio.fist_stop`, on by
+    default). A fist that completes as the music pauses for a conversation still stops
+    it; while the music stays paused the robot does not look for a new fist. The hand
+    models come with `roboemot models fetch --all` and the installer, and load at start
+    only when the radio and the fist stop are on: restart RoboEmot after turning them on
   - the admin turns the radio off
   - the playing station is removed from the list
   - a requested nap, platform sleep, or the circadian rest (night, quiet hours)
