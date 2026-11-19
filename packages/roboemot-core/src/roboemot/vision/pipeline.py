@@ -87,7 +87,9 @@ hand check's own thread in the live app (``hands``: inline without one), whateve
 lets through, so the face and object stages keep their rates. A fist held for
 ``vision.hands.fist_hold_s`` publishes ``percept.hand`` (``HandGesture``: the gesture and the
 hold time, nothing from the image) at the capture stamp of the check that completed the hold.
-The governor's scale at 0 stops the checks like the switch.
+The governor's scale at 0 stops the checks like the switch. While the live preview is watched,
+the palm box of the latest fist check rides in the preview overlay (``PreviewOverlay.hand``,
+``HandWatch.preview``, SPEC 11A), nowhere else.
 
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
@@ -958,10 +960,11 @@ class VisionPipeline:
         self._publish("percept.face_frame", frame.stamp, frame.stamp)
 
     def clear_overlay(self) -> None:
-        """Forget the visible tracks the live preview would draw (the robot fell asleep); a
-        follow of the shown object ends."""
+        """Forget the visible tracks and the fist box the live preview would draw (the robot
+        fell asleep); a follow of the shown object ends."""
         self._visible = []
         self._object_visible = []
+        self.hands.clear_mark()
         self.follower.stop(ASLEEP)
 
     def face_overlay(self) -> list[tuple[Box, str | None]]:
@@ -1013,15 +1016,18 @@ class VisionPipeline:
         ``object_overlay``. Face boxes: ``face_overlay`` when face detection ran on it, none
         while face detection is off (governor scale 0 or no detection rate), else unknown
         (``faces_current`` False: the face boxes belong to an earlier frame; the runner keeps
-        that one for a poll period, then shows newer frames without face boxes)."""
+        that one for a poll period, then shows newer frames without face boxes). The fist box
+        of the latest hand check, if any (``HandWatch.preview``, which this call also tells
+        that the preview is watched)."""
         objects = tuple(self.object_overlay())
+        hand = self.hands.preview(report.stamp)
         if report.faces_detected:
             visible = self._visible
             marks = tuple(self._marks(t) for t in visible) if self.landmarks_wanted() else ()
-            return PreviewOverlay(tuple(self._face_rows(visible)), objects, marks=marks)
+            return PreviewOverlay(tuple(self._face_rows(visible)), objects, marks=marks, hand=hand)
         if math.isinf(self.governor.period("detection")):
-            return PreviewOverlay(objects=objects)
-        return PreviewOverlay(objects=objects, faces_current=False)
+            return PreviewOverlay(objects=objects, hand=hand)
+        return PreviewOverlay(objects=objects, faces_current=False, hand=hand)
 
     def _track_yaw(self, track: Track, state: _FaceState, stamp: float, to_detector: float) -> None:
         """Add this frame's head yaw (from the matched detection's landmarks) to the track's

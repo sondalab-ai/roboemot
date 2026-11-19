@@ -12,6 +12,10 @@ encode. Face boxes and confirmed names are drawn on the picture, and a box with 
 category for each confirmed animal or object track; the gaze target, a face or a shown object
 (SPEC 5A), is highlighted. With ``webui.live.video_landmarks`` on, each face also shows its
 5 detector landmarks as dots and its head yaw under the box (``PreviewOverlay.marks``).
+While the hand check classified a fist (the radio plays, SPEC 5, Hand check), its palm box is
+drawn in a fourth colour with the hold so far (``fist 0.5/1.0 s``) or, once the hold fired,
+``fist: stop`` (``PreviewOverlay.hand``); it comes from a check on an earlier frame, so like the
+object boxes it may trail the picture, by up to a check's run time plus one check period.
 
 A viewer is a client IP that was sent a frame within the window. ``viewers`` feeds the banner every
 open page shows. Start and stop of viewing are logged once each per client IP (the address only).
@@ -51,6 +55,9 @@ BGR_TARGET = (0, 215, 255)
 BGR_OBJECT = (230, 120, 40)
 BGR_TEXT_BG = (0, 0, 0)
 BGR_LANDMARK = (255, 0, 255)  # magenta: apart from every box colour
+BGR_HAND = (40, 40, 230)  # red: the fist box, apart from the face, target and object colours
+HAND_HOLD_LABEL = "fist {held:.1f}/{hold:.1f} s"  # ASCII: the Hershey font
+HAND_FIRED_LABEL = "fist: stop"
 LANDMARK_RADIUS_PX = 2
 LINE_PX = 1
 TARGET_LINE_PX = 3
@@ -66,6 +73,14 @@ def ascii_label(name: str) -> str:
         c for c in unicodedata.normalize("NFKD", str(name)) if not unicodedata.combining(c)
     )
     return base.encode("ascii", "replace").decode("ascii")[:LABEL_MAX_CHARS]
+
+
+def hand_label(mark: Any) -> str:
+    """The fist box's label: the hold so far against ``vision.hands.fist_hold_s`` while it
+    builds, ``fist: stop`` once it fired."""
+    if mark.fired:
+        return HAND_FIRED_LABEL
+    return HAND_HOLD_LABEL.format(held=min(mark.held_s, mark.hold_s), hold=mark.hold_s)
 
 
 class LiveVideo:
@@ -287,8 +302,9 @@ class LiveVideo:
     def _draw(self, cv2: Any, canvas: np.ndarray, scale: float, overlay: Any = None) -> None:
         """Face boxes with the confirmed name (nothing for an unknown face), animal and object
         boxes with their readable category, the gaze target in another colour and a thicker
-        line. ``overlay`` is the ``PreviewOverlay`` the runner kept with the frame, or None (a
-        runner without an overlay hook: the pipeline's latest boxes)."""
+        line, and the fist box with its hold. ``overlay`` is the ``PreviewOverlay`` the runner
+        kept with the frame, or None (a runner without an overlay hook: the pipeline's latest
+        face and object boxes, no fist box)."""
         pipeline = self._host.perception.pipeline
         if pipeline is None:
             return
@@ -315,6 +331,12 @@ class LiveVideo:
                 self._box(cv2, canvas, scale, box, color, line, ascii_label(category))
             except (ValueError, OverflowError, TypeError, cv2.error):
                 log.warning("live video: an object could not be drawn")
+        hand = None if overlay is None else overlay.hand
+        if hand is not None:
+            try:
+                self._box(cv2, canvas, scale, hand.box, BGR_HAND, LINE_PX, hand_label(hand))
+            except (ValueError, OverflowError, TypeError, cv2.error):
+                log.warning("live video: the fist box could not be drawn")
 
     def _draw_faces(
         self, cv2: Any, canvas: np.ndarray, scale: float, faces: Any, target: Any, entry: Any
