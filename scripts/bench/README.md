@@ -141,3 +141,20 @@ own process). Run the same command on the Mac for the comparison column. Random 
 are used; detector post-processing (NMS, decoding) is not included in the timings. Remove the
 bench dir and venv afterwards (`rm -rf ~/bench`) to leave the robot clean (CLAUDE.md, installer
 rules).
+
+## Hand pipeline cost (SPEC 5, 13)
+
+`hands_cm4.py` times the MediaPipe palm detector (192x192) and 21-point hand landmark (224x224)
+ONNX conversions from opencv_zoo (Apache-2.0, pinned to commit `f88e9b2`, tag 4.10.0), fp32 and
+int8, on synthetic 1280x720 frames with the vision pipeline's ONNX Runtime settings (2 threads,
+no spin-wait). Self-contained: it downloads and sha256-checks the models into a temporary folder
+that it deletes on exit, and touches no running app. On the robot, read from stdin so nothing
+is left there (`--host` and `--user` are required when stdin is not a terminal):
+
+```bash
+python scripts/robot_ssh.py --host reachy-mini.local --user pollen -- \
+    /venvs/apps_venv/bin/python -I - --runs 200 < scripts/bench/hands_cm4.py
+```
+
+`--help` lists the options (`--variants`, `--threads`, `--spinning`, `--frame`, `--hand-px`,
+`--cache-dir`, `--json`). With RoboEmot running the numbers include its load.
