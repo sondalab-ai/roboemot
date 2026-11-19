@@ -12,7 +12,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from .types import Box, Detection, Frame
+from .types import Box, Detection, Frame, HandPose, Palm
 
 
 class FaceDetector(Protocol):
@@ -51,6 +51,18 @@ class SingleObjectTracker(Protocol):
     def init(self, image: np.ndarray, box: Box) -> None: ...
 
     def update(self, image: np.ndarray) -> tuple[Box, float]: ...
+
+
+class PalmDetector(Protocol):
+    """The best-scoring palm of a frame (original pixels), or None when the model gives none."""
+
+    def best(self, image: np.ndarray) -> Palm | None: ...
+
+
+class HandPoseEstimator(Protocol):
+    """The 21 hand points of the hand around ``palm``; the backend cuts and turns the crop."""
+
+    def estimate(self, image: np.ndarray, palm: Palm) -> HandPose: ...
 
 
 @runtime_checkable

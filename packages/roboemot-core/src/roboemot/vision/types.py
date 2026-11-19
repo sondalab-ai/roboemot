@@ -43,6 +43,28 @@ class Detection:
         return min(x2 - x1, y2 - y1)
 
 
+@dataclass
+class Palm:
+    """The palm detector's best palm in one frame: box and 7 keypoints (``7x2``, original
+    pixels: wrist, the index, middle, ring and little finger bases, two thumb joints) and score.
+    It lives only inside one hand check (SPEC 12): never published, logged or kept."""
+
+    box: Box
+    score: float
+    keypoints: np.ndarray = field(repr=False)
+
+
+@dataclass
+class HandPose:
+    """The hand model's output for one palm: ``presence`` (0 to 1, a hand is in its crop) and
+    the 21 points (``21x3``, MediaPipe order: wrist, then four joints per finger from the
+    thumb, base to tip) in the model's hand-centred 3D frame. Like ``Palm``, it lives only
+    inside one hand check (SPEC 12)."""
+
+    presence: float
+    points: np.ndarray = field(repr=False)
+
+
 @dataclass(frozen=True)
 class FacePercept:
     """Published on ``percept.face`` for each confirmed face track in a processed frame.

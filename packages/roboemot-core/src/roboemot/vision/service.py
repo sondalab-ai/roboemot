@@ -9,7 +9,8 @@ reason and returns without a pipeline. The app keeps running and the debug repor
 ``VisionService`` owns the threads of a running pipeline: the camera pump (reads frames,
 paced by ``vision.rates.camera_hz``), the worker (``LatestFrameRunner``, latest frame wins) and,
 with an appearance embedder, the embed worker (``EmbedWorker``: DINOv2-S off the vision thread,
-so detection and tracking never wait for it, SPEC 5, 13).
+so detection and tracking never wait for it, SPEC 5, 13) and, with the hand models, the hand
+check's thread (``VisionPipeline.hands``, SPEC 5, Hand check).
 The camera is a robot driver's ``FrameSource``; this module knows nothing about a robot.
 
 The registry store has no encryption yet (M5, SPEC 12 Data): it runs with ``allow_plaintext``,
@@ -35,6 +36,7 @@ from ..world import FrameSpec
 from .embed_worker import EmbedWorker
 from .geometry import CameraModel
 from .governor import RateGovernor
+from .hands import HandWatch
 from .pipeline import VisionPipeline
 from .runner import FrameSource, LatestFrameRunner, pump
 from .stage_timing import StageTimer
@@ -80,11 +82,14 @@ class VisionService:
         source: FrameSource,
         cfg: RoboEmotConfig,
         embed_worker: EmbedWorker | None = None,
+        hands: HandWatch | None = None,
     ) -> None:
         """``embed_worker`` is the pipeline's (``VisionPipeline.embed_worker``), started and
-        stopped with the other threads."""
+        stopped with the other threads; so is ``hands``, the pipeline's hand check
+        (``VisionPipeline.hands``), whose thread runs only with its models loaded."""
         self.pipeline = pipeline
         self.embed_worker = embed_worker
+        self.hands = hands
         self.cfg = cfg
         self.source = CountingSource(source)
         self.runner = LatestFrameRunner(pipeline, overlay=pipeline.preview_overlay)
@@ -105,10 +110,12 @@ class VisionService:
         return self._paused.is_set()
 
     def start(self) -> None:
-        """Start the embed worker, the frame worker and the camera thread."""
+        """Start the embed worker, the hand check, the frame worker and the camera thread."""
         self._stop.clear()
         if self.embed_worker is not None:
             self.embed_worker.start()
+        if self.hands is not None:
+            self.hands.start()
         self.runner.start()
         thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
         thread.start()
@@ -119,8 +126,8 @@ class VisionService:
 
         The camera thread is joined with a timeout and a timeout is logged: a read stuck in the
         SDK cannot be interrupted, so the caller must tear the SDK down knowing it may still be
-        inside it. The workers are stopped even then, the embed worker last (the frame worker
-        may still queue to it).
+        inside it. The workers are stopped even then, the embed worker and the hand check last
+        (the frame worker may still queue to them).
         """
         self._stop.set()
         try:
@@ -132,8 +139,12 @@ class VisionService:
             try:
                 self.runner.stop()
             finally:
-                if self.embed_worker is not None:
-                    self.embed_worker.stop()
+                try:
+                    if self.embed_worker is not None:
+                        self.embed_worker.stop()
+                finally:
+                    if self.hands is not None:
+                        self.hands.stop()
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
@@ -325,6 +336,10 @@ def open_perception(
         embed_worker=worker,
         object_tracker=stages.object_tracker,
         object_track_unavailable=stages.object_track_unavailable,
+        palm_detector=stages.palm_detector,
+        hand_pose=stages.hand_pose,
+        hands_unavailable=stages.hands_unavailable,
+        hands_threaded=True,
     )
     enrollment.attach(pipeline)
     return Perception(
@@ -332,7 +347,7 @@ def open_perception(
         matcher,
         enrollment,
         pipeline,
-        VisionService(pipeline, source, cfg, worker),
+        VisionService(pipeline, source, cfg, worker, pipeline.hands),
         None,
         stages.objects_unavailable,
     )

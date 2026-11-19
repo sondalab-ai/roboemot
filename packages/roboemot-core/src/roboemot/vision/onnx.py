@@ -4,7 +4,9 @@ YuNet face detector (MIT), SFace face embedder (Apache-2.0), DINOv2-S appearance
 (Apache-2.0), NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
 in the M1 spike (docs/spikes/2026-10-m1-models.md), and the VitTrack single-object tracker
 (Apache-2.0, OpenCV's ``cv2.TrackerVit``) that follows the shown object between NanoDet
-runs. Everything runs on CPU: the frame-path models (and VitTrack, on OpenCV's pool) on
+runs, and the MediaPipe palm detector and 21-point hand model (Apache-2.0, opencv_zoo) of the
+hand check (``hands``, owner decision 2026-11-19). Everything runs on CPU: the frame-path
+models (and VitTrack, on OpenCV's pool) and the hand models (on their own thread) on
 ``vision.threads`` (2), DINOv2-S, which runs beside them on the embed worker, on
 ``vision.appearance_threads`` (2) at ``vision.appearance_input_px`` (224); the cm4 budget
 leaves two cores to vision, audio and core together (SPEC 13). All resizing,
@@ -26,11 +28,11 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from ..config.schema import DINO_INPUT_PX, DINO_PATCH_PX, VisionConfig
+from ..config.schema import DINO_INPUT_PX, DINO_PATCH_PX, HandsConfig, VisionConfig
 from . import models
 from .geometry import letterbox_scale
 from .models import ModelError
-from .types import Box, Detection
+from .types import Box, Detection, HandPose, Palm
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +89,33 @@ SCALE_TOL = 1e-4  # the export's scales are float32 of (16 + 0.1) / 37
 NO_SPINNING = "session.intra_op.allow_spinning"
 DINO_MEAN = (0.485, 0.456, 0.406)
 DINO_STD = (0.229, 0.224, 0.225)
+
+# MediaPipe palm detector and hand model, as opencv_zoo's mp_palmdet.py and mp_handpose.py run
+# them (commit f88e9b2, Apache-2.0). The palm detector's 2016 anchors are MediaPipe's SSD anchor
+# options for a 192 input: strides 8, 16, 16, 16, two anchors per cell and layer, fixed size, so
+# a 24x24 grid with 2 per cell and a 12x12 grid with 6 per cell; centres at the cell centre.
+PALM_NAME = "mediapipe-palm"
+HANDPOSE_NAME = "mediapipe-handpose"
+HANDPOSE_FILES = {"fp32": 0, "int8": 1}  # file index in models.yaml by vision.hands.pose_model
+PALM_SIZE = 192
+PALM_STRIDES = (8, 16, 16, 16)
+PALM_ANCHORS_PER_LAYER = 2
+PALM_ANCHOR_OFFSET = 0.5
+PALM_BOX_COLUMNS = 4  # centre x, centre y, width, height (input pixels, from the anchor)
+PALM_KEYPOINTS = 7  # wrist, index, middle, ring and little finger bases, two thumb joints
+PALM_COLUMNS = PALM_BOX_COLUMNS + 2 * PALM_KEYPOINTS
+PALM_WRIST = 0
+PALM_MIDDLE_BASE = 2
+HANDPOSE_SIZE = 224
+HAND_BOX_SHIFT_Y = -0.4  # the hand box: the turned palm keypoints' box moved up by 0.4 of its
+HAND_BOX_ENLARGE = 3.0  # height and grown 3 times, then squared on its longer side
+# Outputs of the opencv_zoo hand model (the TFLite export's names): screen points, the hand
+# presence score (already a probability), handedness and the 21 hand-centred 3D points.
+HANDPOSE_PRESENCE = "Identity_1"
+HANDPOSE_POINTS = "Identity_3"
+HANDPOSE_POINT_VALUES = 63  # 21 points x 3
+NHWC_RANK = 4
+AFFINE_SHAPE = (2, 3)  # an OpenCV affine map
 
 
 def configure(threads: int) -> None:
@@ -510,6 +539,141 @@ class VitTracker:
         return (float(x), float(y), float(x + w), float(y + h)), score
 
 
+def palm_anchors(size: int = PALM_SIZE) -> np.ndarray:
+    """The palm detector's anchor centres, ``(2016, 2)`` normalised to the input (0 to 1), in
+    the model's output order: per group of layers of one stride, row by row, then per anchor."""
+    rows = []
+    i = 0
+    while i < len(PALM_STRIDES):
+        stride, per_cell = PALM_STRIDES[i], 0
+        while i < len(PALM_STRIDES) and PALM_STRIDES[i] == stride:
+            per_cell += PALM_ANCHORS_PER_LAYER
+            i += 1
+        cells = math.ceil(size / stride)
+        centres = (np.arange(cells, dtype=np.float32) + PALM_ANCHOR_OFFSET) / cells
+        ys, xs = np.meshgrid(centres, centres, indexing="ij")
+        grid = np.stack([xs.ravel(), ys.ravel()], axis=1)
+        rows.append(np.repeat(grid, per_cell, axis=0))
+    return np.concatenate(rows).astype(np.float32)
+
+
+def decode_palm(
+    raw: np.ndarray, scores: np.ndarray, anchors: np.ndarray, size: int = PALM_SIZE
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """The best anchor of one palm detector output, in input pixels: box ``(x1, y1, x2, y2)``,
+    the 7 keypoints ``(7, 2)`` and the sigmoid score. ``raw`` is ``(N, 18)`` (box centre offset
+    and size, then keypoint offsets, input pixels from the anchor centre), ``scores`` ``(N,)``
+    logits. Only the best one is decoded: the hand check needs one palm, so there is no NMS."""
+    if len(scores) == 0:
+        return None
+    best = int(np.argmax(scores))
+    centre = anchors[best] * size
+    row = raw[best]
+    cx, cy = centre + row[:2]
+    half = row[2:PALM_BOX_COLUMNS] / 2
+    box = np.array([cx - half[0], cy - half[1], cx + half[0], cy + half[1]], np.float32)
+    keypoints = row[PALM_BOX_COLUMNS:PALM_COLUMNS].reshape(PALM_KEYPOINTS, 2) + centre
+    score = 1 / (1 + math.exp(-float(scores[best])))
+    return box, keypoints.astype(np.float32), score
+
+
+def _nhwc_side(sess: ort.InferenceSession, name: str) -> int:
+    """The side of a model's one ``(1, S, S, 3)`` input; ``ModelError`` naming ``name`` else."""
+    shape = sess.get_inputs()[0].shape
+    if len(shape) != NHWC_RANK or shape[1] != shape[2] or shape[-1] != CHANNELS:
+        raise ModelError(f"{name}: input {shape}, expected (1, S, S, 3)")
+    return int(shape[1])
+
+
+class MediaPipePalmDetector:
+    """The MediaPipe palm detector (opencv_zoo int8, Apache-2.0), the ``PalmDetector`` of the
+    hand check (SPEC 5, 13). The frame is letterboxed, centred, into 192x192 (opencv_zoo's
+    preprocessing: aspect kept, black bars, RGB, 0 to 1), and only the best anchor is decoded,
+    back in frame pixels."""
+
+    def __init__(self, path: Path, threads: int, *, spinning: bool = False):
+        self._sess = _session(path, threads, spinning)
+        self._input = self._sess.get_inputs()[0].name
+        if _nhwc_side(self._sess, path.name) != PALM_SIZE:
+            raise ModelError(f"{path.name}: expected a {PALM_SIZE}x{PALM_SIZE} input")
+        self._anchors = palm_anchors()
+        out = self._sess.get_outputs()
+        if len(out) != 2 or out[0].shape[1:] != [len(self._anchors), PALM_COLUMNS]:
+            raise ModelError(
+                f"{path.name}: outputs {[o.shape for o in out]}, expected "
+                f"{len(self._anchors)} x {PALM_COLUMNS} boxes and their scores"
+            )
+
+    def best(self, image: np.ndarray) -> Palm | None:
+        """The best-scoring palm of ``image`` (frame pixels), whatever its score."""
+        height, width = image.shape[:2]
+        scale = letterbox_scale(width, height, PALM_SIZE, PALM_SIZE)
+        nw, nh = int(width * scale), int(height * scale)
+        left, top = (PALM_SIZE - nw) // 2, (PALM_SIZE - nh) // 2
+        canvas = np.zeros((PALM_SIZE, PALM_SIZE, CHANNELS), np.uint8)
+        canvas[top : top + nh, left : left + nw] = cv2.resize(image, (nw, nh))
+        blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32)[None] / PIXEL_MAX
+        raw, scores = self._sess.run(None, {self._input: blob})
+        found = decode_palm(raw[0], scores[0, :, 0], self._anchors)
+        if found is None:
+            return None
+        box, keypoints, score = found
+        offset = np.array([left, top], np.float32)
+        x1, y1, x2, y2 = (box - np.tile(offset, 2)) / scale
+        points = (keypoints - offset) / scale
+        return Palm((float(x1), float(y1), float(x2), float(y2)), score, points)
+
+
+def hand_crop(palm: Palm, size: int = HANDPOSE_SIZE) -> np.ndarray:
+    """The ``2x3`` affine map from frame pixels to the hand model's ``size`` square, as
+    opencv_zoo's mp_handpose.py builds the crop: turn the frame about the palm box centre so
+    the wrist-to-middle-finger line points up, take the box of the turned palm keypoints, move
+    it up by ``HAND_BOX_SHIFT_Y`` of its height, grow it ``HAND_BOX_ENLARGE`` times about its
+    centre and square it on its longer side. One warp of the frame replaces the zoo's crop,
+    pad, turn, crop and resize; pixels outside the frame are black either way."""
+    wrist, middle = palm.keypoints[PALM_WRIST], palm.keypoints[PALM_MIDDLE_BASE]
+    radians = math.pi / 2 - math.atan2(-(middle[1] - wrist[1]), middle[0] - wrist[0])
+    radians -= 2 * math.pi * math.floor((radians + math.pi) / (2 * math.pi))
+    x1, y1, x2, y2 = palm.box
+    turn = cv2.getRotationMatrix2D(((x1 + x2) / 2, (y1 + y2) / 2), math.degrees(radians), 1.0)
+    turned = palm.keypoints @ turn[:, :2].T + turn[:, 2]
+    low, high = turned.min(axis=0), turned.max(axis=0)
+    wh = high - low
+    centre = (low + high) / 2 + np.array([0.0, HAND_BOX_SHIFT_Y * wh[1]])
+    side = max(float(wh.max()) * HAND_BOX_ENLARGE, 1.0)
+    k = size / side
+    out = np.empty(AFFINE_SHAPE, np.float64)
+    out[:, :2] = k * turn[:, :2]
+    out[:, 2] = k * (turn[:, 2] - (centre - side / 2))
+    return out
+
+
+class MediaPipeHandPose:
+    """The MediaPipe 21-point hand model (opencv_zoo fp32 or int8, Apache-2.0), the
+    ``HandPoseEstimator`` of the hand check (SPEC 5, 13): one warp cuts the upright hand crop
+    (:func:`hand_crop`, RGB, 0 to 1), and only the presence score and the hand-centred 3D points
+    are read. The crop lives only inside the call (SPEC 12)."""
+
+    def __init__(self, path: Path, threads: int, *, spinning: bool = False):
+        self._sess = _session(path, threads, spinning)
+        self._input = self._sess.get_inputs()[0].name
+        if _nhwc_side(self._sess, path.name) != HANDPOSE_SIZE:
+            raise ModelError(f"{path.name}: expected a {HANDPOSE_SIZE}x{HANDPOSE_SIZE} input")
+        shapes = {o.name: o.shape for o in self._sess.get_outputs()}
+        want = {HANDPOSE_PRESENCE: [1, 1], HANDPOSE_POINTS: [1, HANDPOSE_POINT_VALUES]}
+        if any(shapes.get(name) != shape for name, shape in want.items()):
+            raise ModelError(f"{path.name}: outputs {shapes}, expected the opencv_zoo hand model")
+        self._outputs = list(want)
+
+    def estimate(self, image: np.ndarray, palm: Palm) -> HandPose:
+        """Presence and the ``21x3`` points of the hand around ``palm`` in ``image``."""
+        size = (HANDPOSE_SIZE, HANDPOSE_SIZE)
+        crop = cv2.warpAffine(image, hand_crop(palm), size, borderValue=0)
+        blob = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).astype(np.float32)[None] / PIXEL_MAX
+        presence, points = self._sess.run(self._outputs, {self._input: blob})
+        return HandPose(float(presence[0, 0]), points[0].reshape(-1, CHANNELS))
+
+
 @dataclass
 class Stages:
     """The ONNX backends built from a models folder; optional ones are None when skipped."""
@@ -521,6 +685,9 @@ class Stages:
     objects_unavailable: str | None = None  # why the animal and object stage was dropped
     object_tracker: VitTracker | None = None
     object_track_unavailable: str | None = None  # why the shown-object tracker is missing
+    palm_detector: MediaPipePalmDetector | None = None
+    hand_pose: MediaPipeHandPose | None = None
+    hands_unavailable: str | None = None  # why the hand check is missing with vision.hands on
 
 
 def _file(root: Path, name: str, index: int = 0) -> Path:
@@ -552,6 +719,17 @@ def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
     )
 
 
+def load_hands(
+    root: Path, cfg: HandsConfig, threads: int
+) -> tuple[MediaPipePalmDetector, MediaPipeHandPose]:
+    """The palm detector (int8) and the hand model (``cfg.pose_model``) of the hand check, on
+    ``threads`` threads, spin-waiting only with ``cfg.spinning``. ``ModelError`` when a file is
+    missing or unverified."""
+    palm = MediaPipePalmDetector(_file(root, PALM_NAME), threads, spinning=cfg.spinning)
+    path = _file(root, HANDPOSE_NAME, HANDPOSE_FILES[cfg.pose_model])
+    return palm, MediaPipeHandPose(path, threads, spinning=cfg.spinning)
+
+
 def load_stages(
     root: Path,
     cfg: VisionConfig,
@@ -559,6 +737,7 @@ def load_stages(
     profile: str | None = None,
     appearance: bool = True,
     objects: bool = True,
+    hands: bool = True,
 ) -> Stages:
     """Load the backends from ``root``; DINOv2 and the object detector can be skipped.
 
@@ -570,7 +749,10 @@ def load_stages(
     (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds the reason and
     faces keep working. The VitTrack tracker of the shown object loads on its own, only with
     the object detector: a missing file or an OpenCV without ``TrackerVit`` leaves it None
-    with the reason in ``Stages.object_track_unavailable`` and drops nothing else.
+    with the reason in ``Stages.object_track_unavailable`` and drops nothing else. The hand
+    check's two models (``load_hands``) load only with ``hands`` and ``vision.hands.enabled``,
+    both or neither; a failure leaves them None with the reason in ``Stages.hands_unavailable``
+    and drops nothing else.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads, DINOv2-S
@@ -605,6 +787,13 @@ def load_stages(
         except Exception as exc:
             track_unavailable = f"{type(exc).__name__}: {exc}"
             log.warning("shown-object tracker unavailable, running without it (%s)", exc)
+    palm, pose, hands_unavailable = None, None, None
+    if hands and cfg.hands.enabled:
+        try:
+            palm, pose = load_hands(root, cfg.hands, cfg.threads)
+        except Exception as exc:
+            hands_unavailable = f"{type(exc).__name__}: {exc}"
+            log.warning("hand check unavailable, running without it (%s)", exc)
     return Stages(
         YuNetDetector(
             _file(root, "yunet"),
@@ -617,4 +806,7 @@ def load_stages(
         unavailable,
         tracker,
         track_unavailable,
+        palm,
+        pose,
+        hands_unavailable,
     )

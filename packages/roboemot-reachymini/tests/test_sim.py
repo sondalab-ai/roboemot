@@ -559,6 +559,9 @@ class Scene:
                     objects_unavailable=None,
                     object_tracker=None,
                     object_track_unavailable=None,
+                    palm_detector=None,
+                    hand_pose=None,
+                    hands_unavailable=None,
                 )
 
         self.mini, self.app = mini, SimApp.__new__(SimApp)

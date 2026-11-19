@@ -73,6 +73,39 @@ models:
         url: https://github.com/opencv/opencv_zoo/raw/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/object_tracking_vittrack/object_tracking_vittrack_2023sep.onnx
         sha256: 2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d
         size_bytes: 714726
+  - name: mediapipe-palm
+    role: hand_palm_detector
+    licence: Apache-2.0
+    source: https://github.com/opencv/opencv_zoo/tree/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/palm_detection_mediapipe
+    notes: >-
+      MediaPipe palm detector (opencv_zoo palm_detection_mediapipe_2023feb, the zoo's int8
+      variant), 192x192 NHWC, the first stage of the hand check (vision.hands, SPEC 5, 13; owner
+      decision 2026-11-19: int8, 136 ms of CPU per run on the CM4 against 256 ms in fp32). URL
+      pinned to opencv_zoo commit f88e9b2 (tag 4.10.0, as vittrack); the sha256 is the Git LFS
+      object id of the file at that commit.
+    files:
+      - path: opencv_zoo/palm_detection_mediapipe_2023feb_int8.onnx
+        url: https://github.com/opencv/opencv_zoo/raw/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/palm_detection_mediapipe/palm_detection_mediapipe_2023feb_int8.onnx
+        sha256: 9f014de96ef5b6816b3eb9a5fed21a7371ef0f104ea440aa19ce9129fe2af5f6
+        size_bytes: 1157004
+  - name: mediapipe-handpose
+    role: hand_landmarker
+    licence: Apache-2.0
+    source: https://github.com/opencv/opencv_zoo/tree/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/handpose_estimation_mediapipe
+    notes: >-
+      MediaPipe 21-point hand model (opencv_zoo handpose_estimation_mediapipe_2023feb), 224x224
+      NHWC, run on the best palm only (vision.hands, SPEC 5, 13). Two files: fp32 (the default,
+      147 ms of CPU per run on the CM4) and the zoo's int8 variant (60 ms; its README warns of a
+      large accuracy drop), picked by vision.hands.pose_model. Pinned like mediapipe-palm.
+    files:
+      - path: opencv_zoo/handpose_estimation_mediapipe_2023feb.onnx
+        url: https://github.com/opencv/opencv_zoo/raw/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/handpose_estimation_mediapipe/handpose_estimation_mediapipe_2023feb.onnx
+        sha256: db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c
+        size_bytes: 4099621
+      - path: opencv_zoo/handpose_estimation_mediapipe_2023feb_int8.onnx
+        url: https://github.com/opencv/opencv_zoo/raw/f88e9b2bafd21f1cad242fb5af6d78f2bcba16a3/models/handpose_estimation_mediapipe/handpose_estimation_mediapipe_2023feb_int8.onnx
+        sha256: e97bc1fb83b641954d33424c82b6ade719d0f73250bdb91710ecfd5f7b47e321
+        size_bytes: 1167628
 # Files of models that were replaced or removed (SPEC 5, 13; the yolo11n-face-age age model went
 # with the owner decision 2026-10-23 to estimate no age): `roboemot models prune` deletes them
 # and their markers from a models folder that still has them. Nothing loads them any more.

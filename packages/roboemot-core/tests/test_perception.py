@@ -74,6 +74,9 @@ def fake_stages(cfg, profile):
         objects_unavailable=None,
         object_tracker=None,
         object_track_unavailable=None,
+        palm_detector=None,
+        hand_pose=None,
+        hands_unavailable=None,
     )
 
 

@@ -49,6 +49,8 @@ def test_manifest_is_complete_and_pinned():
         "dinov2-small",
         "nanodet-plus-m-320",
         "vittrack",
+        "mediapipe-palm",
+        "mediapipe-handpose",
     }
     paths = [f.path for s in specs.values() for f in s.files]
     assert len(paths) == len(set(paths))

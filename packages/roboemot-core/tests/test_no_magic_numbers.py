@@ -152,6 +152,7 @@ BEHAVIOUR_MODULES = [
     "vision/scene_change.py",
     "vision/scene_motion.py",
     "vision/embed_worker.py",
+    "vision/hands.py",
     "vision/onnx.py",
     "vision/pipeline.py",
     "vision/replay.py",

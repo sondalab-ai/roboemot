@@ -80,6 +80,14 @@ does, every captured frame goes to the motion watch (``scene_motion``) before th
 drop it, with the head pose of the frame, and a confirmed change publishes
 ``percept.scene_motion`` (a scalar share, never the image). It needs no object stage.
 
+``hands_wanted`` (default never) says whether the hand check runs (SPEC 5, Hand check; the radio
+drives it): while it does and the hand models loaded (``vision.hands.enabled``), one frame per
+``1 / vision.hands.rate_hz`` goes to the palm detector and, on a palm, the hand model, on the
+hand check's own thread in the live app (``hands``: inline without one), whatever the governor
+lets through, so the face and object stages keep their rates. A fist held for
+``vision.hands.fist_hold_s`` publishes ``percept.hand`` (``HandGesture``: the gesture and the
+hold time, nothing from the image). The governor's scale at 0 stops the checks like the switch.
+
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
 
@@ -99,6 +107,9 @@ low-score detections the tracker refused or left unmatched, beside those that st
 The head pose comes from the frame's joint state through the robot's ``frame_spec``.
 ``objects`` counts the animal and object detections below ``vision.object_score_min`` handed
 to the tracker and the confirmed tracks such a detection continued (the low-score pass).
+``hands`` counts the hand checks (``HandWatch.snapshot``: checks, palms, hand model runs, fists,
+open hands, unknowns, events, skips while busy, failures, discarded results, the last result's
+age); no box, point or anything else from the image.
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
 beside their product ``rate_scale``. ``stage_timing`` is what each model stage and the whole
 ``process`` call cost over ``vision.timing_window_s`` (``StageTimer``, its own clocks: the
@@ -150,6 +161,7 @@ from .embed_worker import EmbedJob, EmbedWorker, cut
 from .facing import eye_span, head_yaw, smoothed
 from .geometry import CameraModel, letterbox_scale
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
+from .hands import HandWatch
 from .object_crop import CropSchedule, off_centre
 from .object_follow import (
     ASLEEP,
@@ -175,7 +187,9 @@ from .stages import (
     AppearanceEmbedder,
     FaceDetector,
     FaceEmbedder,
+    HandPoseEstimator,
     ObjectDetector,
+    PalmDetector,
     SingleObjectTracker,
 )
 from .track_stats import TrackDiagnostics, head_pose
@@ -364,12 +378,18 @@ class VisionPipeline:
         embed_worker: EmbedWorker | None = None,
         object_tracker: SingleObjectTracker | None = None,
         object_track_unavailable: str | None = None,
+        palm_detector: PalmDetector | None = None,
+        hand_pose: HandPoseEstimator | None = None,
+        hands_unavailable: str | None = None,
+        hands_threaded: bool = False,
     ):
         """``embed_worker`` moves the animal and object appearance embeddings off this thread
         (the live app, ``open_perception``); without one they run inline in ``process``, as
         replay and the unit tests need (SPEC 14). ``object_tracker`` follows the shown object
         between object runs (``object_follow``); ``object_track_unavailable`` says why there
-        is none, for the report."""
+        is none, for the report. ``palm_detector`` and ``hand_pose`` are the hand check's
+        models (``hands_unavailable`` says why they are missing); ``hands_threaded`` runs the
+        check on its own thread, which ``VisionService`` starts (``hands``)."""
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
         self.cfg = cfg
@@ -403,6 +423,7 @@ class VisionPipeline:
         self.scene_motion = SceneMotionWatch(cfg.scene_motion, cfg.object_gate)
         self.motion_wanted: Callable[[], bool] = lambda: False
         self.landmarks_wanted: Callable[[], bool] = lambda: False
+        self.hands_wanted: Callable[[], bool] = lambda: False
         self._frame_size: tuple[int, int] | None = None  # one reference swap; report thread reads
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
@@ -429,6 +450,14 @@ class VisionPipeline:
         self.timer = timer or StageTimer(TIMING_WINDOW_MAX_S)
         self.follower = ShownFollower(
             object_tracker, cfg.object_track, self.timer, object_track_unavailable
+        )
+        self.hands = HandWatch(
+            cfg.hands,
+            palm_detector,
+            hand_pose,
+            self.timer,
+            unavailable=hands_unavailable,
+            threaded=hands_threaded,
         )
         matcher.registry.add_forget_listener(self._on_forget)
 
@@ -458,6 +487,7 @@ class VisionPipeline:
         self._expire(stamp)
         self._note_faces(stamp)
         self._apply_embeds()
+        self._check_hands(frame)
         if self.governor.scale <= 0:
             self.follower.stop(PAUSED)
             return FrameReport(stamp)
@@ -514,6 +544,19 @@ class VisionPipeline:
         if share is not None:
             self._publish("percept.scene_motion", ScenePercept(share), frame.stamp)
 
+    def _check_hands(self, frame: Frame) -> None:
+        """The hand check's step for this frame (``HandWatch.step``) and its fist events on
+        ``percept.hand``. ``hands_wanted`` is read only with the hand models loaded; a failure
+        (the seam or the watch) is logged by type and never costs the frame."""
+        try:
+            wanted = self.hands.ready and self.governor.scale > 0 and self.hands_wanted()
+            events = self.hands.step(frame.stamp, frame.image, wanted)
+        except Exception as exc:
+            log.warning("hand check step failed: %s", type(exc).__name__)
+            return
+        for event in events:
+            self._publish("percept.hand", event, frame.stamp)
+
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).
 
@@ -543,6 +586,7 @@ class VisionPipeline:
         self.object_gate.reset()
         self.object_crop.reset()
         self.scene_motion.reset()
+        self.hands.reset()
 
     def apply_config(
         self,
@@ -567,6 +611,7 @@ class VisionPipeline:
         self.governor.rates = vision.rates
         self.object_gate.cfg = vision.object_gate
         self.scene_motion.cfg, self.scene_motion.gate = vision.scene_motion, vision.object_gate
+        self.hands.cfg = vision.hands
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
@@ -670,6 +715,7 @@ class VisionPipeline:
             "object_gate": self.object_gate.snapshot(),
             "object_input": self.object_crop.snapshot(),
             "scene_motion": self.scene_motion.snapshot(),
+            "hands": self.hands.snapshot(last),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
             "objects": objects,
