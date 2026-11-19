@@ -768,3 +768,63 @@ def test_a_huge_palm_logit_does_not_overflow():
         scores = np.full(2016, logit, np.float32)
         _, _, score = onnx.decode_palm(raw, scores, anchors)
         assert score == pytest.approx(expected, abs=1e-12)
+
+
+def test_the_hand_models_load_only_for_the_radio_fist_stop(monkeypatch, tmp_path, caplog):
+    """SPEC 5, Hand check: the models load only with vision.hands.enabled, tools.radio.enabled
+    and tools.radio.fist_stop all on; otherwise no session, no thread, no warning, state off."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.service import hands_load_wanted
+
+    onnx, built = _hands_rig(monkeypatch, tmp_path)
+    radio_on = {"tools": {"radio": {"enabled": True}}}
+    assert hands_load_wanted(RoboEmotConfig.model_validate(radio_on)) is True
+    for off in (
+        {},  # the default: the radio is an admin opt-in
+        {"tools": {"radio": {"enabled": True, "fist_stop": False}}},
+        {**radio_on, "vision": {"hands": {"enabled": False}}},
+    ):
+        cfg = RoboEmotConfig.model_validate(off)
+        assert hands_load_wanted(cfg) is False
+        stages = onnx.load_stages(
+            tmp_path, cfg.vision, appearance=False, objects=False, hands=hands_load_wanted(cfg)
+        )
+        assert built == [] and stages.hands_unavailable is None
+        watch = HandWatch(cfg.vision.hands, stages.palm_detector, stages.hand_pose, threaded=True)
+        watch.start()
+        assert watch.snapshot(None)["state"] == "off"
+        assert not any(t.name == "roboemot-hands" for t in threading.enumerate())
+    assert "hand check" not in caplog.text
+
+
+def test_missing_hand_models_keep_vision_up_and_never_ask_the_seam(monkeypatch, tmp_path):
+    """SPEC 5, Hand check: the default config with the radio on and no hand model files: the
+    pipeline runs, the report says unavailable, and hands_wanted is never consulted."""
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision.service import hands_load_wanted
+
+    onnx, _ = _hands_rig(monkeypatch, tmp_path, missing="mediapipe-palm")
+    cfg = RoboEmotConfig.model_validate({"tools": {"radio": {"enabled": True}}})
+    vision = cfg.vision.model_copy(update={"objects_enabled": False})
+    stages = onnx.load_stages(tmp_path, vision, appearance=False, hands=hands_load_wanted(cfg))
+    assert "mediapipe-palm" in stages.hands_unavailable
+    _, bus, pipe, _, _ = rig(
+        tmp_path,
+        lambda i: [],
+        vision=vision,
+        palm_detector=stages.palm_detector,
+        hand_pose=stages.hand_pose,
+        hands_unavailable=stages.hands_unavailable,
+    )
+
+    def never() -> bool:
+        raise AssertionError("hands_wanted consulted without the hand models")
+
+    pipe.hands_wanted = never
+    got = []
+    bus.subscribe("percept.hand", got.append)
+    run_frames(pipe, 2.0)
+    assert got == []
+    assert pipe.hands.snapshot(2.0)["state"] == "unavailable"

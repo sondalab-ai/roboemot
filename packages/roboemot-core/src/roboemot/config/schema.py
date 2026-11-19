@@ -2653,8 +2653,9 @@ class HandsConfig(Strict):
     enabled: bool = param(
         True,
         "Load the hand models (MediaPipe palm detector and hand model, roboemot models fetch) "
-        "at start, so the hand check can run while a caller asks for it (the radio's fist stop, "
-        "tools.radio.fist_stop); off, nothing is loaded and the check never runs",
+        "at start for the radio's fist stop: they load only when this, tools.radio.enabled and "
+        "tools.radio.fist_stop are all on, read at start (turning one on later needs a "
+        "restart); otherwise nothing is loaded and the check never runs",
         restart=True,
     )
     rate_hz: float = param(
@@ -7537,7 +7538,8 @@ class RadioConfig(Strict):
         "Stop the radio with a fist: while the music can be heard and the robot is awake the "
         "hand check runs (vision.hands), and a fist held up to the camera for "
         "vision.hands.fist_hold_s stops the station, then the robot nods; off, the hand check "
-        "does not run for the radio",
+        "does not run. The hand models load at start only with this, tools.radio.enabled and "
+        "vision.hands.enabled on: turning it on later needs a restart if they were not loaded",
     )
 
 

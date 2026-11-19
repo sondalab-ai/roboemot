@@ -37,6 +37,7 @@ def real_report(rig, listener=None):
         tracker=SimpleNamespace(active=None),
         circ=empty,
         reflexes=empty,
+        fist_stop=empty,
         speaking=empty,
         dance=empty,
     )

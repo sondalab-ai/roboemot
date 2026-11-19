@@ -10,18 +10,20 @@ import pytest
 from roboemot import diag
 from roboemot.bus import Bus, Message
 from roboemot.config import ConfigStack
+from roboemot.config.schema import HandsConfig
 from roboemot.diagnostics import collect_section
 from roboemot.manifest import load_manifest
 from roboemot.runtime.assembly import assemble
 from roboemot.runtime.diagnostics import build_diagnostics
 from roboemot.runtime.host import RuntimeHost
 from roboemot.runtime.radio_stop import FIST_STOP, FistStop, stop_and_nod
-from roboemot.vision.hands import HandGesture
+from roboemot.vision.hands import HandGesture, HandWatch
 from roboemot.vision.onnx import Stages
 from roboemot.webui.strings import STRINGS
 from test_media_player import JAZZ
 from test_media_player import Rig as PlayerRig
 from test_runtime import CONFIGS, DaytimeHost, RecordingPlatform
+from test_vision_hands import FIST_HAND, FakePalm, FakePose, image
 
 FIST = HandGesture(gesture="fist", held_s=1.04)
 
@@ -74,6 +76,22 @@ class Rig:
 
     def hand(self, gesture=FIST) -> None:
         self.fist.on_hand(Message("percept.hand", gesture, 10.0))
+
+
+def test_stop_and_nod_stops_the_station_then_nods():
+    """SPEC 8, 11 Radio (owner decision 2026-11-19): the listener's voice stop stops the
+    station with its reason, then asks the renderer for one nod with the time; without a
+    renderer it only stops."""
+    calls: list[tuple] = []
+    player = SimpleNamespace(stop=lambda reason: calls.append(("stop", reason)))
+    host = RuntimeHost()
+    stop_and_nod(host, player, "voice_stop")
+    assert calls == [("stop", "voice_stop")]
+    host.expression = SimpleNamespace(
+        request=lambda label, now: calls.append(("gesture", label, now is not None))
+    )
+    stop_and_nod(host, player, "voice_stop")
+    assert calls[1:] == [("stop", "voice_stop"), ("gesture", "nod", True)]
 
 
 def test_defaults():
@@ -197,3 +215,43 @@ def test_the_assembled_runtime_wires_the_seam_the_topic_and_the_report():
         assert collect_section(source)["data"]["fist_stops"] == 1
     finally:
         p.perception.stop()
+
+
+def test_a_hot_reload_of_the_field_takes_effect_without_a_restart():
+    """SPEC 11A: tools.radio.fist_stop is read on each call, so a web UI change applies at
+    once (the models, loaded at start, stay)."""
+    stack = ConfigStack()
+    radio = FakeRadio()
+    fist = FistStop(lambda: radio, lambda: True, stack.effective, lambda r, why: r.stop(why))
+    assert fist.wanted() is True
+    stack.set("tools.radio.fist_stop", False, source="test")
+    assert fist.wanted() is False
+    fist.on_hand(Message("percept.hand", FIST, 1.0))
+    assert radio.stops == []
+    stack.set("tools.radio.fist_stop", True, source="test")
+    assert fist.wanted() is True
+    fist.on_hand(Message("percept.hand", FIST, 2.0))
+    assert radio.stops == ["fist_stop"]
+
+
+@pytest.mark.parametrize("silenced", [True, False])
+def test_one_held_fist_stops_the_radio_once(silenced):
+    """SPEC 5, Hold: a fist kept up after the stop is the same hold, so it never fires a
+    second stop, whether the stop ends the seam (the music is gone) or not (a radio that
+    stays audible)."""
+
+    class Stubborn(FakeRadio):
+        def stop(self, reason: str) -> None:
+            self.stops.append(reason)
+            if silenced:
+                self.on = self.set = False
+
+    radio = Stubborn()
+    fist = FistStop(lambda: radio, lambda: True, lambda: config(), lambda r, why: r.stop(why))
+    watch = HandWatch(HandsConfig(), FakePalm(), FakePose(FIST_HAND))
+    dt = 1 / 30
+    for i in range(round(6.0 / dt)):  # six seconds of a fist in view
+        for stamp, event in watch.step(i * dt, image(), fist.wanted()):
+            fist.on_hand(Message("percept.hand", event, stamp))
+    assert radio.stops == ["fist_stop"]
+    assert fist.fist_stops == 1 and fist.fist_ignored == 0

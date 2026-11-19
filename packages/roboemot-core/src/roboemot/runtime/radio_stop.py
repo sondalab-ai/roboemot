@@ -45,7 +45,7 @@ class Radio(Protocol):
     def stop(self, reason: str) -> None: ...
 
 
-def stop_and_nod(host: RuntimeHost, player: Any, reason: str) -> None:
+def stop_and_nod(host: RuntimeHost, player: Radio, reason: str) -> None:
     """Stop the station for ``reason``, then nod once through ``host.expression`` (the
     ``play`` skill's path, with the time, so the renderer refuses it rather than play it late);
     without a renderer it only stops. Any thread (the listener's for the voice stop, the

@@ -116,13 +116,13 @@ class Pipeline:
     pitch_dof: str
     sleep: SleepGate
     alone: AloneWatch
+    fist_stop: FistStop  # a fist stops the radio (SPEC 5, 11 Radio)
     realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
     cue_sounds: dict[str, CueSound] = field(default_factory=dict)  # the robot's (SPEC 8)
     echo_cancelled: bool = False  # the manifest's hardware echo cancellation (the radio's duck)
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
-    fist_stop: FistStop | None = None  # a fist stops the radio (SPEC 5, 11 Radio)
 
 
 def make_yes_no(
