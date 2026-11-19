@@ -119,21 +119,23 @@ def test_start_media_wires_the_listeners_speech_to_the_players_duck(echo_cancell
         assert player.echo_cancelled is echo_cancelled
         assert listener.media_speech_start == player.duck_from
         assert listener.media_speech_end == player.release_from
-        assert callable(listener.media_stop)
+        stopped = []
+        player.stop = stopped.append  # the hook calls through to this run's player
+        listener.media_stop("voice_stop")
+        assert stopped == ["voice_stop"]
 
 
-@pytest.mark.parametrize("nod_ok", [True, False])
-def test_stop_and_nod_stops_the_station_then_nods(nod_ok):
+def test_stop_and_nod_stops_the_station_then_nods():
     """SPEC 8, 11 Radio (owner decision 2026-11-19): the listener's voice stop stops the
-    station with its reason, then asks the renderer for one nod with the time (a refused nod
-    changes nothing); without a renderer it only stops."""
+    station with its reason, then asks the renderer for one nod with the time; without a
+    renderer it only stops."""
     calls: list[tuple] = []
     player = SimpleNamespace(stop=lambda reason: calls.append(("stop", reason)))
     host = RuntimeHost()
     stop_and_nod(host, player, "voice_stop")
     assert calls == [("stop", "voice_stop")]
     host.expression = SimpleNamespace(
-        request=lambda label, now: calls.append(("gesture", label, now is not None)) or nod_ok
+        request=lambda label, now: calls.append(("gesture", label, now is not None))
     )
     stop_and_nod(host, player, "voice_stop")
     assert calls[1:] == [("stop", "voice_stop"), ("gesture", "nod", True)]

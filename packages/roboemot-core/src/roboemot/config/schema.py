@@ -3546,10 +3546,21 @@ class KeywordSet(Strict):
     greeting: list[str] = param([], "Greeting phrases", advanced=True)
     media: list[str] = param(
         [],
-        "Words that name the robot's music (`musica`, `radio`): with a stop phrase in the "
-        "server's words of a wake over the radio they stop it even when the name is not "
-        "confirmed (tools.radio.stop_without_name). Whole words, no stemming: list the "
-        "inflections you want",
+        "Words that name the robot's music (`musica`, `radio`): with a stop phrase or a "
+        "media_stop verb in the server's words of a wake over the radio they stop it even when "
+        "the name is not confirmed (tools.radio.stop_without_name). Whole words, no stemming: "
+        "list the inflections you want. Only the utterance's language's list counts; a "
+        "language overridden without it has none, so the stop without the name is off there",
+        advanced=True,
+    )
+    media_stop: list[str] = param(
+        [],
+        "Verbs that stop the robot's music (`spegni`, `stoppa`, `turn off`), on top of the stop "
+        "phrases, for the stop without the name over the radio "
+        "(tools.radio.stop_without_name): only with a media word. Not a keyword of their own "
+        "(no event, not in the grammar pass). Whole words, no stemming: list the inflections "
+        "you want. Only the utterance's language's list counts; a language overridden "
+        "without it falls back to its stop phrases",
         advanced=True,
     )
     wake_phrases: list[str] = param(
@@ -5170,7 +5181,32 @@ class VoiceConfig(Strict):
                 "yes": ["certo", "esatto"],
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
-                "media": ["musica", "radio", "canzone"],
+                "media": [
+                    "musica",
+                    "radio",
+                    "canzone",
+                    "canzoni",
+                    "brano",
+                    "musichetta",
+                    "stazione",
+                    "radiolina",
+                ],
+                "media_stop": [
+                    "ferma",
+                    "fermare",
+                    "fermi",
+                    "fermala",
+                    "fermalo",
+                    "stoppa",
+                    "stoppare",
+                    "spegni",
+                    "spegnere",
+                    "spegnila",
+                    "basta",
+                    "smettila",
+                    "togli",
+                    "zitta",
+                ],
                 "wake_phrases": ["ehi robot", "ciao robot"],
                 "name_wake_templates": ["ciao {name}", "ehi {name}", "hey {name}"],
                 "name_lead_ins": ["ok", "okay", "senti", "scusa", "ascolta", "hey"],
@@ -5180,7 +5216,16 @@ class VoiceConfig(Strict):
                 "yes": ["yes", "yeah", "yep"],
                 "no": ["no"],
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
-                "media": ["music", "radio", "song"],
+                "media": ["music", "radio", "song", "songs", "tune"],
+                "media_stop": [
+                    "stop",
+                    "turn off",
+                    "switch off",
+                    "shut off",
+                    "kill",
+                    "halt",
+                    "enough",
+                ],
                 "wake_phrases": ["hey robot", "hello robot"],
                 "name_wake_templates": ["hey {name}", "hello {name}"],
                 "name_lead_ins": ["ok", "okay", "listen", "excuse me"],
@@ -7374,9 +7419,9 @@ class RadioConfig(Strict):
     stop_without_name: bool = param(
         True,
         "Stop the radio by voice without the name: when a wake over the radio is not confirmed "
-        "by the server's words but they hold a stop phrase and a media word "
-        "(voice.keywords: `ferma la musica`), the station stops and the robot nods; nothing "
-        "else is answered without the name",
+        "by the server's words but they hold a stop phrase or a media_stop verb and a media "
+        "word (voice.keywords: `ferma la musica`, `spegni la radio`), the station stops and the "
+        "robot nods; nothing else is answered without the name",
     )
     touch_stop_check_s: float = param(
         1.0,

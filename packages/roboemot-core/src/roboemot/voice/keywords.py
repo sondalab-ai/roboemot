@@ -9,8 +9,9 @@ the inflections you want. Categories are ``stop``, ``yes``, ``no``, ``greeting``
 not count, SPEC 8) and ``wake`` (one of its ``wake_phrases``, or a ``name_wake_templates`` phrase
 rendered with the name or an extra name; a rendered phrase that repeats a wake phrase, such as
 ``ciao robot``, is listed once). It runs on every partial, so it is a few substring tests.
-The ``media`` list is no category (no event, not in the grammar pass): ``holds_any`` matches
-it the same way, for the stop over the radio without the name (SPEC 8, Radio playback).
+The ``media`` and ``media_stop`` lists are no category (no event, not in the grammar pass):
+``holds_any`` matches them the same way, for the stop over the radio without the name (SPEC 8,
+Radio playback).
 
 ``name_first`` tells whether a text *opens* with a name (the robot's own, an extra name, an
 alias), after at most one

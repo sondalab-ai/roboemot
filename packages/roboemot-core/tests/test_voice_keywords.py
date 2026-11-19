@@ -309,5 +309,17 @@ def test_holds_any_matches_whole_words(text, found):
 
 def test_the_default_media_words_per_language():
     """The voice stop's media words (SPEC 8, Radio playback; owner decision 2026-11-19)."""
-    assert V.keywords["it"].media == ["musica", "radio", "canzone"]
-    assert V.keywords["en"].media == ["music", "radio", "song"]
+    it, en = V.keywords["it"], V.keywords["en"]
+    assert {"musica", "radio", "canzone", "canzoni", "brano", "stazione"} <= set(it.media)
+    assert {"music", "radio", "song", "songs", "tune"} <= set(en.media)
+    assert {"ferma", "fermare", "stoppa", "spegni", "spegnere", "basta"} <= set(it.media_stop)
+    assert {"stop", "turn off", "switch off", "shut off"} <= set(en.media_stop)
+    # the global stop list (barge-in cut, appraisal) is not widened
+    assert it.stop == ["stop", "fermati", "ferma", "basta", "fermo"]
+
+
+def test_the_media_lists_are_no_keyword_category():
+    """No event and no grammar word for them: "spegni la musica" spots nothing."""
+    s = spotter()
+    assert s.spot("spegni la musica", "it") == set()
+    assert not any("musica" in p for ps in s.grammar_phrases("it").values() for p in ps)

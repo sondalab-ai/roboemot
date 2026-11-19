@@ -105,8 +105,9 @@ its server items, plays no cue, and the radio rejoins as after any turn; the win
 closes. A follow-up in that window decided before the verdict (the lyric's next line starts
 inside the span the hold back-dates) goes with it when its own final holds neither either.
 Stop trusts the command (owner decision 2026-11-19: a missed stop costs more than a false one):
-when such an unconfirmed server final holds a ``stop`` phrase and a ``media`` word of its
-language (``voice.keywords``, whole words: "Ehi, Alexa, ferma la musica.") while a station is
+when such an unconfirmed server final holds a ``stop`` phrase or a ``media_stop`` verb, and a
+``media`` word, of its language only (``voice.keywords``, whole words: "Ehi, Alexa, ferma la
+musica.", "spegni la radio") while a station is
 set (``media_set``) and ``tools.radio.stop_without_name`` is on, the listener stops the radio
 (``media_stop``, reason ``voice_stop``), counts ``voice_stop_media`` instead of
 ``wake_unconfirmed_media`` and publishes ``media``/``voice_stop`` instead of
@@ -1783,12 +1784,15 @@ class VoiceListener:
     def _stops_media(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
         """Whether ``p``'s unconfirmed server final asks to stop the radio (owner decision
         2026-11-19): ``tools.radio.stop_without_name`` on, a station set (held or not: the
-        turn holds it), a ``stop`` phrase (the server spotter) and a ``media`` word of
-        ``p``'s language in the text, whole words both."""
-        if not (server and self._cfg.tools.radio.stop_without_name and "stop" in fast.keywords):
+        turn holds it), a ``stop`` phrase (the server spotter) or a ``media_stop`` verb, and a
+        ``media`` word in the text, whole words all, of ``p``'s language only (the owner does
+        not want languages mixed)."""
+        if not (server and self._cfg.tools.radio.stop_without_name and self._media_set()):
             return False
         words = self._cfg.voice.keywords.get(p.language)
-        return words is not None and holds_any(text, words.media) and self._media_set()
+        if words is None or not holds_any(text, words.media):
+            return False
+        return "stop" in fast.keywords or holds_any(text, words.media_stop)
 
     def _stop_media(self) -> None:
         """Ask the media player to stop the station for ``voice_stop`` (``media_stop``)."""
