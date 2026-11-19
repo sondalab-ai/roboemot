@@ -1010,7 +1010,7 @@ def test_an_unconfirmed_wake_shows_the_servers_words_with_the_live_transcript_on
     app["webui"]["live"]["transcript_max_chars"] = 80
     with TurnServer(heard=[[lyric]]) as server:
         ear = ears(server, script=["neve"], app=app, to_worker=True)
-        radio_audible(ear)
+        radio_audible(ear)  # no station set (``media_set``): the voice stop does not apply
         seen = []
         ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
         ear.say()
@@ -1141,3 +1141,217 @@ def test_a_wake_over_the_radio_without_a_transcript_keeps_the_local_fallback(ear
         assert u.local_only and u.addressed and u.wake_word
         audio = ear.r.listener.snapshot()["realtime_audio"]
         assert audio["transcript_timeouts"] == 1 and audio["wake_unconfirmed_media"] == 0
+
+
+# ------------------------------------- stop the radio without the name (SPEC 8, 2026-11-19)
+
+
+def radio_playing(ear):
+    """The robot's radio plays a station (``media_set``) and is audible; returns the reasons
+    the listener asked the player to stop with (``media_stop``)."""
+    stops: list[str] = []
+    radio_audible(ear)
+    ear.r.listener.media_set = lambda: True
+    ear.r.listener.media_stop = stops.append
+    return stops
+
+
+def radio_events(ear):
+    seen: list[tuple[str, str, dict]] = []
+    ear.r.listener.events = lambda kind, reason, **fields: seen.append((kind, reason, fields))
+    return seen
+
+
+@pytest.mark.parametrize(
+    "heard",
+    [
+        "Ehi, Alexa, ferma la musica.",
+        "basta con la radio",
+        "STOP, la canzone!",
+        "spegni la musica",  # media_stop verbs, not in the stop list
+        "stoppa la radio",
+        "puoi fermare la musica",
+    ],
+)
+def test_an_unconfirmed_wake_that_says_stop_the_music_stops_the_radio(ears, heard):
+    """The robot (2026-11-19): over the radio "ehi neve, ferma la musica" passed the local gate
+    and the server wrote "Ehi, Alexa, ferma la musica.". Owner decision 2026-11-19 ("stop trusts
+    the command"): a stop word and a media word in that server final stop the radio though the
+    name is not confirmed; the turn is still not answered (no response, no LLM)."""
+    with TurnServer(heard=[[heard]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing(ear)
+        seen = radio_events(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert stops == ["voice_stop"]
+        assert ("media", "voice_stop", {}) in seen
+        assert all(why != "media_unconfirmed" for _, why, _ in seen)
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["voice_stop_media"] == 1 and audio["wake_unconfirmed_media"] == 0
+        assert ear.settle(lambda: len(server.of("conversation.item.delete")) == 1)
+        assert server.of("response.create") == []
+
+
+@pytest.mark.parametrize(
+    "heard",
+    [
+        "Ehi, Alexa, che tempo fa?",  # another request still needs the name
+        "Ehi, Alexa, basta",  # a stop word without a media word
+        "Ehi, Alexa, la musica è bella",  # a media word without a stop word
+        "fermata della radio",  # no whole stop word ("fermata")
+        "ferma la radiosa",  # no whole media word
+        "Hey Alexa, stop the music.",  # English media word: languages are not mixed
+    ],
+)
+def test_an_unconfirmed_wake_without_stop_and_media_words_is_still_dropped(ears, heard):
+    with TurnServer(heard=[[heard]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing(ear)
+        seen = radio_events(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert stops == []
+        assert ("unanswered", "media_unconfirmed", {"heard": None}) in seen
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 1 and audio["voice_stop_media"] == 0
+        assert server.of("response.create") == []
+
+
+def test_stop_without_the_name_off_drops_the_unconfirmed_wake(ears):
+    app = {**NEVE_ALWAYS, "tools": {"radio": {"stop_without_name": False}}}
+    with TurnServer(heard=[["Ehi, Alexa, ferma la musica."]]) as server:
+        ear = ears(server, script=["neve"], app=app, to_worker=True)
+        stops = radio_playing(ear)
+        seen = radio_events(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and stops == []
+        assert ("unanswered", "media_unconfirmed", {"heard": None}) in seen
+        assert ear.r.listener.snapshot()["realtime_audio"]["wake_unconfirmed_media"] == 1
+
+
+def test_no_station_set_leaves_the_unconfirmed_wake_dropped(ears):
+    """The station stopped meanwhile (``media_set`` false): nothing to stop, the turn is the
+    plain unconfirmed wake it was."""
+    with TurnServer(heard=[["Ehi, Alexa, ferma la musica."]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing(ear)
+        ear.r.listener.media_set = lambda: False
+        seen = radio_events(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and stops == []
+        assert ("unanswered", "media_unconfirmed", {"heard": None}) in seen
+
+
+def test_without_the_radio_a_stop_the_music_wake_is_answered_as_ever(ears):
+    """No audible radio at the wake: the server need not confirm it, the turn is answered (the
+    model's ``radio_stop`` tool) and the voice stop never runs."""
+    with TurnServer(heard=[["Ehi, Alexa, ferma la musica."]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing(ear)
+        ear.r.listener.media_audible = lambda at: False
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].addressed and stops == []
+        assert ear.r.listener.snapshot()["realtime_audio"]["voice_stop_media"] == 0
+        assert ear.settle(lambda: len(server.of("response.create")) == 1, 10.0)
+
+
+def test_a_local_rejection_over_the_radio_never_stops_it(ears):
+    """The robot (2026-11-19): Vosk's final "i robot fermano musica" is rejected by the local
+    gate over the radio ("robot" alone never wakes there, "i" is no lead-in). The voice stop
+    needs a wake that passed the local gate: this one stays rejected and nothing is sent."""
+    with TurnServer(heard=[["ferma la musica"]]) as server:
+        ear = ears(server, script=["i robot fermano musica"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed and stops == []
+        assert ear.r.listener.snapshot()["wake"]["decisions"]["rejected_media"] == 1
+        assert appended(server) == []
+
+
+@pytest.mark.parametrize(
+    "heard", ["Hey Alexa, stop the music.", "Hey Alexa, stop the radio.", "turn off the song"]
+)
+def test_an_english_stop_the_music_stops_the_radio(ears, heard):
+    """An English-speaking robot: the English ``media_stop`` and ``media`` lists apply."""
+    app = {"voice": {"wake_word_policy": "always", "wake_word": "Neve"}}
+    app["conversation"] = {"language": "en"}
+    with TurnServer(heard=[[heard]]) as server:
+        ear = ears(server, script=["hey neve"], app=app, to_worker=True)
+        ear.r.listener._speaker_language = lambda: "en"
+        stops = radio_playing(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].language == "en"
+        assert not ear.utterances[0].addressed and stops == ["voice_stop"]
+
+
+def test_a_media_stop_hook_that_raises_is_swallowed(ears):
+    """The player failing never kills the listener: the turn is still handed off, counted and
+    shown as a voice stop."""
+    with TurnServer(heard=[["Ehi, Alexa, ferma la musica."]]) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        radio_playing(ear)
+
+        def broken(reason):
+            raise RuntimeError("player gone")
+
+        ear.r.listener.media_stop = broken
+        seen = radio_events(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert ("media", "voice_stop", {}) in seen
+        assert ear.r.listener.snapshot()["realtime_audio"]["voice_stop_media"] == 1
+
+
+def radio_playing_held(ear):
+    """``radio_held_by_holds`` with a station set and a ``media_stop`` recorder."""
+    stops: list[str] = []
+    radio_held_by_holds(ear)
+    ear.r.listener.media_set = lambda: True
+    ear.r.listener.media_stop = stops.append
+    return stops
+
+
+def test_a_follow_up_riding_an_unconfirmed_wake_can_stop_the_radio(ears):
+    """The lyric (or garbled name) "Ehi Alexa" opens the window, then "ferma la musica"
+    follows in it: the parent is unconfirmed, so the follow-up is too, and it stops the radio
+    (one of each counter)."""
+    heard = [["Ehi Alexa"], ["ferma la musica"]]
+    release = threading.Event()
+    with TurnServer(heard=heard, hold=release) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing_held(ear)
+        ear.say()
+        ear.say()
+        release.set()
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert not ear.utterances[0].addressed and not ear.utterances[1].addressed
+        assert stops == ["voice_stop"]
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["wake_unconfirmed_media"] == 1 and audio["voice_stop_media"] == 1
+        assert server.of("response.create") == []
+
+
+def test_a_follow_up_after_a_voice_stopped_wake_is_still_unconfirmed(ears):
+    heard = [["Ehi Alexa, ferma la musica"], ["la la la"]]
+    release = threading.Event()
+    with TurnServer(heard=heard, hold=release) as server:
+        ear = ears(server, script=["neve"], app=NEVE_ALWAYS, to_worker=True)
+        stops = radio_playing_held(ear)
+        ear.say()
+        ear.say()
+        release.set()
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert not ear.utterances[0].addressed and not ear.utterances[1].addressed
+        assert stops == ["voice_stop"]
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["voice_stop_media"] == 1 and audio["wake_unconfirmed_media"] == 1
+        assert server.of("response.create") == []
