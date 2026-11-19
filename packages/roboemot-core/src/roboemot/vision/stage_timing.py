@@ -3,10 +3,14 @@
 ``StageTimer`` keeps, per stage, a fixed ring of (end time, wall seconds, CPU seconds). Keys:
 ``face_detect`` (YuNet), ``face_embed`` (SFace), ``object_detect`` (NanoDet),
 ``appearance_embed`` (DINOv2), ``object_track`` (VitTrack updates, the shown object between
-NanoDet runs), ``object_track_init`` (VitTrack starts, on a NanoDet frame) and ``process``,
+NanoDet runs), ``object_track_init`` (VitTrack starts, on a NanoDet frame), ``hand_palm``
+(the MediaPipe palm detector of a hand check) and ``hand_pose`` (the 21-point hand model, only
+on a found palm), both on the hand check's own thread in the live app (``hands``), and
+``process``,
 the whole ``VisionPipeline.process`` call of one frame (frames the governor lets through
 without a stage included). The report never carries the word "embedding" (privacy guard of
-the perception tests), hence ``_embed``.
+the perception tests), hence ``_embed``; nor the word "landmark" (the face report's guard),
+hence ``hand_pose`` for the hand model.
 
 ``runs`` is the count since start. Every other field is taken over the last
 ``vision.timing_window_s`` of wall time: ``runs_per_s``, ``wall_ms`` per run (p50, p90, max;
@@ -18,9 +22,10 @@ is 0 before the first run. A run that raises still counts: its time was spent.
 CPU time is ``time.thread_time`` of the thread that ran the stage: the vision thread, except
 ``appearance_embed``, which the embed worker records on its own thread in the live app
 (``embed_worker``; its ``wall_ms`` is then what an embedding takes there, no longer time the
-frame path waits). ONNX Runtime runs each model with ``intra_op_num_threads = vision.threads``
-(2 by default; DINOv2-S ``vision.appearance_threads``, 2) and OpenCV with ``cv2.setNumThreads``
-of the same value, so work done in their pool threads is not counted: ``cpu_share`` is a lower
+frame path waits), and ``hand_palm`` and ``hand_pose``, recorded on the hand check's thread.
+ONNX Runtime runs each model with ``intra_op_num_threads = vision.threads`` (2 by default;
+DINOv2-S ``vision.appearance_threads``, 2) and OpenCV with ``cv2.setNumThreads`` of the same
+value, so work done in their pool threads is not counted: ``cpu_share`` is a lower
 bound, and ``wall_ms`` is the cost the calling thread sees.
 
 Timing reads its own clocks (the pipeline only uses capture stamps); the values never feed a
@@ -50,8 +55,20 @@ OBJECTS = "object_detect"
 APPEARANCE = "appearance_embed"
 OBJECT_TRACK = "object_track"
 OBJECT_TRACK_INIT = "object_track_init"
+HAND_PALM = "hand_palm"
+HAND_POSE = "hand_pose"
 PROCESS = "process"
-STAGES = (DETECTION, EMBEDDING, OBJECTS, APPEARANCE, OBJECT_TRACK, OBJECT_TRACK_INIT, PROCESS)
+STAGES = (
+    DETECTION,
+    EMBEDDING,
+    OBJECTS,
+    APPEARANCE,
+    OBJECT_TRACK,
+    OBJECT_TRACK_INIT,
+    HAND_PALM,
+    HAND_POSE,
+    PROCESS,
+)
 MS_PER_S = 1000.0
 FIELDS = 3  # end time, wall seconds, CPU seconds
 

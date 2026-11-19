@@ -423,6 +423,9 @@ def test_open_perception_gives_the_live_pipeline_an_embed_worker(tmp_path, monke
             objects_unavailable=None,
             object_tracker=None,
             object_track_unavailable=None,
+            palm_detector=None,
+            hand_pose=None,
+            hands_unavailable=None,
         )
 
     class Source:

@@ -22,6 +22,7 @@ TOPICS = (
     "percept.utterance",
     "percept.entity",
     "percept.scene_motion",
+    "percept.hand",
     "sound.loud",
     "music.started",
     "music.stopped",

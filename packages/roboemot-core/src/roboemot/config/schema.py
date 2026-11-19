@@ -2646,6 +2646,104 @@ class SceneMotionConfig(Strict):
     )
 
 
+class HandsConfig(Strict):
+    """The hand check (SPEC 5, 13): MediaPipe palm detector, then the 21-point hand model on the
+    best palm, and the fist rule on its points. It runs only while a caller asks for it."""
+
+    enabled: bool = param(
+        False,
+        "Load the hand models (MediaPipe palm detector and hand model, roboemot models fetch) "
+        "at start, so the hand check can run while a caller asks for it; off, nothing is "
+        "loaded and the check never runs",
+        restart=True,
+    )
+    rate_hz: float = param(
+        2.0,
+        "While the hand check is asked for, one captured frame per 1 / this (capture time) goes "
+        "to the palm detector, on its own thread; a frame due while a check still runs is "
+        "skipped",
+        unit="Hz",
+        ge=0.2,
+        le=10,
+        advanced=True,
+    )
+    palm_score_min: float = param(
+        0.5,
+        "The hand model runs only on the best palm of a check, and only when its palm detector "
+        "score is at least this",
+        ge=0,
+        le=1,
+        advanced=True,
+    )
+    presence_min: float = param(
+        0.8,
+        "The hand model's own score that a hand is in its crop: below this the check's result "
+        "is unknown, neither fist nor open",
+        ge=0,
+        le=1,
+        advanced=True,
+    )
+    fist_ratio_max: float = param(
+        0.95,
+        "Fist rule: a finger (index, middle, ring, little; not the thumb) is curled when its "
+        "tip's distance from the wrist is below this times its middle joint's (PIP), on the "
+        "hand model's 3D points; all four curled make a fist",
+        ge=0.3,
+        le=1.5,
+        advanced=True,
+    )
+    open_ratio_min: float = param(
+        1.2,
+        "Fist rule: four fingers whose tip's distance from the wrist is above this times their "
+        "middle joint's (PIP) make an open hand; any other hand (half closed, some fingers "
+        "curled) is unknown. Must be above fist_ratio_max",
+        ge=0.5,
+        le=2.5,
+        advanced=True,
+    )
+    fist_hold_s: float = param(
+        1.0,
+        "A fist seen on consecutive hand checks for this long (capture time, first fist check "
+        "to the current one) makes one fist event (percept.hand); the next needs a check that "
+        "is not a fist first",
+        unit="s",
+        ge=0.2,
+        le=10,
+    )
+    max_gap_s: float = param(
+        3.0,
+        "Two fist checks further apart than one check period (1 / rate_hz) plus this (capture "
+        "time) are not one hold: the run starts again at the later one. The slack covers slow "
+        "checks on a busy CPU; a longer gap (the camera paused) breaks the hold",
+        unit="s",
+        ge=0.5,
+        le=60,
+        advanced=True,
+    )
+    pose_model: Literal["fp32", "int8"] = param(
+        "fp32",
+        "Weights of the hand model: fp32 (147 ms of CPU per run on the CM4) or the int8 file "
+        "(60 ms, with a large accuracy drop by the model's own notes); the palm detector is "
+        "always int8",
+        restart=True,
+        advanced=True,
+    )
+    spinning: bool = param(
+        False,
+        "Let the hand models' ONNX Runtime threads spin-wait between operators. Off: they run "
+        "beside the face and object detectors, and on four cores spinning pools take cycles "
+        "from each other and from audio",
+        restart=True,
+        advanced=True,
+    )
+
+    @model_validator(mode="after")
+    def _open_above_fist(self) -> HandsConfig:
+        if self.open_ratio_min <= self.fist_ratio_max:
+            raise ValueError("vision.hands.open_ratio_min must be above fist_ratio_max")
+        return self
+
+
 class VisionConfig(Strict):
     rates: VisionRates = param(
         {}, "Per-stage target rates, scaled by the circadian state", advanced=True
@@ -2661,6 +2759,7 @@ class VisionConfig(Strict):
     scene_motion: SceneMotionConfig = param(
         {}, "Motion watch of a day nap (SPEC 5, 7A)", advanced=True
     )
+    hands: HandsConfig = param({}, "Hand check and fist rule (SPEC 5, 13)")
     threads: int = param(
         2, "CPU threads of the frame-path models", ge=1, le=8, restart=True, advanced=True
     )
@@ -6534,7 +6633,14 @@ class RuntimeConfig(Strict):
         ge=0, le=19, restart=True, advanced=True,
     )  # fmt: skip
     background_threads: list[str] = param(
-        ["roboemot-vision", "roboemot-embed", "vision-models", "roboemot-camera", "roboemot-light"],
+        [
+            "roboemot-vision",
+            "roboemot-embed",
+            "roboemot-hands",
+            "vision-models",
+            "roboemot-camera",
+            "roboemot-light",
+        ],
         "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
         "Runtime pool threads the vision models start when they load. The real-time threads "
         "(MainThread, roboemot-audio, roboemot-listener, roboemot-grammar, roboemot-keywords, "
