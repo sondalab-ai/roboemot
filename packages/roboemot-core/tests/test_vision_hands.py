@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from pydantic import ValidationError
 from roboemot.bus import TOPICS
 from roboemot.config.schema import HandsConfig, RoboEmotConfig
 from roboemot.vision import Frame, models
+from roboemot.vision import hands as hands_module
 from roboemot.vision.governor import CIRCADIAN
 from roboemot.vision.hands import (
     FIST,
@@ -30,6 +33,7 @@ from roboemot.vision.types import HandPose, Palm
 from test_vision import H, W, rig
 
 HANDS = HandsConfig(enabled=True)
+GAP = 1 / HANDS.rate_hz + HANDS.max_gap_s
 CACHE = models.default_dir()  # read at import: the autouse fixture moves the data folder
 
 # A synthetic right hand in its own frame (palm length 1): finger bases across the palm, each
@@ -126,7 +130,7 @@ def test_a_fist_held_for_fist_hold_s_fires_once_and_rearms_after_a_non_fist():
     hold, period = FistHold(), 1 / HANDS.rate_hz
     seen = []
     for k, fist in enumerate([True] * 5 + [False] + [True] * 3):
-        held = hold.observe(k * period, fist, HANDS.fist_hold_s)
+        held = hold.observe(k * period, fist, HANDS.fist_hold_s, GAP)
         if held is not None:
             seen.append((k, held))
     assert seen == [(2, pytest.approx(HANDS.fist_hold_s)), (8, pytest.approx(HANDS.fist_hold_s))]
@@ -134,20 +138,20 @@ def test_a_fist_held_for_fist_hold_s_fires_once_and_rearms_after_a_non_fist():
 
 def test_a_break_in_the_fist_starts_the_hold_again():
     hold = FistHold()
-    assert hold.observe(0.0, True, 1.0) is None
-    assert hold.observe(0.5, True, 1.0) is None
-    assert hold.observe(0.9, False, 1.0) is None  # unknown, no palm or a failure
-    assert hold.observe(1.0, True, 1.0) is None
-    assert hold.observe(1.5, True, 1.0) is None
-    assert hold.observe(2.0, True, 1.0) == pytest.approx(1.0)
+    assert hold.observe(0.0, True, 1.0, 2.0) is None
+    assert hold.observe(0.5, True, 1.0, 2.0) is None
+    assert hold.observe(0.9, False, 1.0, 2.0) is None  # unknown, no palm or a failure
+    assert hold.observe(1.0, True, 1.0, 2.0) is None
+    assert hold.observe(1.5, True, 1.0, 2.0) is None
+    assert hold.observe(2.0, True, 1.0, 2.0) == pytest.approx(1.0)
 
 
 def test_fist_checks_further_apart_than_the_hold_are_not_one_hold():
     hold = FistHold()
-    assert hold.observe(0.0, True, 1.0) is None
-    assert hold.observe(600.0, True, 1.0) is None  # the camera paused in between
-    assert hold.observe(600.5, True, 1.0) is None
-    assert hold.observe(601.0, True, 1.0) == pytest.approx(1.0)
+    assert hold.observe(0.0, True, 1.0, 2.0) is None
+    assert hold.observe(600.0, True, 1.0, 2.0) is None  # the camera paused in between
+    assert hold.observe(600.5, True, 1.0, 2.0) is None
+    assert hold.observe(601.0, True, 1.0, 2.0) == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------------------ the check
@@ -186,7 +190,7 @@ def feed(watch, seconds: float, wanted=True, start: float = 0.0, dt: float = 1 /
     events = []
     for i in range(round(seconds / dt)):
         stamp = start + i * dt
-        events += [(stamp, e) for e in watch.step(stamp, image(), wanted)]
+        events += watch.step(stamp, image(), wanted)
     return events
 
 
@@ -284,7 +288,7 @@ def test_the_threaded_check_hands_over_a_copy_and_never_waits():
         watch.run_one()
     assert events == [] and watch.snapshot(1.5)["checks"] == 3
     events += watch.step(1.6, frame, True)  # the 1.5 check lands: held from 0.0
-    assert events == [HandGesture(FIST, pytest.approx(1.5))]
+    assert events == [(1.5, HandGesture(FIST, pytest.approx(1.5)))]
 
 
 def test_a_result_after_the_check_was_turned_off_is_discarded():
@@ -307,7 +311,7 @@ def test_the_thread_starts_runs_and_stops():
             assert watch.wait_idle(5.0)  # the result is ready once the thread is idle
         assert watch.snapshot(1.0)["checks"] == 3
         events += watch.step(1.1, image(), True)
-        assert events == [HandGesture(FIST, pytest.approx(1.0))]
+        assert events == [(1.0, HandGesture(FIST, pytest.approx(1.0)))]
     finally:
         watch.stop()
     HandWatch(HANDS, threaded=True).start()  # without models: no thread, no error
@@ -571,3 +575,132 @@ def test_the_real_hand_models_load_and_run(variant):
     assert hand.points.shape == (21, 3) and np.all(np.isfinite(hand.points))
     assert 0.0 <= hand.presence <= 1.0
     assert classify(hand.points, hand.presence, cfg) in (FIST, OPEN, UNKNOWN)
+
+
+# ------------------------------------------------------------------------ review follow-ups
+
+
+@pytest.mark.parametrize("rate_hz", [0.2, 0.5, 1.0, 2.0, 10.0])
+@pytest.mark.parametrize("hold_s", [0.2, 1.0, 10.0])
+@pytest.mark.parametrize("dt", [1 / 30, 0.3])  # a fast camera, and frames that delay each check
+def test_a_held_fist_fires_once_at_every_rate_and_hold(rate_hz, hold_s, dt):
+    """Regression: the gap limit once was fist_hold_s, so a check period at or above the hold
+    (0.5 s checks with a 0.2 s hold, rate_hz 0.5, a check delayed by a frame) never fired."""
+    cfg = HANDS.model_copy(update={"rate_hz": rate_hz, "fist_hold_s": hold_s})
+    watch = HandWatch(cfg, FakePalm(), FakePose(FIST_HAND))
+    period = max(1 / rate_hz, dt)
+    events = feed(watch, hold_s + 3 * period + 3 * dt, dt=dt)
+    assert len(events) == 1
+    ((stamp, event),) = events
+    assert hold_s - 1e-6 <= event.held_s <= hold_s + period + dt + 1e-6
+    assert stamp == pytest.approx(event.held_s)  # the hold started at the first check, 0
+
+
+def test_slow_checks_on_a_busy_cpu_still_make_one_hold():
+    """Checks that take three periods each (the thread busy, frames skipped) stay one hold
+    within one period plus vision.hands.max_gap_s."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    events, dt = [], 0.25
+    for i in range(int(4.0 / dt)):
+        events += watch.step(i * dt, image(), True)
+        if i % 6 == 0:  # the thread finishes a check only every 1.5 s
+            watch.run_one()
+    events += watch.step(4.0, image(), True)
+    # checks at 0, 0.5 and 1.75: 1.25 s apart, more than the 1 s hold, still one hold
+    assert [(s, e.held_s) for s, e in events] == [(1.75, pytest.approx(1.75))]
+    assert watch.snapshot(4.0)["busy"] > 0
+
+
+def test_a_gap_beyond_the_period_plus_max_gap_s_breaks_the_hold():
+    hold, gap = FistHold(), 1 / HANDS.rate_hz + HANDS.max_gap_s
+    assert hold.observe(0.0, True, 1.0, gap) is None
+    assert hold.observe(gap + 0.01, True, 1.0, gap) is None  # too late: a new run
+    assert hold.observe(gap + 0.5, True, 1.0, gap) is None
+    assert hold.observe(gap + 1.01, True, 1.0, gap) == pytest.approx(1.0)
+    hold.clear()
+    assert hold.observe(0.0, True, 1.0, gap) is None
+    assert hold.observe(gap, True, 1.0, gap) == pytest.approx(gap)  # just inside: one hold
+
+
+def test_a_hot_reload_of_the_hold_and_the_rate_applies_to_the_run_in_progress():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    assert watch.step(0.0, image(), True) == []
+    watch.cfg = HANDS.model_copy(update={"fist_hold_s": 0.5})
+    assert watch.step(0.5, image(), True) == [(0.5, HandGesture(FIST, pytest.approx(0.5)))]
+    watch.step(0.9, image(), False)
+    watch.cfg = HANDS
+    assert watch.step(1.0, image(), True) == []
+    watch.cfg = HANDS.model_copy(update={"rate_hz": 0.5})  # next check 2 s later
+    assert watch.step(1.5, image(), True) == []  # not due at the new rate
+    assert watch.step(3.0, image(), True) == [(3.0, HandGesture(FIST, pytest.approx(2.0)))]
+
+
+def test_stop_during_a_running_check_is_bounded_and_a_late_step_queues_nothing(caplog):
+    gate, entered = threading.Event(), threading.Event()
+
+    class SlowPalm(FakePalm):
+        def best(self, image):
+            entered.set()
+            gate.wait(5.0)
+            return super().best(image)
+
+    watch = HandWatch(HANDS, SlowPalm(), FakePose(FIST_HAND), threaded=True, join_timeout_s=0.1)
+    watch.start()
+    try:
+        watch.step(0.0, image(), True)
+        assert entered.wait(5.0)
+        t0 = time.monotonic()
+        watch.stop()
+        assert time.monotonic() - t0 < 2.0
+        assert "did not stop" in caplog.text
+        watch.step(0.5, image(), True)
+        assert watch._job is None  # nothing queued after stop
+    finally:
+        gate.set()
+    assert watch.wait_idle(5.0)
+    thread = watch._thread
+    assert thread is not None
+    thread.join(5.0)
+    assert not thread.is_alive()
+
+
+def test_the_vision_service_starts_and_joins_the_hand_thread():
+    from roboemot.bus import Bus
+    from roboemot.vision.service import open_perception
+    from test_perception import Source, fake_stages
+
+    def stages(cfg, profile):
+        s = fake_stages(cfg, profile)
+        s.palm_detector, s.hand_pose = FakePalm(score=None), FakePose()
+        return s
+
+    base = RoboEmotConfig()
+    cfg = base.model_copy(update={"vision": base.vision.model_copy(update={"hands": HANDS})})
+    p = open_perception(cfg, Bus(), Source(), load_stages=stages)
+    assert p.service is not None and p.service.hands is p.pipeline.hands
+    p.start()
+    try:
+        assert any(t.name == "roboemot-hands" and t.is_alive() for t in threading.enumerate())
+    finally:
+        p.stop()
+    assert not any(t.name == "roboemot-hands" and t.is_alive() for t in threading.enumerate())
+
+
+def test_no_image_or_box_in_a_repr():
+    job_repr = repr(hands_module._Job(np.full((2, 2, 3), 7, np.uint8), 0.0, 1))
+    assert "array" not in job_repr and "image" not in job_repr
+    palm_repr = repr(Palm((11.0, 12.0, 13.0, 14.0), 0.9, np.zeros((7, 2))))
+    assert "11.0" not in palm_repr and "keypoints" not in palm_repr
+
+
+def test_a_huge_palm_logit_does_not_overflow():
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision import onnx
+
+    anchors = onnx.palm_anchors()
+    raw = np.zeros((2016, 18), np.float32)
+    for logit, expected in ((-1e6, 0.0), (1e6, 1.0)):
+        scores = np.full(2016, logit, np.float32)
+        _, _, score = onnx.decode_palm(raw, scores, anchors)
+        assert score == pytest.approx(expected, abs=1e-12)

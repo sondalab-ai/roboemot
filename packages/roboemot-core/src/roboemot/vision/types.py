@@ -49,7 +49,7 @@ class Palm:
     pixels: wrist, the index, middle, ring and little finger bases, two thumb joints) and score.
     It lives only inside one hand check (SPEC 12): never published, logged or kept."""
 
-    box: Box
+    box: Box = field(repr=False)
     score: float
     keypoints: np.ndarray = field(repr=False)
 

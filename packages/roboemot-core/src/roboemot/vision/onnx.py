@@ -115,6 +115,7 @@ HANDPOSE_PRESENCE = "Identity_1"
 HANDPOSE_POINTS = "Identity_3"
 HANDPOSE_POINT_VALUES = 63  # 21 points x 3
 NHWC_RANK = 4
+LOGIT_CLIP = 80.0  # exp(80) is far inside float range; the sigmoid is 0 or 1 to double precision
 AFFINE_SHAPE = (2, 3)  # an OpenCV affine map
 
 
@@ -573,7 +574,8 @@ def decode_palm(
     half = row[2:PALM_BOX_COLUMNS] / 2
     box = np.array([cx - half[0], cy - half[1], cx + half[0], cy + half[1]], np.float32)
     keypoints = row[PALM_BOX_COLUMNS:PALM_COLUMNS].reshape(PALM_KEYPOINTS, 2) + centre
-    score = 1 / (1 + math.exp(-float(scores[best])))
+    logit = min(max(float(scores[best]), -LOGIT_CLIP), LOGIT_CLIP)
+    score = 1 / (1 + math.exp(-logit))
     return box, keypoints.astype(np.float32), score
 
 
@@ -630,7 +632,8 @@ def hand_crop(palm: Palm, size: int = HANDPOSE_SIZE) -> np.ndarray:
     the wrist-to-middle-finger line points up, take the box of the turned palm keypoints, move
     it up by ``HAND_BOX_SHIFT_Y`` of its height, grow it ``HAND_BOX_ENLARGE`` times about its
     centre and square it on its longer side. One warp of the frame replaces the zoo's crop,
-    pad, turn, crop and resize; pixels outside the frame are black either way."""
+    pad, turn, crop and resize; pixels outside the frame come out black, as the zoo's padding
+    makes them."""
     wrist, middle = palm.keypoints[PALM_WRIST], palm.keypoints[PALM_MIDDLE_BASE]
     radians = math.pi / 2 - math.atan2(-(middle[1] - wrist[1]), middle[0] - wrist[0])
     radians -= 2 * math.pi * math.floor((radians + math.pi) / (2 * math.pi))

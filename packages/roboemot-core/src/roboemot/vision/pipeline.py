@@ -86,7 +86,8 @@ drives it): while it does and the hand models loaded (``vision.hands.enabled``),
 hand check's own thread in the live app (``hands``: inline without one), whatever the governor
 lets through, so the face and object stages keep their rates. A fist held for
 ``vision.hands.fist_hold_s`` publishes ``percept.hand`` (``HandGesture``: the gesture and the
-hold time, nothing from the image). The governor's scale at 0 stops the checks like the switch.
+hold time, nothing from the image) at the capture stamp of the check that completed the hold.
+The governor's scale at 0 stops the checks like the switch.
 
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
@@ -554,8 +555,8 @@ class VisionPipeline:
         except Exception as exc:
             log.warning("hand check step failed: %s", type(exc).__name__)
             return
-        for event in events:
-            self._publish("percept.hand", event, frame.stamp)
+        for stamp, event in events:
+            self._publish("percept.hand", event, stamp)
 
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).

@@ -2710,6 +2710,16 @@ class HandsConfig(Strict):
         ge=0.2,
         le=10,
     )
+    max_gap_s: float = param(
+        3.0,
+        "Two fist checks further apart than one check period (1 / rate_hz) plus this (capture "
+        "time) are not one hold: the run starts again at the later one. The slack covers slow "
+        "checks on a busy CPU; a longer gap (the camera paused) breaks the hold",
+        unit="s",
+        ge=0.5,
+        le=60,
+        advanced=True,
+    )
     pose_model: Literal["fp32", "int8"] = param(
         "fp32",
         "Weights of the hand model: fp32 (147 ms of CPU per run on the CM4) or the int8 file "

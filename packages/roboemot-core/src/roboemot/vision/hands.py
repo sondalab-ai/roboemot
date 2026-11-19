@@ -10,17 +10,21 @@ checks held for ``vision.hands.fist_hold_s`` into one :class:`HandGesture`, whic
 publishes on ``percept.hand``.
 
 **Thread.** In the live app the checks run on their own low-priority thread
-(``roboemot-hands``, lowered like the embed worker by ``runtime.background_nice``): about
-200 ms of CPU per check on the CM4 would hold up the 8 Hz face detector and the object stage on
-the vision thread. The vision thread hands over a copy of the frame (the only one) and never
-waits; a frame due while a check still runs is skipped (``busy``). The results come back through
-:meth:`HandWatch.step` on the vision thread, which applies the hold rule in check order, so the
-hold state lives on one thread. Without a thread (replay, unit tests) the check runs inline in
-``step``, so a replay stays deterministic (SPEC 14).
+(``roboemot-hands``, lowered like the embed worker by ``runtime.background_nice``): a check
+costs about 136 ms of CPU on the CM4 without a palm and about 283 ms with one (int8 palm
+detector plus fp32 hand model, ``scripts/bench/hands_cm4.py``), which inline would hold up the
+8 Hz face detector and the object stage on the vision thread. The vision thread hands over a
+copy of the frame (the only one) and never waits; a frame due while a check still runs is
+skipped (``busy``). The results come back through :meth:`HandWatch.step` on the vision thread,
+which applies the hold rule in check order, so the hold state lives on one thread.
+Without a thread (replay, unit tests) the check runs inline in ``step``, so a replay stays
+deterministic (SPEC 14).
 
 **Seam.** ``step(stamp, image, wanted)``: ``wanted`` false costs one flag check. Going from
 wanted to not wanted (or a ``reset``) starts a new generation: the frame waiting for the thread
 is dropped, a result of the old generation is discarded (``discarded``) and the hold starts over.
+After ``stop`` nothing is queued any more. ``step`` returns each event with the capture stamp of
+the check that made it.
 
 **Privacy (SPEC 12).** The frame copy lives only in the waiting or running job; palm boxes,
 keypoints and hand points live only inside one check. A result holds the check's capture stamp
@@ -33,7 +37,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
@@ -121,17 +125,18 @@ class FistHold:
         self._last: float | None = None
         self._fired = False
 
-    def observe(self, stamp: float, fist: bool, hold_s: float) -> float | None:
+    def observe(self, stamp: float, fist: bool, hold_s: float, gap_s: float) -> float | None:
         """One check at ``stamp``. Returns the hold time (capture time from the first fist check
         of the run to this one) when the run reaches ``hold_s`` now, else None. A check that is
         not a fist (open, unknown, no palm, a failure) ends the run and re-arms; a run that
-        fired fires again only after such a check. Two fist checks further apart than
-        ``hold_s`` (the camera paused, the robot asleep) are not one hold: the run starts again
-        at the later one, still without re-arming."""
+        fired fires again only after such a check. Two fist checks further apart than ``gap_s``
+        (the watch passes one check period plus ``vision.hands.max_gap_s``: the camera paused,
+        the robot asleep) are not one hold: the run starts again at the later one, still without
+        re-arming."""
         if not fist:
             self.clear()
             return None
-        if self._since is None or (self._last is not None and stamp - self._last > hold_s):
+        if self._since is None or (self._last is not None and stamp - self._last > gap_s):
             self._since = stamp
         self._last = stamp
         held = stamp - self._since
@@ -155,7 +160,7 @@ class HandGesture:
 
 @dataclass(frozen=True)
 class _Job:
-    image: np.ndarray
+    image: np.ndarray = field(repr=False)
     stamp: float
     generation: int
 
@@ -211,10 +216,13 @@ class HandWatch:
         """Whether the models are there and the switch is on."""
         return self.palm is not None and self.pose is not None and self.cfg.enabled
 
-    def step(self, stamp: float, image: np.ndarray, wanted: bool) -> list[HandGesture]:
+    def step(
+        self, stamp: float, image: np.ndarray, wanted: bool
+    ) -> list[tuple[float, HandGesture]]:
         """One captured frame at ``stamp`` (vision thread). Applies the finished checks in order
-        and returns the events they made; then, while ``wanted``, starts a check on ``image``
-        when one is due (a copy goes to the thread, or it runs inline here)."""
+        and returns the events they made, each with its check's capture stamp; then, while
+        ``wanted``, starts a check on ``image`` when one is due (a copy goes to the thread, or it
+        runs inline here). After ``stop`` nothing is queued."""
         wanted = wanted and self.ready
         if not wanted and not self._wanted:
             return []
@@ -229,6 +237,8 @@ class HandWatch:
             outcome = self._check(_Job(image, stamp, self._generation))
             return events + self._apply([outcome])
         with self._cond:
+            if self._stop:
+                return events
             if self._busy or self._job is not None:
                 self._counts["busy"] += 1
                 return events
@@ -253,18 +263,21 @@ class HandWatch:
             done, self._done = self._done, []
         return done
 
-    def _apply(self, outcomes: list[_Outcome]) -> list[HandGesture]:
-        """The hold rule over finished checks, in check order (vision thread)."""
+    def _apply(self, outcomes: list[_Outcome]) -> list[tuple[float, HandGesture]]:
+        """The hold rule over finished checks, in check order (vision thread); ``cfg`` is read
+        at each check, so a hot reload of the rate or the hold applies to the run in progress."""
         events = []
         for o in sorted(outcomes, key=lambda o: o.stamp):
             if o.generation != self._generation:
                 self._count("discarded")
                 continue
             self._last_result = o.stamp
-            held = self._hold.observe(o.stamp, o.result == FIST, self.cfg.fist_hold_s)
+            cfg = self.cfg
+            gap = 1 / cfg.rate_hz + cfg.max_gap_s
+            held = self._hold.observe(o.stamp, o.result == FIST, cfg.fist_hold_s, gap)
             if held is not None:
                 self._count("events")
-                events.append(HandGesture(FIST, held))
+                events.append((o.stamp, HandGesture(FIST, held)))
         return events
 
     def _count(self, key: str) -> None:
@@ -389,7 +402,8 @@ class HandWatch:
     def snapshot(self, now: float | None) -> dict[str, Any]:
         """For the debug report (SPEC 12A): the state, the counts since start and
         ``last_result_age_s``, the capture time from the last finished check to ``now`` (the
-        last processed frame; null before a check). Numbers only."""
+        last processed frame; null before a check). The state stays ``watching`` while no frame
+        comes (the camera paused): the age then stops growing with it. Numbers only."""
         with self._cond:
             counts = dict(self._counts)
         if self.unavailable is not None:
