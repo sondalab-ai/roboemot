@@ -75,7 +75,8 @@ What this means in practice:
   `motion.arbiter.source_timeout_ms`, `motion.idle.gaze_shift_interval_s`,
   `motion.idle.gaze_shift_amplitude`, the whole `mirror` section, `llm_routes[].supports_images`,
   `privacy.multimodal_frames`, `privacy.keep_enrollment_images` and `privacy.debug_recording`
-  (SPEC 11A, Renamed and removed settings).
+  (SPEC 11A, Renamed and removed settings). On 2026-11-19 the radio's touch stop went with its
+  settings `tools.radio.touch_stop` and `tools.radio.touch_stop_check_s`.
 
 ### Three ways to change a value
 

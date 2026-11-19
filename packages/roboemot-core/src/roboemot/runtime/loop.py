@@ -29,7 +29,6 @@ from .ticks import (
     soothe_context,
     soothe_tick,
 )
-from .touch_stop import touch_stop_tick
 
 MS_PER_S = 1000.0
 
@@ -101,8 +100,6 @@ def _tick_until_stopped(
             if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
                 host.cues.release_listening("asleep")
             p.selector.sleep(now)  # a shown-object episode ends (SPEC 5A)
-            # motors off: no nod is left for the wake (SPEC 11, Radio)
-            touch_stop_tick(p.touch_stop, now, p.loop, stack.effective())
             if p.perception.pipeline is not None:
                 episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
             p.circ.tick(now)
@@ -144,7 +141,6 @@ def _tick_until_stopped(
         p.expression.set_register(register)
         p.speaking.set_register(register)
         p.dance.set_register(register)
-        touch_stop_tick(p.touch_stop, now, p.loop, live)  # before the expression update: the nod
         if state is not None:
             p.expression.update(state, register, now)
             p.speaking.set_affect(state)

@@ -58,6 +58,8 @@ dropped:
   privacy.multimodal_frames: no image path to a route; no code read the opt-in (SPEC 8, 12, 2026-11-16)
   privacy.keep_enrollment_images: enrollment never keeps face crops; no code read the opt-in (SPEC 6, 12, 2026-11-16)
   privacy.debug_recording: no debug recording; no code read the opt-in (SPEC 12, 2026-11-16)
+  tools.radio.touch_stop: no touch stop; it missed held heads and fired on the robot's own moves (SPEC 11, 2026-11-19)
+  tools.radio.touch_stop_check_s: no touch stop (SPEC 11, 2026-11-19)
 dropped_entries:
   appraisal.rules:
     person.known_child: one person.known event for everyone (SPEC 7, 2026-10-23)

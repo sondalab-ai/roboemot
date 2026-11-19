@@ -505,3 +505,31 @@ def test_web_keys_lose_only_the_fields_no_code_read(key, value, kept, caplog):
     assert out == ({} if kept is None else {key: kept})
     assert stripped is (kept is not None)
     assert "overrides-file" in caplog.text and "no longer acceptable" not in caplog.text
+
+
+# ---------------------------------------- owner decision 2026-11-19: the radio's touch stop
+
+TOUCH_STOP_PATHS = ("tools.radio.touch_stop", "tools.radio.touch_stop_check_s")
+
+
+def test_the_removed_touch_stop_is_dropped_not_live():
+    assert all(not schema_has(p) for p in TOUCH_STOP_PATHS)
+    assert set(TOUCH_STOP_PATHS) <= set(DROPPED_SETTINGS)
+
+
+def test_an_app_config_with_the_touch_stop_loads_and_logs_each_path(tmp_path, caplog):
+    app = tmp_path / "app.yaml"
+    app.write_text("tools:\n  radio: {dance: false, touch_stop: true, touch_stop_check_s: 1.0}\n")
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    assert cfg.tools.radio.dance is False
+    for path in TOUCH_STOP_PATHS:
+        assert caplog.text.count(f"setting {path} ignored") == 1, path
+
+
+def test_web_keys_lose_the_touch_stop(caplog):
+    keys = {"tools.radio.touch_stop": False, "tools.radio.touch_stop_check_s": 2.0}
+    with caplog.at_level("WARNING"):
+        out, _ = settings_module._migrated(keys, "overrides-file")
+    assert out == {}
+    assert "no longer acceptable" not in caplog.text

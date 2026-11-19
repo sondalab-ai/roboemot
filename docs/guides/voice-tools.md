@@ -149,10 +149,6 @@ The robot plays internet radio streams from your station list through its speake
     wake and the words hold a stop word and a music word (`voice.keywords`: `stop` or
     `media_stop`, and `media`), the radio stops and the robot nods, but nothing else is
     answered (`tools.radio.stop_without_name`, on by default)
-  - a hand on the robot (`tools.radio.touch_stop`, on by default): hold the head or an antenna
-    away from where it was for about a second (`tools.radio.touch_stop_check_s`) while the music
-    plays and the radio stops; the robot nods once it takes control back, a few seconds after
-    you let go
   - the admin turns the radio off
   - the playing station is removed from the list
   - a requested nap, platform sleep, or the circadian rest (night, quiet hours)
