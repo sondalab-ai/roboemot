@@ -6,7 +6,12 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import os
+import signal
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -118,6 +123,9 @@ def test_fetch_reports_a_network_error(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+STATE = {"loadavg": [1.0, 1.0, 1.0], "cpu_mhz": [1800] * 4, "throttled": "throttled=0x0"}
+
+
 def test_render_lists_each_stage_and_a_variant_that_could_not_run():
     stage = hands.summarise([0.01], [0.02], [0.009])
     report = {
@@ -131,8 +139,8 @@ def test_render_lists_each_stage_and_a_variant_that_could_not_run():
             "frame": [1280, 720],
             "hand_px": 360,
         },
-        "loadavg_before": None,
-        "loadavg_after": None,
+        "before": STATE,
+        "after": STATE,
         "results": [
             {
                 "variant": "fp32",
@@ -146,6 +154,157 @@ def test_render_lists_each_stage_and_a_variant_that_could_not_run():
     assert "| fp32 | palm | 192x192 | 10.0 |" in text
     assert "| fp32 | pass |  |" in text
     assert "| int8 | not run: boom |" in text
+    assert "before: loadavg=[1.0, 1.0, 1.0] cpu_mhz=[1800, 1800, 1800, 1800]" in text
+
+
+def test_redirects_are_followed_only_to_https():
+    handler = hands.HttpsOnlyRedirect()
+    req = urllib.request.Request("https://github.com/x.onnx")
+    ok = handler.redirect_request(req, None, 302, "Found", {}, "https://media.example/x.onnx")
+    assert ok is not None and ok.full_url == "https://media.example/x.onnx"
+    with pytest.raises(urllib.error.HTTPError, match="non-https"):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://media.example/x.onnx")
+
+
+def test_fetch_reports_a_broken_http_response_in_one_line(tmp_path):
+    import http.client
+
+    def urlopen(url, timeout):
+        raise http.client.IncompleteRead(b"partial")
+
+    with pytest.raises(hands.BenchError, match="download of m.onnx failed") as e:
+        hands.fetch(_file(b"x"), tmp_path, urlopen)
+    assert "\n" not in str(e.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cpu_mhz_reads_cpufreq_in_core_order(tmp_path):
+    for core, khz in ((10, 600000), (0, 1800000), (2, 1500000)):
+        f = tmp_path / f"cpu{core}" / "cpufreq" / "scaling_cur_freq"
+        f.parent.mkdir(parents=True)
+        f.write_text(f"{khz}\n")
+    assert hands.cpu_mhz(tmp_path) == [1800, 1500, 600]
+    assert hands.cpu_mhz(tmp_path / "missing") is None
+
+
+def _report(results):
+    stage = hands.summarise([0.01], [0.02], [0.009])
+    return {
+        "host": {"cpu": "cpu", "machine": "aarch64", "cores_visible": 4, "python": "3.12"},
+        "onnxruntime": "1.x",
+        "opencv": "4.x",
+        "settings": {
+            "threads": 2,
+            "spinning": False,
+            "runs": 1,
+            "frame": [1280, 720],
+            "hand_px": 360,
+        },
+        "before": STATE,
+        "after": STATE,
+        "results": [
+            r
+            if "error" in r
+            else {
+                **r,
+                "inputs": {"palm": 192, "landmark": 224},
+                "stages": {"palm": stage, "landmark": stage, "pass": stage},
+            }
+            for r in results
+        ],
+    }
+
+
+@pytest.fixture
+def temp_folder(tmp_path, monkeypatch):
+    """The folder main() takes as its temporary download folder."""
+    folder = tmp_path / "roboemot-hands-test"
+
+    def mkdtemp(prefix):
+        folder.mkdir()
+        return str(folder)
+
+    monkeypatch.setattr(hands.tempfile, "mkdtemp", mkdtemp)
+    return folder
+
+
+def _run_writes(folder, outcome):
+    def run(args, path):
+        assert path == folder
+        (path / "model.onnx").write_bytes(b"x")
+        return outcome()
+
+    return run
+
+
+def test_main_removes_the_temp_folder_after_a_run(temp_folder, monkeypatch, capsys):
+    monkeypatch.setattr(
+        hands, "run", _run_writes(temp_folder, lambda: _report([{"variant": "fp32"}]))
+    )
+    assert hands.main([]) == 0
+    assert not temp_folder.exists()
+    assert "| fp32 | pass |" in capsys.readouterr().out
+
+
+def test_main_fails_when_no_variant_ran(temp_folder, monkeypatch, capsys):
+    report = _report([{"variant": "fp32", "error": "boom"}, {"variant": "int8", "error": "boom"}])
+    monkeypatch.setattr(hands, "run", _run_writes(temp_folder, lambda: report))
+    assert hands.main([]) == 1
+    assert "no variant ran" in capsys.readouterr().err
+    assert not temp_folder.exists()
+
+
+def test_main_removes_the_temp_folder_on_a_reported_error(temp_folder, monkeypatch, capsys):
+    def fail():
+        raise hands.BenchError("digest does not match")
+
+    monkeypatch.setattr(hands, "run", _run_writes(temp_folder, fail))
+    assert hands.main([]) == 1
+    assert "error: digest does not match" in capsys.readouterr().err
+    assert not temp_folder.exists()
+
+
+def test_main_removes_the_temp_folder_on_an_unexpected_error(temp_folder, monkeypatch):
+    def fail():
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(hands, "run", _run_writes(temp_folder, fail))
+    with pytest.raises(RuntimeError, match="bug"):
+        hands.main([])
+    assert not temp_folder.exists()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize("signum", [getattr(signal, "SIGHUP", 0), signal.SIGTERM])
+def test_a_hangup_or_terminate_still_removes_the_temp_folder(temp_folder, monkeypatch, signum):
+    before = signal.getsignal(signum)
+
+    def hang_up():
+        os.kill(os.getpid(), signum)
+        raise AssertionError("the signal handler did not stop the run")
+
+    monkeypatch.setattr(hands, "run", _run_writes(temp_folder, hang_up))
+    with pytest.raises(SystemExit) as e:
+        hands.main([])
+    assert e.value.code == hands.SIGNAL_EXIT_BASE + signum
+    assert not temp_folder.exists()
+    assert signal.getsignal(signum) == before
+
+
+def test_cache_dir_keeps_its_folder(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(hands, "run", _run_writes(cache, lambda: _report([{"variant": "fp32"}])))
+    assert hands.main(["--cache-dir", str(cache)]) == 0
+    assert (cache / "model.onnx").exists()
+
+
+def test_the_script_runs_from_stdin_like_over_ssh():
+    with SCRIPT.open("rb") as f:
+        out = subprocess.run(
+            [sys.executable, "-I", "-", "--help"], stdin=f, capture_output=True, timeout=60
+        )
+    assert out.returncode == 0, out.stderr
+    assert b"--cache-dir" in out.stdout
 
 
 @pytest.mark.models

@@ -29,22 +29,28 @@ the script is read from stdin, so nothing is left on the robot:
     python scripts/robot_ssh.py --host reachy-mini.local --user pollen -- \\
         /venvs/apps_venv/bin/python -I - --runs 200 < scripts/bench/hands_cm4.py
 
-With RoboEmot running the numbers include its load (the load average is printed before and
-after); stop it from the dashboard first to measure the models alone.
+With RoboEmot running the numbers include its load. The load average, the per-core frequency
+and, on a Raspberry Pi, ``vcgencmd get_throttled`` are printed before and after the run; stop
+the app from the dashboard first to measure the models alone. SIGHUP (the SSH session drops)
+and SIGTERM still delete the temporary folder. Exits 1 when no variant could run.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
 import platform
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +121,13 @@ CHUNK = 1 << 16
 MS = 1000.0
 P50, P90 = 0.5, 0.9
 LOG_ERROR = 3
+PALM_BOX_COLUMNS = 18  # box (4) and 7 palm points (14) per anchor
+PALM_SCORE_COLUMNS = 1
+SIGNAL_EXIT_BASE = 128
+CPU_FREQ_GLOB = "cpu[0-9]*/cpufreq/scaling_cur_freq"
+CPU_SYS = Path("/sys/devices/system/cpu")
+KHZ_PER_MHZ = 1000
+VCGENCMD_TIMEOUT_S = 5
 STAGES = ("palm", "landmark", "pass")
 
 
@@ -261,7 +274,26 @@ def verified(path: Path, spec: ModelFile) -> bool:
     )
 
 
-def fetch(spec: ModelFile, folder: Path, urlopen: Any = urllib.request.urlopen) -> Path:
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to an https URL (GitHub sends LFS files to its media host)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        if not newurl.lower().startswith("https://"):
+            raise urllib.error.HTTPError(
+                newurl, code, f"refused redirect to a non-https URL: {newurl}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(HttpsOnlyRedirect)
+
+
+def _first_line(e: BaseException) -> str:
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
+
+
+def fetch(spec: ModelFile, folder: Path, urlopen: Any = _OPENER.open) -> Path:
     """The verified file of ``spec`` in ``folder``: reused when it matches, else downloaded to a
     ``.part`` file that becomes the file only when its size and sha256 match the pin."""
     path = folder / spec.name
@@ -271,9 +303,9 @@ def fetch(spec: ModelFile, folder: Path, urlopen: Any = urllib.request.urlopen) 
     try:
         with urlopen(spec.url, timeout=DOWNLOAD_TIMEOUT_S) as r, part.open("wb") as f:
             shutil.copyfileobj(r, f, CHUNK)
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         part.unlink(missing_ok=True)
-        raise BenchError(f"download of {spec.name} failed: {e}") from e
+        raise BenchError(f"download of {spec.name} failed: {_first_line(e)}") from e
     if not verified(part, spec):
         size = part.stat().st_size
         part.unlink()
@@ -308,6 +340,35 @@ def load_average() -> list[float] | None:
         return [round(x, 2) for x in os.getloadavg()]
     except OSError:
         return None
+
+
+def cpu_mhz(root: Path = CPU_SYS) -> list[int] | None:
+    """Current frequency of each core in MHz (Linux cpufreq), or None where it is not exposed."""
+    files = sorted(root.glob(CPU_FREQ_GLOB), key=lambda f: int(f.parts[-3][len("cpu") :]))
+    try:
+        return [int(f.read_text().strip()) // KHZ_PER_MHZ for f in files] or None
+    except (OSError, ValueError):
+        return None
+
+
+def throttled() -> str | None:
+    """``vcgencmd get_throttled`` (Raspberry Pi firmware: under-voltage, frequency capping,
+    thermal throttling, now and since boot), or None without vcgencmd."""
+    tool = shutil.which("vcgencmd")
+    if tool is None:
+        return None
+    try:
+        out = subprocess.run(
+            [tool, "get_throttled"], capture_output=True, text=True, timeout=VCGENCMD_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def machine_state() -> dict:
+    """Load average, per-core MHz and throttle flags: printed before and after the run."""
+    return {"loadavg": load_average(), "cpu_mhz": cpu_mhz(), "throttled": throttled()}
 
 
 def _imports() -> tuple[Any, Any, Any]:
@@ -366,8 +427,13 @@ def bench_variant(
         )
         x = (cv2.cvtColor(boxed, cv2.COLOR_BGR2RGB).astype(np.float32) / PIXEL_MAX)[None]
         t0 = time.perf_counter()
-        _, scores = palm.run(None, {palm_in: x})
+        boxes, scores = palm.run(None, {palm_in: x})
         net = time.perf_counter() - t0
+        if boxes.shape[-1] != PALM_BOX_COLUMNS or scores.shape[-1] != PALM_SCORE_COLUMNS:
+            raise BenchError(
+                f"palm outputs {boxes.shape} and {scores.shape}: expected boxes with "
+                f"{PALM_BOX_COLUMNS} columns, then scores with {PALM_SCORE_COLUMNS}"
+            )
         int(np.argmax(1.0 / (1.0 + np.exp(-scores[0, :, 0]))))
         return net
 
@@ -426,8 +492,11 @@ def render(report: dict) -> str:
         f"host: {h['cpu']} ({h['machine']}, {h['cores_visible']} cores), python {h['python']}, "
         f"onnxruntime {report['onnxruntime']}, opencv {report['opencv']}",
         f"threads={s['threads']} spinning={s['spinning']} runs={s['runs']} "
-        f"frame={s['frame'][0]}x{s['frame'][1]} hand_px={s['hand_px']} "
-        f"loadavg before={report['loadavg_before']} after={report['loadavg_after']}",
+        f"frame={s['frame'][0]}x{s['frame'][1]} hand_px={s['hand_px']}",
+        *(
+            f"{when}: loadavg={st['loadavg']} cpu_mhz={st['cpu_mhz']} throttled={st['throttled']}"
+            for when, st in (("before", report["before"]), ("after", report["after"]))
+        ),
         "",
         "| variant | stage | input | wall p50 ms | wall p90 ms | wall max ms | net p50 ms "
         "| CPU p50 ms | cores |",
@@ -453,7 +522,7 @@ def run(args: argparse.Namespace, folder: Path) -> dict:
     ort.set_default_logger_severity(LOG_ERROR)
     cv2.setNumThreads(args.threads)
     frames = synthetic_frames(*args.frame, args.seed)
-    before = load_average()
+    before = machine_state()
     results = []
     for variant in args.variants:
         palm_spec, hand_spec = VARIANTS[variant]
@@ -463,8 +532,7 @@ def run(args: argparse.Namespace, folder: Path) -> dict:
         except Exception as e:  # one variant the runtime cannot load must not stop the others
             if isinstance(e, BenchError):
                 raise
-            first = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
-            results.append({"variant": variant, "error": first})
+            results.append({"variant": variant, "error": _first_line(e)})
     return {
         "host": host_info(),
         "onnxruntime": ort.__version__,
@@ -478,15 +546,23 @@ def run(args: argparse.Namespace, folder: Path) -> dict:
             "hand_px": args.hand_px,
             "zoo_commit": ZOO_COMMIT,
         },
-        "loadavg_before": before,
-        "loadavg_after": load_average(),
+        "before": before,
+        "after": machine_state(),
         "results": results,
     }
 
 
+def _exit_on_signal(signum: int, _frame: Any) -> None:
+    raise SystemExit(SIGNAL_EXIT_BASE + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Run the bench; 1 on a reported failure or when no variant ran. SIGHUP (an SSH drop) and
+    SIGTERM exit through ``finally``, so the temporary model folder never outlives the run."""
     args = parse_args(argv)
     keep = args.cache_dir is not None
+    signals = [getattr(signal, n) for n in ("SIGHUP", "SIGTERM") if hasattr(signal, n)]
+    previous = {s: signal.signal(s, _exit_on_signal) for s in signals}
     folder = args.cache_dir if keep else Path(tempfile.mkdtemp(prefix="roboemot-hands-"))
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -497,9 +573,14 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if not keep:
             shutil.rmtree(folder, ignore_errors=True)
+        for s, handler in previous.items():
+            signal.signal(s, handler)
     print(render(report))
     if args.json:
         args.json.write_text(json.dumps(report, indent=1))
+    if not any("stages" in r for r in report["results"]):
+        print("error: no variant ran", file=sys.stderr)
+        return 1
     return 0
 
 
