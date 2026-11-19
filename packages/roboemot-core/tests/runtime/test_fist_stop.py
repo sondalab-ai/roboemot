@@ -18,7 +18,6 @@ from roboemot.runtime.diagnostics import build_diagnostics
 from roboemot.runtime.host import RuntimeHost
 from roboemot.runtime.radio_stop import FIST_STOP, FistStop, stop_and_nod
 from roboemot.vision.hands import HandGesture, HandWatch
-from roboemot.vision.onnx import Stages
 from roboemot.webui.strings import STRINGS
 from test_media_player import JAZZ
 from test_media_player import Rig as PlayerRig
@@ -32,6 +31,8 @@ class StagesHost(DaytimeHost):
     """Fake vision backends, so the run has a vision pipeline to wire the seam into."""
 
     def load_vision_stages(self, cfg, profile):
+        from roboemot.vision.onnx import Stages  # needs cv2: the vision extra
+
         return Stages(object(), object(), None)
 
 
@@ -196,6 +197,7 @@ def test_the_assembled_runtime_wires_the_seam_the_topic_and_the_report():
         allow_unmeasured_dynamics=True,
         safety=stack.effective().safety,
     )
+    pytest.importorskip("cv2")
     platform = RecordingPlatform()
     host = StagesHost()
     p = assemble(host, stack, manifest, platform, platform.bind(object()))
