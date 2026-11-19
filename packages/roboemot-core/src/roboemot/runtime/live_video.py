@@ -15,7 +15,8 @@ category for each confirmed animal or object track; the gaze target, a face or a
 While the hand check classified a fist (the radio plays, SPEC 5, Hand check), its palm box is
 drawn in a fourth colour with the hold so far (``fist 0.5/1.0 s``) or, once the hold fired,
 ``fist: stop`` (``PreviewOverlay.hand``); it comes from a check on an earlier frame, so like the
-object boxes it may trail the picture, by up to a check's run time plus one check period.
+object boxes it may trail the picture, by up to a check's run time plus the preview window
+(``1 / vision.hands.rate_hz + vision.hands.preview_slack_s``).
 
 A viewer is a client IP that was sent a frame within the window. ``viewers`` feeds the banner every
 open page shows. Start and stop of viewing are logged once each per client IP (the address only).
@@ -38,6 +39,7 @@ import numpy as np
 from roboemot.attention.types import SHOWN
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import person_name
+from roboemot.vision.types import HandMark
 from roboemot.world.types import UNKNOWN_IDENTITY
 
 log = logging.getLogger(__name__)
@@ -56,8 +58,11 @@ BGR_OBJECT = (230, 120, 40)
 BGR_TEXT_BG = (0, 0, 0)
 BGR_LANDMARK = (255, 0, 255)  # magenta: apart from every box colour
 BGR_HAND = (40, 40, 230)  # red: the fist box, apart from the face, target and object colours
-HAND_HOLD_LABEL = "fist {held:.1f}/{hold:.1f} s"  # ASCII: the Hershey font
+HAND_HOLD_LABEL = "fist {held:.{digits}f}/{hold:.{digits}f} s"  # ASCII: the Hershey font
 HAND_FIRED_LABEL = "fist: stop"
+HAND_LABEL_DIGITS = (1, 2)  # decimals: tenths, or hundredths for a hold such as 0.25 s
+DECIMAL_BASE = 10
+ROUND_TOLERANCE = 1e-6  # float noise when testing a hold for its decimals and flooring
 LANDMARK_RADIUS_PX = 2
 LINE_PX = 1
 TARGET_LINE_PX = 3
@@ -75,12 +80,25 @@ def ascii_label(name: str) -> str:
     return base.encode("ascii", "replace").decode("ascii")[:LABEL_MAX_CHARS]
 
 
-def hand_label(mark: Any) -> str:
+def hand_label(mark: HandMark) -> str:
     """The fist box's label: the hold so far against ``vision.hands.fist_hold_s`` while it
-    builds, ``fist: stop`` once it fired."""
+    builds, ``fist: stop`` once it fired. The hold shows with the fewest decimals it needs
+    (tenths or hundredths), and the time so far is floored to them and kept one step below
+    the hold, so a hold that has not fired never reads as complete."""
     if mark.fired:
         return HAND_FIRED_LABEL
-    return HAND_HOLD_LABEL.format(held=min(mark.held_s, mark.hold_s), hold=mark.hold_s)
+    hold = mark.hold_s
+    digits = HAND_LABEL_DIGITS[-1]
+    for d in HAND_LABEL_DIGITS:
+        scaled = hold * DECIMAL_BASE**d
+        if abs(scaled - round(scaled)) < ROUND_TOLERANCE:
+            digits = d
+            break
+    step = DECIMAL_BASE**-digits
+    held = mark.held_s if math.isfinite(mark.held_s) else 0.0
+    held = math.floor(held / step + ROUND_TOLERANCE) * step
+    held = max(0.0, min(held, hold - step))
+    return HAND_HOLD_LABEL.format(held=held, hold=hold, digits=digits)
 
 
 class LiveVideo:

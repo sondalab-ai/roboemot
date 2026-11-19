@@ -836,6 +836,7 @@ def test_missing_hand_models_keep_vision_up_and_never_ask_the_seam(monkeypatch, 
 # ------------------------------------------------------------------------ the preview's fist box
 
 PERIOD = 1 / HANDS.rate_hz
+WINDOW = PERIOD + HANDS.preview_slack_s  # the preview window: watched gate and lapse
 ODD_BOX = (123.25, 45.75, 211.5, 133.125)  # numbers no report, log or event would hold
 
 
@@ -882,35 +883,59 @@ def test_a_non_fist_result_removes_the_box():
     assert watch._mark is None
 
 
-def test_the_box_lapses_one_check_period_after_the_last_fist_result():
+def test_the_box_lapses_one_window_after_the_frame_its_result_came_back_on():
     watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
     watch.preview(0.0)
     watch.step(0.0, image(), True)
     watch.run_one()
     assert watch.preview(0.2) is None  # not applied yet: the result lags the frame
     watch.step(0.3, image(), True)  # it comes back on the frame at 0.3
-    assert watch.preview(0.3) is not None and watch.preview(0.3 + PERIOD) is not None
-    assert watch.preview(0.3 + PERIOD + 0.01) is None
-    watch.step(0.3 + PERIOD + 0.02, image(), True)
+    assert watch.preview(0.3) is not None and watch.preview(0.3 + WINDOW) is not None
+    assert watch.preview(0.3 + WINDOW + 0.01) is None  # just past the slack
+    watch.step(0.3 + WINDOW + 0.02, image(), True)
     assert watch._mark is None  # dropped from memory too
+
+
+def test_sparse_frames_within_the_slack_keep_the_box_and_the_watch():
+    """Processed frames further apart than one check period, but within the slack, neither
+    drop the watch nor blink the box (a slow vision thread, uneven frames)."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    gap = PERIOD + HANDS.preview_slack_s / 2
+    assert gap > PERIOD
+    marks = []
+    for k in range(4):
+        stamp = k * gap
+        watch.step(stamp, image(), True)
+        marks.append(watch.preview(stamp))
+    assert marks[0] is None  # the check at 0 ran before the first read
+    assert all(m is not None for m in marks[1:])
+    assert marks[-1].fired
+
+
+def test_a_slower_rate_and_a_zero_slack_follow_the_config():
+    cfg = HANDS.model_copy(update={"preview_slack_s": 0.0})
+    watch = HandWatch(cfg, FakePalm(), FakePose(FIST_HAND))
+    watched(watch, 0.6)
+    assert watch.preview(0.5 + PERIOD) is not None
+    assert watch.preview(0.5 + PERIOD + 0.01) is None
 
 
 def test_the_fired_box_stays_after_the_seam_goes_off_until_it_lapses():
     """The fist stops the radio, which turns the seam off at once: ``fist: stop`` still shows
-    for one check period."""
+    for the preview window."""
     watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
     marks = watched(watch, 1.0 + 1 / 30)
     assert marks[-1][1].fired
-    after = dict(watched(watch, 0.7, start=1.0 + 1 / 30, wanted=False))
-    assert all(m is not None and m.fired for t, m in after.items() if t <= 1.0 + PERIOD)
-    assert all(m is None for t, m in after.items() if t > 1.0 + PERIOD + 0.01)
+    after = dict(watched(watch, WINDOW + 0.2, start=1.0 + 1 / 30, wanted=False))
+    assert all(m is not None and m.fired for t, m in after.items() if t <= 1.0 + WINDOW)
+    assert all(m is None for t, m in after.items() if t > 1.0 + WINDOW + 0.01)
 
 
 def test_the_box_goes_when_the_preview_is_no_longer_watched_or_cleared():
     watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
     watched(watch, 0.6)
     assert watch._mark is not None
-    watch.step(0.6 + PERIOD + 0.02, image(), True)  # no preview call for a period
+    watch.step(0.6 + WINDOW + 0.02, image(), True)  # no preview call for a window
     assert watch._mark is None
     watched(watch, 0.6, start=2.0)
     assert watch._mark is not None
@@ -939,6 +964,69 @@ def test_the_box_reaches_only_the_preview_overlay(tmp_path, caplog):
         assert str(number) not in text
     pipe.clear_overlay()  # the robot fell asleep
     assert pipe.preview_overlay(pipe.process(Frame(image(), 1.3))).hand is None
+
+
+def test_a_clear_mark_after_a_boxed_job_keeps_the_box_out():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    watch.preview(0.0)
+    watch.step(0.0, image(), True)
+    assert watch._job.boxed
+    watch.run_one()
+    watch.clear_mark()  # the robot fell asleep (app thread)
+    watch.step(0.1, image(), True)
+    assert watch._mark is None and watch._preview_at is None
+
+
+def test_a_clear_mark_during_a_step_wins_over_its_write():
+    """The sleep race: ``step`` has already seen the preview watched when ``clear_mark`` runs
+    on the app thread; the result it then applies must not bring the box back."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    watch.preview(0.0)
+    watch.step(0.0, image(), True)
+    watch.run_one()
+    drain = watch._drain
+
+    def cleared_meanwhile():
+        done = drain()
+        watch.clear_mark()
+        return done
+
+    watch._drain = cleared_meanwhile
+    watch.step(0.1, image(), True)
+    assert watch._mark is None and watch._preview_at is None
+    watch._drain = drain
+    preview_epoch = watch._epoch
+
+    def cleared_in_preview():
+        epoch = preview_epoch()
+        watch.clear_mark()
+        return epoch
+
+    watch._epoch = cleared_in_preview
+    assert watch.preview(0.2) is None and watch._preview_at is None
+
+
+def test_sleep_through_the_live_video_clears_the_mark(tmp_path):
+    from types import SimpleNamespace
+
+    from roboemot.runtime.live_video import LiveVideo
+
+    pipe, _ = hands_pipeline(tmp_path, FakePalm(box=ODD_BOX), FakePose(FIST_HAND))
+    pipe.hands_wanted = lambda: True
+    for i in range(20):
+        pipe.preview_overlay(pipe.process(Frame(image(), i / 30)))
+    assert pipe.hands._mark is not None
+    host = SimpleNamespace(perception=SimpleNamespace(service=None, pipeline=pipe))
+    p = SimpleNamespace(sleep=SimpleNamespace(asleep=True), selector=None, world=None)
+    LiveVideo(host, p, RoboEmotConfig()).sleep()
+    assert pipe.hands._mark is None and pipe.hands._preview_at is None
+
+
+def test_the_preview_slack_is_a_config_field():
+    assert HandsConfig().preview_slack_s == 0.5
+    for bad in (-0.1, 5.1):
+        with pytest.raises(ValidationError):
+            HandsConfig(preview_slack_s=bad)
 
 
 def test_no_box_in_a_result_or_mark_repr():

@@ -469,3 +469,25 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         stack.set("webui.live.video", True, source="test", admin=True)
         assert serve()[1] is None
     assert video._jpeg is None and runner.latest() is None  # shutdown
+
+
+def test_the_state_never_carries_the_preview_fist_box(served):
+    """SPEC 12, Live video preview: while the hand check keeps a fist box for the preview, the
+    serialised ``/api/live/state`` holds none of its coordinates."""
+    from roboemot.config.schema import HandsConfig
+    from roboemot.vision.hands import HandWatch
+    from roboemot.vision.types import HandMark
+
+    odd = (123.25, 45.75, 211.5, 133.125)
+    hands = HandWatch(HandsConfig())
+    hands._mark = (HandMark(odd, 0.5, 1.0, False), NOW)
+    served.host.perception = SimpleNamespace(service=None, pipeline=SimpleNamespace(hands=hands))
+    served.stack.set("webui.live.enabled", True, source="test", admin=True)
+    served.stack.set("webui.live.video", True, source="test", admin=True)
+    c = served.client
+    c.login()
+    resp = c.request("GET", "/api/live/state")
+    assert resp.status == 200 and "video" in resp.json
+    assert hands._mark is not None  # the box is held right now
+    body = resp.body.decode()
+    assert all(str(v) not in body for v in odd)

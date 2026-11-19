@@ -131,7 +131,7 @@ class PreviewOverlay:
     ``webui.live.video_landmarks`` is on; then it has one ``FaceMarks`` per face, in ``faces``
     order. ``hand`` is the palm box of the latest hand check while it classified a fist
     (``HandWatch.preview``), else None: like the object boxes it comes from an earlier frame
-    (up to a check's run time plus one check period behind the picture), so it never holds
+    (up to a check's run time plus the preview window behind the picture), so it never holds
     a frame."""
 
     faces: tuple[tuple[Box, str | None], ...] = ()

@@ -717,6 +717,11 @@ def labels(rig):
     [
         (HandMark(FIST_BOX, 0.5, 1.0, False), "fist 0.5/1.0 s"),
         (HandMark(FIST_BOX, 0.0, 1.5, False), "fist 0.0/1.5 s"),
+        (HandMark(FIST_BOX, 0.99, 1.0, False), "fist 0.9/1.0 s"),  # floored, never complete
+        (HandMark(FIST_BOX, 1.0, 1.0, False), "fist 0.9/1.0 s"),  # not fired: one step below
+        (HandMark(FIST_BOX, 0.3, 1.0, False), "fist 0.3/1.0 s"),
+        (HandMark(FIST_BOX, 0.1, 0.25, False), "fist 0.10/0.25 s"),  # hundredths when needed
+        (HandMark(FIST_BOX, 0.25, 0.25, False), "fist 0.24/0.25 s"),
         (HandMark(FIST_BOX, 1.0, 1.0, True), "fist: stop"),
         (HandMark(FIST_BOX, 2.5, 1.0, True), "fist: stop"),  # kept up after it fired
     ],
@@ -746,6 +751,16 @@ def test_no_fist_box_without_a_hand_mark():
     img = drawn(Rig(hook=lambda report: PreviewOverlay(objects=(CUP,))))
     assert red_pixels(img) == 0 and blue_pixels(img) > 0
     assert red_pixels(drawn(Rig(objects=[CUP]))) == 0  # no hook: no fist box either
+
+
+def test_a_fist_box_outside_the_picture_is_clamped_and_still_served():
+    far = HandMark((-5000.0, 400.0, 9000.0, 1e9), 0.5, 1.0, False)
+    rig = Rig(hook=lambda report: PreviewOverlay(hand=far))
+    seen = labels(rig)
+    img = drawn(rig)
+    assert img is not None and img.shape == (480, 640, 3)
+    assert red_pixels(img) > 0  # the top edge at y=400 crosses the picture
+    assert seen == [("fist 0.5/1.0 s", live_video.BGR_HAND)]
 
 
 def test_a_bad_fist_box_never_breaks_the_picture():
