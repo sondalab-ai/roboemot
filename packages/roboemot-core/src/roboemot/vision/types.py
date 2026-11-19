@@ -47,7 +47,8 @@ class Detection:
 class Palm:
     """The palm detector's best palm in one frame: box and 7 keypoints (``7x2``, original
     pixels: wrist, the index, middle, ring and little finger bases, two thumb joints) and score.
-    It lives only inside one hand check (SPEC 12): never published, logged or kept."""
+    It lives only inside one hand check (SPEC 12): never published, logged or kept, except
+    the box of a fist while the live preview is watched, kept for its overlay (``HandMark``)."""
 
     box: Box = field(repr=False)
     score: float
@@ -107,6 +108,19 @@ class FaceMarks:
 
 
 @dataclass(frozen=True)
+class HandMark:
+    """The latest hand check's fist for the live preview (SPEC 5, Hand check; 11A): the palm box
+    in camera pixels, the hold so far (``held_s``, capture time) against ``hold_s``
+    (``vision.hands.fist_hold_s`` at that check) and whether the hold fired. Only for the local
+    preview, never published, stored or logged (SPEC 12); the box is hidden from repr."""
+
+    box: Box = field(repr=False)
+    held_s: float
+    hold_s: float
+    fired: bool
+
+
+@dataclass(frozen=True)
 class PreviewOverlay:
     """The live preview's boxes for one frame (SPEC 11A): face tracks as ``(box, owner_id or
     None)``, confirmed animal and object tracks as ``(box, readable category, owner_id or
@@ -115,12 +129,16 @@ class PreviewOverlay:
     with face boxes for a poll period. Object boxes are the tracker's latest estimate, never
     an exact match of the picture, so they never hold a frame. ``marks`` is empty unless
     ``webui.live.video_landmarks`` is on; then it has one ``FaceMarks`` per face, in ``faces``
-    order."""
+    order. ``hand`` is the palm box of the latest hand check while it classified a fist
+    (``HandWatch.preview``), else None: like the object boxes it comes from an earlier frame
+    (up to a check's run time plus the preview window behind the picture), so it never holds
+    a frame."""
 
     faces: tuple[tuple[Box, str | None], ...] = ()
     objects: tuple[tuple[Box, str, str | None], ...] = ()
     faces_current: bool = True
     marks: tuple[FaceMarks, ...] = ()
+    hand: HandMark | None = None
 
     def __bool__(self) -> bool:
         """True when it holds a face box: what makes a kept frame worth holding."""

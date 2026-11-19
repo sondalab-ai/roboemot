@@ -16,7 +16,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.runtime import live_video
 from roboemot.runtime.live_video import LiveVideo, ascii_label
 from roboemot.vision.runner import LatestFrameRunner
-from roboemot.vision.types import FaceMarks, Frame, PreviewOverlay
+from roboemot.vision.types import FaceMarks, Frame, HandMark, PreviewOverlay
 from roboemot.world.types import Entry
 
 cv2 = pytest.importorskip("cv2")  # the vision extra: run by the python-vision CI job
@@ -400,7 +400,9 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
     from roboemot.vision.service import Perception, VisionService
 
     caplog.set_level(logging.DEBUG)
-    rig = Rig()
+    fist_box = (123.25, 45.75, 211.5, 133.125)  # numbers nothing else would hold
+    hand = HandMark(fist_box, 0.5, 1.0, False)
+    rig = Rig(hook=lambda report: PreviewOverlay(hand=hand))
     pipeline = SimpleNamespace(
         stats=lambda: {"face_tracks": 0}, close=lambda: None, preview_overlay=lambda r: None
     )
@@ -409,10 +411,13 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
     perception = Perception(None, None, None, None, service, None)
     rig.host.perception.service = service
     report = Diagnostics().add(FnSource("roboemot.vision", perception.vision_snapshot))
+    drawn_labels = labels(rig)
     rig.video.frame("10.0.0.9")
     rig.submit(np.full((480, 640, 3), SENTINEL_BGR, np.uint8))
     jpeg, _ = rig.video.frame("10.0.0.9")
     assert rig.runner.latest() is not None  # a frame is held and a JPEG cached right now
+    assert rig.runner.latest().overlay.hand is hand  # and the fist box drawn on it
+    assert drawn_labels == [("fist 0.5/1.0 s", live_video.BGR_HAND)]
 
     dump = json.dumps(report.report(), default=str)
     logs = "\n".join(f"{r.getMessage()} {r.args!r}" for r in caplog.records)
@@ -426,6 +431,7 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
             base64.b64encode(pixels).decode(),
             repr(jpeg[:12]),
             "\\xff\\xd8",
+            *(str(v) for v in fist_box),
         ):
             assert needle not in text, needle
     assert '"frames"' in dump  # the real vision section was built
@@ -685,6 +691,82 @@ def test_an_object_box_is_drawn_in_its_own_colour_with_its_category():
 
 def test_the_object_colour_differs_from_the_face_and_target_colours():
     assert len({live_video.BGR_FACE, live_video.BGR_TARGET, live_video.BGR_OBJECT}) == 3
+
+
+def red_pixels(img):
+    return int(((img[:, :, 2] > 180) & (img[:, :, 1] < 100) & (img[:, :, 0] < 100)).sum())
+
+
+FIST_BOX = (200.0, 150.0, 320.0, 270.0)
+
+
+def labels(rig):
+    seen = []
+    real = rig.video._label
+
+    def spy(cv2, canvas, text, x, y, color):
+        seen.append((text, color))
+        return real(cv2, canvas, text, x, y, color)
+
+    rig.video._label = spy
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("mark", "text"),
+    [
+        (HandMark(FIST_BOX, 0.5, 1.0, False), "fist 0.5/1.0 s"),
+        (HandMark(FIST_BOX, 0.0, 1.5, False), "fist 0.0/1.5 s"),
+        (HandMark(FIST_BOX, 0.99, 1.0, False), "fist 0.9/1.0 s"),  # floored, never complete
+        (HandMark(FIST_BOX, 1.0, 1.0, False), "fist 0.9/1.0 s"),  # not fired: one step below
+        (HandMark(FIST_BOX, 0.3, 1.0, False), "fist 0.3/1.0 s"),
+        (HandMark(FIST_BOX, 0.1, 0.25, False), "fist 0.10/0.25 s"),  # hundredths when needed
+        (HandMark(FIST_BOX, 0.25, 0.25, False), "fist 0.24/0.25 s"),
+        (HandMark(FIST_BOX, 1.0, 1.0, True), "fist: stop"),
+        (HandMark(FIST_BOX, 2.5, 1.0, True), "fist: stop"),  # kept up after it fired
+    ],
+)
+def test_the_fist_box_is_drawn_in_its_own_colour_with_its_hold(mark, text):
+    rig = Rig(hook=lambda report: PreviewOverlay(hand=mark))
+    seen = labels(rig)
+    img = drawn(rig)
+    assert red_pixels(img) > 0 and img[210, 200:202].max() > 0  # the left edge (scale 1)
+    assert green_pixels(img) == 0 and blue_pixels(img) == 0 and yellow_pixels(img) == 0
+    assert seen == [(text, live_video.BGR_HAND)]
+    assert text.isascii()
+
+
+def test_the_fist_colour_differs_from_every_other_overlay_colour():
+    others = {
+        live_video.BGR_FACE,
+        live_video.BGR_TARGET,
+        live_video.BGR_OBJECT,
+        live_video.BGR_LANDMARK,
+        live_video.BGR_TEXT_BG,
+    }
+    assert live_video.BGR_HAND not in others
+
+
+def test_no_fist_box_without_a_hand_mark():
+    img = drawn(Rig(hook=lambda report: PreviewOverlay(objects=(CUP,))))
+    assert red_pixels(img) == 0 and blue_pixels(img) > 0
+    assert red_pixels(drawn(Rig(objects=[CUP]))) == 0  # no hook: no fist box either
+
+
+def test_a_fist_box_outside_the_picture_is_clamped_and_still_served():
+    far = HandMark((-5000.0, 400.0, 9000.0, 1e9), 0.5, 1.0, False)
+    rig = Rig(hook=lambda report: PreviewOverlay(hand=far))
+    seen = labels(rig)
+    img = drawn(rig)
+    assert img is not None and img.shape == (480, 640, 3)
+    assert red_pixels(img) > 0  # the top edge at y=400 crosses the picture
+    assert seen == [("fist 0.5/1.0 s", live_video.BGR_HAND)]
+
+
+def test_a_bad_fist_box_never_breaks_the_picture():
+    bad = HandMark((float("nan"), 1.0, 1e12, -1e12), float("inf"), 1.0, False)
+    img = drawn(Rig(hook=lambda report: PreviewOverlay(hand=bad)))
+    assert img is not None and img.shape == (480, 640, 3)
 
 
 def test_a_shown_object_target_uses_the_target_colour_and_line():

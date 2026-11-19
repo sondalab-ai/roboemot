@@ -2721,6 +2721,17 @@ class HandsConfig(Strict):
         le=60,
         advanced=True,
     )
+    preview_slack_s: float = param(
+        0.5,
+        "The Live video preview's fist box stays for one check period (1 / rate_hz) plus this "
+        "after the frame its result came back on, and the preview counts as watched for as "
+        "long after its last read (capture time). The slack covers uneven frames and slow "
+        "checks, so the box does not blink between results",
+        unit="s",
+        ge=0,
+        le=5,
+        advanced=True,
+    )
     pose_model: Literal["fp32", "int8"] = param(
         "fp32",
         "Weights of the hand model: fp32 (147 ms of CPU per run on the CM4) or the int8 file "

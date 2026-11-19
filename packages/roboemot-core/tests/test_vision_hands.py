@@ -30,7 +30,7 @@ from roboemot.vision.hands import (
 )
 from roboemot.vision.models import ModelError
 from roboemot.vision.stage_timing import HAND_PALM, HAND_POSE, StageTimer
-from roboemot.vision.types import HandPose, Palm
+from roboemot.vision.types import HandMark, HandPose, Palm
 from test_vision import H, W, rig
 
 HANDS = HandsConfig(enabled=True)
@@ -158,9 +158,12 @@ def test_fist_checks_further_apart_than_the_hold_are_not_one_hold():
 # ------------------------------------------------------------------------ the check
 
 
+PALM_BOX = (10.0, 10.0, 60.0, 60.0)
+
+
 class FakePalm:
-    def __init__(self, score: float | None = 0.9, raises: bool = False):
-        self.score, self.raises, self.calls = score, raises, 0
+    def __init__(self, score: float | None = 0.9, raises: bool = False, box=PALM_BOX):
+        self.score, self.raises, self.calls, self.box = score, raises, 0, box
         self.images: list[np.ndarray] = []
 
     def best(self, image):
@@ -170,7 +173,7 @@ class FakePalm:
             raise RuntimeError("backend down")
         if self.score is None:
             return None
-        return Palm((10.0, 10.0, 60.0, 60.0), self.score, np.zeros((7, 2)))
+        return Palm(self.box, self.score, np.zeros((7, 2)))
 
 
 class FakePose:
@@ -828,3 +831,205 @@ def test_missing_hand_models_keep_vision_up_and_never_ask_the_seam(monkeypatch, 
     run_frames(pipe, 2.0)
     assert got == []
     assert pipe.hands.snapshot(2.0)["state"] == "unavailable"
+
+
+# ------------------------------------------------------------------------ the preview's fist box
+
+PERIOD = 1 / HANDS.rate_hz
+WINDOW = PERIOD + HANDS.preview_slack_s  # the preview window: watched gate and lapse
+ODD_BOX = (123.25, 45.75, 211.5, 133.125)  # numbers no report, log or event would hold
+
+
+def watched(watch, seconds: float, start: float = 0.0, dt: float = 1 / 30, wanted=True):
+    """Frames at ``dt`` with a viewer watching: each ``step`` followed by the preview overlay
+    hook's ``preview`` (the pipeline's order); the marks it returned, with their frame stamps."""
+    marks = []
+    for i in range(round(seconds / dt)):
+        stamp = start + i * dt
+        watch.step(stamp, image(), wanted)
+        marks.append((stamp, watch.preview(stamp)))
+    return marks
+
+
+def test_a_fist_while_the_preview_is_watched_keeps_its_box_and_hold():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    marks = dict(watched(watch, 1.2))
+    assert all(m is None for t, m in marks.items() if t < PERIOD)  # 0 ran before the first read
+    building = [m for t, m in marks.items() if PERIOD <= t < 2 * PERIOD]
+    expected = HandMark(PALM_BOX, 0.5, HANDS.fist_hold_s, False)
+    assert building and all(m == expected for m in building)
+    fired = marks[max(marks)]
+    assert fired.fired and fired.held_s == pytest.approx(HANDS.fist_hold_s)
+
+
+def test_no_viewer_means_no_box_is_built():
+    inline = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    assert len(feed(inline, 2.0)) == 1  # the fist stop still works
+    assert inline._mark is None
+    threaded = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    threaded.step(0.0, image(), True)
+    assert threaded._job is not None and not threaded._job.boxed
+    threaded.run_one()
+    assert threaded._done[0].result == FIST and threaded._done[0].box is None
+
+
+def test_a_non_fist_result_removes_the_box():
+    pose = FakePose(FIST_HAND)
+    watch = HandWatch(HANDS, FakePalm(), pose)
+    assert watched(watch, 0.6)[-1][1] is not None
+    pose.points = OPEN_HAND
+    marks = dict(watched(watch, 0.6, start=0.6))
+    assert all(m is None for t, m in marks.items() if t >= 2 * PERIOD)
+    assert watch._mark is None
+
+
+def test_the_box_lapses_one_window_after_the_frame_its_result_came_back_on():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    watch.preview(0.0)
+    watch.step(0.0, image(), True)
+    watch.run_one()
+    assert watch.preview(0.2) is None  # not applied yet: the result lags the frame
+    watch.step(0.3, image(), True)  # it comes back on the frame at 0.3
+    assert watch.preview(0.3) is not None and watch.preview(0.3 + WINDOW) is not None
+    assert watch.preview(0.3 + WINDOW + 0.01) is None  # just past the slack
+    watch.step(0.3 + WINDOW + 0.02, image(), True)
+    assert watch._mark is None  # dropped from memory too
+
+
+def test_sparse_frames_within_the_slack_keep_the_box_and_the_watch():
+    """Processed frames further apart than one check period, but within the slack, neither
+    drop the watch nor blink the box (a slow vision thread, uneven frames)."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    gap = PERIOD + HANDS.preview_slack_s / 2
+    assert gap > PERIOD
+    marks = []
+    for k in range(4):
+        stamp = k * gap
+        watch.step(stamp, image(), True)
+        marks.append(watch.preview(stamp))
+    assert marks[0] is None  # the check at 0 ran before the first read
+    assert all(m is not None for m in marks[1:])
+    assert marks[-1].fired
+
+
+def test_a_slower_rate_and_a_zero_slack_follow_the_config():
+    cfg = HANDS.model_copy(update={"preview_slack_s": 0.0})
+    watch = HandWatch(cfg, FakePalm(), FakePose(FIST_HAND))
+    watched(watch, 0.6)
+    assert watch.preview(0.5 + PERIOD) is not None
+    assert watch.preview(0.5 + PERIOD + 0.01) is None
+
+
+def test_the_fired_box_stays_after_the_seam_goes_off_until_it_lapses():
+    """The fist stops the radio, which turns the seam off at once: ``fist: stop`` still shows
+    for the preview window."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    marks = watched(watch, 1.0 + 1 / 30)
+    assert marks[-1][1].fired
+    after = dict(watched(watch, WINDOW + 0.2, start=1.0 + 1 / 30, wanted=False))
+    assert all(m is not None and m.fired for t, m in after.items() if t <= 1.0 + WINDOW)
+    assert all(m is None for t, m in after.items() if t > 1.0 + WINDOW + 0.01)
+
+
+def test_the_box_goes_when_the_preview_is_no_longer_watched_or_cleared():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND))
+    watched(watch, 0.6)
+    assert watch._mark is not None
+    watch.step(0.6 + WINDOW + 0.02, image(), True)  # no preview call for a window
+    assert watch._mark is None
+    watched(watch, 0.6, start=2.0)
+    assert watch._mark is not None
+    watch.clear_mark()
+    assert watch._mark is None and watch.preview(2.6) is None
+    watched(watch, 0.6, start=4.0)
+    watch.reset()
+    assert watch._mark is None
+
+
+def test_the_box_reaches_only_the_preview_overlay(tmp_path, caplog):
+    caplog.set_level("DEBUG")
+    pipe, got = hands_pipeline(tmp_path, FakePalm(box=ODD_BOX), FakePose(FIST_HAND))
+    pipe.hands_wanted = lambda: True
+    overlays = []
+    for i in range(round(1.2 * 30)):
+        report = pipe.process(Frame(image(), i / 30))
+        overlays.append(pipe.preview_overlay(report))
+    hands = [o.hand for o in overlays if o.hand is not None]
+    assert hands and all(h.box == ODD_BOX for h in hands) and hands[-1].fired
+    assert len(got) == 1
+    text = "\n".join(
+        (json.dumps(pipe.stats(), default=str), repr(got), repr(overlays), caplog.text)
+    )
+    for number in ODD_BOX:
+        assert str(number) not in text
+    pipe.clear_overlay()  # the robot fell asleep
+    assert pipe.preview_overlay(pipe.process(Frame(image(), 1.3))).hand is None
+
+
+def test_a_clear_mark_after_a_boxed_job_keeps_the_box_out():
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    watch.preview(0.0)
+    watch.step(0.0, image(), True)
+    assert watch._job.boxed
+    watch.run_one()
+    watch.clear_mark()  # the robot fell asleep (app thread)
+    watch.step(0.1, image(), True)
+    assert watch._mark is None and watch._preview_at is None
+
+
+def test_a_clear_mark_during_a_step_wins_over_its_write():
+    """The sleep race: ``step`` has already seen the preview watched when ``clear_mark`` runs
+    on the app thread; the result it then applies must not bring the box back."""
+    watch = HandWatch(HANDS, FakePalm(), FakePose(FIST_HAND), threaded=True)
+    watch.preview(0.0)
+    watch.step(0.0, image(), True)
+    watch.run_one()
+    drain = watch._drain
+
+    def cleared_meanwhile():
+        done = drain()
+        watch.clear_mark()
+        return done
+
+    watch._drain = cleared_meanwhile
+    watch.step(0.1, image(), True)
+    assert watch._mark is None and watch._preview_at is None
+    watch._drain = drain
+    preview_epoch = watch._epoch
+
+    def cleared_in_preview():
+        epoch = preview_epoch()
+        watch.clear_mark()
+        return epoch
+
+    watch._epoch = cleared_in_preview
+    assert watch.preview(0.2) is None and watch._preview_at is None
+
+
+def test_sleep_through_the_live_video_clears_the_mark(tmp_path):
+    from types import SimpleNamespace
+
+    from roboemot.runtime.live_video import LiveVideo
+
+    pipe, _ = hands_pipeline(tmp_path, FakePalm(box=ODD_BOX), FakePose(FIST_HAND))
+    pipe.hands_wanted = lambda: True
+    for i in range(20):
+        pipe.preview_overlay(pipe.process(Frame(image(), i / 30)))
+    assert pipe.hands._mark is not None
+    host = SimpleNamespace(perception=SimpleNamespace(service=None, pipeline=pipe))
+    p = SimpleNamespace(sleep=SimpleNamespace(asleep=True), selector=None, world=None)
+    LiveVideo(host, p, RoboEmotConfig()).sleep()
+    assert pipe.hands._mark is None and pipe.hands._preview_at is None
+
+
+def test_the_preview_slack_is_a_config_field():
+    assert HandsConfig().preview_slack_s == 0.5
+    for bad in (-0.1, 5.1):
+        with pytest.raises(ValidationError):
+            HandsConfig(preview_slack_s=bad)
+
+
+def test_no_box_in_a_result_or_mark_repr():
+    outcome = repr(hands_module._Outcome(0.0, 1, FIST, ODD_BOX))
+    mark = repr(HandMark(ODD_BOX, 0.5, 1.0, False))
+    assert all(str(n) not in outcome + mark for n in ODD_BOX)

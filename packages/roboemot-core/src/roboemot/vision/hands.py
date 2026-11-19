@@ -26,10 +26,23 @@ is dropped, a result of the old generation is discarded (``discarded``) and the 
 After ``stop`` nothing is queued any more. ``step`` returns each event with the capture stamp of
 the check that made it.
 
+**Preview (SPEC 11A).** While the web UI's live preview is watched (:meth:`HandWatch.preview`
+was called within the preview window, one check period plus ``vision.hands.preview_slack_s``,
+capture time: the runner calls the preview overlay hook only then), a check that classifies a
+fist also returns its palm box, and the watch keeps it with the hold so far as a
+:class:`HandMark` for the preview overlay. A result that is not a fist removes it, and so does
+the preview window (capture time from the frame the result was applied on) without a new
+result, the end of the watch, ``clear_mark`` (sleep, from any thread) and ``reset``. A
+``clear_mark`` bumps an epoch under the lock; ``step`` and ``preview`` capture it at entry and
+write the kept fist or the watch only while it is unchanged, so a frame in flight during a sleep
+cannot bring the box back.
+
 **Privacy (SPEC 12).** The frame copy lives only in the waiting or running job; palm boxes,
-keypoints and hand points live only inside one check. A result holds the check's capture stamp
-and its class, nothing from the image; the event holds the fact and the hold time. Failures are
-logged by exception type only. The report has counts only.
+keypoints and hand points live only inside one check, except the palm box of a fist while the
+preview is watched, which goes only to the preview overlay. A result holds the check's capture
+stamp and its class (and that box, hidden from repr), nothing else from the image; the event
+holds the fact and the hold time. Failures are logged by exception type only. The report has
+counts only.
 """
 
 from __future__ import annotations
@@ -47,6 +60,7 @@ from ..config.schema import HandsConfig
 from .governor import EPSILON_S
 from .stage_timing import HAND_PALM, HAND_POSE, StageTimer
 from .stages import HandPoseEstimator, PalmDetector
+from .types import Box, HandMark
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +162,13 @@ class FistHold:
     def clear(self) -> None:
         self._since, self._last, self._fired = None, None, False
 
+    def progress(self) -> tuple[float, bool]:
+        """The run so far: capture time from its first fist check to its last (0 without a
+        run) and whether it fired."""
+        if self._since is None or self._last is None:
+            return 0.0, self._fired
+        return self._last - self._since, self._fired
+
 
 @dataclass(frozen=True)
 class HandGesture:
@@ -163,6 +184,7 @@ class _Job:
     image: np.ndarray = field(repr=False)
     stamp: float
     generation: int
+    boxed: bool = False  # the preview is watched: a fist returns its palm box
 
 
 @dataclass(frozen=True)
@@ -170,6 +192,7 @@ class _Outcome:
     stamp: float
     generation: int
     result: CheckResult
+    box: Box | None = field(default=None, repr=False)  # a fist's palm box, only when boxed
 
 
 class HandWatch:
@@ -210,6 +233,9 @@ class HandWatch:
         self._last_result: float | None = None
         self._hold = FistHold()
         self._counts = dict.fromkeys(COUNTS, 0)
+        self._preview_at: float | None = None
+        self._mark: tuple[HandMark, float] | None = None  # with the stamp it was applied at
+        self._mark_epoch = 0  # bumped by ``clear_mark``; writes from an older epoch are dropped
 
     @property
     def ready(self) -> bool:
@@ -222,20 +248,25 @@ class HandWatch:
         """One captured frame at ``stamp`` (vision thread). Applies the finished checks in order
         and returns the events they made, each with its check's capture stamp; then, while
         ``wanted``, starts a check on ``image`` when one is due (a copy goes to the thread, or it
-        runs inline here). After ``stop`` nothing is queued."""
+        runs inline here). After ``stop`` nothing is queued. The kept fist (``preview``) is
+        dropped here once the preview is no longer watched or it lapsed."""
+        epoch = self._epoch()
+        boxed = self._watched(stamp)
+        if not boxed or self._lapsed(self._mark, stamp):
+            self._mark = None
         wanted = wanted and self.ready
         if not wanted and not self._wanted:
             return []
         if wanted != self._wanted:
             self._new_generation()
             self._wanted = wanted
-        events = self._apply(self._drain())
+        events = self._apply(self._drain(), stamp, boxed, epoch)
         if not wanted or not self._due(stamp):
             return events
         if not self.threaded:
             self._last_check = stamp
-            outcome = self._check(_Job(image, stamp, self._generation))
-            return events + self._apply([outcome])
+            outcome = self._check(_Job(image, stamp, self._generation, boxed))
+            return events + self._apply([outcome], stamp, boxed, epoch)
         with self._cond:
             if self._stop:
                 return events
@@ -243,9 +274,58 @@ class HandWatch:
                 self._counts["busy"] += 1
                 return events
             self._last_check = stamp
-            self._job = _Job(image.copy(), stamp, self._generation)
+            self._job = _Job(image.copy(), stamp, self._generation, boxed)
             self._cond.notify()
         return events
+
+    def _window(self) -> float:
+        """The preview window: one check period plus ``preview_slack_s`` (capture time)."""
+        cfg = self.cfg
+        return 1 / cfg.rate_hz + cfg.preview_slack_s + EPSILON_S
+
+    def _epoch(self) -> int:
+        with self._cond:
+            return self._mark_epoch
+
+    def _watched(self, stamp: float) -> bool:
+        """Whether the preview asked (``preview``) within the preview window before ``stamp``."""
+        at = self._preview_at
+        return at is not None and stamp - at <= self._window()
+
+    def _lapsed(self, mark: tuple[HandMark, float] | None, stamp: float) -> bool:
+        """Whether the kept fist ``mark`` is older than the preview window at ``stamp`` (none
+        counts as lapsed)."""
+        return mark is None or stamp - mark[1] > self._window()
+
+    def preview(self, stamp: float) -> HandMark | None:
+        """The preview overlay hook's read for the frame at ``stamp`` (vision thread, called
+        only while a viewer watches): marks the preview as watched, so the next checks return
+        a fist's palm box, and returns the kept fist unless it lapsed. A ``clear_mark`` since
+        entry wins: nothing is marked and nothing returned."""
+        epoch = self._epoch()
+        mark = self._mark  # one read: ``clear_mark`` may run on another thread (sleep)
+        with self._cond:
+            if epoch != self._mark_epoch:
+                return None
+            self._preview_at = stamp
+        if mark is None or self._lapsed(mark, stamp):
+            return None
+        return mark[0]
+
+    def clear_mark(self) -> None:
+        """Forget the kept fist and that the preview is watched (the robot fell asleep; any
+        thread). Bumps the epoch, so a ``step`` or ``preview`` already running writes neither
+        back."""
+        with self._cond:
+            self._mark_epoch += 1
+            self._mark = None
+            self._preview_at = None
+
+    def _keep_mark(self, mark: HandMark, stamp: float, epoch: int) -> None:
+        """Keep ``mark`` applied at ``stamp`` unless ``clear_mark`` ran since ``epoch``."""
+        with self._cond:
+            if epoch == self._mark_epoch:
+                self._mark = (mark, stamp)
 
     def _due(self, stamp: float) -> bool:
         last = self._last_check
@@ -263,9 +343,14 @@ class HandWatch:
             done, self._done = self._done, []
         return done
 
-    def _apply(self, outcomes: list[_Outcome]) -> list[tuple[float, HandGesture]]:
+    def _apply(
+        self, outcomes: list[_Outcome], stamp: float, boxed: bool, epoch: int
+    ) -> list[tuple[float, HandGesture]]:
         """The hold rule over finished checks, in check order (vision thread); ``cfg`` is read
-        at each check, so a hot reload of the rate or the hold applies to the run in progress."""
+        at each check, so a hot reload of the rate or the hold applies to the run in progress.
+        While the preview is watched (``boxed``) a fist with its box is kept for it, applied at
+        ``stamp`` (the frame it comes back on) unless ``clear_mark`` ran since ``epoch``; any
+        other result removes it."""
         events = []
         for o in sorted(outcomes, key=lambda o: o.stamp):
             if o.generation != self._generation:
@@ -278,6 +363,10 @@ class HandWatch:
             if held is not None:
                 self._count("events")
                 events.append((o.stamp, HandGesture(FIST, held)))
+            self._mark = None
+            if boxed and o.result == FIST and o.box is not None:
+                so_far, fired = self._hold.progress()
+                self._keep_mark(HandMark(o.box, so_far, cfg.fist_hold_s, fired), stamp, epoch)
         return events
 
     def _count(self, key: str) -> None:
@@ -289,8 +378,9 @@ class HandWatch:
         above ``palm_score_min``. A backend that raises makes a ``failed`` check (logged by
         type), which also ends a fist run."""
         result: CheckResult
+        box = None
         try:
-            result = self._classify(job.image)
+            result, box = self._classify(job.image)
         except Exception as exc:
             log.warning("hand check failed: %s", type(exc).__name__)
             result = "failed"
@@ -299,20 +389,22 @@ class HandWatch:
             self._counts["checks"] += 1
             if result in counted:
                 self._counts[counted[result]] += 1
-        return _Outcome(job.stamp, job.generation, result)
+        kept = box if job.boxed and result == FIST else None
+        return _Outcome(job.stamp, job.generation, result, kept)
 
-    def _classify(self, image: np.ndarray) -> CheckResult:
+    def _classify(self, image: np.ndarray) -> tuple[CheckResult, Box | None]:
+        """The check's class and the box of the palm the hand model ran on (None without)."""
         palm_detector, pose_estimator, cfg = self.palm, self.pose, self.cfg
         assert palm_detector is not None and pose_estimator is not None
         with self._timed(HAND_PALM):
             palm = palm_detector.best(image)
         if palm is None or palm.score < cfg.palm_score_min:
-            return NO_PALM
+            return NO_PALM, None
         self._count("palms")
         with self._timed(HAND_POSE):
             hand = pose_estimator.estimate(image, palm)
         self._count("pose_runs")
-        return classify(hand.points, hand.presence, cfg)
+        return classify(hand.points, hand.presence, cfg), palm.box
 
     def _timed(self, stage: str) -> _Timed:
         return _Timed(self.timer, stage)
@@ -396,6 +488,7 @@ class HandWatch:
         self._new_generation()
         self._wanted = False
         self._last_result = None
+        self.clear_mark()
         with self._cond:
             self._counts = dict.fromkeys(COUNTS, 0)
 
