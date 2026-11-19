@@ -145,6 +145,10 @@ The robot plays internet radio streams from your station list through its speake
 - **Dancing.** The robot may dance to its own radio (`tools.radio.dance`, on by default).
 - **When it stops.**
   - "stop the radio"
+  - "hey Neve, stop the music" even when the music garbles the name: if the robot heard a
+    wake and the words hold a stop word and a music word (`voice.keywords`: `stop`, `media`),
+    the radio stops and the robot nods, but nothing else is answered
+    (`tools.radio.stop_without_name`, on by default)
   - a hand on the robot (`tools.radio.touch_stop`, on by default): hold the head or an antenna
     away from where it was for about a second (`tools.radio.touch_stop_check_s`) while the music
     plays and the radio stops; the robot nods once it takes control back, a few seconds after

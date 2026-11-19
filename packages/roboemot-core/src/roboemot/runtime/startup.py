@@ -47,6 +47,8 @@ from .assembly import Pipeline
 from .host import RuntimeHost
 from .webui import WebAdmin, start_webui
 
+VOICE_STOP_GESTURE = "nod"  # the robot's answer to a stop said over the radio (SPEC 11, Radio)
+
 
 def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
     """The responder's cue, speaking on ``host.speech_output`` (SPEC 12A, Behaviour while
@@ -210,6 +212,17 @@ def start_voice_output(
         bind_barge_in(bargein, output, conv, listener, cut_own)
 
 
+def stop_and_nod(host: RuntimeHost, player: Any, reason: str) -> None:
+    """The listener's voice stop over the radio (SPEC 8, 11 Radio; owner decision 2026-11-19):
+    stop the station for ``reason``, then nod once (the ``play`` skill's path, with the time,
+    so the renderer refuses it rather than play it late). Runs on the listener thread; the
+    renderer's request is thread-safe."""
+    player.stop(reason)
+    expression = host.expression
+    if expression is not None:
+        expression.request(VOICE_STOP_GESTURE, time.monotonic())
+
+
 def start_media(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -228,8 +241,8 @@ def start_media(
     ``tools.radio.dance``), lets it record a turn's hold (``hold_from``) and hands it the
     pieces that played (``on_piece``: the dance's audio behind a hardware echo canceller), and
     gives it each utterance's start and end (``duck_from``, ``release_from``: the duck over
-    speech, only with the manifest's ``echo_cancelled``). Sets ``host.media``; None (and no
-    radio) otherwise."""
+    speech, only with the manifest's ``echo_cancelled``), and lets it stop the station by voice
+    without the name (``stop_and_nod``). Sets ``host.media``; None (and no radio) otherwise."""
     if not isinstance(output.sink, MediaSink):
         return None
     player = host.media = MediaPlayer(output, host, stack.effective, echo_cancelled=echo_cancelled)
@@ -240,6 +253,7 @@ def start_media(
         listener.media_audible = player.audible_at
         listener.media_hold = player.hold_from
         listener.media_set = player.playing
+        listener.media_stop = lambda reason: stop_and_nod(host, player, reason)
         listener.media_speech_start = player.duck_from
         listener.media_speech_end = player.release_from
         player.on_piece = listener.hear_media

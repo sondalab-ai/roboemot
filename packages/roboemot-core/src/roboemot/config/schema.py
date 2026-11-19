@@ -3544,6 +3544,14 @@ class KeywordSet(Strict):
     )
     no: list[str] = param([], "Phrases that mean no: the robot shakes its head", advanced=True)
     greeting: list[str] = param([], "Greeting phrases", advanced=True)
+    media: list[str] = param(
+        [],
+        "Words that name the robot's music (`musica`, `radio`): with a stop phrase in the "
+        "server's words of a wake over the radio they stop it even when the name is not "
+        "confirmed (tools.radio.stop_without_name). Whole words, no stemming: list the "
+        "inflections you want",
+        advanced=True,
+    )
     wake_phrases: list[str] = param(
         [],
         "Phrases that wake the robot when they occur anywhere in the final text. Use words the "
@@ -5162,6 +5170,7 @@ class VoiceConfig(Strict):
                 "yes": ["certo", "esatto"],
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
+                "media": ["musica", "radio", "canzone"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
                 "name_wake_templates": ["ciao {name}", "ehi {name}", "hey {name}"],
                 "name_lead_ins": ["ok", "okay", "senti", "scusa", "ascolta", "hey"],
@@ -5171,6 +5180,7 @@ class VoiceConfig(Strict):
                 "yes": ["yes", "yeah", "yep"],
                 "no": ["no"],
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
+                "media": ["music", "radio", "song"],
                 "wake_phrases": ["hey robot", "hello robot"],
                 "name_wake_templates": ["hey {name}", "hello {name}"],
                 "name_lead_ins": ["ok", "okay", "listen", "excuse me"],
@@ -7360,6 +7370,13 @@ class RadioConfig(Strict):
         "A hand on the robot stops the radio: a hand that holds part of the robot away from "
         "its last move while the music can be heard stops the station, then the robot nods; "
         "only where the motion loop detects external control",
+    )
+    stop_without_name: bool = param(
+        True,
+        "Stop the radio by voice without the name: when a wake over the radio is not confirmed "
+        "by the server's words but they hold a stop phrase and a media word "
+        "(voice.keywords: `ferma la musica`), the station stops and the robot nods; nothing "
+        "else is answered without the name",
     )
     touch_stop_check_s: float = param(
         1.0,

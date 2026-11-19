@@ -3,7 +3,7 @@
 import pytest
 from reachy_config import reachy_config
 from roboemot.config.schema import KeywordSet
-from roboemot.voice.keywords import KeywordSpotter, normalise
+from roboemot.voice.keywords import KeywordSpotter, holds_any, normalise
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.wake import WakeGate
 
@@ -291,3 +291,23 @@ def test_an_english_name_of_several_words():
     assert s.name_close("hi neevee biancah please", "en", 1, 4)
     assert not s.name_close("hi neevee bianka please", "en", 1, 4)  # k is not c
     assert not s.name_close("bianca navy", "en", 1, 4)
+
+
+@pytest.mark.parametrize(
+    "text,found",
+    [
+        ("Ehi, Alexa, ferma la MUSICA.", True),
+        ("stop the radio", True),
+        ("la radiosa estate", False),  # whole words only
+        ("", False),
+        ("canzone", True),
+    ],
+)
+def test_holds_any_matches_whole_words(text, found):
+    assert holds_any(text, ["musica", "radio", "canzone"]) is found
+
+
+def test_the_default_media_words_per_language():
+    """The voice stop's media words (SPEC 8, Radio playback; owner decision 2026-11-19)."""
+    assert V.keywords["it"].media == ["musica", "radio", "canzone"]
+    assert V.keywords["en"].media == ["music", "radio", "song"]

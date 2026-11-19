@@ -104,6 +104,14 @@ server's words while the live transcript is on): the conversation deletes
 its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
 closes. A follow-up in that window decided before the verdict (the lyric's next line starts
 inside the span the hold back-dates) goes with it when its own final holds neither either.
+Stop trusts the command (owner decision 2026-11-19: a missed stop costs more than a false one):
+when such an unconfirmed server final holds a ``stop`` phrase and a ``media`` word of its
+language (``voice.keywords``, whole words: "Ehi, Alexa, ferma la musica.") while a station is
+set (``media_set``) and ``tools.radio.stop_without_name`` is on, the listener stops the radio
+(``media_stop``, reason ``voice_stop``), counts ``voice_stop_media`` instead of
+``wake_unconfirmed_media`` and publishes ``media``/``voice_stop`` instead of
+``media_unconfirmed``; the turn is still handed off not addressed, so nothing else is answered
+without the name. A local rejection (``rejected_media``) never reaches this rule.
 Otherwise a wake in a follow-up window or a reply window (the radio held) needs no
 confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
@@ -154,6 +162,7 @@ from .decode_worker import DecodeJob, DecodeWorker
 from .direction import VoiceDirection
 from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
+from .keywords import holds_any
 from .listener_load import ListenerLoad
 from .music import STARTED, MusicDetector, MusicState
 from .music_classifier import MusicClassifier
@@ -182,6 +191,7 @@ OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be 
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
 # what in the server's transcript confirms a wake over the audible radio (SPEC 8, Radio playback)
 WAKE_CONFIRMS = frozenset({"name", "wake"})  # not ``extra_name``: a lyric can say "robot"
+VOICE_STOP = "voice_stop"  # ``media.stopped``'s reason, and the ``media`` event's (SPEC 8, 11)
 
 
 class VoiceChunkLike(Protocol):
@@ -350,6 +360,8 @@ class VoiceListener:
         self.media_audible: Callable[[float], bool] = lambda at: False
         self.media_hold: Callable[[float], None] = lambda at: None
         self.media_set: Callable[[], bool] = lambda: False  # a station is set (held or not)
+        # stop the station by voice without the name (``voice_stop``: the player's stop and a nod)
+        self.media_stop: Callable[[str], None] = lambda reason: None
         # an utterance's VAD start, and the moment every utterance is decided, for the
         # player's duck (``duck_from`` and ``release_from``; the player applies the guard)
         self.media_speech_start: Callable[[float], None] = lambda at: None
@@ -395,6 +407,8 @@ class VoiceListener:
             "wake_word_heard": 0,  # the server's transcript held a wake phrase or the name
             # a wake over the audible radio whose server transcript held neither: not answered
             "wake_unconfirmed_media": 0,
+            # one that said stop the music instead: the radio stopped, still not answered
+            "voice_stop_media": 0,
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
             "decodes": 0,
@@ -1766,6 +1780,23 @@ class VoiceListener:
             return True
         return server and self._fast.server_name_close(text, p.language, extras=False)
 
+    def _stops_media(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
+        """Whether ``p``'s unconfirmed server final asks to stop the radio (owner decision
+        2026-11-19): ``tools.radio.stop_without_name`` on, a station set (held or not: the
+        turn holds it), a ``stop`` phrase (the server spotter) and a ``media`` word of
+        ``p``'s language in the text, whole words both."""
+        if not (server and self._cfg.tools.radio.stop_without_name and "stop" in fast.keywords):
+            return False
+        words = self._cfg.voice.keywords.get(p.language)
+        return words is not None and holds_any(text, words.media) and self._media_set()
+
+    def _stop_media(self) -> None:
+        """Ask the media player to stop the station for ``voice_stop`` (``media_stop``)."""
+        try:
+            self.media_stop(VOICE_STOP)
+        except Exception as exc:
+            log.warning("voice listener: media player: %s", type(exc).__name__)
+
     def _heard(self, text: str, server: bool) -> str | None:
         """The server's words of an unconfirmed wake for the Live tab (SPEC 12): only a server
         final, only while the Live tab and its transcript are on, cut as a transcript turn;
@@ -1896,9 +1927,15 @@ class VoiceListener:
             # server's words hold no name and no wake phrase, so it is not answered (SPEC 8)
             addressed = p.addressed = False
             p.unconfirmed = True
-            self._count_audio("wake_unconfirmed_media")
-            # the Live tab: the server did not hear the name, and what it heard instead
-            self.events("unanswered", "media_unconfirmed", heard=self._heard(text, server))
+            if self._stops_media(fast, text, p, server):
+                # stop trusts the command (owner decision 2026-11-19): only the radio stops
+                self._stop_media()
+                self._count_audio("voice_stop_media")
+                self.events("media", VOICE_STOP)
+            else:
+                self._count_audio("wake_unconfirmed_media")
+                # the Live tab: the server did not hear the name, and what it heard instead
+                self.events("unanswered", "media_unconfirmed", heard=self._heard(text, server))
             if self._media_wake is p:  # no wake since: the window it opened was a lyric's
                 self._gate.close_window()
         if self._media_wake is p:  # its verdict is in

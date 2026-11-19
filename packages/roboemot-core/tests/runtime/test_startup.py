@@ -9,7 +9,13 @@ from types import SimpleNamespace
 import pytest
 from roboemot.config import ConfigStack
 from roboemot.runtime import RuntimeHost
-from roboemot.runtime.startup import bind_barge_in, offline_cue, start_all, start_media
+from roboemot.runtime.startup import (
+    bind_barge_in,
+    offline_cue,
+    start_all,
+    start_media,
+    stop_and_nod,
+)
 
 
 class Part:
@@ -113,6 +119,24 @@ def test_start_media_wires_the_listeners_speech_to_the_players_duck(echo_cancell
         assert player.echo_cancelled is echo_cancelled
         assert listener.media_speech_start == player.duck_from
         assert listener.media_speech_end == player.release_from
+        assert callable(listener.media_stop)
+
+
+@pytest.mark.parametrize("nod_ok", [True, False])
+def test_stop_and_nod_stops_the_station_then_nods(nod_ok):
+    """SPEC 8, 11 Radio (owner decision 2026-11-19): the listener's voice stop stops the
+    station with its reason, then asks the renderer for one nod with the time (a refused nod
+    changes nothing); without a renderer it only stops."""
+    calls: list[tuple] = []
+    player = SimpleNamespace(stop=lambda reason: calls.append(("stop", reason)))
+    host = RuntimeHost()
+    stop_and_nod(host, player, "voice_stop")
+    assert calls == [("stop", "voice_stop")]
+    host.expression = SimpleNamespace(
+        request=lambda label, now: calls.append(("gesture", label, now is not None)) or nod_ok
+    )
+    stop_and_nod(host, player, "voice_stop")
+    assert calls[1:] == [("stop", "voice_stop"), ("gesture", "nod", True)]
 
 
 def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
