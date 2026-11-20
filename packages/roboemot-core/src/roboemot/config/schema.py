@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 import warnings
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -444,6 +444,87 @@ class IntensityFactors(Strict):
     high: float = param(1.3, "Amplitude factor of reaction_intensity high", ge=0, le=2)
 
 
+# The situations the robot reacts to in its own words (SPEC 8, Robot expression).
+Situation = Literal["didnt_catch", "failed_action", "shown_object", "returning_person"]
+SITUATIONS: tuple[str, ...] = get_args(Situation)
+
+
+class SituationConfig(Strict):
+    """One situation of the robot's own reactions (SPEC 8, Robot expression)."""
+
+    enabled: bool = param(True, "React to this situation")
+    max_age_s: float = param(
+        ...,
+        "A reaction not started within this time after its cause is dropped",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    cooldown_s: float = param(
+        ...,
+        "At most one reaction per situation and subject (a station, a category) in this time",
+        unit="s",
+        ge=0,
+        le=86400,
+    )
+    gesture: str = param(
+        "",
+        "Gesture of the manifest gesture_map played before the line, and alone while music "
+        "plays; empty for none",
+    )
+
+
+class ExpressionReactionsConfig(Strict):
+    """The robot's own reactions, worded by the model (SPEC 8, Robot expression)."""
+
+    enabled: bool = param(True, "The robot reacts in its own words to what happens around it")
+    model_asks: bool = param(
+        True,
+        "When speech clearly meant for the robot is unclear, the model asks a short question "
+        "instead of ignoring it",
+    )
+    turn_timeout_s: float = param(
+        5.0,
+        "A reaction whose reply audio has not started within this time after the route could "
+        "take it falls back to the fixed line",
+        unit="s",
+        ge=1,
+        le=30,
+    )
+    greet_absence_s: float = param(
+        1800.0,
+        "A known person is greeted again only after being away at least this long while the "
+        "robot was awake",
+        unit="s",
+        ge=60,
+        le=86400,
+    )
+    didnt_catch: SituationConfig = param(
+        {"max_age_s": 10, "cooldown_s": 15},
+        "Someone spoke to the robot and it did not catch it: it asks again",
+    )
+    failed_action: SituationConfig = param(
+        {"max_age_s": 30, "cooldown_s": 120, "gesture": "puzzled"},
+        "A radio station dropped: the robot says so; the cooldown is per station",
+    )
+    shown_object: SituationConfig = param(
+        {"max_age_s": 60, "cooldown_s": 120},
+        "Someone shows the robot a thing: it comments on it, and only while the thing is still "
+        "shown; the cooldown is per category",
+    )
+    returning_person: SituationConfig = param(
+        {"max_age_s": 30, "cooldown_s": 0},
+        "A known person comes back: the robot greets them; per person, greet_absence_s is the "
+        "limit",
+    )
+
+    def situation(self, name: str) -> SituationConfig:
+        """The settings of situation ``name`` (one of ``SITUATIONS``)."""
+        if name not in SITUATIONS:
+            raise ValueError(f"unknown situation {name!r}")
+        return getattr(self, name)
+
+
 class ExpressionConfig(Strict):
     intensity_factor: IntensityFactors = param(
         {},
@@ -511,6 +592,9 @@ class ExpressionConfig(Strict):
         ge=1,
         le=100,
         advanced=True,
+    )
+    reactions: ExpressionReactionsConfig = param(
+        {}, "The robot's own reactions in its own words (SPEC 8, Robot expression)"
     )
 
 
