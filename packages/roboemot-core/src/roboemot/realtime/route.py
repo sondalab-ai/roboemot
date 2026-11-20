@@ -89,9 +89,10 @@ Connect on speech (SPEC 8, Realtime speech route; owner decision 2026-11-20): a 
 route reopens only on demand (closed at a conversation's end, or by Gemini's idle close) would
 be reopened by the turn, after the utterance ended, so its audio could not go. The audio input
 calls ``connect_on_speech`` when speech starts: the connect a turn's ``ready`` makes starts now
-on a thread of its own (counted ``connects_on_speech``), and ``opening`` says it is in flight,
-so the utterance's audio waits for it within its deadline. Only from those two closes, never
-from a backoff, a refusal or any other close, and one at a time.
+on a thread of its own (counted ``connects_on_speech``), and ``pending_connect`` says it is in
+flight, so the utterance's audio waits for it within its deadline. Only from those two closes
+(the state's reason and the last close's), never from a backoff, a refusal or any other close,
+and one at a time.
 """
 
 from __future__ import annotations
@@ -1295,6 +1296,17 @@ class RealtimeRoute:
         with self._lock:
             return self._in_flight()
 
+    def pending_connect(self) -> str | None:
+        """The connect an utterance's audio may wait for (SPEC 8, Connect on speech):
+        ``reopening`` while a reset's reconnect is in flight, ``connecting`` while a speech
+        start's is, else None. Any other connect (the background retry after a loss or a
+        refusal, a turn's own ``ready``) is not waited for: the local recognizer hears the
+        utterance as before."""
+        with self._lock:
+            if self._reopens > 0:
+                return "reopening"
+            return "connecting" if self._speech_connects > 0 else None
+
     def _in_flight(self) -> bool:
         """(``_lock`` held.) A connect is in flight, or a thread is about to make one."""
         return self._reopens > 0 or self._speech_connects > 0 or self._connecting is not None
@@ -1322,7 +1334,11 @@ class RealtimeRoute:
                 return False
             if self._in_flight() or self.clock() < self._reopen_at:
                 return False
-            if self.state != "closed" or self._close_reason not in ON_DEMAND_CLOSES:
+            # both: the state's reason (a later detach, reconfigured, rewrites only it) and the
+            # last close's (a close of a session already closed, asleep, rewrites only that)
+            if self.state != "closed" or self.reason not in ON_DEMAND_CLOSES:
+                return False
+            if self._close_reason not in ON_DEMAND_CLOSES:
                 return False
             self._speech_connects += 1
             self._counts["connects_on_speech"] += 1
@@ -2570,8 +2586,10 @@ COUNTERS = (
     "idle_closes",  # Gemini closed an idle session (no loss): reconnected on demand
     # connects a speech start began on a session reopened on demand (connect_on_speech)
     "connects_on_speech",
-    "audio_connect_wait",  # bursts that waited for a connect in flight (not a reset's)
-    "audio_connect_fallbacks",  # ... that still found no session: decoded locally
+    "audio_connect_wait",  # bursts that waited for a speech start's connect
+    # bursts that waited for a session that failed or came within connect_wait_reserve_s of
+    # their deadline: decoded locally, and answered
+    "audio_connect_fallbacks",
     "setup_unready",  # a Gemini setup without the turn's tools: not sent, retried
     "transcripts",
     "transcript_timeouts",

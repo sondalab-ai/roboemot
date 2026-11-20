@@ -137,12 +137,15 @@ music detector ignores the radio while it is audible: its chunks are holes to it
 ``music_state`` and the wake gate's music predicate say no music.
 
 Connect on speech (SPEC 8, Realtime speech route; owner decision 2026-11-20): when speech
-starts with no session open, the realtime input has the route reopen one it closed on demand (a
-conversation's end, Gemini's idle close: ``_connect_on_speech``), before the speech start's
-checks read ``_wants_audio``, which counts a connect in flight as a session; so the Vosk skip,
-the face rule over the radio and the decision at the end agree, and the burst waits for the
-connect within its deadline. A connect that fails refuses the burst: the local path decodes it,
-so no utterance is lost.
+starts with no session open and the utterance could go as audio without its wake word
+(``_addressable_rule``, ``_face_media_rule``), the realtime input has the route reopen one it
+closed on demand (a conversation's end, Gemini's idle close: ``_connect_on_speech``), before the
+speech start's checks read ``_wants_audio``, which counts that connect as a session; so the
+Vosk skip, the face rule over the radio and the decision at the end agree, and the burst waits
+for the connect within its deadline less ``connect_wait_reserve_s``. One that needs the wake
+word reopens it at its decision. Each decision that sends audio tries again (an idle close
+during the utterance). A connect that fails or comes too late refuses the burst: the local path
+decodes it and it is answered with the robot's own words.
 
 The duck over speech (SPEC 8, Radio playback, owner decision 2026-11-18): each utterance's start
 and end also go to the player: ``media_speech_start`` at the VAD start, ``media_speech_end``
@@ -302,6 +305,9 @@ class _Handoff:
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
+    # a face wake whose audio was refused before it left, decoded instead: never offered again,
+    # and its listening cue ends at the decision (the did-not-get-it cue unless addressed)
+    no_audio: bool = False
     progress: _DecodeProgress | None = field(default=None, repr=False)  # its local decode's
     decoded_end: int | None = None  # index in ``ev.audio`` the local text was decoded up to
     stream: bool = False  # its audio is a live stream's (turns: server)
@@ -1198,12 +1204,17 @@ class VoiceListener:
         )
         self._fast.begin(ev.stamp, audio_end, self._language)
         self._cut_stream()  # none should be left: a segment's stream ends with it
-        self._connect_on_speech()  # before the checks below: they then agree on the session
+        # asked once: could it go as audio without the wake word once a session is up? Only
+        # then does its start reopen a session (SPEC 8, Connect on speech), before the checks
+        # below read whether audio would go, so they agree on the session
+        bound = self._realtime is not None
+        addressable = bound and self._addressable_rule(ev.stamp)
+        if addressable or (bound and self._face_media_rule(ev.stamp)):
+            self._connect_on_speech()
         self._stream = self._stream_start(ev)
         self._face_media = self._stream is None and self._face_media_at(ev.stamp)
-        self._vosk = (
-            self._stream is None and not self._face_media and not self._addressable(ev.stamp)
-        )
+        self._vosk = self._stream is None and not self._face_media
+        self._vosk = self._vosk and not (addressable and self._wants_audio())
         if self._vosk:
             self._timed("asr_start", self._asr.start, self._language)
         else:
@@ -1246,11 +1257,14 @@ class VoiceListener:
             return None
         return _Stream(ev.stamp, [ev.pre_roll], playback=playback)
 
-    @staticmethod
-    def _reopen_for_streams(rt: Any) -> None:
+    def _reopen_for_streams(self, rt: Any) -> None:
         """A segment could not stream for want of a session (server turns): the route reopens
-        one it closed on demand (``connect_on_speech``), for the next segment."""
+        one it closed on demand (``connect_on_speech``), for the next segment. Not with the
+        upload budget spent (``stream_refusal`` asks for the session first): nothing could go."""
+        rt_cfg = self._cfg.voice.realtime_route
         try:
+            if rt.route.upload_left_s(self._cfg) <= rt_cfg.close_silence_ms / MS_PER_S:
+                return
             rt.route.connect_on_speech()
         except Exception as exc:
             log.warning("voice listener: realtime input: %s", type(exc).__name__)
@@ -1453,6 +1467,11 @@ class VoiceListener:
         (``direction_over_media``: the robot reads it behind a hardware echo canceller; else the
         check could only take a degraded path, never trusted here). It skips the local
         recognizer, its grammar pass and any local decode (CPU)."""
+        return self._face_media_rule(start) and self._wants_audio()
+
+    def _face_media_rule(self, start: float) -> bool:
+        """``_face_media_at`` but for the audio path: the switch, the policy, the radio audible
+        and a live sound direction over it."""
         if not self._cfg.tools.radio.face_addresses or self._at_face() is None:
             return False
         d = self._direction
@@ -1460,13 +1479,15 @@ class VoiceListener:
             return False  # no reading over the radio: Vosk listens for the name as today
         if self._gate.policy_requires(self._enrolled(start)):
             return False  # the policy needs the wake word: Vosk listens for it as today
-        return self._media_at(start) and self._wants_audio()
+        return self._media_at(start)
 
-    def _addressable(self, start: float) -> bool:
-        """Whether the utterance starting at ``start`` skips Vosk: its audio would go, and the
-        wake gate would address it without the wake word (its voice-at-face check aside)."""
-        if not self._wants_audio():
-            return False
+    def _addressable_rule(self, start: float) -> bool:
+        """Whether the wake gate would address the utterance starting at ``start`` without the
+        wake word (its voice-at-face check aside), whatever the audio path. With audio that
+        would go (``_wants_audio``) the utterance skips Vosk; either this or the face rule
+        (``_face_media_rule``) lets its start reopen a session (SPEC 8, Connect on speech).
+        One that needs the wake word reopens it at its decision (``_deliver``), so what leaves
+        the robot is what left before."""
         return self._gate.addressable(
             enrolled_in_view=self._enrolled(start), start=start, speaker=self._speaker()
         )
@@ -1580,7 +1601,8 @@ class VoiceListener:
         d = self._direction
         heard = d is not None and d.last_path == HEARD
         start = ev.start_stamp
-        self._connect_on_speech()  # a session closed since its start (an idle close)
+        if heard and self._media_at(start) and self._realtime:
+            self._connect_on_speech()  # a session closed since its start (an idle close)
         if heard and self._media_at(start) and self._wants_audio() and self._realtime:
             p = self._handoff_for(ev, face)
             outcome = self._gate.outcome(
@@ -1648,6 +1670,7 @@ class VoiceListener:
         if addressed:
             self._decided(p, outcome, "")  # its CPU fallback; words come with its final
         if addressed:
+            self._connect_on_speech()  # a session closed since its start (an idle close)
             self._send(p)
         else:  # decided already (a reload changed the policy meanwhile): decoded, not re-decided
             self._decode(p)
@@ -1759,14 +1782,19 @@ class VoiceListener:
                     if p.addressed and not p.local_only:  # never dropped without a word
                         self._count_audio("decodes_lost")
                         self._audio_event(AUDIO_NOT_HEARD, p)
+                    elif p.no_audio:  # a decoded face wake that heard nothing (it looked)
+                        self._audio_event(AUDIO_NOT_HEARD, p)
                     self._set_active(self._recording or bool(self._queue))
                     continue
             if p.rt is not None:
                 if not self._rt_settled(p):
                     if self._clock() < p.deadline:
                         return
-                    self._count_audio("transcript_timeouts")
-                    self._rt_timeout(p)
+                    if p.rt.sent:
+                        self._count_audio("transcript_timeouts")
+                        self._rt_timeout(p)
+                    else:  # it never left (a hold, a session that never came): no transcript
+                        self._cancel_job(p.rt)  # was due, so no timeout; decoded locally
                 self._hand_off(frozenset())
             elif p.job is None or (p.job.done and p.job.ran):
                 self._hand_off(p.job.result if p.job is not None else frozenset())
@@ -1917,9 +1945,10 @@ class VoiceListener:
                 self._hold_media(ev.last_speech_stamp)
             p.media_wake = media and outcome == "wake_word"
             self._note_wake(p, outcome)
-            if p.addressed:
+            self._face_unsent_cue(p)
+            if p.addressed and not p.no_audio:
                 self._connect_on_speech()  # a session closed since its start (an idle close)
-            if p.addressed and self._wants_audio():
+            if p.addressed and not p.no_audio and self._wants_audio():
                 p.heard = heard
                 self._send(p, wake_word=wake)
                 return p
@@ -2082,17 +2111,23 @@ class VoiceListener:
         """A face wake over the radio whose audio was refused before it left (SPEC 8, owner
         decision 2026-11-20: the session it waited for never came, the budget, asleep): no
         utterance is lost, so its buffer is decoded for the wake word and the wake gate decides
-        again on those words (``_deliver``: over the radio only the name addresses it). The
-        window its face wake opened closes; its listening cue ends (``AUDIO_UNSENT``)."""
+        again on those words (``_deliver``: over the radio only the name addresses it), and its
+        audio is never offered again (``no_audio``). The window its face wake opened closes.
+        Its listening cue ends at that decision (``_face_unsent_cue``): silently when the name
+        addressed it, else with the did-not-get-it cue (the person looked at the robot)."""
         self._count_audio("face_wake_unsent")
-        p.rt, p.addressed = None, None
+        p.rt, p.addressed, p.no_audio = None, None, True
         p.face_wake = p.media_wake = False
         if self._media_wake is p:
             self._gate.close_window()
             self._media_wake = None
-        self._audio_event(AUDIO_UNSENT, p)
         self._decode(p, wake=True)
         return p
+
+    def _face_unsent_cue(self, p: _Handoff) -> None:
+        """End the listening cue of a decoded face wake (``_face_wake_unsent``) once decided."""
+        if p.no_audio:
+            self._audio_event(AUDIO_UNSENT if p.addressed else AUDIO_NOT_HEARD, p)
 
     def _finish(
         self,

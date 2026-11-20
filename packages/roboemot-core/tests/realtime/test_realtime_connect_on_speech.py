@@ -23,7 +23,9 @@ from roboemot.conversation import TranscriptRing
 from rt_rig import build_rt, wait_for
 from test_gemini_route import FACE_RADIO, gemini_route, radio_face_ear, text_turns
 from test_realtime_face_media import LOOKING, LYRIC, app, on_radio
-from test_realtime_listener import FACE_RAD, Ear
+from test_realtime_listener import FACE_RAD, Ear, ears  # noqa: F401 (fixture)
+from test_realtime_server_turns import OPT_INS as SERVER_OPT_INS
+from test_realtime_server_turns import SERVER
 from test_voice_listener import silence, voice
 from turn_server import TurnServer
 
@@ -89,6 +91,7 @@ def closed(gemini):
 
     def make(provider, *, heard=None, radio=False, rt=None, app_cfg=None, **ear_kw):
         rt = {"input": "audio", **IDLE_AGE, **(rt or {})}
+        ear_kw.setdefault("script", ["vosk text"])
         stops: list[str] = []
         if provider == GEMINI:
             said = heard or HEARD
@@ -98,7 +101,7 @@ def closed(gemini):
             if radio:
                 ear, stops = radio_face_ear(rig)
             else:
-                ear = Ear(rig, script=["vosk text"], bearing=FACE_RAD, to_worker=True, **ear_kw)
+                ear = Ear(rig, bearing=FACE_RAD, to_worker=True, **ear_kw)
             assert wait_for(lambda: rig.route.snapshot()["idle_closes"] == 1, WAIT_S)
             srv.idle_close_s = None  # the next session stays up
         else:
@@ -112,7 +115,7 @@ def closed(gemini):
                 ear = Ear(rig, script=[LYRIC], bearing=FACE_RAD, yaw=LOOKING, to_worker=True)
                 stops = on_radio(ear)["stop"]
             else:
-                ear = Ear(rig, script=["vosk text"], bearing=FACE_RAD, to_worker=True, **ear_kw)
+                ear = Ear(rig, bearing=FACE_RAD, to_worker=True, **ear_kw)
             rig.route.close_soon("conversation_end")  # the conversation ended: closed
         assert wait_for(lambda: not rig.route.connected and rig.route.state == "closed", WAIT_S)
         c = Closed(provider, srv, rig, ear, said, stops)
@@ -219,17 +222,37 @@ def test_a_connect_that_fails_leaves_the_local_path_and_loses_nothing(closed, pr
     assert user_turns(c.rig) == [(u.text, "robot")]  # D: the robot's own words
 
 
-def test_a_connect_that_comes_after_the_deadline_decodes_locally(closed):
+def into_the_reserve(c: Closed) -> None:
+    """Move the listener's clock so less than ``connect_wait_reserve_s`` of the burst's
+    deadline is left (the deadline itself not past)."""
+    rt = c.rig.stack.effective().voice.realtime_route
+    c.ear.r.now += rt.transcript_timeout_s - rt.connect_wait_reserve_s / 2
+
+
+@pytest.mark.parametrize("lands", [False, True], ids=["never_up", "lands_late"])
+def test_a_session_too_late_for_the_transcript_is_decoded_locally_and_answered(closed, lands):
+    """Review of PR 291: a connect that lands (or would land) with less than
+    ``connect_wait_reserve_s`` of the deadline left would leave the server too little time for
+    its transcript, and the utterance would end ``local_only``, unanswered. It stops waiting
+    instead: the robot's own recognizer gives the words and the utterance is answered."""
     c = closed(OPENAI, decoded="ciao Neve accendi la luce")
-    c.slow(WAIT_S)  # never up in time
+    live(c.rig)
+    c.slow(SLOW_S if lands else WAIT_S)
     c.speak()
     c.end()
     assert wait_for(lambda: c.route.snapshot()["audio_connect_wait"] == 1, WAIT_S)
-    c.ear.r.now += c.rig.stack.effective().voice.realtime_route.transcript_timeout_s
+    into_the_reserve(c)
+    if lands:
+        assert wait_for(lambda: c.route.connected, WAIT_S)
     assert c.ear.settle(lambda: len(c.ear.utterances) == 1, WAIT_S)
     u = c.ear.utterances[0]
-    assert u.text == "ciao Neve accendi la luce" and u.realtime is None and not u.local_only
-    assert wait_for(lambda: c.route.snapshot()["audio_connect_fallbacks"] == 1, WAIT_S)
+    assert u.addressed and u.text == "ciao Neve accendi la luce"
+    assert u.realtime is None and not u.local_only  # answered, not the did-not-get-it cue
+    assert c.server.of("input_audio_buffer.append") == []
+    assert c.route.snapshot()["audio_connect_fallbacks"] == 1
+    assert c.ear.r.listener.snapshot()["realtime_audio"]["transcript_timeouts"] == 0
+    assert c.ear.settle(lambda: len(c.rig.events) == 1, WAIT_S)
+    assert user_turns(c.rig) == [(u.text, "robot")]
 
 
 # ------------------------------------------------------------------ no connect from these states
@@ -321,3 +344,92 @@ def test_a_face_wake_whose_connect_fails_is_decoded_for_the_wake_word(closed):
     audio = c.ear.r.listener.snapshot()["realtime_audio"]
     assert audio["face_wake_media"] == 1 and audio["face_wake_unsent"] == 1
     assert c.route.snapshot()["audio_connect_fallbacks"] == 1
+
+
+# ------------------------------------------------------------------ review of PR 291
+
+
+def test_a_close_rewritten_by_a_later_detach_is_not_reopened_on_speech(closed):
+    """The state's reason counts too: a session closed for a reconfiguration (or a ``_fits``
+    failure, a route gone) after an on-demand close is not reopened by speech."""
+    c = closed(OPENAI)
+    c.route._set_state("closed", "reconfigured")  # the last close was conversation_end
+    assert not c.route.connect_on_speech()
+    assert c.route.snapshot()["connects_on_speech"] == 0
+
+
+def test_an_utterance_that_needs_the_wake_word_reconnects_at_its_decision(closed):
+    """Only an utterance that could go as audio without its wake word reopens the session at
+    its start; one that needs it (Vosk hears it first) reopens it once the wake word addressed
+    it, so what leaves the robot is what left before this PR."""
+    c = closed(
+        OPENAI, app_cfg={"voice": {"wake_word_policy": "always"}}, script=["ciao robot che ore"]
+    )
+    c.speak()
+    assert c.route.snapshot()["connects_on_speech"] == 0 and not c.route.connected
+    c.end()
+    assert c.ear.settle(lambda: len(c.ear.utterances) == 1, WAIT_S)
+    u = c.ear.utterances[0]
+    assert c.ear.r.asr.started  # Vosk heard it: the wake word was needed
+    assert u.addressed and u.text == c.heard and u.realtime is not None
+    assert c.route.snapshot()["connects_on_speech"] == 1
+
+
+def test_an_unaddressed_utterance_reconnects_nothing(closed):
+    c = closed(OPENAI, app_cfg={"voice": {"wake_word_policy": "always"}}, script=["che ore"])
+    before = c.connections()
+    c.speak()
+    c.end()
+    assert c.ear.settle(lambda: len(c.ear.utterances) == 1, WAIT_S)
+    assert not c.ear.utterances[0].addressed
+    assert c.route.snapshot()["connects_on_speech"] == 0 and c.connections() == before
+
+
+def test_a_retry_after_a_loss_is_not_waited_for_and_vosk_hears(closed):
+    """``fallback_local``: the background reconnect worker's attempt is in flight, but an
+    outage retry is not a session an utterance waits for: Vosk hears it as before."""
+    c = closed(OPENAI)
+    c.refuse(1)
+    assert not c.route.ready() and c.route.state == "fallback_local"
+    c.slow(WAIT_S)  # the worker's next attempt hangs
+    assert wait_for(lambda: c.route.opening(), WAIT_S)
+    assert c.route.pending_connect() is None
+    assert not c.ear.input.wants(c.rig.stack.effective())
+    c.speak()
+    c.end()
+    assert c.ear.settle(lambda: len(c.ear.utterances) == 1, WAIT_S)
+    u = c.ear.utterances[0]
+    assert c.ear.r.asr.started and u.text == "vosk text" and u.realtime is None
+    assert c.route.snapshot()["connects_on_speech"] == 0
+
+
+def test_a_spent_upload_budget_never_reopens_a_session_for_streams(closed):
+    c = closed(OPENAI)
+    left = c.route.upload_left_s
+    c.route.upload_left_s = lambda cfg: 0.0
+    c.ear.r.listener._reopen_for_streams(c.ear.input)
+    assert c.route.snapshot()["connects_on_speech"] == 0
+    c.route.upload_left_s = left  # the control: with budget left it reopens
+    c.ear.r.listener._reopen_for_streams(c.ear.input)
+    assert c.route.snapshot()["connects_on_speech"] == 1
+
+
+def test_a_turns_ready_racing_the_speech_connect_opens_one_socket(closed):
+    c = closed(OPENAI)
+    c.slow(SLOW_S)
+    before = c.connections()
+    assert c.route.connect_on_speech()
+    assert c.route.ready()  # a turn's own connect waits for it, then uses its session
+    assert c.route.connected and c.connections() == before + 1
+    assert c.route.snapshot()["opened"] == 2  # the first session and this one
+
+
+def test_a_server_turns_words_are_marked_as_the_clouds(ears):  # noqa: F811
+    """D on the server-turn path (``_attach``): the stream's words come with the server's
+    transcript after its own answer."""
+    with TurnServer(stream_vad=True, heard=[[SAID]], vad_answers=True) as server:
+        ear = ears(server, rt=SERVER, app=SERVER_OPT_INS, script=["x"], to_worker=True)
+        live(ear.rt)
+        ear.say()
+        assert ear.settle(lambda: len(ear.rt.events) == 1, WAIT_S)
+        assert ear.settle(lambda: user_turns(ear.rt) == [(SAID, "cloud")], WAIT_S)

@@ -4739,6 +4739,16 @@ class RealtimeRouteConfig(Strict):
         ge=0.5,
         le=15,
     )
+    connect_wait_reserve_s: float = param(
+        2.0,
+        "Time an utterance's audio waiting for a session to come up keeps for the server's "
+        "transcript: once less than this is left of transcript_timeout_s, it stops waiting and "
+        "the robot's own recognizer gives the words, so the utterance is still answered",
+        unit="s",
+        ge=0,
+        le=15,
+        advanced=True,
+    )
     server_silence_ms: float = param(
         600.0,
         "Silence that ends a turn for the server's VAD. At least voice.vad.end_silence_ms, so "
@@ -4945,7 +4955,7 @@ class RealtimeRouteConfig(Strict):
         60.0,
         "A gemini_live session its server closes with code 1008 after living at least this long, "
         "with nothing running on it, was closed for being idle: no loss, reconnected at the next "
-        "turn. A younger one, or another code, is a loss (backoff)",
+        "speech start or turn. A younger one, or another code, is a loss (backoff)",
         unit="s",
         ge=1,
         le=3600,

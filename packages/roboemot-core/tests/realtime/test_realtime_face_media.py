@@ -489,7 +489,7 @@ def test_audio_that_can_no_longer_go_at_the_end_is_decoded_not_held(ears):
 def test_a_face_wake_refused_before_it_left_is_decoded_for_the_wake_word(ears, decoded, addressed):
     """Owner decision 2026-11-20 (no utterance is lost): a face wake whose audio was refused
     before it left (its session never came, asleep, the budget) is decoded from its buffer, and
-    over the radio only the name addresses it then; its listening cue ends."""
+    over the radio only the name addresses it then; its audio is not offered a second time."""
     from roboemot.realtime.input import InputJob
 
     with TurnServer() as server:
@@ -509,8 +509,9 @@ def test_a_face_wake_refused_before_it_left_is_decoded_for_the_wake_word(ears, d
         assert ear.settle(lambda: len(ear.utterances) == 1)
         u = ear.utterances[0]
         assert u.text == decoded and u.addressed is addressed and u.realtime is None
-        # the name wakes it on its decoded words: its audio is offered again (refused again)
-        assert cues == ["sent", "unsent"] * (2 if addressed else 1)
+        # its audio is never offered again; the person looked at the robot, so a decode with
+        # no name ends with the did-not-get-it cue (review of PR 291)
+        assert cues == ["sent", "unsent" if addressed else "not_heard"]
         assert ear.r.asr.decodes == 1
         audio = ear.r.listener.snapshot()["realtime_audio"]
         assert audio["face_wake_unsent"] == 1 and audio["face_wake_unheard"] == 0
