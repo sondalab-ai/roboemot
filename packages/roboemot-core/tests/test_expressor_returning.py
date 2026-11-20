@@ -5,11 +5,12 @@ conversation."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 from expressor_rig import Rig
 from roboemot.circadian.model import CircadianState
-from roboemot.runtime.expressor import NO_MEMORY, WAKE_EVENT, ReturnTracker, event_text
+from roboemot.runtime.expressor import LOCAL_TIME, NO_MEMORY, WAKE_EVENT, ReturnTracker, event_text
 from roboemot.vision.types import FacePercept
 
 ABSENCE = 1800.0
@@ -111,8 +112,23 @@ def test_wake_from_night_greets_once_awake_and_outside_quiet_hours():
     rig.clock.t += 1
     face(rig)
     assert queued(rig) is None  # once
+    rig.expressor.wall_now = lambda: datetime(2026, 11, 20, 7, 0)
     named = rig.expressor._named(request)
-    assert event_text(named).endswith(WAKE_EVENT.format(who="Marcello"))
+    assert WAKE_EVENT.format(who="Marcello") in event_text(named)
+
+
+def test_a_greeting_carries_the_robots_local_time_so_its_words_fit_the_hour():
+    """Owner 2026-11-20: never a good morning in the afternoon. The event text gives the model
+    the robot's local time; the wake text never says the robot just woke."""
+    rig = attached()
+    rig.expressor.wall_now = lambda: datetime(2026, 11, 20, 15, 4)
+    for wake in ("1", ""):
+        request = rig.request("returning_person", {"wake": wake}, key="p1")
+        named = rig.expressor._named(request)
+        assert named.data["time"] == "15:04"
+        text = event_text(named)
+        assert text.endswith(LOCAL_TIME.format(time="15:04")) and "{" not in text
+        assert "just woke" not in text
 
 
 def test_woken_inside_quiet_hours_greets_only_after_they_end():

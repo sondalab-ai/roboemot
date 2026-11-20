@@ -49,9 +49,10 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Literal, get_args
 
-from .. import shutdown
+from .. import shutdown, timezones
 from ..attention.types import SHOWN, AttentionTarget
 from ..bus import Message
 from ..circadian.model import CircadianState
@@ -107,9 +108,12 @@ RETURNING_EVENT = (
     "{who} just came back after being away. Greet them by name in one short sentence. " + NO_MEMORY
 )
 WAKE_EVENT = (
-    "You just woke up and {who} is here. Greet them for the time of day in one short sentence. "
-    + NO_MEMORY
+    "You woke up earlier and {who} is here for the first time since. Greet them in one short "
+    "sentence. " + NO_MEMORY
 )
+# a greeting's local time (the robot's clock, circadian.timezone): its words fit the hour, never a
+# good morning in the afternoon (owner, 2026-11-20)
+LOCAL_TIME = " The local time is {time}: greet with words that fit this time of day."
 ANONYMOUS = "a person you know"  # {who} without an enrolled name
 SLOTS = ("station", "category", "who")  # the data keys a template or a fixed line may hold
 # the cue of a situation whose line cannot be said (SPEC 8, Non-verbal cues), and its reason
@@ -207,8 +211,11 @@ class Expressor:
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
         registry: Any = None,
+        wall_now: Callable[[], datetime] | None = None,
     ) -> None:
         self.worker, self.host, self.cfg = worker, host, cfg
+        # the robot's local wall clock (circadian.timezone): a greeting's time of day
+        self.wall_now = wall_now or (lambda: timezones.now(self.cfg().circadian.timezone))
         self.registry = registry  # the person registry: a returning person's name
         self.online, self.asleep, self.clock = online, asleep, clock
         self._stop = threading.Event()
@@ -498,7 +505,8 @@ class Expressor:
             return self._offline(request)
 
     def _named(self, request: ReactionRequest) -> ReactionRequest:
-        """A returning person's request with ``who``: the first word of the confirmed
+        """A returning person's request with ``time`` (the robot's local ``HH:MM``, so the
+        greeting fits the hour) and ``who``: the first word of the confirmed
         (``active``) record's name, the name the profile summary already sends; "" without
         one. With ``privacy.pseudonyms_to_cloud`` the whole name, which the cloud route's
         pseudonym map aliases (it does not catch a first name alone). Looked up here, on the
@@ -508,7 +516,8 @@ class Expressor:
         name = person_name(self.registry, request.key) or ""
         if not self.cfg().privacy.pseudonyms_to_cloud:
             name = next(iter(name.split()), "")
-        return replace(request, data={**request.data, "who": name})
+        local = self.wall_now().strftime("%H:%M")
+        return replace(request, data={**request.data, "who": name, "time": local})
 
     def _turn(self, request: ReactionRequest, sit: SituationConfig) -> str:
         """Start the reaction turn and wait for its result (``no_route`` when it raised or the
@@ -658,7 +667,7 @@ class Expressor:
 
 def event_text(request: ReactionRequest) -> str:
     """The reaction turn's text (SPEC 8, 12): a fixed English template filled with data only
-    (a station name, a detector category, an enrolled first name, a wake flag)."""
+    (a station name, a detector category, an enrolled first name, a wake flag, a local time)."""
     data = request.data
     situation = request.situation
     if situation == "didnt_catch":
@@ -670,6 +679,8 @@ def event_text(request: ReactionRequest) -> str:
     else:
         template = WAKE_EVENT if data.get("wake") else RETURNING_EVENT
         body = template.format(who=data.get("who") or ANONYMOUS)
+        if data.get("time"):
+            body += LOCAL_TIME.format(time=data["time"])
     return EVENT_PREFIX + body
 
 
