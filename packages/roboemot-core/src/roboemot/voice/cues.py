@@ -111,9 +111,10 @@ class CueSoundError(ValueError):
 class CueSink(Protocol):
     """What the listener, the conversation and the offline cue need of the cues."""
 
-    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
+    def play(self, kind: CueKind, reason: str = "", *, sound: bool = True, **detail: Any) -> bool:
         """Show the one-shot cue ``kind``; whether anything played. ``reason`` (a code) and
-        ``detail`` (scalars) say why, for the Live tab's decision event."""
+        ``detail`` (scalars) say why, for the Live tab's decision event. ``sound`` False shows
+        the gesture alone (the robot says something in its place)."""
         ...
 
     def listening_begin(self, key: Hashable) -> None:
@@ -260,16 +261,18 @@ class Cues:
 
     # ----------------------------------------------------------------- one-shot cues
 
-    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
+    def play(self, kind: CueKind, reason: str = "", *, sound: bool = True, **detail: Any) -> bool:
         """Show ``kind`` now: its gesture (replacing one of the same kind still playing) and its
         sound. False when off, muted, or the robot has neither (counted). ``reason`` and
-        ``detail`` go into the ``cue`` decision event with what happened."""
+        ``detail`` go into the ``cue`` decision event with what happened. ``sound`` False
+        shows the gesture alone (counted and reported ``gesture_only``): the robot asks again
+        in its own words in the sound's place (SPEC 8, Robot expression)."""
         with self._lock:
             blocked = self._blocked(kind)
             if blocked is None:
                 prim = self._gesture(GESTURE_PREFIX + kind)
-                sound = self._sounds.get(kind)
-                if prim is None and sound is None:
+                clip = self._sounds.get(kind) if sound else None
+                if prim is None and clip is None:
                     self._counts[f"{kind}.unsupported"] += 1
                     blocked = "unsupported"
             if blocked is None:
@@ -283,13 +286,18 @@ class Cues:
         if blocked is not None:
             self.events("cue", reason, cue=kind, result=blocked, **detail)
             return False
-        if sound is not None and self._speech_on():
+        if not sound:
+            with self._lock:
+                self._counts[f"{kind}.gesture_only"] += 1
+            self.events("cue", reason, cue=kind, result="gesture_only", **detail)
+            return True
+        if clip is not None and self._speech_on():
             with self._lock:
                 self._counts[f"{kind}.sound_skipped"] += 1
             self.events("cue", reason, cue=kind, result="sound_skipped", **detail)
             return True
-        job = self._play_sound(kind, sound, volume)
-        result = "sound_dropped" if sound is not None and job is None else "played"
+        job = self._play_sound(kind, clip, volume)
+        result = "sound_dropped" if clip is not None and job is None else "played"
         self.events("cue", reason, cue=kind, result=result, **detail)
         return True
 
@@ -498,7 +506,7 @@ class Cues:
 class NoCues:
     """The cues when there is nothing to show them with (tests, no runtime wiring)."""
 
-    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
+    def play(self, kind: CueKind, reason: str = "", *, sound: bool = True, **detail: Any) -> bool:
         return False
 
     def listening_begin(self, key: Hashable) -> None:

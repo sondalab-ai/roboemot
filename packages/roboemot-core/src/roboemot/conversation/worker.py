@@ -363,6 +363,9 @@ class ConversationWorker:
         self._emit = emit if emit is not None else lambda event, now, payload: None
         self.cues: CueSink = cues if cues is not None else NoCues()  # SPEC 8, Non-verbal cues
         self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
+        # a streamed, addressed utterance no server answer took: whether the robot asks about it
+        # in its own words (SPEC 8, Robot expression; the expressor), in the cue sound's place
+        self.on_not_heard: Callable[[str], bool] = lambda why: False
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
         self._reply: tuple[int, list[tuple[int, str]]] | None = (
             None  # (ring seq, queued) of the last reply
@@ -1568,12 +1571,21 @@ class ConversationWorker:
     def _unanswered(self, utterance: Utterance) -> None:
         """A streamed utterance no server answer took (none came in time, it was a fragment's
         or ambiguous, the server ignores create_response): its server items are deleted, the
-        listening cue ends and the did-not-get-it cue shows (``server_unanswered``)."""
+        listening cue ends and the did-not-get-it cue shows (``server_unanswered``). When its
+        words hold the robot's name (a stream carries no other wake decision: it may be a
+        television) the robot may ask again in its own words (``on_not_heard``): the cue then
+        shows its gesture alone (SPEC 8, Robot expression)."""
         self._counts["server_unanswered"] += 1
         self._drop_audio(utterance)
         self._heard_done(utterance)
         self.events("unanswered", "no_server_answer")
-        self.cues.play("not_heard", "no_server_answer")
+        taken = False
+        if utterance.addressed and utterance.wake_word:
+            try:
+                taken = bool(self.on_not_heard("no_server_answer"))
+            except Exception as exc:
+                log.warning("conversation: not-heard consumer raised %s", type(exc).__name__)
+        self.cues.play("not_heard", "no_server_answer", sound=not taken)
 
     def _attach(self, turn: _Turn, utterance: Utterance) -> None:
         """Join a stream's words to the server turn that answered it (any thread): the user's

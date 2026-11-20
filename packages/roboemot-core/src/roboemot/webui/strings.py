@@ -146,6 +146,7 @@ EN: dict[str, str] = {
     "live_res_sound_skipped": "gesture only: someone was speaking",
     "live_res_skipped": "not played: someone was speaking",
     "live_res_dropped": "not played: the speaker was busy",
+    "live_res_gesture_only": "gesture only: the robot asks in its own words",
     "live_ev_unanswered_no_window": "Not answered: no wake word",
     "live_ev_unanswered_other_speaker": "Not answered: someone else spoke after the wake word",
     "live_ev_unanswered_no_face_at_voice": "Not answered: the voice did not come from a face",
@@ -1473,6 +1474,7 @@ IT: dict[str, str] = {
     "live_res_sound_skipped": "solo il gesto: qualcuno stava parlando",
     "live_res_skipped": "non suonato: qualcuno stava parlando",
     "live_res_dropped": "non suonato: l'altoparlante era occupato",
+    "live_res_gesture_only": "solo il gesto: il robot chiede con parole sue",
     "live_ev_unanswered_no_window": "Senza risposta: manca la parola di attivazione",
     "live_ev_unanswered_other_speaker": (
         "Senza risposta: dopo la parola di attivazione ha parlato un altro"

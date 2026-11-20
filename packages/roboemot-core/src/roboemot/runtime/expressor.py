@@ -209,6 +209,15 @@ class Expressor:
         self._signal.set()
         return True
 
+    def offer_not_heard(self, why: str) -> bool:
+        """The listener or the conversation did not hear an addressed utterance (``why``: a
+        code, never sent or logged): offer the "did not catch it" reaction, only while a route
+        can word it. False (offline, music, asleep, the cooldown) keeps the did-not-get-it cue
+        as it is, sound included."""
+        if not self.online():
+            return False
+        return self.offer(ReactionRequest("didnt_catch", {}, self.clock()))
+
     def _take(self) -> ReactionRequest | None:
         """The oldest queued request, taken off the queue (None when empty)."""
         with self._lock:

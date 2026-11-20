@@ -498,6 +498,8 @@ def test_a_face_wake_refused_before_it_left_is_decoded_for_the_wake_word(ears, d
         seen = events(ear)
         cues: list[str] = []
         ear.r.listener._on_audio = lambda event, key: cues.append(event)
+        asked: list[str] = []  # SPEC 8, Robot expression: a face wake is never asked about
+        ear.r.listener.on_not_heard = lambda why: asked.append(why) or True
 
         def refused(samples, rate_hz, **kw):
             job = InputJob(samples, rate_hz)
@@ -512,6 +514,7 @@ def test_a_face_wake_refused_before_it_left_is_decoded_for_the_wake_word(ears, d
         # its audio is never offered again; the person looked at the robot, so a decode with
         # no name ends with the did-not-get-it cue (review of PR 291)
         assert cues == ["sent", "unsent" if addressed else "not_heard"]
+        assert asked == []
         assert ear.r.asr.decodes == 1
         audio = ear.r.listener.snapshot()["realtime_audio"]
         assert audio["face_wake_unsent"] == 1 and audio["face_wake_unheard"] == 0
