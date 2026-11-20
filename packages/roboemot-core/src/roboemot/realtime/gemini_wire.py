@@ -1002,10 +1002,11 @@ def _dict(value: Any) -> dict[str, Any]:
 def language_codes(session: dict[str, Any], tags: dict[str, str]) -> list[str]:
     """The setup's ``languageCodes`` for a ``session.update``'s session: the BCP-47 code ``tags``
     maps its input transcription language to (``audio.input.transcription.language``, set
-    with ``input: audio`` only), as a one-item list; empty without a language or a mapping."""
+    with ``input: audio`` only, looked up in lower case: the tags' keys are), as a one-item
+    list; empty without a language or a mapping."""
     transcription = _dict(_dict(_dict(session.get("audio")).get("input")).get("transcription"))
     language = transcription.get("language")
-    tag = tags.get(language) if isinstance(language, str) else None
+    tag = tags.get(language.strip().lower()) if isinstance(language, str) else None
     return [tag] if tag else []
 
 

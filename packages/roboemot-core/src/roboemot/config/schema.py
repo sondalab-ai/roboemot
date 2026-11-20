@@ -4636,9 +4636,19 @@ class VoiceFacingConfig(Strict):
 TONE_LABELS_MAX = 12  # voice.realtime_route.tone_labels: the note_tone enum stays short
 TONE_LABEL_MAX_CHARS = 24
 TONE_LABEL = re.compile(rf"[a-z][a-z_]{{0,{TONE_LABEL_MAX_CHARS - 1}}}")
-# voice.realtime_route.transcription_language_tags: a language code and its BCP-47 tag
-LANGUAGE_CODE = re.compile(r"[a-z]{2,3}")
-LANGUAGE_TAG = re.compile(r"[a-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}")
+# voice.realtime_route.transcription_language_tags: a lowercase language code and its BCP-47
+# tag (a language, then up to LANGUAGE_SUBTAGS_MAX subtags such as a region or a script)
+LANGUAGE_CODE_MIN_CHARS = 2
+LANGUAGE_CODE_MAX_CHARS = 3
+LANGUAGE_SUBTAG_MIN_CHARS = 2
+LANGUAGE_SUBTAG_MAX_CHARS = 8
+LANGUAGE_SUBTAGS_MAX = 2
+_LANGUAGE = rf"[a-z]{{{LANGUAGE_CODE_MIN_CHARS},{LANGUAGE_CODE_MAX_CHARS}}}"
+LANGUAGE_CODE = re.compile(_LANGUAGE)
+LANGUAGE_TAG = re.compile(
+    rf"{_LANGUAGE}(-[A-Za-z0-9]{{{LANGUAGE_SUBTAG_MIN_CHARS},{LANGUAGE_SUBTAG_MAX_CHARS}}})"
+    rf"{{0,{LANGUAGE_SUBTAGS_MAX}}}"
+)
 
 
 class RealtimeRouteConfig(Strict):
@@ -4838,14 +4848,24 @@ class RealtimeRouteConfig(Strict):
         "conversation.language) as a BCP-47 hint in the setup (inputAudioTranscription."
         "languageCodes, input: audio only), so Gemini does not guess the language of what it "
         "hears. A language without a code in transcription_language_tags sends none. A setup the "
-        "server closes before it is ready is sent again at once without the hint; when that one "
-        "comes up, the route and model get no hint until this switch, the codes or the model "
-        "change, or a restart. The openai_realtime route always sends the language",
+        "server closes before it is ready is sent again at once without the hint. After "
+        "transcription_language_refusals such connects in a row, the route, model and code get "
+        "no hint until this switch or the codes change, or a restart. The openai_realtime route "
+        "always sends the language",
         advanced=True,
     )
     transcription_language_tags: dict[str, str] = param(
         {"it": "it-IT", "en": "en-US"},
         "BCP-47 code per conversation language for transcription_language_hint",
+        advanced=True,
+    )
+    transcription_language_refusals: int = param(
+        2,
+        "Connects in a row whose setup with the transcription language was closed before it was "
+        "ready while the same setup without it came up, before a gemini_live route stops sending "
+        "the language; a connect that comes up with it starts the count again",
+        ge=1,
+        le=10,
         advanced=True,
     )
     prebuffer_ms: float = param(
