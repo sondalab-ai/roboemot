@@ -69,6 +69,12 @@ when none started within ``tools.scheduler.announce_timeout_s``, counted from wh
 can take the request (the open realtime session, else the chat request); a late reply is then
 cancelled.
 
+Reactions (SPEC 8, Robot expression): ``reaction_turn`` queues the same turn, but it never jumps
+ahead of a person. When the loop takes it, and again after the realtime connect, it gives way
+(``busy``) while another item waits, a turn is open, a confirmation waits or the room is not
+quiet; nothing of it is then sent or kept. It has its own audio timeout and may leave out the
+profile summary (a greeting never recalls an earlier conversation).
+
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
 """
@@ -87,7 +93,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .. import shutdown
 from ..bus import Bus
@@ -166,6 +172,9 @@ SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
 TONE_INVALID = '{"error": "unknown_tone"}'  # not one of voice.realtime_route.tone_labels
 CANCELLED = "cancelled"  # the response.done status of a response cancelled (S2: by the server)
 EVENT = "event"  # the live transcript's kind of a robot-initiated turn's event text (SPEC 8)
+# what became of a reaction turn (SPEC 8, Robot expression): its reply audio started, no route
+# answered in time, or it gave way to a person before anything was sent
+ReactionResult = Literal["spoken", "no_route", "busy"]
 
 
 class Speech(Protocol):
@@ -256,6 +265,8 @@ class _Turn:
     after: list[Callable[[], None]] = field(default_factory=list, repr=False)
     event: bool = False  # a robot-initiated turn: its utterance text is the event text
     event_from: float | None = None  # when its route could take the request (announce timeout)
+    event_timeout_s: float | None = None  # its own audio timeout (a reaction), else the announce
+    profile: bool = True  # its request carries the speaker's profile summary (SPEC 8)
 
 
 @dataclass
@@ -266,6 +277,11 @@ class _EventTurn:
     text: str = field(repr=False)
     language: str
     future: concurrent.futures.Future[bool] = field(repr=False)
+    timeout_s: float | None = None  # its own audio timeout, else announce_timeout_s
+    reaction: bool = False  # a reaction (``reaction_turn``): it gives way to a person
+    profile: bool = True  # its request carries the speaker's profile summary
+    quiet: Callable[[], bool] | None = field(default=None, repr=False)  # the room is quiet now
+    refused: bool = False  # it gave way before anything was sent
 
 
 @dataclass
@@ -606,6 +622,10 @@ class ConversationWorker:
         """Whether there is no local voice: the speech output was built with ``voice.backend:
         none`` (a restart field, so the built backend, not the live config, decides)."""
         return bool(self.speech.backend.name == NO_VOICE)
+
+    def local_voice(self) -> bool:
+        """Whether a local voice can say a fixed line (``local_line``). Any thread."""
+        return not self._no_voice()
 
     @staticmethod
     def _only_stop(utterance: Utterance, cfg: RoboEmotConfig) -> bool:
@@ -954,10 +974,15 @@ class ConversationWorker:
                 self._drop_audio(utterance)
         self._finish(turn)
 
-    async def _respond(self, turn: _Turn, router: Any, now: float) -> None:
+    async def _respond(
+        self, turn: _Turn, router: Any, now: float, ready: bool | None = None
+    ) -> None:
         """The answer: the pending confirmation, the realtime route, else the chat routes (or,
-        without a local voice, the cue in their place); then the fixed lines it left."""
-        if await self._realtime_ready(turn):
+        without a local voice, the cue in their place); then the fixed lines it left.
+        ``ready``: whether the realtime route is ready, when the caller already asked."""
+        if ready is None:
+            ready = await self._realtime_ready(turn)
+        if ready:
             turn.voice = "realtime"
         if turn.event:  # the session is open, or the chat request goes now
             turn.event_from = self.clock()
@@ -1109,7 +1134,11 @@ class ConversationWorker:
                 conversation=None if line else turn.conversation,
                 tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
             ),
-            profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
+            profile_summary=(
+                self._summary(self._profile, conv.profile_summary_max_chars)
+                if turn.profile
+                else None
+            ),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
             history=[],
             user_text="",
@@ -1996,6 +2025,69 @@ class ConversationWorker:
             loop.call_soon_threadsafe(wake.set)
         return future
 
+    def reaction_turn(
+        self,
+        text: str,
+        language: str,
+        *,
+        timeout_s: float,
+        quiet: Callable[[], bool],
+        profile: bool = True,
+    ) -> concurrent.futures.Future[ReactionResult]:
+        """Queue a reaction (SPEC 8, Robot expression): an event turn for ``text`` that never
+        jumps ahead of a person. On the loop it gives way (``busy``: nothing sent, no session
+        opened, no trace in the history or the transcript) when another item waits, a turn is
+        open, a confirmation waits or ``quiet()`` is False, checked when the loop takes it and
+        again right before its text goes out (after the realtime connect). Else it runs as
+        ``event_turn``'s: ``spoken`` at its first reply audio, ``no_route`` when none started
+        within ``timeout_s`` from when the route could take it (a late reply is cancelled).
+        ``profile`` False leaves the profile summary out. Any thread; it never waits."""
+        outer: concurrent.futures.Future[ReactionResult] = concurrent.futures.Future()
+        inner: concurrent.futures.Future[bool] = concurrent.futures.Future()
+        item = _EventTurn(
+            text, language, inner, timeout_s=timeout_s, reaction=True, profile=profile, quiet=quiet
+        )
+
+        def settle(done: concurrent.futures.Future[bool]) -> None:
+            result: ReactionResult = (
+                "busy" if item.refused else "spoken" if done.result() else "no_route"
+            )
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                outer.set_result(result)
+
+        inner.add_done_callback(settle)
+        loop, wake = self._loop, self._wake
+        if self._closed or loop is None or wake is None:
+            _resolve(inner, False)
+            return outer
+        with self._lock:
+            self._pending.appendleft((item, NOT_RECORDED))  # type: ignore[arg-type]
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(wake.set)
+        return outer
+
+    def _gives_way(self, ev: _EventTurn) -> bool:
+        """Whether reaction ``ev`` gives way to a person now (on the loop): another item waits,
+        another turn is open, a confirmation waits, or the room is not quiet. The worker's
+        state is read under its lock; ``quiet()`` is called outside it (it takes the
+        listener's, the speech's and the phase's locks)."""
+        with self._lock:
+            other = bool(self._pending) or self._active_turn is not None
+            other = other or self._confirm is not None
+        if other:
+            return True
+        try:
+            return ev.quiet is not None and not ev.quiet()
+        except Exception as exc:
+            log.warning("conversation: reaction quiet check failed (%s)", type(exc).__name__)
+            return True
+
+    def _give_way(self, ev: _EventTurn) -> None:
+        """Reaction ``ev`` gave way: nothing was sent, its future says ``busy``."""
+        self._counts["reactions_busy"] += 1
+        ev.refused = True
+        _resolve(ev.future, False)
+
     def local_line(self, text: str, language: str) -> concurrent.futures.Future[bool]:
         """Say a fixed line with the local voice now (the announcer's fallback sentence,
         SPEC 11); the future is whether it was queued (False without a local voice). Runs on
@@ -2030,7 +2122,12 @@ class ConversationWorker:
     async def _answer_event_turn(self, ev: _EventTurn) -> None:
         """The turn of ``event_turn``: as an utterance's, with the event text as its words, not
         addressed (no turn latency), the session's own person (never a speaker change), and a
-        watcher that resolves the future (``_watch_event``)."""
+        watcher that resolves the future (``_watch_event``). A reaction gives way to a person
+        (``_gives_way``) before anything of it is kept or sent: when the loop takes it, and
+        after the realtime connect, before the session is touched and its text goes out."""
+        if ev.reaction and self._gives_way(ev):
+            self._give_way(ev)
+            return
         now = self.clock()
         cfg = self.stack.effective()
         self.apply_config(cfg)
@@ -2041,7 +2138,8 @@ class ConversationWorker:
         # the open session's person (never a speaker change); with none open, the person in
         # view, as for an utterance, so that person's reply continues it (SPEC 8)
         speaker = session.speaker if session is not None else self._who()
-        self._touch(now, speaker)
+        if not ev.reaction:
+            self._touch(now, speaker)
         quiet = Prosody(0.0, None, None, 0.0)
         utterance = Utterance(ev.text, ev.language, now, now, now, False, False, frozenset(), quiet)
         register = self._register_for(cfg)
@@ -2054,8 +2152,17 @@ class ConversationWorker:
             max_reply_sentences(cfg, register),
             speaker=speaker,
             event=True,
+            event_timeout_s=ev.timeout_s,
+            profile=ev.profile,
         )
         turn.began, turn.stamps["heard"] = now, now
+        ready = None
+        if ev.reaction:
+            ready = await self._realtime_ready(turn)
+            if self._gives_way(ev):
+                self._give_way(ev)
+                return
+            self._touch(now, speaker)
         if self.transcript is not None:
             _, turn.ring_gen = self.transcript.begin(EVENT, ev.text, ev.language)
         self.affect.new_turn()
@@ -2065,7 +2172,7 @@ class ConversationWorker:
         self._after_tasks.add(task)
         task.add_done_callback(self._after_tasks.discard)
         try:
-            await self._respond(turn, router, now)
+            await self._respond(turn, router, now, ready)
         except BaseException as exc:
             self._abandon(turn, cancelled=isinstance(exc, asyncio.CancelledError))
             raise
@@ -2088,7 +2195,9 @@ class ConversationWorker:
         self, turn: _Turn, future: concurrent.futures.Future[bool]
     ) -> None:
         """``_watch_event``'s polling loop."""
-        timeout = turn.cfg.tools.scheduler.announce_timeout_s
+        timeout = turn.event_timeout_s
+        if timeout is None:
+            timeout = turn.cfg.tools.scheduler.announce_timeout_s
         while not future.done():
             if self.speech.first_audio_at(turn.speech_id) is not None:
                 _resolve(future, True)
@@ -2163,7 +2272,11 @@ class ConversationWorker:
                 robot_name=self._prompt_name(cfg),
                 extra_names=self._prompt_extra_names(cfg),
             ),
-            profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
+            profile_summary=(
+                self._summary(self._profile, conv.profile_summary_max_chars)
+                if turn.profile
+                else None
+            ),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
             history=self._history(),
             user_text=turn.utterance.text,

@@ -253,10 +253,11 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     return effects.vision_rate_scale
 
 
-def conversation_idle(host: Any, now: float) -> bool:
-    """Whether the conversation is idle at ``now`` (SPEC 11, Voice tools, Due items): the phase
-    is ``idle``, the robot is not speaking, nobody's speech is in progress or starting, and no
-    turn (a tool round included) is open or waiting. A part the run lacks does not count."""
+def room_quiet(host: Any, now: float) -> bool:
+    """Whether the room is quiet at ``now`` (SPEC 8, Robot expression): the phase is ``idle``,
+    the robot is not speaking and nobody's speech is in progress or starting. It takes the
+    phase's, the speech's and the listener's locks, never the conversation worker's: a reaction
+    turn asks it from the worker's loop. A part the run lacks does not count."""
     phase = host.phase
     if phase is not None and phase.current()[0] != IDLE:
         return False
@@ -264,7 +265,14 @@ def conversation_idle(host: Any, now: float) -> bool:
     if speech is not None and speech.speaking(now):
         return False
     listener = host.voice_listener
-    if listener is not None and listener.voice_active():
+    return listener is None or not listener.voice_active()
+
+
+def conversation_idle(host: Any, now: float) -> bool:
+    """Whether the conversation is idle at ``now`` (SPEC 11, Voice tools, Due items): the room
+    is quiet (``room_quiet``) and no turn (a tool round included) is open or waiting. A part the
+    run lacks does not count."""
+    if not room_quiet(host, now):
         return False
     conversation = host.conversation
     return conversation is None or not conversation.busy()
