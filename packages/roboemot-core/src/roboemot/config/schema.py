@@ -866,6 +866,16 @@ class CircadianConfig(Strict):
         "A day nap ends on a loud sound (sound.loud, the reflex engine's loud onset: needs "
         "reflexes.enabled and reflexes.audio.enabled); never a night rest",
     )
+    nap_wake_loud_ratio: float = param(
+        12.0,
+        "A loud sound wakes a day nap only at this level over the room's sound floor or more (the "
+        "startle reflex's own bar by default). sound.loud fires from reflexes.audio."
+        "loud_event_ratio, which ordinary voices and a television cross",
+        unit="ratio",
+        ge=1.5,
+        le=100,
+        advanced=True,
+    )
     nap_light_grace_s: float = param(
         300.0,
         "A light rise confirmed this soon after a day nap starts does not wake it: the rest "

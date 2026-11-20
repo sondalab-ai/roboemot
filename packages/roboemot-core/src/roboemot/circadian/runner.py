@@ -42,8 +42,11 @@ Three stimuli also end a day nap (owner decision 2026-11-03), each behind its sw
   ``nap_motion_grace_s`` of the nap's start is ignored (auto-exposure still settling on the
   rest posture's view);
 - ``nap_wake_on_loud``: ``sound.loud``, the reflex engine's loud onset, which is already
-  silent while the robot's own speech or sound plays (``SpeechActivity.sounding``). So a loud
-  television now wakes a nap, though its speech still does not.
+  silent while the robot's own speech or sound plays (``SpeechActivity.sounding``), at
+  ``nap_wake_loud_ratio`` over the floor or more (the startle's bar): the event's own bar
+  (``reflexes.audio.loud_event_ratio``) is crossed by ordinary voices and a television, which
+  ended 18 of 20 naps on the robot (2026-11-20). A quieter onset during a nap is counted
+  (``loud_below_ratio``), never a wake.
 
 They wake only a day nap, never the night rest of the quiet hours, a rest of the rhythm's own,
 a hold, or a nap while the platform sleeps (``robot.asleep``: the motors are off). Sound and
@@ -82,6 +85,7 @@ from ..config.schema import RoboEmotConfig, StateEffects
 from ..diag import EventSink, no_events
 from ..manifest import Dof
 from ..motion.core import Command
+from ..reflex.engine import SoundLoud
 from .light import LEVELS
 from .model import (
     HOURS_PER_DAY,
@@ -158,6 +162,7 @@ class CircadianRunner:
     ) -> None:
         self.cfg = cfg
         self.bus = bus
+        self._loud_below = 0  # loud onsets under nap_wake_loud_ratio during a nap (report)
         self.affect = affect
         self.clock: Clock = clock or SystemClock()
         self._set_timezone(cfg)
@@ -237,7 +242,15 @@ class CircadianRunner:
             self.wake()
 
     def _on_loud(self, msg: Message) -> None:
-        """A loud onset (the reflex engine's, never the robot's own sound): wakes a day nap."""
+        """A loud onset (the reflex engine's, never the robot's own sound): wakes a day nap when
+        its ratio over the floor reaches ``circadian.nap_wake_loud_ratio``; a quieter one during
+        a nap is only counted."""
+        loud = msg.payload
+        if not isinstance(loud, SoundLoud) or loud.ratio < self.cfg.circadian.nap_wake_loud_ratio:
+            with self._lock:
+                if self.nap.napping:
+                    self._loud_below += 1
+            return
         self._on_stimulus("loud")
 
     def _on_scene_motion(self, msg: Message) -> None:
@@ -600,6 +613,7 @@ class CircadianRunner:
                     "idle_s": round(self.nap.idle_s, 1),  # as of the last update
                     "naps": self.nap.naps,
                     "wakes": dict(self.nap.wakes),
+                    "loud_below_ratio": self._loud_below,
                     "resume_after_s": c.nap_resume_after_s,
                     "resuming": self.nap.resuming,
                     "resumes": self.nap.resumes,
