@@ -266,6 +266,9 @@ class Utterance:
     # with server turns, the live stream that carried it (a ``RealtimeInput`` job): the server
     # answered it on its own, and the conversation joins these words to that turn's history
     stream: Any = field(default=None, repr=False, compare=False)
+    # the voice-at-face rule addressed it (the voice came from a face): speech clearly meant
+    # for the robot, which the model asks about when unclear (SPEC 8, Robot expression)
+    at_face: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,7 @@ class _Handoff:
     addressed: bool | None = None
     face: str | None = None
     face_info: dict[str, Any] = field(default_factory=dict)  # that check's numbers
+    face_seen: str | None = None  # the check's verdict when the wake gate asked it at its end
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
@@ -2219,6 +2223,7 @@ class VoiceListener:
             realtime=realtime,
             local_only=local_only,
             stream=stream,
+            at_face=addressed and AT_FACE in (p.face, p.face_seen),
         )
         self._fast.stats.record("final_vs_last_speech", self._clock() - ev.last_speech_stamp)
         self._count("utterances")
@@ -2259,7 +2264,7 @@ class VoiceListener:
 
         def run() -> str:
             verdict = check()
-            p.face_info = self._face_info
+            p.face_info, p.face_seen = self._face_info, verdict
             return verdict
 
         return run

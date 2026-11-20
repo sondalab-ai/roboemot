@@ -1,0 +1,1 @@
+When the speech is clearly meant for you but you cannot tell what the person wants, do not call ignore_utterance: ask one short question to find out.

@@ -1122,10 +1122,14 @@ class ConversationWorker:
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
         out the skip rule and the conversation hint (the server must say it, not judge it), and
         the tone rule too, as do the round after a tone-only response and every tool round
-        after the first. ``generation``: the session the replay is for (default: the
-        current one)."""
+        after the first. The ask rule (``expression.reactions.model_asks``, SPEC 8 Robot
+        expression) goes with a turn clearly meant for the robot: the wake decision
+        (``addressed``) or the voice-at-face rule; never with a fixed line or an event turn.
+        ``generation``: the session the replay is for (default: the current one)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
+        meant = turn.conversation == ADDRESSED or turn.utterance.at_face
+        ask = cfg.expression.reactions.model_asks and meant and not (line or turn.event)
         system = build_messages(
             system=realtime_instructions(
                 cfg,
@@ -1136,6 +1140,7 @@ class ConversationWorker:
                 skip_rule=not (line or turn.event),
                 conversation=None if line else turn.conversation,
                 tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
+                ask_rule=ask,
             ),
             profile_summary=(
                 self._summary(self._profile, conv.profile_summary_max_chars)
