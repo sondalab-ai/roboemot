@@ -491,6 +491,23 @@ class ExpressionReactionsConfig(Strict):
         ge=1,
         le=30,
     )
+    busy_retry_s: float = param(
+        1.0,
+        "A reaction a person got ahead of waits this long before it tries again (within its "
+        "max age)",
+        unit="s",
+        ge=0.1,
+        le=10,
+        advanced=True,
+    )
+    wake_min_sleep_s: float = param(
+        1800.0,
+        "Only a sleep or night rest at least this long counts as a wake, so a greeting is due; "
+        "shorter motor toggles and daemon restarts do not",
+        unit="s",
+        ge=60,
+        le=43200,
+    )
     greet_absence_s: float = param(
         1800.0,
         "A known person is greeted again only after being away at least this long while the "
@@ -509,8 +526,8 @@ class ExpressionReactionsConfig(Strict):
     )
     shown_object: SituationConfig = param(
         {"max_age_s": 60, "cooldown_s": 120},
-        "Someone shows the robot a thing: it comments on it, and only while the thing is still "
-        "shown; the cooldown is per category",
+        "Someone shows the robot a thing: it comments on it within max_age_s (60 s by default) "
+        "and only while the thing is still shown; the cooldown is per category",
     )
     returning_person: SituationConfig = param(
         {"max_age_s": 30, "cooldown_s": 0},

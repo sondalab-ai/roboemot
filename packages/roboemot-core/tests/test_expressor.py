@@ -118,8 +118,84 @@ def test_a_worker_that_keeps_refusing_is_waited_on_never_spun():
     a poll before trying again, so the tries stay bounded by the max age."""
     rig = Rig(answers=("busy",))
     assert rig.expressor.handle(rig.request("didnt_catch", at=0.0)) == "dropped_busy"
-    max_age = rig.stack.effective().expression.reactions.didnt_catch.max_age_s
-    assert 1 < len(rig.worker.turns) <= max_age / 0.05 + 2
+    reactions = rig.stack.effective().expression.reactions
+    max_age, retry = reactions.didnt_catch.max_age_s, reactions.busy_retry_s
+    assert 1 < len(rig.worker.turns) <= max_age / retry + 1  # S3: backed off, not 20 a second
+    gaps = [b["t"] - a["t"] for a, b in zip(rig.worker.turns, rig.worker.turns[1:], strict=False)]
+    assert all(gap >= retry for gap in gaps)
+
+
+def test_the_turn_is_told_when_the_reaction_no_longer_applies():
+    """S1: the worker re-checks the reaction's age and validity (``fresh``) itself."""
+    rig = Rig()
+    turns = []
+
+    def look(index):
+        turns.append(rig.worker.turns[index]["fresh"])
+
+    rig.worker.on_turn = look
+    rig.expressor.handle(rig.request("didnt_catch", at=0.0))
+    assert turns == [True]
+    from expressor_rig import done
+
+    captured = {}
+
+    def capture(*args, fresh, **kw):
+        captured["fresh"] = fresh
+        return done("no_route")
+
+    rig.worker.reaction_turn = capture
+    sit = rig.stack.effective().expression.reactions.didnt_catch
+    rig.expressor._turn(rig.request("didnt_catch", at=rig.clock()), sit)
+    assert captured["fresh"]() is True
+    rig.clock.t += 10.5
+    assert captured["fresh"]() is False  # past its 10 s max age
+
+
+def test_didnt_catch_is_stale_once_a_persons_turn_began():
+    """S2: the person spoke again (or something else) and their turn started after the
+    question's cause: the question is no longer asked."""
+    rig = Rig()
+    rig.worker.busy_until = 3.0
+
+    def person_spoke(t):
+        if t >= 1.0:
+            rig.worker.person_at = 1.0
+
+    rig.clock.waits.append(person_spoke)
+    assert rig.expressor.handle(rig.request("didnt_catch", at=0.0)) == "dropped_stale"
+    assert rig.worker.turns == []
+    rig = Rig()
+    rig.worker.person_at = -5.0  # an earlier turn: still asked
+    assert rig.expressor.handle(rig.request("didnt_catch", at=0.0)) == "spoken"
+
+
+def test_close_during_a_reaction_plays_nothing_more():
+    """After close() no offline line or cue plays, and the turn asked is given up."""
+    import concurrent.futures
+
+    rig = Rig(online=True)
+    pending: concurrent.futures.Future = concurrent.futures.Future()
+    rig.worker.reaction_turn = lambda *a, **kw: pending
+    rig.clock.waits.append(lambda t: rig.expressor.close() if t >= 0.2 else None)
+    assert rig.expressor.handle(rig.request("failed_action", {"station": "A"})) == "dropped_busy"
+    assert pending.cancelled()
+    assert rig.worker.lines == [] and rig.host.cues.played == []
+    assert rig.expressor.handle(rig.request("didnt_catch")) == "dropped_busy"
+    assert rig.worker.lines == [] and rig.host.cues.played == []
+
+
+def test_a_gesture_plays_once_when_music_starts_after_a_refusal():
+    rig = Rig(answers=("busy",))
+
+    def music(index):
+        rig.media.is_playing = True
+
+    rig.worker.on_turn = music
+    assert rig.expressor.handle(rig.request("failed_action", {"station": "A"})) == (
+        "gesture_only_music"
+    )
+    assert rig.host.expression.requests == ["puzzled"]
 
 
 def test_a_waiting_confirmation_holds_the_reaction():
@@ -203,13 +279,24 @@ def test_no_route_falls_back_like_offline():
 def test_cooldown_per_situation_and_key():
     rig = Rig()
     assert rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))
-    rig.expressor._take()  # the thread took it
+    assert rig.expressor.handle(rig.expressor._take()) == "spoken"  # the cooldown starts here
     rig.clock.t = 60.0
     assert not rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))
     assert rig.expressor.offer(rig.request("failed_action", {"station": "B"}, key="B"))
-    assert rig.counts("failed_action") == {"dropped_cooldown": 1}
+    assert rig.counts("failed_action") == {"spoken": 1, "dropped_cooldown": 1}
     rig.clock.t = 121.0
     rig.expressor._take()
+    assert rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))
+
+
+def test_a_replaced_or_dropped_request_never_starts_the_cooldown():
+    rig = Rig()
+    assert rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))
+    assert rig.expressor.offer(rig.request("failed_action", {"station": "B"}, key="B"))
+    assert rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))  # A again
+    rig.worker.busy_until = 100.0
+    assert rig.expressor.handle(rig.expressor._take()) == "dropped_busy"
+    rig.clock.t = 101.0
     assert rig.expressor.offer(rig.request("failed_action", {"station": "A"}, key="A"))
 
 

@@ -76,8 +76,16 @@ Outcome = Literal[
     "offline_line",
     "cue",
     "offline_silent",
+    "dropped_session",
 ]
 OUTCOMES: tuple[str, ...] = get_args(Outcome)
+# the outcomes of a request that was handled (said, shown or offline): its cooldown starts then;
+# a dropped or replaced request never starts it
+HANDLED: frozenset[str] = frozenset(
+    {"spoken", "gesture_only_music", "offline_line", "cue", "offline_silent"}
+)
+QUEUED = "queued"  # what ``_offer`` says of a request it queued
+DISABLED = "disabled"  # ... and of one whose reactions or situation are off
 
 DIDNT_CATCH_EVENT = (
     "Someone just spoke to you and you did not catch what they said. Ask them in one short "
@@ -131,10 +139,10 @@ class ReturnTracker:
     """When a known person comes back (SPEC 8, Robot expression): per person, the last time
     they were seen while the robot was awake, and the robot's last wake from sleep or the
     night. In RAM only (a restart forgets it: the first sighting after one is not a return).
-    No lock of its own: the expressor holds its lock around it."""
+    No lock of its own and no config read: the expressor holds its lock around it and hands it
+    the absence it read before."""
 
-    def __init__(self, absence_s: Callable[[], float]) -> None:
-        self.absence_s = absence_s
+    def __init__(self) -> None:
         self.last_seen: dict[str, float] = {}
         self.last_wake: float | None = None
 
@@ -142,19 +150,29 @@ class ReturnTracker:
         """The robot woke from sleep or the night at ``now``."""
         self.last_wake = now
 
-    def seen(self, person_id: str, now: float, awake: bool) -> Return:
-        """``person_id`` is in view at ``now``. ``wake``: first seen since the robot woke;
-        ``return``: away at least ``absence_s()`` while the robot was awake; else ``none``.
-        A sighting while the robot is not awake is not recorded and gives ``none``."""
-        if not awake:
-            return "none"
+    def check(self, person_id: str, now: float, absence_s: float) -> Return:
+        """What a sighting of ``person_id`` at ``now`` (the robot awake) is, recording nothing:
+        ``wake``: first seen since the robot woke; ``return``: away at least ``absence_s``
+        while the robot was awake; else ``none``."""
         prior = self.last_seen.get(person_id)
-        self.last_seen[person_id] = now
         if self.last_wake is not None and (prior is None or prior < self.last_wake):
             return "wake"
-        if prior is not None and now - prior >= self.absence_s():
+        if prior is not None and now - prior >= absence_s:
             return "return"
         return "none"
+
+    def note(self, person_id: str, now: float) -> None:
+        """Record a sighting of ``person_id`` at ``now``."""
+        self.last_seen[person_id] = now
+
+    def seen(self, person_id: str, now: float, awake: bool, absence_s: float) -> Return:
+        """``check`` and, the robot awake, ``note``: a sighting while the robot is not awake
+        is not recorded and gives ``none``."""
+        if not awake:
+            return "none"
+        kind = self.check(person_id, now, absence_s)
+        self.note(person_id, now)
+        return kind
 
 
 @dataclass(frozen=True)
@@ -204,9 +222,11 @@ class Expressor:
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
         self._shown_key: str | None = None  # the look at a shown thing now (attention's key)
-        self._returns = ReturnTracker(lambda: self.cfg().expression.reactions.greet_absence_s)
-        self._was_asleep = False  # robot.asleep came: the next robot.awake is a wake
+        self._returns = ReturnTracker()
+        self._asleep_at: float | None = None  # robot.asleep came then: robot.awake may be a wake
         self._circadian: tuple[str, str | None] | None = None  # the last state and its reason
+        self._rest_at: float | None = None  # a rest of the night began then
+        self._inflight: concurrent.futures.Future | None = None  # the reaction turn asked now
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -233,9 +253,14 @@ class Expressor:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop the thread and detach from the bus. Close it before the conversation."""
+        """Stop the thread and detach from the bus. Close it before the conversation. A
+        reaction turn asked and not yet taken by the worker is given up; after this no line,
+        cue or gesture of a reaction plays."""
         self._stop.set()
         self._signal.set()
+        inflight = self._inflight
+        if inflight is not None:
+            inflight.cancel()
         for unsubscribe in self._unsubscribe:
             unsubscribe()
         self._unsubscribe.clear()
@@ -249,35 +274,40 @@ class Expressor:
         reactions and the situation are on; the robot is awake (else ``dropped_asleep``); no
         music plays (else the gesture alone, ``gesture_only_music``); the situation's cooldown
         for the request's key has passed (else ``dropped_cooldown``). Then it is queued,
-        replacing a queued request of its situation (``dropped_replaced``). True when queued."""
+        replacing a queued request of its slot (``dropped_replaced``): one slot per situation,
+        one per person for a greeting (two people back together are both greeted, one after the
+        other). True when queued. The cooldown starts when a request is handled (said, shown or
+        offline), never for one replaced or dropped."""
+        return self._offer(request) == QUEUED
+
+    def _offer(self, request: ReactionRequest) -> str:
+        """``offer``: ``QUEUED``, ``DISABLED`` or the outcome that refused it."""
         reactions = self.cfg().expression.reactions
         sit = reactions.situation(request.situation)
         if not (reactions.enabled and sit.enabled):
-            return False
+            return DISABLED
         if self.resting():
             self._outcome(request, "dropped_asleep")
-            return False
+            return "dropped_asleep"
+        now = self.clock()
+        cooldown = (request.situation, request.key)
+        with self._lock:
+            last = self._cooldowns.get(cooldown)
+        if last is not None and now - last < sit.cooldown_s:
+            self._outcome(request, "dropped_cooldown")
+            return "dropped_cooldown"
         if self.music():
             self._gesture(sit)
             self._outcome(request, "gesture_only_music")
-            return False
-        now = self.clock()
-        replaced = None
+            return "gesture_only_music"
+        slot = request.situation if request.situation != RETURNING else f"{RETURNING}:{request.key}"
         with self._lock:
-            key = (request.situation, request.key)
-            last = self._cooldowns.get(key)
-            cooling = last is not None and now - last < sit.cooldown_s
-            if not cooling:
-                self._cooldowns[key] = now
-                replaced = self._queue.pop(request.situation, None)
-                self._queue[request.situation] = request
-        if cooling:
-            self._outcome(request, "dropped_cooldown")
-            return False
+            replaced = self._queue.pop(slot, None)
+            self._queue[slot] = request
         if replaced is not None:
             self._outcome(replaced, "dropped_replaced")
         self._signal.set()
-        return True
+        return QUEUED
 
     def _on_media_stopped(self, msg: Message) -> None:
         """``media.stopped`` (the player's thread): a station that dropped or failed offers the
@@ -318,44 +348,74 @@ class Expressor:
         face = msg.payload
         if not isinstance(face, FacePercept) or not face.owner_id:
             return
-        awake = not self.resting()  # outside the lock: it takes the runner's
-        now = self.clock()
+        if self.resting():  # outside the lock: it takes the runner's; not recorded
+            return
+        absence = self.cfg().expression.reactions.greet_absence_s  # read outside the lock
+        person, now = face.owner_id, self.clock()
         with self._lock:
-            kind = self._returns.seen(face.owner_id, now, awake)
+            kind = self._returns.check(person, now, absence)
+            if kind == "none":
+                self._returns.note(person, now)
         if kind == "none":
             return
         data = {"wake": "1" if kind == "wake" else ""}
-        self.offer(ReactionRequest(RETURNING, data, now, key=face.owner_id))
+        status = self._offer(ReactionRequest(RETURNING, data, now, key=person))
+        if status in (QUEUED, DISABLED, "gesture_only_music"):
+            with self._lock:  # taken or settled: the next frame is no return again
+                self._returns.note(person, now)
 
     def _on_asleep(self, msg: Message) -> None:
-        """``robot.asleep``: the platform holds the motors off."""
+        """``robot.asleep``: the platform holds the motors off from now."""
+        now = self.clock()
         with self._lock:
-            self._was_asleep = True
+            if self._asleep_at is None:
+                self._asleep_at = now
 
     def _on_awake(self, msg: Message) -> None:
-        """``robot.awake`` after ``robot.asleep`` in this run: a wake (a greeting is due)."""
+        """``robot.awake`` after a ``robot.asleep`` of this run at least
+        ``wake_min_sleep_s`` long: a wake (a greeting is due). A shorter one (motors toggled,
+        a daemon restart) is not."""
+        least = self.cfg().expression.reactions.wake_min_sleep_s  # read outside the lock
+        now = self.clock()
         with self._lock:
-            if self._was_asleep:
-                self._was_asleep = False
-                self._returns.woke(self.clock())
+            since, self._asleep_at = self._asleep_at, None
+            if since is not None and now - since >= least:
+                self._returns.woke(now)
 
     def _on_circadian(self, msg: Message) -> None:
-        """``circadian.state``: leaving a rest of the night (``quiet_hours`` or
-        ``sleepiness``) is a wake; a day nap or a hold is not (the absence rule covers it)."""
+        """``circadian.state``: leaving a rest of the night (``quiet_hours`` or ``sleepiness``)
+        at least ``wake_min_sleep_s`` long is a wake; a day nap, a hold or a short rest is not
+        (the absence rule covers them)."""
         state = msg.payload
         if not isinstance(state, CircadianState):
             return
+        least = self.cfg().expression.reactions.wake_min_sleep_s  # read outside the lock
+        now = self.clock()
+        night_now = state.state == RESTING and state.reason in NIGHT_REASONS
         with self._lock:
-            prior, self._circadian = self._circadian, (state.state, state.reason)
-            night = prior is not None and prior[0] == RESTING and prior[1] in NIGHT_REASONS
-            if night and state.state != RESTING:
-                self._returns.woke(self.clock())
+            self._circadian = (state.state, state.reason)
+            if night_now:
+                if self._rest_at is None:
+                    self._rest_at = now
+                return
+            since, self._rest_at = self._rest_at, None
+            if since is not None and state.state != RESTING and now - since >= least:
+                self._returns.woke(now)
 
     def offer_not_heard(self, why: str) -> bool:
         """The listener or the conversation did not hear an addressed utterance (``why``: a
-        code, never sent or logged): offer the "did not catch it" reaction, only while a route
-        can word it. False (offline, music, asleep, the cooldown) keeps the did-not-get-it cue
-        as it is, sound included."""
+        code, never sent or logged). True: the did-not-get-it cue shows its gesture without its
+        sound. While the radio plays that is always so (the owner's rule: a gesture only,
+        nothing over the music; the cue's gesture is the only one). Else the "did not catch
+        it" reaction is offered while a route can word it; False (offline, asleep, the
+        cooldown, the reactions off) keeps the cue as it is, sound included."""
+        if self.music():
+            reactions = self.cfg().expression.reactions
+            if reactions.enabled and reactions.didnt_catch.enabled:
+                self._outcome(
+                    ReactionRequest("didnt_catch", {}, self.clock()), "gesture_only_music"
+                )
+            return True
         if not self.online():
             return False
         return self.offer(ReactionRequest("didnt_catch", {}, self.clock()))
@@ -390,6 +450,9 @@ class Expressor:
         reactions = self.cfg().expression.reactions
         sit = reactions.situation(request.situation)
         outcome = self._handle(self._named(request), sit)
+        if outcome in HANDLED:  # the cooldown starts once it was said, shown or offline
+            with self._lock:
+                self._cooldowns[(request.situation, request.key)] = self.clock()
         self._outcome(request, outcome)
         return outcome
 
@@ -397,6 +460,8 @@ class Expressor:
         """``handle`` without the outcome's count and event."""
         waited = gestured = False
         while True:
+            if self._stop.is_set():  # closed: nothing more of it plays
+                return "dropped_busy"
             if self.clock() - request.created_at > sit.max_age_s:
                 return "dropped_busy" if waited else "dropped_stale"
             if not self.valid(request):
@@ -404,24 +469,27 @@ class Expressor:
             if self.resting():
                 return "dropped_asleep"
             if self.music():
-                self._gesture(sit)
+                if not gestured:
+                    self._gesture(sit)
                 return "gesture_only_music"
             if not self.idle():
                 waited = True
                 if self.wait(POLL_S) or self._stop.is_set():
                     return "dropped_busy"
                 continue
-            if request.situation == RETURNING and self.worker.in_session():
-                return "dropped_busy"  # never a greeting into an open session's history
+            if request.situation == RETURNING and self.worker.conversed():
+                return "dropped_session"  # never a greeting after an earlier conversation
             if not self.online():
                 return self._offline(request)
             if not gestured:
                 self._gesture(sit)
                 gestured = True
-            result = self._turn(request)
-            if result == "busy":  # a person came first: wait again, never spin
+            result = self._turn(request, sit)
+            if self._stop.is_set():
+                return "dropped_busy"
+            if result == "busy":  # a person came first: back off, then wait for idle again
                 waited = True
-                if self.wait(POLL_S) or self._stop.is_set():
+                if self.wait(self.cfg().expression.reactions.busy_retry_s) or self._stop.is_set():
                     return "dropped_busy"
                 continue
             if result == "spoken":
@@ -442,19 +510,31 @@ class Expressor:
             name = next(iter(name.split()), "")
         return replace(request, data={**request.data, "who": name})
 
-    def _turn(self, request: ReactionRequest) -> str:
+    def _turn(self, request: ReactionRequest, sit: SituationConfig) -> str:
         """Start the reaction turn and wait for its result (``no_route`` when it raised or the
-        expressor closed first)."""
+        expressor closed first). The worker re-checks, when it takes the turn and before its
+        text goes out, that it is not past its max age and still valid (``fresh``)."""
         cfg = self.cfg()
         reactions = cfg.expression.reactions
-        future = self.worker.reaction_turn(
+
+        def fresh() -> bool:
+            young = self.clock() - request.created_at <= sit.max_age_s
+            return young and not self._stop.is_set() and self.valid(request)
+
+        future = self._inflight = self.worker.reaction_turn(
             event_text(request),
             cfg.conversation.language,
             timeout_s=reactions.turn_timeout_s,
             quiet=lambda: room_quiet(self.host, self.clock()),
             profile=request.situation != RETURNING,
+            fresh=fresh,
         )
-        result = self._result(future)
+        if self._stop.is_set():  # closed while asking: give it up
+            future.cancel()
+        try:
+            result = self._result(future)
+        finally:
+            self._inflight = None
         return "no_route" if result is None else str(result)
 
     def _after_spoken(self) -> None:
@@ -473,6 +553,8 @@ class Expressor:
         cue, else nothing."""
         cfg = self.cfg()
         language = cfg.conversation.language
+        if self._stop.is_set():
+            return "dropped_busy"
         if self.worker.local_voice():
             line = fallback_text(request, language, cfg)
             said = self._result(self.worker.local_line(line, language))
@@ -512,8 +594,12 @@ class Expressor:
         return announcer is None or not announcer.busy()
 
     def valid(self, request: ReactionRequest) -> bool:
-        """Whether ``request`` still applies: a shown thing is still the look it was shown in
-        (checked at the start, on every wait poll and right before its turn)."""
+        """Whether ``request`` still applies (checked at the start, on every wait poll and, by
+        the worker, right before its text goes out): a shown thing is still the look it was
+        shown in; a "did not catch it" question has no person's turn begun since (the person
+        said it again, or something else)."""
+        if request.situation == "didnt_catch":
+            return self.worker.person_turn_at() <= request.created_at
         if request.situation != "shown_object":
             return True
         with self._lock:
@@ -538,8 +624,9 @@ class Expressor:
         return True
 
     def _result(self, future: concurrent.futures.Future) -> Any:
-        """``future``'s result once done (a failure counts None); None when closed first."""
-        if not self._until(future.done):
+        """``future``'s result once done (a failure or a cancel counts None); None when closed
+        first."""
+        if not self._until(future.done) or future.cancelled():
             return None
         try:
             return future.result()

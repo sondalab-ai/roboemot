@@ -281,7 +281,10 @@ class _EventTurn:
     reaction: bool = False  # a reaction (``reaction_turn``): it gives way to a person
     profile: bool = True  # its request carries the speaker's profile summary
     quiet: Callable[[], bool] | None = field(default=None, repr=False)  # the room is quiet now
+    # it still applies: not past its max age, its cause still there (the caller's clock)
+    fresh: Callable[[], bool] | None = field(default=None, repr=False)
     refused: bool = False  # it gave way before anything was sent
+    cancelled: bool = False  # its caller gave it up (closed): it gives way if not started
 
 
 @dataclass
@@ -387,6 +390,7 @@ class ConversationWorker:
         self._confirm: Pending | None = None
         self._tail: _Tail | None = None
         self._barge_at = -math.inf  # when the last barge-in or stop keyword cut the robot off
+        self._person_at = -math.inf  # when the last turn answering a person's words began
         self._spoke_at = -math.inf  # when the last turn in which the robot spoke ended
         self._lock = threading.Lock()
         # (utterance, the live transcript's generation when it was recorded)
@@ -966,6 +970,8 @@ class ConversationWorker:
             if utterance.local_only:  # its audio left, no transcript came: not_heard showed
                 turn.outcome = "not_heard"
             else:
+                with self._lock:
+                    self._person_at = now
                 await self._respond(turn, router, now)
         except BaseException as exc:
             self._abandon(turn, cancelled=isinstance(exc, asyncio.CancelledError))
@@ -1667,6 +1673,8 @@ class ConversationWorker:
             rt_audio=True,
         )
         turn.began, turn.stamps["heard"] = now, heard
+        with self._lock:
+            self._person_at = now
         if self.transcript is not None:
             turn.ring_gen = self.transcript.current()
         shown = job.shown
@@ -2048,6 +2056,21 @@ class ConversationWorker:
         with self._lock:
             return self._confirm is not None
 
+    def person_turn_at(self) -> float:
+        """When the last turn answering a person's words began (this worker's clock; -inf
+        before any): a "did not catch it" question older than it is stale. Any thread."""
+        with self._lock:
+            return self._person_at
+
+    def conversed(self) -> bool:
+        """Whether the open session holds a person's words (a greeting is never said into such
+        a session: it would follow an earlier conversation). A session that holds only the
+        robot's own lines (an earlier greeting) does not count. Any thread."""
+        with self._lock:
+            return self._session is not None and any(
+                m.get("role") == "user" for turn in self._turns for m in turn
+            )
+
     def reaction_turn(
         self,
         text: str,
@@ -2056,6 +2079,7 @@ class ConversationWorker:
         timeout_s: float,
         quiet: Callable[[], bool],
         profile: bool = True,
+        fresh: Callable[[], bool] | None = None,
     ) -> concurrent.futures.Future[ReactionResult]:
         """Queue a reaction (SPEC 8, Robot expression): an event turn for ``text`` that never
         jumps ahead of a person. On the loop it gives way (``busy``: nothing sent, no session
@@ -2064,21 +2088,38 @@ class ConversationWorker:
         again right before its text goes out (after the realtime connect). Else it runs as
         ``event_turn``'s: ``spoken`` at its first reply audio, ``no_route`` when none started
         within ``timeout_s`` from when the route could take it (a late reply is cancelled).
-        ``profile`` False leaves the profile summary out. Any thread; it never waits."""
+        ``profile`` False leaves the profile summary out. ``fresh()`` False (past its max age,
+        its cause gone) also makes it give way, however long it waited in line. Cancelling the
+        returned future before the loop takes it makes it give way too (the caller closed).
+        Any thread; it never waits; the future always resolves."""
         outer: concurrent.futures.Future[ReactionResult] = concurrent.futures.Future()
         inner: concurrent.futures.Future[bool] = concurrent.futures.Future()
         item = _EventTurn(
-            text, language, inner, timeout_s=timeout_s, reaction=True, profile=profile, quiet=quiet
+            text,
+            language,
+            inner,
+            timeout_s=timeout_s,
+            reaction=True,
+            profile=profile,
+            quiet=quiet,
+            fresh=fresh,
         )
 
         def settle(done: concurrent.futures.Future[bool]) -> None:
-            result: ReactionResult = (
-                "busy" if item.refused else "spoken" if done.result() else "no_route"
-            )
+            try:
+                spoke = not done.cancelled() and done.exception() is None and bool(done.result())
+            except Exception:  # a cancelled or failed inner future: nothing played
+                spoke = False
+            result: ReactionResult = "busy" if item.refused else "spoken" if spoke else "no_route"
             with contextlib.suppress(concurrent.futures.InvalidStateError):
                 outer.set_result(result)
 
+        def given_up(done: concurrent.futures.Future[ReactionResult]) -> None:
+            if done.cancelled():
+                item.cancelled = True
+
         inner.add_done_callback(settle)
+        outer.add_done_callback(given_up)
         loop, wake = self._loop, self._wake
         if self._closed or loop is None or wake is None:
             _resolve(inner, False)
@@ -2090,16 +2131,21 @@ class ConversationWorker:
         return outer
 
     def _gives_way(self, ev: _EventTurn) -> bool:
-        """Whether reaction ``ev`` gives way to a person now (on the loop): another item waits,
-        another turn is open, a confirmation waits, or the room is not quiet. The worker's
-        state is read under its lock; ``quiet()`` is called outside it (it takes the
-        listener's, the speech's and the phase's locks)."""
+        """Whether reaction ``ev`` gives way now (on the loop): its caller gave it up, another
+        item waits, another turn is open, a confirmation waits, it no longer applies
+        (``fresh()``) or the room is not quiet. The worker's state is read under its lock;
+        ``fresh()`` and ``quiet()`` are called outside it (``quiet`` takes the listener's, the
+        speech's and the phase's locks)."""
+        if ev.cancelled:
+            return True
         with self._lock:
             other = bool(self._pending) or self._active_turn is not None
             other = other or self._confirm is not None
         if other:
             return True
         try:
+            if ev.fresh is not None and not ev.fresh():
+                return True
             return ev.quiet is not None and not ev.quiet()
         except Exception as exc:
             log.warning("conversation: reaction quiet check failed (%s)", type(exc).__name__)

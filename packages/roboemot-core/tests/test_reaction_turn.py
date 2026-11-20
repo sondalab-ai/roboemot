@@ -42,6 +42,74 @@ def test_reaction_turn_refuses_when_an_utterance_is_pending():
         rig.worker.close()
 
 
+def test_a_reaction_held_in_line_past_its_max_age_is_never_said():
+    """S1: a person's turn holds the loop longer than the reaction's max age; when the loop
+    finally takes the reaction it no longer applies (``fresh``) and gives way: no speech."""
+    rig = audible(build())
+    try:
+        rig.server.scripts["lan.local"] = [GATE, "Ok."]
+        rig.say("primo")
+        assert wait_for(lambda: len(rig.server.requests) == 1)
+        deadline = time.monotonic() + 0.2  # its max age, on the caller's clock
+        fut = rig.worker.reaction_turn(
+            EVENT, "it", timeout_s=5, quiet=lambda: True, fresh=lambda: time.monotonic() < deadline
+        )
+        time.sleep(0.3)  # the person's turn still holds the loop past the max age
+        rig.server.gate.set()
+        assert fut.result(timeout=5) == "busy"
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) == 1)
+        time.sleep(0.05)
+        assert last_user_texts(rig) == ["primo"]
+        assert rig.speech.texts() == ["Ok."]  # the person's answer only
+    finally:
+        rig.worker.close()
+
+
+def test_a_reaction_given_up_before_it_is_taken_is_never_said():
+    rig = audible(build())
+    try:
+        rig.server.scripts["lan.local"] = [GATE, "Ok."]
+        rig.say("primo")
+        assert wait_for(lambda: len(rig.server.requests) == 1)
+        fut = rig.worker.reaction_turn(EVENT, "it", timeout_s=5, quiet=lambda: True)
+        assert fut.cancel()  # the expressor closed
+        rig.server.gate.set()
+        assert wait_for(lambda: rig.worker.snapshot().get("reactions_busy") == 1)
+        assert last_user_texts(rig) == ["primo"]
+    finally:
+        rig.worker.close()
+
+
+def test_person_turn_and_conversed_follow_the_persons_words():
+    """S2, S5: a reaction's own turn is not a person's turn and holds no person's words."""
+    rig = audible(build())
+    try:
+        assert rig.worker.person_turn_at() == float("-inf") and not rig.worker.conversed()
+        fut = rig.worker.reaction_turn(EVENT, "it", timeout_s=5, quiet=lambda: True)
+        assert fut.result(timeout=5) == "spoken"
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) == 1)
+        assert rig.worker.person_turn_at() == float("-inf") and not rig.worker.conversed()
+        rig.turn("ciao")
+        assert rig.worker.person_turn_at() == rig.clock[0] and rig.worker.conversed()
+    finally:
+        rig.worker.close()
+
+
+def test_the_outer_future_resolves_when_the_turn_fails():
+    """The reaction's future always resolves, whatever happens to the turn."""
+    rig = audible(build())
+    try:
+
+        async def boom(ev):
+            raise RuntimeError("x")
+
+        rig.worker._answer_event_turn = boom
+        fut = rig.worker.reaction_turn(EVENT, "it", timeout_s=5, quiet=lambda: True)
+        assert fut.result(timeout=5) == "no_route"
+    finally:
+        rig.worker.close()
+
+
 def test_reaction_turn_refuses_when_room_not_quiet():
     rig = audible(build())
     try:

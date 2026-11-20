@@ -47,11 +47,12 @@ class FakeWorker:
         self.voice = True
         self.session = False
         self.confirm = False  # a confirmation question waits
+        self.person_at = -float("inf")  # when a person's turn last began
         self.busy_until = 0.0
         self.after = 0
         self.on_turn: Any = None  # called with the call's index before it answers
 
-    def reaction_turn(self, text, language, *, timeout_s, quiet, profile=True):
+    def reaction_turn(self, text, language, *, timeout_s, quiet, profile=True, fresh=None):
         self.turns.append(
             {
                 "t": self.clock(),
@@ -60,6 +61,7 @@ class FakeWorker:
                 "timeout_s": timeout_s,
                 "quiet": quiet(),
                 "profile": profile,
+                "fresh": None if fresh is None else fresh(),
             }
         )
         if self.on_turn is not None:
@@ -86,6 +88,12 @@ class FakeWorker:
 
     def confirming(self) -> bool:
         return self.confirm
+
+    def conversed(self) -> bool:
+        return self.session
+
+    def person_turn_at(self) -> float:
+        return self.person_at
 
 
 class MediaSpy:

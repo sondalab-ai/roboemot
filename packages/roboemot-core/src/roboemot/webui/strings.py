@@ -256,6 +256,7 @@ EN: dict[str, str] = {
     "live_ev_expression_offline_line": "Offline: said the fixed line ({situation})",
     "live_ev_expression_cue": "Offline: a cue instead of words ({situation})",
     "live_ev_expression_offline_silent": "Offline: no reaction ({situation})",
+    "live_ev_expression_dropped_session": "No greeting, a talk is open: {situation}",
     "live_route": "Route",
     "live_route_pending": "connecting",
     "live_elapsed": "Waiting for {n} s",
@@ -1600,6 +1601,9 @@ IT: dict[str, str] = {
     "live_ev_expression_offline_line": "Offline: ha detto la frase fissa ({situation})",
     "live_ev_expression_cue": "Offline: un segnale al posto delle parole ({situation})",
     "live_ev_expression_offline_silent": "Offline: nessuna reazione ({situation})",
+    "live_ev_expression_dropped_session": (
+        "Nessun saluto, una conversazione è aperta: {situation}"
+    ),
     "live_route": "Rotta",
     "live_route_pending": "in connessione",
     "live_elapsed": "In attesa da {n} s",

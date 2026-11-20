@@ -21,6 +21,15 @@ def show(rig: Rig, entry_id: str, category: str) -> None:
     rig.host.bus.publish("attention.target", target(entry_id, category), rig.clock())
 
 
+def test_a_thing_still_shown_is_not_commented_on_after_60_s():
+    """The 60 s cap holds even while the thing is still shown."""
+    rig = attached()
+    rig.worker.busy_until = 61.0
+    show(rig, "e1", "cup")
+    assert rig.expressor.handle(rig.expressor._take()) == "dropped_busy"
+    assert rig.worker.turns == []
+
+
 def test_shown_object_spoken_with_category():
     rig = attached()
     show(rig, "obj-7c1d", "cup")
@@ -71,8 +80,8 @@ def test_burst_of_shown_objects_speaks_at_most_once_about_the_last():
     assert rig.expressor.snapshot()["queued"] == 1
     assert rig.expressor.handle(rig.expressor._take()) == "spoken"
     assert len(rig.worker.turns) == 1 and "phone" in rig.worker.turns[0]["text"]
-    counts = rig.counts("shown_object")
-    assert counts == {"dropped_replaced": 3, "dropped_cooldown": 1, "spoken": 1}
+    counts = rig.counts("shown_object")  # the cooldown starts when one is handled
+    assert counts == {"dropped_replaced": 4, "spoken": 1}
 
 
 def test_same_category_once_per_cooldown():

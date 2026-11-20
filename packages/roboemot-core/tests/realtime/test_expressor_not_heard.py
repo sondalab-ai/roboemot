@@ -82,17 +82,23 @@ def test_spoken_question_replaces_the_sound_keeps_the_gesture(ears):
         assert reactions.expressor._take().situation == "didnt_catch"
 
 
-def test_music_keeps_the_cue_as_today(ears):
+def test_music_shows_the_cue_gesture_without_its_sound(ears):
+    """S6, the owner's hard rule: while the radio plays a reaction is a gesture only. The
+    did-not-get-it cue shows its gesture, never its sound, and no second gesture plays."""
     with TurnServer(heard=[[]]) as server:
         ear, cues, events = ears(server, script=["x"], decoded="che tempo fa")
-        reactions = ExpressorRig()
+        reactions = ExpressorRig(
+            app={"expression": {"reactions": {"didnt_catch": {"gesture": "x"}}}}
+        )
         reactions.media.is_playing = True
         ear.r.listener.on_not_heard, calls = offers(reactions.expressor)
         transcript_timeout(ear, server)
         assert calls == ["no_transcript"]
-        assert events[-1] == AUDIO_NOT_HEARD
-        assert cues.reasons == [("not_heard", "no_transcript", {})]
+        assert events[-1] == AUDIO_NOT_HEARD_SPOKEN
+        assert cues.reasons == [("not_heard", "no_transcript", {"sound": False})]
+        assert reactions.host.expression.requests == []  # the cue's gesture is the only one
         assert reactions.expressor.snapshot()["queued"] == 0
+        assert reactions.counts("didnt_catch") == {"gesture_only_music": 1}
         assert reactions.media.calls == []
 
 

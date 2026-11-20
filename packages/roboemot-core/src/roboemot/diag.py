@@ -124,6 +124,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "offline_line",
         "cue",
         "offline_silent",
+        "dropped_session",
     ),
 }
 
