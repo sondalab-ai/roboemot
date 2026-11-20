@@ -158,7 +158,10 @@ EN: dict[str, str] = {
     ),
     "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
     "live_ev_unanswered_music": "Not answered: music is playing, the wake word is needed",
-    "live_ev_unanswered_media": "Not answered: the radio is playing, the wake word is needed",
+    "live_ev_unanswered_media": (
+        "Not answered: the radio is playing, the wake word (or a face looking at the robot) "
+        "is needed"
+    ),
     "live_ev_unanswered_media_unconfirmed": (
         "Not answered: the radio is playing and the server's words held no wake word"
     ),
@@ -218,6 +221,9 @@ EN: dict[str, str] = {
     "live_ev_nap_loud": "Heard a loud sound: woke from the nap",
     "live_ev_media_fist_stop": "A fist held up for {held_s} s: stopped the radio",
     "live_ev_media_voice_stop": "Told to stop the music, name not heard: stopped the radio",
+    "live_ev_media_face_wake": (
+        "A voice from a face looking at the robot over the radio: sent, the server's words decide"
+    ),
     "live_ev_turn_ok": "Answered ({voice})",
     "live_voice_realtime": "cloud voice",
     "live_voice_local": "local voice",
@@ -1467,7 +1473,10 @@ IT: dict[str, str] = {
         "Senza risposta: nessun dato sullo sguardo (nessuna rotazione della testa misurata)"
     ),
     "live_ev_unanswered_music": "Senza risposta: c'è musica, serve la parola di attivazione",
-    "live_ev_unanswered_media": "Senza risposta: suona la radio, serve la parola di attivazione",
+    "live_ev_unanswered_media": (
+        "Senza risposta: suona la radio, serve la parola di attivazione (o un volto che guarda "
+        "il robot)"
+    ),
     "live_ev_unanswered_media_unconfirmed": (
         "Senza risposta: suona la radio e nelle parole del server non c'era la parola di "
         "attivazione"
@@ -1531,6 +1540,10 @@ IT: dict[str, str] = {
     "live_ev_nap_loud": "Ha sentito un rumore forte: si sveglia dal pisolino",
     "live_ev_media_fist_stop": "Un pugno mostrato per {held_s} s: ha fermato la radio",
     "live_ev_media_voice_stop": "Detto di fermare la musica, nome non sentito: ha fermato la radio",
+    "live_ev_media_face_wake": (
+        "Una voce da un volto che guarda il robot sopra la radio: inviata, decidono le parole "
+        "del server"
+    ),
     "live_ev_turn_ok": "Ha risposto ({voice})",
     "live_voice_realtime": "voce cloud",
     "live_voice_local": "voce locale",

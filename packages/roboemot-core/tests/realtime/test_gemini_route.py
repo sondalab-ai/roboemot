@@ -469,3 +469,77 @@ def test_gemini_cutting_its_own_answer_ends_the_turn_once(gemini, rigs):
     assert len([t for t in text_turns(srv) if t.get("turnComplete")]) == 1  # nothing more asked
     snap = rig.route.snapshot()
     assert snap["server_interrupts"] == 1 and snap["responses"] == {"cancelled": 1}
+
+
+# ------------------------------- a face over the radio, confirmed by the transcript (SPEC 8)
+
+FACE_RADIO = {
+    "privacy": {"realtime_audio": True},
+    "voice": {"wake_word_policy": "never", "wake_word": "Neve", "facing": {"enabled": True}},
+}
+
+
+def radio_face_ear(rig):
+    """An ear with a face looking at the robot while its radio plays a station; returns it and
+    the stop reasons the listener asked the player for."""
+    ear = Ear(rig, script=["ragazzi dopo musica"], bearing=FACE_RAD, yaw=0.0, to_worker=True)
+    stops: list[str] = []
+    ear.r.listener.media_audible = lambda at: True
+    ear.r.listener.media_set = lambda: True
+    ear.r.listener.media_stop = stops.append
+    return ear, stops
+
+
+def test_a_lyric_from_a_face_over_the_radio_never_plays_gemini_answer_or_runs_its_tool(
+    gemini, rigs
+):
+    """Safety (2026-11-20): Gemini answers an activity by itself, a tool call included. For a
+    face wake over the radio whose server words hold no name, that held answer is discarded:
+    no reply audio, no tool run, no text turn asked."""
+    play = {"play": {"gesture": "joy"}}
+    srv = gemini([["call:play", "audio"]], call_args=play, heard=["Innamorata musica"])
+    rig = rigs(srv, rt=AUDIO, app=FACE_RADIO)
+    env = Env()
+    rig.worker.skills = env.registry
+    ear, stops = radio_face_ear(rig)
+    try:
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert not ear.utterances[0].addressed and stops == []
+        assert ear.settle(lambda: wire(rig)["held_discarded"] == 1, 5.0)
+        time.sleep(0.3)  # anything Gemini still sends for it is dropped, never played
+        assert env.played == [] and rig.sink.pushed == [] and rig.history() == []
+        assert not [t for t in text_turns(srv) if t.get("turnComplete")]
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["face_wake_media"] == 1 and audio["wake_unconfirmed_media"] == 1
+        assert ear.r.asr.started == [] and ear.r.asr.decodes == 0
+    finally:
+        ear.close()
+
+
+def test_a_stop_from_a_face_over_the_radio_stops_it_on_gemini(gemini, rigs):
+    srv = gemini([["audio"]], heard=["Spegni la musica."])
+    rig = rigs(srv, rt=AUDIO, app=FACE_RADIO)
+    ear, stops = radio_face_ear(rig)
+    try:
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1, 10.0)
+        assert not ear.utterances[0].addressed and stops == ["voice_stop"]
+        assert ear.settle(lambda: wire(rig)["held_discarded"] == 1, 5.0)
+        assert rig.sink.pushed == []
+    finally:
+        ear.close()
+
+
+def test_the_name_from_a_face_over_the_radio_releases_gemini_answer(gemini, rigs):
+    srv = gemini([["audio"]], heard=["Neve, che tempo fa?"])
+    rig = rigs(srv, rt=AUDIO, app=FACE_RADIO)
+    ear, stops = radio_face_ear(rig)
+    try:
+        ear.say()
+        assert ear.settle(lambda: len(rig.events) == 1, 10.0)
+        assert ear.utterances[0].addressed and stops == []
+        assert rig.events[-1]["outcome"] == "ok" and rig.sink.pushed
+        assert said(rig) == [REPLY]
+    finally:
+        ear.close()

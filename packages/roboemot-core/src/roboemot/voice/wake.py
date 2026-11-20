@@ -31,6 +31,16 @@ them) no lyric can be heard, so the normal rules apply: "Neve" then "stoppa la m
 follow-up in the window the name opened. An utterance is decided by its start stamp, so one that
 started while the radio was held keeps the normal rules.
 
+Over the audible radio the voice-at-face check can stand in for the wake word (owner decision
+2026-11-20, ``tools.radio.face_addresses``): when the caller says a server transcript can
+confirm it (``face_media``: a realtime audio route takes the utterance's audio) and the policy
+would address it without the wake word were the radio silent (``never``, or
+``unless_enrolled_in_view`` with an enrolled person in view; never under ``always``), an
+utterance without the wake word whose voice came from a visible face (looking at the robot, with
+``voice.facing`` on) is ``face_media``: addressed for now and opening the window as the wake word
+does, but a wake the server's words must confirm (the listener). One that fails the check stays
+``rejected_media``. Lyrics come from the robot's own speaker, not from a face.
+
 A robot-initiated turn's reply window (``open_window``, an announcement; owner decision
 2026-11-17) is one such hold: the media player keeps the radio paused while it is open
 (``reply_window``), so the media rule does not apply in it and a follow-up extends it, never
@@ -56,6 +66,7 @@ DECISIONS = (
     "rejected_no_facing_data",
     "rejected_music",
     "rejected_media",
+    "face_media",
 )
 # The voice-at-face check's verdicts (``at_face``); a rejection is counted ``rejected_<verdict>``.
 AT_FACE = "at_face"
@@ -157,13 +168,19 @@ class WakeGate:
         last_speech: float,
         speaker: str | None = None,
         at_face: AtFace | None = None,
+        face_media: bool = False,
     ) -> str:
         """``decide`` with its outcome (one of ``DECISIONS``): a ``rejected_*`` one is not
-        addressed, and says which rule rejected it (the Live tab's decision event)."""
+        addressed, and says which rule rejected it (the Live tab's decision event).
+        ``face_media``: over the audible radio an utterance without the wake word that passes
+        ``at_face`` is ``face_media`` (a wake the server's transcript must confirm, module
+        docstring) instead of ``rejected_media``, only where the policy does not require the
+        wake word; the caller sets it only when that transcript can come."""
         with self._lock:
             media = self._media_at(start)
             music = media or self._music_in(start, last_speech)
-            required = self._required(enrolled_in_view) or music
+            policy_required = self._required(enrolled_in_view)
+            required = policy_required or music
             if not required:
                 outcome = "not_required"
                 if not wake_word:
@@ -174,8 +191,16 @@ class WakeGate:
                 self._reply = self._reply_at(start)  # inside a reply window it goes on as one
                 self._opened, self._speaker = last_speech, speaker
                 outcome = "wake_word"
+            elif media:
+                outcome = "rejected_media"
+                # only where the policy would address it without the wake word (radio aside)
+                face = face_media and not policy_required and at_face is not None
+                if face and at_face() == AT_FACE:
+                    self._reply = False
+                    self._opened, self._speaker = last_speech, speaker
+                    outcome = "face_media"
             else:
-                outcome = "rejected_media" if media else self._follow(start, speaker, music)
+                outcome = self._follow(start, speaker, music)
                 if outcome == "window":
                     outcome = _face_outcome(outcome, at_face)
             self._decisions[outcome] += 1
@@ -203,6 +228,13 @@ class WakeGate:
             music = self._music_in(start, start if end is None else end)
             required = self._required(enrolled_in_view) or music
             return not required or self._follow(start, speaker, music) == "window"
+
+    def policy_requires(self, enrolled_in_view: bool) -> bool:
+        """Whether the policy alone requires the wake word now (music and the radio aside):
+        the face rule over the radio applies only where it does not (owner decision
+        2026-11-20)."""
+        with self._lock:
+            return self._required(enrolled_in_view)
 
     def _required(self, enrolled_in_view: bool) -> bool:
         """Whether the policy requires the wake word: always with ``always``, never with

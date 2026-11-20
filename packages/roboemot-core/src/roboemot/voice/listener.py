@@ -102,8 +102,9 @@ addressed, counted
 ``wake_unconfirmed_media`` (the Live tab's ``unanswered``/``media_unconfirmed``, with the
 server's words while the live transcript is on): the conversation deletes
 its server items, plays no cue, and the radio rejoins as after any turn; the window it opened
-closes. A follow-up in that window decided before the verdict (the lyric's next line starts
-inside the span the hold back-dates) goes with it when its own final holds neither either.
+closes. An utterance addressed without the wake word before the verdict (the lyric's next line
+starts inside the span the hold back-dates: a follow-up in that window, or ``not_required``
+under policy ``never``) goes with it when its own final holds neither either.
 Stop trusts the command (owner decision 2026-11-19: a missed stop costs more than a false one):
 when such an unconfirmed server final holds a ``stop`` phrase or a ``media_stop`` verb, and a
 ``media`` word, of its language only (``voice.keywords``, whole words: "Ehi, Alexa, ferma la
@@ -113,6 +114,19 @@ set (``media_set``) and ``tools.radio.stop_without_name`` is on, the listener st
 ``wake_unconfirmed_media`` and publishes ``media``/``voice_stop`` instead of
 ``media_unconfirmed``; the turn is still handed off not addressed, so nothing else is answered
 without the name. A local rejection (``rejected_media``) never reaches this rule.
+A face over the radio (owner decision 2026-11-20, ``tools.radio.face_addresses``): when the switch
+is on, the policy does not require the wake word (``never``, or ``unless_enrolled_in_view`` with an
+enrolled person in view; under ``always`` Vosk listens for the name as before), the voice-at-face
+check is on and the utterance's audio can go to a realtime route with robot turns
+(``_wants_audio``), an utterance that starts while the radio is audible skips the local speech
+check (``_face_media_at``: no Vosk, no grammar pass, no local decode; counted ``vosk_skipped``) and
+the voice-at-face check alone decides at its end (``_face_media_end``): passed, the wake gate's
+``face_media``, its audio goes as a media wake the server's words must confirm (counted
+``face_wake_media``, the Live tab's ``media``/``face_wake``), held as a wake, and the rules above
+decide it (answered with the name, the radio stopped by a stop with a media word, else dropped);
+failed, ``rejected_media`` with no words and nothing sent. A face wake whose server final never
+comes is dropped, never decoded (``face_wake_unheard``). With server turns no burst can go, so the
+``media`` gate's local path stays as it is.
 Otherwise a wake in a follow-up window or a reply window (the radio held) needs no
 confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
@@ -192,6 +206,10 @@ OFF_GATES = ("music", "at_face", "facing")  # gates with a detector that can be 
 NO_UNADDRESSED = "no_unaddressed_opt_in"  # turns: server without its opt-in (robot turns run)
 # what in the server's transcript confirms a wake over the audible radio (SPEC 8, Radio playback)
 WAKE_CONFIRMS = frozenset({"name", "wake"})  # not ``extra_name``: a lyric can say "robot"
+# the wake gate's outcomes that open a window as a wake (``face_media``: the voice-at-face check
+# stood in for the wake word over the audible radio, SPEC 8, Radio playback)
+WAKES = frozenset({"wake_word", "face_media"})
+FACE_WAKE = "face_wake"  # the ``media`` event of a face wake sent for the server to confirm
 VOICE_STOP = "voice_stop"  # ``media.stopped``'s reason, and the ``media`` event's (SPEC 8, 11)
 
 
@@ -282,6 +300,9 @@ class _Handoff:
     # a follow-up in the window a media wake opened, decided before that wake's verdict
     media_parent: _Handoff | None = field(default=None, repr=False)
     unconfirmed: bool = False  # the server's words did not confirm its wake: not answered
+    # the voice-at-face check stood in for the wake word over the radio (``face_media``): only a
+    # server final may confirm it, never a local one (Vosk never heard it)
+    face_wake: bool = False
 
 
 @dataclass
@@ -410,6 +431,11 @@ class VoiceListener:
             "wake_unconfirmed_media": 0,
             # one that said stop the music instead: the radio stopped, still not answered
             "voice_stop_media": 0,
+            # over the audible radio, a voice from a face sent for the server to confirm
+            # (tools.radio.face_addresses), and one of those whose server final never came:
+            # dropped, never decoded locally
+            "face_wake_media": 0,
+            "face_wake_unheard": 0,
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
             "decodes": 0,
@@ -446,6 +472,9 @@ class VoiceListener:
         self._unheard: collections.deque[float] = collections.deque()
         self._last_streamed: tuple[str | None, float] = (None, -math.inf)  # speaker, last speech
         self._vosk = True  # the utterance in progress runs the recognizer
+        # the utterance in progress started over the audible radio with the face rule on: no
+        # local recognizer, the voice-at-face check decides at its end (``_face_media_end``)
+        self._face_media = False
         self._wait_last_s = 0.0
         self._wait_max_s = 0.0
         self.apply_config(cfg)
@@ -1152,7 +1181,10 @@ class VoiceListener:
         self._fast.begin(ev.stamp, audio_end, self._language)
         self._cut_stream()  # none should be left: a segment's stream ends with it
         self._stream = self._stream_start(ev)
-        self._vosk = self._stream is None and not self._addressable(ev.stamp)
+        self._face_media = self._stream is None and self._face_media_at(ev.stamp)
+        self._vosk = (
+            self._stream is None and not self._face_media and not self._addressable(ev.stamp)
+        )
         if self._vosk:
             self._timed("asr_start", self._asr.start, self._language)
         else:
@@ -1367,6 +1399,20 @@ class VoiceListener:
             log.warning("voice listener: realtime input: %s", type(exc).__name__)
             return False
 
+    def _face_media_at(self, start: float) -> bool:
+        """Whether the utterance starting at ``start`` is left to the voice-at-face check over
+        the audible radio (``tools.radio.face_addresses``, owner decision 2026-11-20): the
+        switch on, a policy that does not require the wake word now (``never``, or
+        ``unless_enrolled_in_view`` with an enrolled person in view), the radio audible, the
+        check on and the utterance's audio able to go to a realtime route with robot turns,
+        whose transcript then confirms it. It skips the local
+        recognizer, its grammar pass and any local decode (CPU)."""
+        if not self._cfg.tools.radio.face_addresses or self._at_face() is None:
+            return False
+        if self._gate.policy_requires(self._enrolled(start)):
+            return False  # the policy needs the wake word: Vosk listens for it as today
+        return self._media_at(start) and self._wants_audio()
+
     def _addressable(self, start: float) -> bool:
         """Whether the utterance starting at ``start`` skips Vosk: its audio would go, and the
         wake gate would address it without the wake word (its voice-at-face check aside)."""
@@ -1392,6 +1438,10 @@ class VoiceListener:
             self._stream = None
         if s is not None and s.job is not None:
             self._stream_end(ev, s)
+            return
+        if self._face_media:  # over the radio: the voice-at-face check alone decides
+            self._face_media = False
+            self._face_media_end(ev)
             return
         if not self._vosk:  # buffered only: addressed now, or decoded from the buffer
             face = self._face()
@@ -1436,11 +1486,13 @@ class VoiceListener:
         check = self._at_face()
         return None if check is None else check()
 
-    def _decided(self, p: _Handoff, outcome: str, text: str) -> None:
+    def _decided(self, p: _Handoff, outcome: str, text: str, *, wordless: bool = False) -> None:
         """Publish the wake decision of an utterance with words: ``unanswered`` with the rule
         when it was rejected, and the facing check's CPU fallback when it took one. ``text`` is
         the local final; a rejection over the radio (``rejected_media``) carries it as ``heard``
-        under the live transcript's gate (``_live_words``), no other rejection carries words."""
+        under the live transcript's gate (``_live_words``), no other rejection carries words.
+        ``wordless``: an utterance no local recognizer heard (the face rule over the radio) is
+        published all the same, with no words."""
         info = p.face_info
         if info.get("facing") == "cpu_high":
             self.events(
@@ -1450,9 +1502,11 @@ class VoiceListener:
                 cpu_percent=info.get("cpu_percent"),
                 cpu_max_percent=info.get("cpu_max_percent"),
             )
-        if not text.strip() or not outcome.startswith("rejected_"):
+        if not (text.strip() or wordless) or not outcome.startswith("rejected_"):
             return
-        words = {"heard": self._live_words(text)} if outcome == "rejected_media" else {}
+        words = {}
+        if outcome == "rejected_media":
+            words = {"heard": self._live_words(text) if text.strip() else None}
         self.events(
             "unanswered",
             outcome.removeprefix("rejected_"),
@@ -1462,6 +1516,40 @@ class VoiceListener:
             limit_deg=info.get("limit_deg"),
             **words,
         )
+
+    def _face_media_end(self, ev: SpeechEnd) -> None:
+        """An utterance that started over the audible radio with the face rule on ended
+        (``_face_media_at``): no local words. The wake gate decides with the voice-at-face
+        check: ``face_media`` sends its audio as a wake the server's transcript must confirm
+        (``_finish``); ``rejected_media`` drops it, nothing sent, no words. Should the radio no
+        longer count at its start (a hold back-dated to it), the gate's normal rules decide and
+        an addressed one goes as any utterance that skipped Vosk; nothing is decoded locally."""
+        face = self._face()
+        p = self._handoff_for(ev, face)
+        start = ev.start_stamp
+        outcome = self._gate.outcome(
+            wake_word=False,
+            enrolled_in_view=self._enrolled(start),
+            start=start,
+            last_speech=ev.last_speech_stamp,
+            speaker=self._speaker(),
+            at_face=None if face is None else (lambda: face),
+            face_media=self._realtime is not None,
+        )
+        p.addressed = not outcome.startswith("rejected")
+        self._decided(p, outcome, "", wordless=True)
+        if not p.addressed or self._realtime is None:
+            self._set_active(self._recording or bool(self._queue))
+            return
+        if outcome == "face_media":
+            p.media = p.media_wake = p.face_wake = True
+            self._hold_media(ev.last_speech_stamp)  # its turn holds the radio, as a wake's
+            self._count_audio("face_wake_media")
+            self.events("media", FACE_WAKE)
+        self._note_wake(p, outcome)
+        self._send(p)  # no wake word: its burst does not say the conversation is open
+        self._queue.append(p)
+        self.poll_handoff()
 
     def _send_unheard(self, ev: SpeechEnd, face: str | None) -> bool:
         """An utterance that skipped Vosk ended: if the wake gate addresses it without the
@@ -1626,6 +1714,13 @@ class VoiceListener:
             log.warning("voice listener: realtime input: %s", type(exc).__name__)
             return True  # handled as a failure: decoded locally
 
+    def _cancel_job(self, job: Any) -> None:
+        """Cancel ``job`` (its server items are deleted); a failing input never stops us."""
+        try:
+            self._realtime.cancel(job)
+        except Exception as exc:
+            log.warning("voice listener: realtime input: %s", type(exc).__name__)
+
     def _rt_timeout(self, p: _Handoff) -> None:
         """No transcript within ``transcript_timeout_s``: the job is cancelled (its server
         items are deleted) and the utterance is decoded locally."""
@@ -1765,11 +1860,14 @@ class VoiceListener:
 
     def _note_wake(self, p: _Handoff, outcome: str) -> None:
         """Keep the wake decision's media context: a wake opens a new window (the pending media
-        wake is ``p`` when it was one over the audible radio, else none), and a follow-up in the
-        window of a media wake whose server verdict is still due remembers that wake."""
-        if outcome == "wake_word":
+        wake is ``p`` when it was one over the audible radio, else none), and any utterance
+        addressed without the wake word while a media wake's server verdict is still due (a
+        window follow-up, or ``not_required`` under policy ``never``) remembers that wake."""
+        if outcome in WAKES:
             self._media_wake = p if p.media_wake else None
-        elif outcome == "window" and self._media_wake is not None:
+        elif not outcome.startswith("rejected") and self._media_wake is not None:
+            # a window follow-up, or (policy never) one the gate addressed without the wake
+            # word: the media wake's hold made the radio inaudible at its start either way
             p.media_parent = self._media_wake
 
     def _confirms(self, fast: Any, text: str, p: _Handoff, server: bool) -> bool:
@@ -1855,6 +1953,17 @@ class VoiceListener:
             heard = (result.generation, result.items)
             stream = job if p.stream else None
             self._finish(p, result.text, None, frozenset(), heard, server=True, stream=stream)
+            return None
+        if p.face_wake:
+            # no server final for a face wake over the radio: no local words exist to decide
+            # it (Vosk never ran), so it is dropped, never decoded nor answered; its items go
+            self._count_audio("face_wake_unheard")
+            p.addressed, p.unconfirmed = False, True
+            if self._media_wake is p:
+                self._gate.close_window()
+                self._media_wake = None
+            self._audio_event(AUDIO_UNSENT, p)  # the listening cue ends, no other cue
+            self._cancel_job(job)
             return None
         if p.stream and job.answered:
             # the server answered it on its own, and its transcript never came: the answer

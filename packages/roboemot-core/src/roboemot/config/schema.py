@@ -7544,6 +7544,17 @@ class RadioConfig(Strict):
         "word (voice.keywords: `ferma la musica`, `spegni la radio`), the station stops and the "
         "robot nods; nothing else is answered without the name",
     )
+    face_addresses: bool = param(
+        True,
+        "Over the radio, a voice from a face looking at the robot is sent to the realtime "
+        "route without the wake word, and the server's words decide: the name answers it, a "
+        "stop with a media word stops the radio, anything else is dropped. The local "
+        "recognizer does not run on it (saves CPU), so the name said while not looking at the "
+        "robot does not wake it over the radio. Needs a realtime audio route with robot turns, "
+        "voice.direction and a voice.wake_word_policy that does not require the wake word then "
+        "(never, or unless_enrolled_in_view with an enrolled person in view); otherwise only the "
+        "wake word addresses the robot over the radio",
+    )
     fist_stop: bool = param(
         True,
         "Stop the radio with a fist: while the music can be heard and the robot is awake the "
