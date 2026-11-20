@@ -224,6 +224,24 @@ def test_due_item_waits_for_idle_then_nods_and_announces(tmp_path):
     assert rig.host.cues.played == []
 
 
+def test_busy_while_handling_an_item(tmp_path):
+    """SPEC 8, Robot expression: the robot's own reactions wait while an announcement is
+    handled (its wait for idle included)."""
+    rig = Rig(tmp_path)
+    item = rig.timer()
+    seen = []
+    t0 = rig.clock.t
+    rig.host.speech.speaking = lambda now: seen.append(rig.announcer.busy()) or now < t0 + 1.0
+    turn = rig.worker.event_turn
+    rig.worker.event_turn = lambda text, language: (
+        seen.append(rig.announcer.busy()) or turn(text, language)
+    )
+    assert not rig.announcer.busy()
+    assert rig.announcer.handle(item.id)
+    assert seen and all(seen)
+    assert not rig.announcer.busy()
+
+
 def test_a_reminder_event_text_carries_its_text_and_a_timer_without_label_says_so(tmp_path):
     rig = Rig(tmp_path)
     reminder, timer = rig.reminder(), rig.timer(label=None)

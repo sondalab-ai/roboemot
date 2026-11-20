@@ -39,11 +39,17 @@ from roboemot.tools.announce import Announcer
 from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.cues import Cues, CueSink
 from roboemot.voice.factory import build_speech
-from roboemot.voice.listener import AUDIO_DROPPED, AUDIO_NOT_HEARD, AUDIO_SENT
+from roboemot.voice.listener import (
+    AUDIO_DROPPED,
+    AUDIO_NOT_HEARD,
+    AUDIO_NOT_HEARD_SPOKEN,
+    AUDIO_SENT,
+)
 from roboemot.voice.speech import MediaSink
 from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
+from .expressor import Expressor
 from .host import RuntimeHost
 from .radio_stop import stop_and_nod
 from .webui import WebAdmin, start_webui
@@ -205,6 +211,7 @@ def start_voice_output(
     cleanup.callback(conv.close)
     conv.start()
     start_announcer(host, stack, p, cleanup)
+    start_expressor(host, stack, p, cleanup)
     if realtime is not None:
         realtime.start()
     if bargein is not None:
@@ -327,6 +334,32 @@ def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
     start_scheduler_runner(host)  # attached first: its first tick reaches the announcer
 
 
+def start_expressor(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:
+    """The robot's own reactions (SPEC 8, Robot expression), once the conversation runs. A
+    route can word a line while the realtime session is up or the chat routes are online; the
+    platform's sleep drops them. The listener and the conversation offer the "did not catch it"
+    reaction (``offer_not_heard``). Closed before the conversation it hands turns to. Sets
+    ``host.expressor``; nothing without a conversation."""
+    conv = host.conversation
+    if conv is None:
+        return
+    rt = host.realtime_route
+    expressor = host.expressor = Expressor(
+        conv,
+        host,
+        stack.effective,
+        online=lambda: (rt is not None and rt.up()) or not p.hub.router.offline,
+        asleep=lambda: p.sleep.asleep,
+        registry=p.perception.registry,  # a returning person's name (SPEC 6, 8)
+    )
+    expressor.events = host.events
+    cleanup.callback(expressor.close)  # before the conversation it hands turns to
+    expressor.start()
+    conv.on_not_heard = expressor.offer_not_heard
+    if p.listener is not None:
+        p.listener.on_not_heard = expressor.offer_not_heard
+
+
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
     """Someone speaks while only the robot's own sounds that are not speech play (a
     self-soothing hum, a cue sound): cut them (``SpeechOutput.cut_raw``: checked and cut under
@@ -368,8 +401,9 @@ def bind_realtime_input(
 def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
     """The listener's audio events as cues, keyed by the utterance's start stamp: audio sent
     begins the listening cue; audio that did not leave ends it; audio without a transcript ends
-    it and shows ``not_heard``; a barge-in's segment the server never confirmed (dropped, S3)
-    shows ``not_heard`` (no listening cue began for it)."""
+    it and shows ``not_heard``, its gesture alone when the robot asks again in its own words
+    (``AUDIO_NOT_HEARD_SPOKEN``, SPEC 8, Robot expression); a barge-in's segment the server
+    never confirmed (dropped, S3) shows ``not_heard`` (no listening cue began for it)."""
 
     def on_audio(event: str, key: float) -> None:
         if event == AUDIO_SENT:
@@ -381,6 +415,8 @@ def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
         cues.listening_end(key)
         if event == AUDIO_NOT_HEARD:
             cues.play("not_heard", "no_transcript")
+        elif event == AUDIO_NOT_HEARD_SPOKEN:  # the robot asks in its own words instead
+            cues.play("not_heard", "no_transcript", sound=False)
 
     return on_audio
 

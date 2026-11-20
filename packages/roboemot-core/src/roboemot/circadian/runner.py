@@ -294,6 +294,13 @@ class CircadianRunner:
             self._force = True
             self._cause = "wake"
 
+    def quiet_now(self) -> bool:
+        """Whether the quiet hours run now (``circadian.quiet_hours`` at the clock's local hour);
+        False while the rhythm is off. Reads the live state and changes nothing (SPEC 7A, 8)."""
+        with self._lock:
+            c = self.cfg.circadian
+            return c.enabled and in_window(self.clock.hour(), c.quiet_hours)
+
     def nap_status(self) -> NapStatus:
         """Whether a requested nap could start now (SPEC 7A, Requested nap): ``disabled`` while
         the rhythm is off, ``asleep`` while the platform sleeps, ``already_resting`` during the

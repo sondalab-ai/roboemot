@@ -38,6 +38,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .config.schema import SITUATIONS
+
 log = logging.getLogger(__name__)
 
 TOPIC = "diag.event"
@@ -110,6 +112,20 @@ REASONS: dict[str, tuple[str, ...]] = {
         "declined",
         "capped",
     ),
+    # a reaction of the robot in its own words ended (SPEC 8, Robot expression): its outcome
+    "expression": (
+        "spoken",
+        "gesture_only_music",
+        "dropped_stale",
+        "dropped_busy",
+        "dropped_asleep",
+        "dropped_cooldown",
+        "dropped_replaced",
+        "offline_line",
+        "cue",
+        "offline_silent",
+        "dropped_session",
+    ),
 }
 
 # Values a free-valued field may carry: the closed sets that feed it today. Anything else becomes
@@ -145,7 +161,7 @@ EXCEPTIONS = {  # exception class name -> the code a turn failure carries
 CUE_KINDS = ("listening", "offline", "not_heard", "fallback")
 CUE_RESULTS = (
     "played", "disabled", "muted", "unsupported", "sound_dropped", "sound_skipped", "skipped",
-    "dropped",
+    "dropped", "gesture_only",
 )  # fmt: skip
 FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
 PATHS = ("vad", "onset", "keyword")
@@ -173,6 +189,7 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "after": ROUTE_REASONS,
     "counter": ("resets", "input_resets", "pending_call_resets"),
     "code": SERVER_CODES,
+    "situation": SITUATIONS,
     "yaw_deg": NUMBER,
     "limit_deg": NUMBER,
     "limit": NUMBER,
@@ -187,6 +204,7 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "delay_s": NUMBER,
     "rounds": NUMBER,
     "held_s": NUMBER,
+    "age_s": NUMBER,
     "robot_playing": FLAG,
     "moving": FLAG,
     "ducking": FLAG,

@@ -319,6 +319,20 @@ def test_a_one_shot_cue_sound_never_starts_while_someone_speaks():
     assert len(out.played) == 1
 
 
+def test_play_without_sound_shows_gesture_only():
+    """SPEC 8, Robot expression: the robot asks again in its own words, so the did-not-get-it
+    cue keeps its gesture and drops its sound."""
+    cues, clock, out, _ = make(sounds={"not_heard": sound()})
+    events = []
+    cues.events = lambda kind, reason, **f: events.append((kind, reason, f["result"]))
+    assert cues.play("not_heard", "no_transcript", sound=False)
+    assert out.played == []
+    assert len(cues._players) == 1
+    assert [c.source for c in cues.commands(clock.t + PEAK)] == ["cue:not_heard"]
+    assert events == [("cue", "no_transcript", "gesture_only")]
+    assert cues.snapshot()["counts"]["not_heard"] == {"played": 1, "gesture_only": 1}
+
+
 def test_a_cue_without_a_sound_is_not_held_by_speech():
     cues, _, out, state = make(sounds={})
     state.hearing = True

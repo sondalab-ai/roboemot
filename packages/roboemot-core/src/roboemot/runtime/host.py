@@ -53,6 +53,7 @@ from roboemot.world import WorldModel
 from roboemot.world.autoenroll import AutoEnroller
 from roboemot.world.sources import JointStateFn
 
+from .expressor import Expressor
 from .levels import AudioLevels
 
 
@@ -91,6 +92,7 @@ class RuntimeHost:
     scheduler: Scheduler | None = None  # timers and reminders (SPEC 11, Voice tools); with voice
     scheduler_runner: SchedulerRunner | None = None  # tools.due; an announcer set_consumer(True)
     announcer: Announcer | None = None  # announces due items (SPEC 11, robot-initiated turn)
+    expressor: Expressor | None = None  # the robot's own reactions (SPEC 8, Robot expression)
     media: MediaPlayer | None = None  # the radio's player (SPEC 11); a speaker that can play media
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)

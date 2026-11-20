@@ -128,3 +128,19 @@ def test_a_confirmation_after_the_transcript_wait_is_late_and_never_stops_the_ro
         silent(ear)
         ear.r.feed(after_the_echo_tail(ear))
         assert ear.settle(lambda: [e for e, _ in events] == ["dropped"])
+
+
+def test_unanswered_stream_offers_and_drops_sound(ears):  # noqa: F811
+    """SPEC 8, Robot expression: a stream whose words hold the robot's name and that no server
+    answer took within server_answer_wait_s is asked about in the robot's own words; the
+    did-not-get-it cue keeps its gesture without its sound."""
+    with TurnServer(stream_vad=True, heard=HEARD) as server:  # the name, no answer
+        rt = {**SERVER, "server_answer_wait_s": 1.0}
+        app = {**OPT_INS, "voice": {"wake_word": "Neve", "wake_word_policy": "never"}}
+        ear = ears(server, rt=rt, app=app, script=["x"], to_worker=True)
+        calls: list[str] = []
+        ear.rt.worker.on_not_heard = lambda why: calls.append(why) or True
+        ear.say()
+        assert ear.settle(lambda: "not_heard" in ear.rt.cues.played, 10.0)
+        assert calls == ["no_server_answer"]
+        assert ("not_heard", "no_server_answer", {"sound": False}) in ear.rt.cues.reasons

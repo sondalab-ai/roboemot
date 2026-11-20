@@ -93,6 +93,7 @@ BEHAVIOUR_MODULES = [
     "conversation/phase.py",
     "runtime/loop.py",
     "runtime/radio_stop.py",
+    "runtime/expressor.py",
     "runtime/reload.py",
     "runtime/sleep.py",
     "runtime/reports.py",

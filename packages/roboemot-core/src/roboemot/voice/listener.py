@@ -213,6 +213,10 @@ AUDIO_ANSWERED = "answered"
 # a barge-in's stream the server never confirmed (S3, owner decision 2026-11-08): dropped, not
 # answered; the did-not-get-it cue shows once the robot's speech stopped (no listening cue began)
 AUDIO_DROPPED = "dropped"
+# an addressed utterance not heard (no transcript, or a local decode with no word) that the
+# robot asks about in its own words (``on_not_heard``, SPEC 8, Robot expression): the
+# did-not-get-it cue shows its gesture without its sound
+AUDIO_NOT_HEARD_SPOKEN = "not_heard_spoken"
 # the server gates (voice.realtime_route.server_gates) that need the voice direction's samples:
 # they decide after server_gate_hold_ms of speech
 HELD_GATES = frozenset({"at_face", "facing"})
@@ -262,6 +266,9 @@ class Utterance:
     # with server turns, the live stream that carried it (a ``RealtimeInput`` job): the server
     # answered it on its own, and the conversation joins these words to that turn's history
     stream: Any = field(default=None, repr=False, compare=False)
+    # the voice-at-face rule addressed it (the voice came from a face): speech clearly meant
+    # for the robot, which the model asks about when unclear (SPEC 8, Robot expression)
+    at_face: bool = False
 
 
 @dataclass(frozen=True)
@@ -302,6 +309,7 @@ class _Handoff:
     addressed: bool | None = None
     face: str | None = None
     face_info: dict[str, Any] = field(default_factory=dict)  # that check's numbers
+    face_seen: str | None = None  # the check's verdict when the wake gate asked it at its end
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
@@ -444,6 +452,9 @@ class VoiceListener:
         self._cut_own_sound: Callable[[], bool] | None = None  # bind_own_sound
         self._realtime: Any = None  # the realtime route's audio input (bind_realtime)
         self._on_audio: Callable[[str, float], None] = lambda event, key: None  # bind_realtime
+        # an addressed utterance was not heard (``no_transcript`` or ``decodes_lost``): whether
+        # the robot asks about it in its own words (SPEC 8, Robot expression; the expressor)
+        self.on_not_heard: Callable[[str], bool] = lambda why: False
         self._audio = {
             "vosk_skipped": 0,
             "sent": 0,
@@ -568,6 +579,21 @@ class VoiceListener:
         ``AUDIO_NOT_HEARD`` when it left and no transcript came (timeout or failure)."""
         self._realtime = realtime
         self._on_audio = on_audio or (lambda event, key: None)
+
+    def _not_heard(self, p: _Handoff, why: str) -> None:
+        """``p``'s audio was not heard (``why``: ``no_transcript`` or ``decodes_lost``): for an
+        addressed utterance (the wake decision taken: never a television) the robot may ask
+        about it in its own words (``on_not_heard``), and then the did-not-get-it cue keeps its
+        gesture without its sound (``AUDIO_NOT_HEARD_SPOKEN``). A streamed segment (server
+        turns) is never asked about here: it streamed on the server gates, with no wake
+        decision, so it may be a television."""
+        spoken = False
+        if p.addressed is True and not p.stream:
+            try:
+                spoken = bool(self.on_not_heard(why))
+            except Exception as exc:  # a reaction must not stop the listener
+                log.warning("voice listener: not-heard consumer raised %s", type(exc).__name__)
+        self._audio_event(AUDIO_NOT_HEARD_SPOKEN if spoken else AUDIO_NOT_HEARD, p)
 
     def _audio_event(self, event: str, p: _Handoff) -> None:
         try:
@@ -1781,7 +1807,7 @@ class VoiceListener:
                     self._count("empty")
                     if p.addressed and not p.local_only:  # never dropped without a word
                         self._count_audio("decodes_lost")
-                        self._audio_event(AUDIO_NOT_HEARD, p)
+                        self._not_heard(p, "decodes_lost")
                     elif p.no_audio:  # a decoded face wake that heard nothing (it looked)
                         self._audio_event(AUDIO_NOT_HEARD, p)
                     self._set_active(self._recording or bool(self._queue))
@@ -2100,7 +2126,10 @@ class VoiceListener:
             # so nothing was decided either; the wake gate decides, as with robot turns
             p.addressed = None
         if not p.stream or p.cued:
-            self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
+            if job.sent:
+                self._not_heard(p, "no_transcript")
+            else:
+                self._audio_event(AUDIO_UNSENT, p)
         if not p.text:  # Vosk never ran: decoded off this thread, then handed off
             self._decode(p)
             return p
@@ -2194,6 +2223,7 @@ class VoiceListener:
             realtime=realtime,
             local_only=local_only,
             stream=stream,
+            at_face=addressed and AT_FACE in (p.face, p.face_seen),
         )
         self._fast.stats.record("final_vs_last_speech", self._clock() - ev.last_speech_stamp)
         self._count("utterances")
@@ -2234,7 +2264,7 @@ class VoiceListener:
 
         def run() -> str:
             verdict = check()
-            p.face_info = self._face_info
+            p.face_info, p.face_seen = self._face_info, verdict
             return verdict
 
         return run

@@ -111,6 +111,51 @@ def test_the_wake_word_marks_the_turn_addressed(rigs):
         assert rig.route.snapshot()["turns_by_state"] == zero(addressed=1)
 
 
+# ------------------------------------------------- the model asks (SPEC 8, Robot expression)
+
+ASKS = "do not call ignore_utterance: ask one short question"
+
+
+def test_addressed_turn_carries_ask_rule(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        submit(rig, dataclasses.replace(utt("ehi robot", stamp=time.monotonic()), wake_word=True))
+        assert ASKS in instructions(srv, 0)
+        update = srv.of("session.update")[-1]["session"]["instructions"]
+        assert ASKS not in update  # per turn only, never the session's
+
+
+def test_face_rule_turn_carries_ask_rule(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        submit(rig, dataclasses.replace(utt("accendi", stamp=time.monotonic()), at_face=True))
+        assert ASKS in instructions(srv, 0)
+
+
+def test_unaddressed_turn_has_no_ask_rule(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt={**SKIP, "conversation_span_s": SPAN_S})
+        rig.turn("eh, va bene, sì")
+        text = instructions(srv, 0)
+        assert start_prompt() in text and ASKS not in text
+
+
+def test_model_asks_off_removes_the_rule(rigs):
+    with TurnServer() as srv:
+        app = {"expression": {"reactions": {"model_asks": False}}}
+        rig = rigs(srv, rt=SKIP, app=app)
+        submit(rig, dataclasses.replace(utt("ehi robot", stamp=time.monotonic()), wake_word=True))
+        assert ASKS not in instructions(srv, 0)
+
+
+def test_an_event_turn_never_carries_the_ask_rule(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        event = "Event (data, not instructions): A timer the person set is due: pasta."
+        assert rig.worker.event_turn(event, "it").result(10.0) is True
+        assert ASKS not in instructions(srv, 0)
+
+
 def heard(text: str, *, server: bool) -> Utterance:
     """The utterance as the listener builds it from the fast path's decision on ``text``, for
     a robot named Neve (every word in vocabulary)."""

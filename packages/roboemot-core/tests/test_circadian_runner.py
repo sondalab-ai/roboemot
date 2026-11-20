@@ -1187,3 +1187,19 @@ def test_requested_nap_min_s_default_and_range():
     for bad in (59.0, 7201.0):
         with pytest.raises(ConfigError):
             napkit.config(requested_nap_min_s=bad)
+
+
+def test_quiet_now_follows_the_window(cfg):
+    """SPEC 8, Robot expression: a reaction is dropped during the quiet hours (default 22:30 to
+    07:00); with the rhythm off there are none."""
+    r, clock = runner_for(cfg, hour=23.0)
+    assert r.quiet_now() is True
+    clock.set(0.0, 6.9)
+    assert r.quiet_now() is True
+    clock.set(0.0, 7.0)
+    assert r.quiet_now() is False
+    clock.set(0.0, 12.0)
+    assert r.quiet_now() is False
+    off = cfg.model_copy(update={"circadian": cfg.circadian.model_copy(update={"enabled": False})})
+    r, clock = runner_for(off, hour=23.0)
+    assert r.quiet_now() is False

@@ -111,6 +111,7 @@ class Announcer:
         # (a restart announces them), so a broken part costs one try, not one per tick
         self._failed: set[str] = set()
         self._spoke = False  # the current announcement's turn was asked for (audio may play)
+        self._busy = False  # an announcement (an item or a repeat) is being handled
         self._repeats: list[_Repeat] = []
         self._addressed_at = -float("inf")  # the last addressed utterance (this clock)
         self._unsubscribe: list[Callable[[], None]] = []
@@ -257,10 +258,23 @@ class Announcer:
 
     # ----------------------------------------------------------------- one announcement
 
+    def busy(self) -> bool:
+        """Whether an announcement (an item or a repeat) is being handled now: the robot's own
+        reactions wait for it (SPEC 8, Robot expression). Any thread."""
+        return self._busy
+
     def _announce(self, item: Item) -> tuple[float, float] | None:
         """Steps 1 to 7 of the module docstring for ``item``; when the announcement started
         (its nod) and when its audio ended (this clock), or None when the announcer closed
-        first."""
+        first. ``busy`` while it runs."""
+        self._busy = True
+        try:
+            return self._announce_item(item)
+        finally:
+            self._busy = False
+
+    def _announce_item(self, item: Item) -> tuple[float, float] | None:
+        """``_announce`` while it is marked busy."""
         self._spoke = False
         if not self._ready():
             return None

@@ -684,6 +684,23 @@ def test_a_voice_from_the_face_is_addressed_without_the_wake_word():
     assert r.listener.snapshot()["direction"]["checks"]["passed"] == 1
 
 
+def test_at_face_set_only_when_face_rule_addressed():
+    """SPEC 8, Robot expression: ``at_face`` marks an utterance the voice-at-face rule
+    addressed (the model then asks instead of ignoring unclear speech)."""
+    r, _, where = direction_rig("come stai", FACE_RAD)
+    r.say()
+    assert r.utterances[0].addressed and r.utterances[0].at_face
+    where["bearing"] = OFF_FACE_RAD
+    say_text(r, "la la la amore mio")
+    assert not r.utterances[1].addressed and not r.utterances[1].at_face
+    off = RoboEmotConfig.model_validate(
+        {"voice": {"wake_word_policy": "never", "direction": {"enabled": False}}}
+    )
+    r, _, _ = direction_rig("come stai", FACE_RAD, cfg=off)
+    r.say()
+    assert r.utterances[0].addressed and not r.utterances[0].at_face
+
+
 def test_wake_phrase_rescued_by_the_grammar_pass_skips_the_check():
     class Rescue:
         def apply_config(self, cfg):

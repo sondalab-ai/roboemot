@@ -40,6 +40,7 @@ PROMPTS_DIR = Path(__file__).with_name("prompts")
 INSTRUCTION_LANGUAGE = "en"
 SKIP_PROMPT = "ignore_utterance"  # prompts/ignore_utterance.en.txt (the skip tool)
 TONE_PROMPT = "note_tone"  # prompts/note_tone.en.txt (the tone tool)
+ASK_PROMPT = "ask_unclear"  # prompts/ask_unclear.en.txt (expression.reactions.model_asks)
 PREVIEW_PROMPT = "voice_preview"  # prompts/voice_preview.<language>.txt (the web UI's preview)
 FALLBACK_LANGUAGE = "en"  # a spoken line's language when neither the turn's nor the default has one
 # The conversation state of a realtime turn with the skip tool (SPEC 8, Conversation start):
@@ -85,6 +86,7 @@ def realtime_instructions(
     skip_rule: bool = True,
     conversation: str | None = None,
     tone_rule: bool = True,
+    ask_rule: bool = False,
 ) -> str:
     """Parts 1 to 4 for the realtime speech route (SPEC 8, Realtime speech route): the same
     prompt without the mood-tag rule, because the server's voice would speak the tags. The
@@ -92,9 +94,11 @@ def realtime_instructions(
     boundary). With ``voice.realtime_route.tone_tool`` (and ``tone_rule``: a fixed line and the
     round after a tone-only response leave it out) the ``note_tone`` rule follows. With
     ``voice.realtime_route.skip_tool`` (and ``skip_rule``: a fixed line leaves it out) the
-    ``ignore_utterance`` rule from the prompt files follows, then the hint of the turn's
-    ``conversation`` state (one of ``CONVERSATION_STATES``; None, as in ``session.update``: no
-    hint). The rules are English whatever ``language``; only the reply rule names it."""
+    ``ignore_utterance`` rule from the prompt files follows, then, with ``ask_rule`` (speech
+    clearly meant for the robot, SPEC 8 Robot expression), the rule to ask a short question
+    instead of ignoring unclear speech, then the hint of the turn's ``conversation`` state (one
+    of ``CONVERSATION_STATES``; None, as in ``session.update``: no hint). The rules are English
+    whatever ``language``; only the reply rule names it."""
     prompt = _prompt(cfg, register, language, _name_rule(robot_name, extra_names), False)
     rt = cfg.voice.realtime_route
     parts = [prompt]
@@ -103,6 +107,8 @@ def realtime_instructions(
     if not (skip_rule and rt.skip_tool):
         return "\n".join(p for p in parts if p)
     parts.append(skip_prompt())
+    if ask_rule:
+        parts.append(ask_prompt())
     if conversation is not None:
         parts.append(start_prompt() if conversation == NO_CONVERSATION else open_prompt())
     return "\n".join(p for p in parts if p)
@@ -140,6 +146,12 @@ def tone_prompt() -> str:
     return _instruction(TONE_PROMPT)
 
 
+def ask_prompt() -> str:
+    """The rule to ask instead of ignoring speech clearly meant for the robot, from
+    ``prompts/ask_unclear.en.txt`` (SPEC 8, Skip tool; Robot expression)."""
+    return _instruction(ASK_PROMPT)
+
+
 def preview_line(cfg: RoboEmotConfig) -> tuple[str, str]:
     """The voice preview's sentence and its language (SPEC 8, Voice preview), from
     ``prompts/voice_preview.<lang>.txt``: ``conversation.language``'s, else English's (the
@@ -170,6 +182,14 @@ def event_fallback(kind: str, language: str, cfg: RoboEmotConfig) -> str:
     Fallback): ``language``'s, else ``conversation.language``'s, else English's. It holds a
     ``{label}`` or ``{text}`` slot the caller fills."""
     return _in_language(_prompt_files(f"event_{kind}"), language, cfg)
+
+
+def expression_fallback(situation: str, language: str, cfg: RoboEmotConfig) -> str:
+    """The fixed line the robot says for a reaction when no route can word it (SPEC 8, Robot
+    expression), from ``prompts/expression_<situation>.<lang>.txt``: ``language``'s, else
+    ``conversation.language``'s, else English's. Its slots (``{station}``, ``{who}``) are the
+    reaction's data keys; the caller fills them."""
+    return _in_language(_prompt_files(f"expression_{situation}"), language, cfg)
 
 
 @functools.cache
