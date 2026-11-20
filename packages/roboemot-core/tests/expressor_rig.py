@@ -182,5 +182,15 @@ class Rig:
         created = self.clock() if at is None else at
         return ReactionRequest(situation, dict(data or {}), created, **kw)  # type: ignore[arg-type]
 
+    def shown(self, category: str = "cup", entry_id: str = "e1") -> ReactionRequest:
+        """Show the robot a thing (a new look, as attention publishes it) and take the request
+        it queued, as the expressor's thread would."""
+        from roboemot.attention.types import SHOWN, AttentionTarget
+
+        target = AttentionTarget(entry_id, "object", 0.0, 0.0, SHOWN, "new", 0.0, category)
+        self.expressor._on_attention(SimpleNamespace(payload=target))
+        with self.expressor._lock:
+            return self.expressor._queue.pop("shown_object")
+
     def counts(self, situation: str) -> dict[str, int]:
         return self.expressor.snapshot()["counts"].get(situation, {})

@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
 from .. import shutdown
+from ..attention.types import SHOWN, AttentionTarget
 from ..bus import Message
 from ..config.schema import RoboEmotConfig, Situation, SituationConfig
 from ..diag import EventSink, no_events
@@ -99,6 +100,7 @@ OFFLINE_CUES: dict[str, str] = {"didnt_catch": "not_heard", "failed_action": "fa
 # the stream ended or stalled (a silent station stops after tools.media.connect_timeout_s), or
 # its feeder failed (SPEC 11, Media player)
 MEDIA_STOPPED = "media.stopped"
+ATTENTION_TARGET = "attention.target"
 FAILED_STOPS = ("dropped", "error")
 CUE_REASON = "no_route"
 RESTING = "resting"
@@ -153,14 +155,18 @@ class Expressor:
         self._counts: dict[str, collections.Counter[str]] = {}
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
+        self._shown_key: str | None = None  # the look at a shown thing now (attention's key)
 
     # ----------------------------------------------------------------- lifecycle
 
     def attach(self) -> None:
         """Subscribe to the bus topics whose events offer reactions: ``media.stopped`` (a
-        station that failed)."""
+        station that failed) and ``attention.target`` (a thing shown)."""
         bus = self.host.bus
-        self._unsubscribe = [bus.subscribe(MEDIA_STOPPED, self._on_media_stopped)]
+        self._unsubscribe = [
+            bus.subscribe(MEDIA_STOPPED, self._on_media_stopped),
+            bus.subscribe(ATTENTION_TARGET, self._on_attention),
+        ]
 
     def start(self) -> None:
         """Attach and start the expressor's thread (once)."""
@@ -227,6 +233,26 @@ class Expressor:
         if payload.get("reason") not in FAILED_STOPS or not isinstance(name, str):
             return
         self.offer(ReactionRequest("failed_action", {"station": name}, self.clock(), key=name))
+
+    def _on_attention(self, msg: Message) -> None:
+        """``attention.target``: a new look at a shown thing (the same rule as the appraisal's
+        ``object.shown``, which keeps its own reaction) offers the shown-object reaction with
+        the detector's category, keyed by the category for its cooldown; the look's key is the
+        request's token, never sent. Every target updates the look held now (none when the
+        target is not a shown thing), which ``valid`` reads."""
+        target = msg.payload
+        shown = isinstance(target, AttentionTarget) and target.priority == SHOWN
+        key = target.key if shown else None
+        with self._lock:
+            new_look = shown and key != self._shown_key
+            self._shown_key = key
+        if not new_look or not isinstance(target, AttentionTarget) or key is None:
+            return
+        category = target.category
+        request = ReactionRequest(
+            "shown_object", {"category": category}, self.clock(), key=category, token=key
+        )
+        self.offer(request)
 
     def offer_not_heard(self, why: str) -> bool:
         """The listener or the conversation did not hear an addressed utterance (``why``: a
@@ -371,8 +397,12 @@ class Expressor:
         return announcer is None or not announcer.busy()
 
     def valid(self, request: ReactionRequest) -> bool:
-        """Whether ``request`` still applies (a shown thing still shown)."""
-        return True
+        """Whether ``request`` still applies: a shown thing is still the look it was shown in
+        (checked at the start, on every wait poll and right before its turn)."""
+        if request.situation != "shown_object":
+            return True
+        with self._lock:
+            return request.token == self._shown_key
 
     def _speaking(self) -> bool:
         """Whether robot speech is queued or playing now."""

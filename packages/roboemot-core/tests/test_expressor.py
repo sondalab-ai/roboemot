@@ -85,7 +85,7 @@ def test_music_starting_during_the_wait_turns_it_gesture_only():
             rig.media.is_playing = True
 
     rig.clock.waits.append(start_music)
-    request = rig.request("shown_object", {"category": "cup"}, at=0.0)
+    request = rig.shown("cup")
     assert rig.expressor.handle(request) == "gesture_only_music"
     assert rig.worker.turns == [] and rig.worker.lines == []
     assert rig.media.calls == []
@@ -165,7 +165,7 @@ def test_offline_without_voice_plays_the_situation_cue_or_nothing():
     rig.worker.voice = False
     assert rig.expressor.handle(rig.request("didnt_catch")) == "cue"
     assert rig.expressor.handle(rig.request("failed_action", {"station": "A"})) == "cue"
-    shown = rig.request("shown_object", {"category": "cup"})
+    shown = rig.shown("cup")
     assert rig.expressor.handle(shown) == "offline_silent"
     assert [kind for kind, _, _ in rig.host.cues.played] == ["not_heard", "fallback"]
     assert rig.worker.lines == []
@@ -239,6 +239,7 @@ def test_media_is_never_called_on_any_path():
             ):
                 rig.expressor.offer(rig.request(situation, data, key=situation))
                 rig.expressor.handle(rig.request(situation, data))
+            rig.expressor.handle(rig.shown("lamp", "e9"))
             assert rig.media.calls == []
 
 
@@ -246,7 +247,7 @@ def test_logs_and_events_carry_no_data(caplog):
     caplog.set_level(logging.DEBUG, logger="roboemot")
     rig = Rig()
     rig.expressor.handle(rig.request("failed_action", {"station": "Radio Segreta"}))
-    rig.expressor.handle(rig.request("shown_object", {"category": "cup"}))
+    rig.expressor.handle(rig.shown("cup"))
     rig.media.is_playing = True
     rig.expressor.offer(rig.request("shown_object", {"category": "cup"}, key="cup"))
     text = caplog.text + repr(rig.events)
