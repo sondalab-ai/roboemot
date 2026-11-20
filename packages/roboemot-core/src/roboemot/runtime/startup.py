@@ -460,8 +460,15 @@ def start_all(
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
     start_scheduler_runner(host)  # no announcer was built: the log-only fallback
+    if p.listener is not None:  # the face rule over the radio needs that reading (SPEC 8)
+        p.listener.direction_over_media = p.echo_cancelled
     for world_source in p.plugin.sources:
         world_source.speaking = p.speech.sounding  # no turning towards its own sound
+        # the radio does not reach a hardware echo canceller's microphone: the sound direction
+        # is read over it for the listener's voice-at-face check alone (SPEC 8, Radio playback)
+        world_source.direction_speaking = (
+            p.speech.sounding_except_media if p.echo_cancelled else None
+        )
         cleanup.callback(world_source.stop)
         world_source.start(p.publish)
     if stack.effective().runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the models

@@ -30,7 +30,7 @@ class Bearing:
     def __init__(self):
         self.max_ages: list[float] = []
 
-    def get(self, now, max_age_s):
+    def get(self, now, max_age_s, *, listener=False):
         self.max_ages.append(max_age_s)
         return None
 

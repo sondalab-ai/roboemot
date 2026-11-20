@@ -157,6 +157,7 @@ class DoASource:
         self._errors: dict[str, str] = {}
         self._muted_until = -math.inf
         self.speaking: Callable[[float], bool] | None = None
+        self.direction_speaking: Callable[[float], bool] | None = None
 
     def mute(self, until_stamp: float) -> None:
         """Ignore the microphones until the clock passes ``until_stamp`` (own speech playing)."""
@@ -176,8 +177,15 @@ class DoASource:
         not per poll; it is logged again after that stage has worked once.
         """
         now = self._clock()
-        if now < self._muted_until or (self.speaking is not None and self.speaking(now)):
+        if now < self._muted_until:
             return False
+        listener_only = False
+        if self.speaking is not None and self.speaking(now):
+            # only the radio plays, behind a hardware echo canceller: read for the listener
+            ds = self.direction_speaking
+            if ds is None or ds(now):
+                return False
+            listener_only = True
         try:
             reading = self._mini.media.get_DoA()
             if reading is None:
@@ -202,6 +210,7 @@ class DoASource:
             doa_azimuth(float(angle)),
             0.0,
             confidence=self.cfg.doa_confidence,
+            listener_only=listener_only,
         )
         try:
             sink(obs, state)

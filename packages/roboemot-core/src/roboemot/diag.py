@@ -89,6 +89,7 @@ REASONS: dict[str, tuple[str, ...]] = {
     "media": (
         "fist_stop",  # a fist held up to the robot stopped the radio (SPEC 5, 11)
         "voice_stop",  # a stop said over the radio without the name stopped it (SPEC 8, 11)
+        "face_wake",  # a voice from a face over the radio went for the server to confirm (SPEC 8)
     ),
     "turn": (  # a turn ended (its outcome), the model's skip was refused or its tone was invalid
         "ok",

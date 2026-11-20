@@ -192,7 +192,7 @@ def build_listener(
         live = listener.config
         dcfg, fcfg = live.voice.direction, live.voice.facing
         max_age = dcfg.face_max_age_s if dcfg.face_max_age_s is not None else live.attention.stale_s
-        heard = bearing.get(now, dcfg.doa_max_age_ms / MS_PER_S)
+        heard = bearing.get(now, dcfg.doa_max_age_ms / MS_PER_S, listener=True)
         faces = [e for e in world.entries if e.kind == "person" and now - e.last_seen <= max_age]
         attended = attended_person()
         engaged = attended is not None and any(e.entry_id == attended.entry_id for e in faces)

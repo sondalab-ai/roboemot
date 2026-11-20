@@ -166,11 +166,12 @@ class AsideSink(Protocol):
 @runtime_checkable
 class MediaSink(Protocol):
     """An ``AudioSink`` that can play media (the radio, SPEC 8, Radio playback): ``push_media``
-    queues it as a stream (resampled across pushes) that opens only the own-sound window
-    (``SpeechActivity.extend_own``), never the speaking window, so the listener keeps hearing
-    the room (the wake word over the music) and barge-in does not take it for the robot's voice.
-    It refuses media behind speech the sink holds (returns 0.0). ``cut_media`` drops the media
-    still queued or playing, never speech; whether it cut anything."""
+    queues it as a stream (resampled across pushes) that opens only the media window
+    (``SpeechActivity.extend_media``, part of ``sounding``), never the speaking window, so the
+    listener keeps hearing the room (the wake word over the music) and barge-in does not take
+    it for the robot's voice. It refuses media behind speech the sink holds (returns 0.0).
+    ``cut_media`` drops the media still queued or playing, never speech; whether it cut
+    anything."""
 
     def push_media(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def cut_media(self) -> bool: ...

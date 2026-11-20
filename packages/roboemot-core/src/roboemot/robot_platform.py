@@ -97,9 +97,10 @@ class BearingSource(Protocol):
     direction of arrival). ``get`` is the azimuth of the reading nearest to ``now`` if it is at
     most ``max_age_s`` away on either side, else None: a caller behind real time (the listener
     sampling old audio) must not get a later sound. ``close`` stops listening to whatever feeds
-    it."""
+    it. ``listener``: readings marked ``listener_only`` (read over the robot's own media, SPEC 8,
+    Radio playback) count too; only the voice-at-face check asks for them."""
 
-    def get(self, now: float, max_age_s: float) -> float | None: ...
+    def get(self, now: float, max_age_s: float, *, listener: bool = False) -> float | None: ...
     def close(self) -> None: ...
 
 

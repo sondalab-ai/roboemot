@@ -171,6 +171,10 @@ class VoiceDirection:
         size = facing.config.report_checks if facing is not None else 1
         self._recent: deque[dict[str, Any]] = deque(maxlen=size)  # facing check records
         self.last: dict[str, Any] = {}  # the last check's numbers (``details``)
+        # the last check's path: ``HEARD`` (judged on direction readings) or its degraded
+        # reason (``no_source``, ``silent``, ``muted``); the face rule over the radio trusts
+        # only ``HEARD`` (SPEC 8, Radio playback)
+        self.last_path = ""
 
     def apply_config(
         self, cfg: VoiceDirectionConfig, facing: VoiceFacingConfig | None = None
@@ -187,6 +191,11 @@ class VoiceDirection:
     @property
     def enabled(self) -> bool:
         return self._cfg.enabled
+
+    @property
+    def doa_available(self) -> bool:
+        """Whether the robot has a sound direction at all (the manifest's ``doa``)."""
+        return self._doa
 
     def begin(self) -> None:
         """A new utterance: forget the previous one's samples."""
@@ -226,6 +235,7 @@ class VoiceDirection:
     def _check(self) -> str:
         cfg = self._cfg
         heard = [s for s in self._samples if s.bearing_rad is not None]
+        self.last_path = HEARD
         if len(heard) >= cfg.min_doa_readings:
             offsets = [face_offset(s) for s in heard]
             tol = math.radians(cfg.tolerance_deg)
@@ -235,7 +245,7 @@ class VoiceDirection:
             if not passed:
                 return NO_FACE_AT_VOICE
             return self._facing_verdict(HEARD, heard, tol)
-        reason = self._reason()
+        reason = self.last_path = self._reason()
         passed = self._rule(reason) == "engaged" and self._engaged()
         self._record("degraded_passed" if passed else "degraded_rejected", None, reason)
         if not passed:

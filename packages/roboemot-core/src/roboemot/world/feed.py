@@ -28,7 +28,7 @@ def feed_world(
     """
 
     def on_entity(msg: Message) -> None:
-        if isinstance(msg.payload, Observation):
+        if isinstance(msg.payload, Observation) and not msg.payload.listener_only:
             result = world.observe(msg.payload, msg.meta.get("joint_state"))
             if on_result is not None:
                 on_result(msg.payload, result)
