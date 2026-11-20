@@ -72,6 +72,12 @@ minutes (code 1008, no ``goAway``; S3 run 2026-11-12): a 1008 close of a session
 stays up) and reconnects at the next turn (owner decision 2026-11-12); any other close is a loss.
 ``refusals_to_report`` connects in a row refused with 1008 report ``server_refused`` (the
 backoff goes on). A Gemini setup without the turn's tools is never sent (``setup_unready``).
+A Gemini setup carries the transcription language's ``languageCodes``
+(``transcription_language_hint``): one the server closes before it is ready is sent again at
+once on a new socket without them (the client's ``reopen``, same budget). When that one comes
+up the connect is suspect; ``transcription_language_refusals`` suspect connects in a row
+remember the route, model and code, and later connects leave the codes out
+(``_language_at_connect``). If it fails too, it is one failed connect and nothing changes.
 
 Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
 12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
@@ -111,7 +117,7 @@ from ..llm.prompt_log import PromptRing
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
-from .gemini_wire import REFUSED_CLOSE
+from .gemini_wire import REFUSED_CLOSE, language_codes
 from .session import (
     GEMINI_LIVE,
     DirectSession,
@@ -345,6 +351,38 @@ def without_hint(update: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def language_tag(cfg: RoboEmotConfig, update: dict[str, Any]) -> str | None:
+    """The BCP-47 code a ``gemini_live`` setup built from ``update`` carries in
+    ``languageCodes``: with ``transcription_language_hint`` on, the update's transcription
+    language mapped by ``transcription_language_tags`` (the codec's own rule,
+    ``gemini_wire.language_codes``); None when it carries none."""
+    rt = cfg.voice.realtime_route
+    if not rt.transcription_language_hint:
+        return None
+    codes = language_codes(update.get("session", {}), rt.transcription_language_tags)
+    return codes[0] if codes else None
+
+
+def sends_language(cfg: RoboEmotConfig, update: dict[str, Any]) -> bool:
+    """Whether a ``gemini_live`` setup built from ``update`` carries ``languageCodes``."""
+    return language_tag(cfg, update) is not None
+
+
+def without_language(update: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``update`` without the transcription language and without its ``event_id``
+    (the resend gets an id of its own); the transcription object goes when nothing else is in
+    it. A ``gemini_live`` setup built from it carries no ``languageCodes``."""
+    out = copy.deepcopy(update)
+    out.pop("event_id", None)
+    audio_in = out["session"]["audio"]["input"]
+    transcription = audio_in.get("transcription")
+    if transcription is not None:
+        transcription.pop("language", None)
+        if not transcription:
+            del audio_in["transcription"]
+    return out
+
+
 def streak_delay(n: int, policy: Any) -> float:
     """The wait before the next connect after the ``n``-th reset or loss in a row (the
     ``connectivity.network`` backoff): none after the first, then ``probe_initial_s`` growing by
@@ -445,6 +483,16 @@ class RealtimeRoute:
         # model changes (apply_config); _lock guards it
         self._hint_refused: set[tuple[str, str, str, str]] = set()
         self._hint_settings: tuple[bool, str] | None = None  # (switch, model) last applied
+        # (route name, base_url, model, BCP-47 code) of the gemini_live routes whose server
+        # closed transcription_language_refusals setups in a row that carried that code and
+        # accepted each without it: their connects leave the code out. ``_language_streak``:
+        # such connects in a row so far per key (a connect that came up with the code clears
+        # it). Both cleared when the switch or the codes change (apply_config); _lock guards them
+        self._language_refused: set[tuple[str, str, str, str]] = set()
+        self._language_streak: collections.Counter[tuple[str, str, str, str]] = (
+            collections.Counter()
+        )
+        self._language_settings: tuple[bool, dict[str, str]] | None = None
         # the hint the current session's connect update carried and the server confirmed
         # (session.updated): its later updates carry the same one; None: no hint this session
         self._session_hint: str | None = None
@@ -528,10 +576,15 @@ class RealtimeRoute:
         self._turns_fallback = fallback
         rt = cfg.voice.realtime_route
         settings = (rt.transcription_name_hint, rt.transcription_model)
+        language = (rt.transcription_language_hint, dict(rt.transcription_language_tags))
         with self._lock:
             if settings != self._hint_settings:  # a new switch or model: try the hint again
                 self._hint_refused.clear()
                 self._hint_settings = settings
+            if language != self._language_settings:  # new switch or codes: try them again
+                self._language_refused.clear()
+                self._language_streak.clear()
+                self._language_settings = language
         self.network.set_realtime(reason is None, endpoint)
         with self._lock:
             self._rev += 1
@@ -839,15 +892,25 @@ class RealtimeRoute:
                     "fallback": without_hint(update),
                     "prefer_fallback": lambda origin: self._hint_is_refused((*key, origin)),
                 }
+            tag = language_tag(cfg, update) if route.protocol == GEMINI_LIVE else None
+            lang_key = (route.name, route.base_url, route.model, tag or "")
+            reopen: dict[str, Any] = {}
+            if tag is not None:  # a setup closed with the codes goes again without them
+                reopen = {
+                    "reopen": without_language(update),
+                    "prefer_reopen": lambda: self._language_is_refused(lang_key),
+                }
             if route.protocol == GEMINI_LIVE:  # what the setup's build left of the budget
                 fallback["timeout_s"] = max(0.0, budget - (time.monotonic() - started))
             try:
-                ok = client.connect(update, **fallback)
+                ok = client.connect(update, **fallback, **reopen)
             finally:
                 with self._lock:
                     self._connecting = self._connecting_token = None
             snap = client.snapshot()
             confirmed = self._hint_at_connect(key, snap, ok) if fallback else False
+            if reopen:
+                self._language_at_connect(lang_key, snap, ok)
             if not ok:  # the client's close hook already reported the failure
                 with self._lock:
                     self._client_snapshot = snap
@@ -1033,6 +1096,60 @@ class RealtimeRoute:
             log.warning("realtime: the server refused the transcription hint; sent without it")
             self.events("session", "hint_refused")
         return ok and how is None
+
+    def _language_is_refused(self, key: tuple[str, str, str, str]) -> bool:
+        """Whether the ``gemini_live`` route at ``key`` (name, base_url, model, BCP-47 code)
+        refused the setup's ``languageCodes``; counted ``language_skipped`` when it did (the
+        connect leaves them out)."""
+        with self._lock:
+            refused = key in self._language_refused
+            if refused:
+                self._counts["language_skipped"] += 1
+            return refused
+
+    def _language_at_connect(
+        self, key: tuple[str, str, str, str], snap: dict[str, Any], ok: bool
+    ) -> None:
+        """Count a ``gemini_live`` connect whose setup carried ``languageCodes``, by the
+        client's ``reopen``:
+
+        - None and up: the session holds them (``language_sent``); the streak at ``key`` ends;
+        - ``reopened`` and up: the server closed that setup before it was ready and the one
+          without them came up (``language_suspect``, the streak grows); only after
+          ``transcription_language_refusals`` such connects in a row is ``key`` remembered
+          (``language_refused``), so one transient close (the probe saw a 1008) changes
+          nothing: the next connect sends the codes again;
+        - ``preferred``: left out (refused before, counted at the choice).
+
+        A connect that failed either way changes nothing: the codes are not shown to be the
+        cause, and it costs one failed connect like any other."""
+        how = snap.get("reopen")
+        limit = self.stack.effective().voice.realtime_route.transcription_language_refusals
+        suspect = ok and how == "reopened"
+        refused = False
+        with self._lock:
+            if ok and how is None:
+                self._counts["language_sent"] += 1
+                self._language_streak.pop(key, None)
+            if suspect:
+                self._counts["language_suspect"] += 1
+                self._language_streak[key] += 1
+                refused = self._language_streak[key] >= limit
+            if refused:
+                self._counts["language_refused"] += 1
+                self._language_refused.add(key)
+                self._language_streak.pop(key, None)
+        if suspect and not refused:
+            log.info(
+                "realtime: the server closed the setup with the transcription language; "
+                "connected without it this time"
+            )
+        if refused:
+            log.warning(
+                "realtime: the server closed the setup with the transcription language; "
+                "connected without it"
+            )
+            self.events("session", "language_refused")
 
     def _set_state(self, state: str, reason: str | None) -> None:
         with self._lock:
@@ -2314,6 +2431,16 @@ class RealtimeRoute:
                 "transcription_hint": {
                     "sent": counts.get("hint_sent", 0),
                     "refused": counts.get("hint_refused", 0),
+                },
+                # gemini_live: sessions that came up with languageCodes (the wire's
+                # language_codes_sent counts setups sent with them, closed ones too), connects
+                # whose setup with them was closed and the one without came up, the times that
+                # made them refused, connects that left them out since
+                "transcription_language": {
+                    "sent": counts.get("language_sent", 0),
+                    "suspect": counts.get("language_suspect", 0),
+                    "refused": counts.get("language_refused", 0),
+                    "skipped": counts.get("language_skipped", 0),
                 },
                 "latency_ms": {
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),

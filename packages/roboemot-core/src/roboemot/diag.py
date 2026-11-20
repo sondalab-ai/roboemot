@@ -81,6 +81,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "server_error",
         "go_away",
         "idle_close",
+        "language_refused",  # a gemini_live setup closed for its languageCodes (SPEC 8)
     ),  # fmt: skip
     "audio": ("transcript_timeout",),  # the server's transcript of sent audio never came
     "facing": ("cpu_high",),  # the facing check did not trust the head yaw

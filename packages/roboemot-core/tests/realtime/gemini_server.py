@@ -6,7 +6,12 @@ binary frame.
 
 - The first message must be ``setup``: answered ``setupComplete`` and an unasked
   ``sessionResumptionUpdate``; with ``refuse`` > 0 the connect is closed instead with 1008
-  "The caller does not have permission" (S0 saw it once), ``refuse`` times.
+  "The caller does not have permission" (S0 saw it once), ``refuse`` times (``refuse_code``
+  instead of 1008); with ``drop`` > 0 the connection is aborted with no close frame (the
+  client sees 1006), ``drop`` times; with ``refuse_language`` (a close code) a setup whose
+  ``inputAudioTranscription`` carries ``languageCodes`` is closed with that code after
+  ``refuse_language_delay_s`` (``language_closes``), every time (unverified on
+  ``gemini-3.8-live``: the docs do not say how a model refuses the field).
 - ``realtimeInput.activityStart``: ``voiceActivity`` ``ACTIVITY_START`` at the session's audio
   clock (``audioOffset``: the 16 kHz PCM received so far, as a protobuf Duration); a reply still
   streaming is cut (``interrupted``), as Gemini does on new input.
@@ -57,6 +62,7 @@ OUTPUT_RATE_HZ = 24000
 REPLY = "Ciao! Sto benissimo, grazie."
 HEARD = "Ciao Neve, come stai oggi?"
 REFUSAL = "The caller does not have permission"
+UNKNOWN_FIELD = "Unknown name languageCodes"
 IDLE = "idle"
 POLICY = 1008
 SAMPLE_PAIR = b"\x10\x00\x20\x00"  # two PCM16 samples
@@ -111,6 +117,10 @@ class GeminiServer:
         usage_gate: threading.Event | None = None,
         setup_delay_s: float = 0.0,
         close_record_delay_s: float = 0.0,
+        refuse_language: int | None = None,
+        refuse_language_delay_s: float = 0.0,
+        refuse_code: int = POLICY,
+        drop: int = 0,
     ) -> None:
         self.tls_files = tls_files
         self.answers = answers or [["audio"]]
@@ -131,6 +141,10 @@ class GeminiServer:
         self.setups: list[dict[str, Any]] = []
         self.tool_responses: list[list[dict[str, Any]]] = []
         self.closes = 0  # connects refused with 1008
+        self.refuse_language = refuse_language
+        self.refuse_language_delay_s = refuse_language_delay_s
+        self.refuse_code, self.drop = refuse_code, drop
+        self.language_closes = 0  # setups closed for their languageCodes
         self.connections = 0
         self.port = 0
         self._turns = 0  # answers started (all connections)
@@ -223,10 +237,20 @@ class _Session:
         srv.received.append(first)
         assert "setup" in first, first
         srv.setups.append(first["setup"])
+        if srv.drop > 0:  # no close frame: the client sees 1006
+            srv.drop -= 1
+            self.ws.transport.abort()
+            return
         if srv.refuse > 0:
             srv.refuse -= 1
             srv.closes += 1
-            await self.ws.close(POLICY, REFUSAL)
+            await self.ws.close(srv.refuse_code, REFUSAL)
+            return
+        codes = first["setup"].get("inputAudioTranscription", {}).get("languageCodes")
+        if srv.refuse_language is not None and codes:
+            srv.language_closes += 1
+            await asyncio.sleep(srv.refuse_language_delay_s)
+            await self.ws.close(srv.refuse_language, UNKNOWN_FIELD)
             return
         if srv.setup_delay_s:
             await asyncio.sleep(srv.setup_delay_s)

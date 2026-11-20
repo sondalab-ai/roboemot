@@ -44,7 +44,13 @@ from .check import (
 )
 from .gemini_wire import GEMINI_VOICES
 from .protocol import QWEN3_VOICES
-from .route import EVENT_PREFIX, PCM_SAMPLE_BYTES, realtime_extra, session_update
+from .route import (
+    EVENT_PREFIX,
+    PCM_SAMPLE_BYTES,
+    realtime_extra,
+    session_update,
+    without_language,
+)
 from .session import GEMINI_LIVE, DirectSession, SessionProvider
 from .turn import line_instructions
 
@@ -172,6 +178,8 @@ class _Preview(_Run):
             interrupt_response=False,
             route=self.route,
         )
+        if self.gemini:  # no audio to transcribe: a model that refuses languageCodes still speaks
+            update = without_language(update)
         if not client.connect(update, timeout_s=max(0.0, min(budget, left))):
             raise PreviewFailed(client.reason or "closed", client.snapshot().get("close_code"))
         # no text item: with none, Gemini's codec sends the instructions as the turn's line

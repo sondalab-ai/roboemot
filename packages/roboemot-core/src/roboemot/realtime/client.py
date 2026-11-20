@@ -188,6 +188,8 @@ class RealtimeClient:
         self._platform_id_sent = False  # the last allocation request carried the identifier
         # connect's fallback update: None (not sent), "preferred" (sent first), "resent"
         self._update_fallback: str | None = None
+        # connect's reopen update (gemini_live): None (not sent), "preferred", "reopened"
+        self._reopen_how: str | None = None
         self._wire: Wire = OpenAIWire(settings.max_message_bytes)  # the session's (``_connect``)
         self.state = "idle"
         self.reason: str | None = None
@@ -247,6 +249,8 @@ class RealtimeClient:
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
         timeout_s: float | None = None,
+        reopen: dict[str, Any] | None = None,
+        prefer_reopen: Callable[[], bool] = lambda: False,
     ) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
         client thread). False on any failure, with ``reason`` set to a code (and
@@ -258,10 +262,19 @@ class RealtimeClient:
         with an ``error`` (the only event sent yet, so the error is about it) whose code is not
         an account error (``protocol.ACCOUNT_ERRORS``), or sent in its place when
         ``prefer_fallback(origin)`` holds for the connect endpoint; the snapshot's
-        ``update_fallback`` says which (``resent``, ``preferred``) or None."""
+        ``update_fallback`` says which (``resent``, ``preferred``) or None.
+        ``reopen`` (``gemini_live`` only, which refuses a setup by closing the socket: one setup
+        per socket): the update sent once on a new socket (and codec) when the server closes
+        the first with a close code before ``setupComplete`` (also while the setup is being
+        written), within the same deadline, or sent in the first one's place when
+        ``prefer_reopen()``; a close without a close code (1006: no close frame, a network
+        loss) is a connect failure as before. The snapshot's ``reopen`` says which
+        (``reopened``, ``preferred``) or None."""
         self.start()
         budget = self._connect_timeout_s() if timeout_s is None else timeout_s
-        future = self._submit(self._connect(session_update, fallback, prefer_fallback, budget))
+        future = self._submit(
+            self._connect(session_update, fallback, prefer_fallback, budget, reopen, prefer_reopen)
+        )
         s = self.settings
         try:
             return bool(future.result(budget + s.send_timeout_s))
@@ -314,6 +327,7 @@ class RealtimeClient:
                 "key_sent": target.send_key if target else False,
                 "platform_id_sent": self._platform_id_sent,
                 "update_fallback": self._update_fallback,
+                "reopen": self._reopen_how,
                 "key_hosts": list(self.provider.key_hosts),
                 "close_code": self.close_code,
                 "failures": dict(self._failures),
@@ -397,13 +411,80 @@ class RealtimeClient:
 
     def _new_wire(self) -> Wire:
         """The codec of one session: a new ``GeminiWire`` (the route's model, the message cap,
-        its voice, a process-wide session number) for a ``gemini_live`` route, else the
-        identity ``OpenAIWire``, which is stateless (a new one changes nothing)."""
+        its voice, a process-wide session number, the BCP-47 codes of the transcription
+        language while ``transcription_language_hint`` is on) for a ``gemini_live`` route, else
+        the identity ``OpenAIWire``, which is stateless (a new one changes nothing)."""
         if self.route.protocol == GEMINI_LIVE:
-            voice = realtime_voice(self.route, self.settings) or None
-            cap = self.settings.max_message_bytes
-            return GeminiWire(self.route.model, cap, voice, next(_SESSIONS))
+            s = self.settings
+            voice = realtime_voice(self.route, s) or None
+            tags = s.transcription_language_tags if s.transcription_language_hint else {}
+            return GeminiWire(self.route.model, s.max_message_bytes, voice, next(_SESSIONS), tags)
         return OpenAIWire(self.settings.max_message_bytes)
+
+    def _swap_wire(self) -> None:
+        """Start a new codec for the next socket; the last one's counts join the totals."""
+        wire = self._new_wire()
+        with self._lock:
+            self._wire_totals.update(_wire_counts(self._wire) or {})
+            self._wire = wire
+
+    async def _open_gated(self, loop: asyncio.AbstractEventLoop, deadline: float) -> Any:
+        """Open the socket, then ask the owner's gate right before the first data leaves (after
+        the handshake): a reload meanwhile (pseudonyms on, the route changed) sends nothing
+        (SPEC 12)."""
+        ws = await self._open(loop, deadline)
+        self._ws = ws
+        if self._local_only() and not ws_target_local(self._target):
+            raise _SessionRefused("pseudonyms")
+        if not await loop.run_in_executor(None, self._may_send):
+            raise _SessionRefused("reconfigured")
+        return ws
+
+    async def _setup(
+        self,
+        ws: ClientConnection,
+        update: dict[str, Any],
+        fallback: dict[str, Any] | None,
+        reopen: dict[str, Any] | None,
+        loop: Any,
+        deadline: float,
+    ) -> None:
+        """Send the connect's update and wait for ``session.updated``. On a ``gemini_live``
+        route with a ``reopen`` update left, a server close with a close code before
+        ``setupComplete`` (raised while the setup is written or while it is awaited) sends the
+        ``reopen`` update once on a new socket (``_reopen``); any other close fails the connect.
+        """
+        try:
+            await self._send_update(ws, update)
+            await self._await_session(ws, fallback)
+        except ConnectionClosed as exc:
+            if reopen is None or exc.rcvd is None or self.route.protocol != GEMINI_LIVE:
+                raise
+            ws = await self._reopen(exc, reopen, loop, deadline)
+            await self._await_session(ws)
+
+    async def _reopen(
+        self, exc: ConnectionClosed, update: dict[str, Any], loop: Any, deadline: float
+    ) -> ClientConnection:
+        """A ``gemini_live`` setup the server closed before ``setupComplete``: a new socket
+        (and codec, a new allocation) gets ``update``'s setup, once, within the same deadline;
+        the snapshot's ``reopen`` is ``reopened``. A first close that took most of the budget
+        can leave the second attempt no time: that connect ends as ``connect_timeout`` and the
+        owner learns nothing about the first setup (``reopen`` is still ``reopened``, but the
+        connect failed). Only the close code is logged."""
+        log.info(
+            "realtime route %s: setup closed (code %s) before it was ready; sent again on a new "
+            "socket with the reopen setup",
+            self.route.name,
+            exc.rcvd.code if exc.rcvd else None,
+        )
+        await self._drop_socket()
+        self._swap_wire()
+        with self._lock:
+            self._reopen_how = "reopened"
+        ws = await self._open_gated(loop, deadline)
+        await self._send_update(ws, update)
+        return ws
 
     async def _connect(
         self,
@@ -411,16 +492,17 @@ class RealtimeClient:
         fallback: dict[str, Any] | None = None,
         prefer_fallback: Callable[[str], bool] = lambda _origin: False,
         budget_s: float | None = None,
+        reopen: dict[str, Any] | None = None,
+        prefer_reopen: Callable[[], bool] = lambda: False,
     ) -> bool:
         await self._close(None)
-        wire = self._new_wire()
+        self._swap_wire()
         with self._lock:
-            self._wire_totals.update(_wire_counts(self._wire) or {})
-            self._wire = wire
             self.close_code = None
             self.state, self.reason, self._target = "connecting", None, None
             self._refused_host = None
             self._update_fallback = None
+            self._reopen_how = None
             self._server_error = (None, None)
             self._sent_types.clear()
             self._counts["connects"] += 1
@@ -428,22 +510,18 @@ class RealtimeClient:
         deadline = loop.time() + (self._connect_timeout_s() if budget_s is None else budget_s)
         try:
             async with asyncio.timeout_at(deadline):
-                ws = await self._open(loop, deadline)
-                self._ws = ws
-                # the owner's gate right before the first data leaves (after the handshake): a
-                # reload meanwhile (pseudonyms on, the route changed) sends nothing (SPEC 12)
-                if self._local_only() and not ws_target_local(self._target):
-                    raise _SessionRefused("pseudonyms")
-                if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
-                    raise _SessionRefused("reconfigured")
+                ws = await self._open_gated(loop, deadline)
                 if fallback is not None and await loop.run_in_executor(
                     None, prefer_fallback, self._origin()
                 ):
                     session_update, fallback = fallback, None
                     with self._lock:
                         self._update_fallback = "preferred"
-                await self._send_update(ws, session_update)
-                await self._await_session(ws, fallback)
+                if reopen is not None and await loop.run_in_executor(None, prefer_reopen):
+                    session_update, reopen = reopen, None
+                    with self._lock:
+                        self._reopen_how = "preferred"
+                await self._setup(ws, session_update, fallback, reopen, loop, deadline)
         except _KeyUnavailable:
             log.warning("realtime route %s: its key is not available", self.route.name)
             self._fail("key_unavailable")
