@@ -2042,6 +2042,12 @@ class ConversationWorker:
             loop.call_soon_threadsafe(wake.set)
         return future
 
+    def confirming(self) -> bool:
+        """Whether a confirmation question waits for the person's answer (a reaction then
+        waits, SPEC 8, Robot expression). Any thread."""
+        with self._lock:
+            return self._confirm is not None
+
     def reaction_turn(
         self,
         text: str,

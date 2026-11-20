@@ -1,6 +1,13 @@
 """The robot's own reactions, worded by the model (SPEC 8, Robot expression; owner decisions of
 2026-11-20).
 
+The triggers: the listener and the conversation for an addressed utterance not caught
+(``offer_not_heard``), ``media.stopped`` for a station that dropped or failed,
+``attention.target`` for a new look at a shown thing, and ``percept.face`` with the robot's
+sleep and circadian states for a known person who comes back or is there at a wake
+(``ReturnTracker``). A greeting is never started into an open session and carries no profile
+summary: it never recalls an earlier conversation.
+
 Triggers offer a :class:`ReactionRequest` (``offer``: any thread, never waits). The offer is
 refused at once when the reactions or the situation are off, while the robot sleeps, rests or
 the quiet hours run (``dropped_asleep``), while the radio plays (the situation's gesture alone,
@@ -412,8 +419,10 @@ class Expressor:
                 self._gesture(sit)
                 gestured = True
             result = self._turn(request)
-            if result == "busy":
+            if result == "busy":  # a person came first: wait again, never spin
                 waited = True
+                if self.wait(POLL_S) or self._stop.is_set():
+                    return "dropped_busy"
                 continue
             if result == "spoken":
                 self._after_spoken()
@@ -495,8 +504,9 @@ class Expressor:
         return runner.model.state == RESTING or bool(runner.quiet_now())
 
     def idle(self) -> bool:
-        """Whether the conversation is idle and no announcement is being handled."""
-        if not conversation_idle(self.host, self.clock()):
+        """Whether the conversation is idle, no confirmation question waits for its answer and
+        no announcement is being handled."""
+        if not conversation_idle(self.host, self.clock()) or self.worker.confirming():
             return False
         announcer = self.host.announcer
         return announcer is None or not announcer.busy()

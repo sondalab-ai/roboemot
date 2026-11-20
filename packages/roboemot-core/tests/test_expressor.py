@@ -113,6 +113,29 @@ def test_busy_result_requests_the_gesture_once():
     assert rig.host.expression.requests == ["puzzled"]
 
 
+def test_a_worker_that_keeps_refusing_is_waited_on_never_spun():
+    """Regression: the idle check and the worker's refusal could disagree; a refusal then waits
+    a poll before trying again, so the tries stay bounded by the max age."""
+    rig = Rig(answers=("busy",))
+    assert rig.expressor.handle(rig.request("didnt_catch", at=0.0)) == "dropped_busy"
+    max_age = rig.stack.effective().expression.reactions.didnt_catch.max_age_s
+    assert 1 < len(rig.worker.turns) <= max_age / 0.05 + 2
+
+
+def test_a_waiting_confirmation_holds_the_reaction():
+    """A confirmation question waits for the person's yes or no: the reaction waits too."""
+    rig = Rig()
+    rig.worker.confirm = True
+
+    def answered(t):
+        if t >= 2.0:
+            rig.worker.confirm = False
+
+    rig.clock.waits.append(answered)
+    assert rig.expressor.handle(rig.request("didnt_catch", at=0.0)) == "spoken"
+    assert rig.worker.turns[0]["t"] >= 2.0
+
+
 @pytest.mark.parametrize("cause", ["asleep", "resting", "quiet_hours"])
 def test_asleep_or_quiet_hours_while_waiting_drops_it(cause):
     """Review Focus 3: the robot falls asleep with a reaction queued: dropped, nothing said,

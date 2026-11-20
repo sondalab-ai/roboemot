@@ -46,6 +46,7 @@ class FakeWorker:
         self.lines: list[tuple[str, str]] = []
         self.voice = True
         self.session = False
+        self.confirm = False  # a confirmation question waits
         self.busy_until = 0.0
         self.after = 0
         self.on_turn: Any = None  # called with the call's index before it answers
@@ -82,6 +83,9 @@ class FakeWorker:
 
     def in_session(self) -> bool:
         return self.session
+
+    def confirming(self) -> bool:
+        return self.confirm
 
 
 class MediaSpy:
