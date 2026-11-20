@@ -41,16 +41,19 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, get_args
 
 from .. import shutdown
 from ..attention.types import SHOWN, AttentionTarget
 from ..bus import Message
+from ..circadian.model import CircadianState
 from ..config.schema import RoboEmotConfig, Situation, SituationConfig
+from ..conversation.sources import person_name
 from ..diag import EventSink, no_events
 from ..llm.prompt import expression_fallback
 from ..tools.announce import EVENT_PREFIX
+from ..vision.types import FacePercept
 from .ticks import conversation_idle, room_quiet
 
 log = logging.getLogger(__name__)
@@ -101,6 +104,12 @@ OFFLINE_CUES: dict[str, str] = {"didnt_catch": "not_heard", "failed_action": "fa
 # its feeder failed (SPEC 11, Media player)
 MEDIA_STOPPED = "media.stopped"
 ATTENTION_TARGET = "attention.target"
+FACE = "percept.face"
+ROBOT_ASLEEP, ROBOT_AWAKE = "robot.asleep", "robot.awake"
+CIRCADIAN_STATE = "circadian.state"
+# a rest the robot wakes from as from the night (a greeting is due): not a day nap or a hold
+NIGHT_REASONS = ("quiet_hours", "sleepiness")
+Return = Literal["none", "return", "wake"]
 FAILED_STOPS = ("dropped", "error")
 CUE_REASON = "no_route"
 RESTING = "resting"
@@ -109,6 +118,36 @@ POLL_S = 0.05  # how often a wait looks again (the idle room, a future, the spee
 IDLE_POLL_S = 0.5  # how often the idle thread looks at its queue without a signal
 JOIN_TIMEOUT_S = 2.0
 SPACE_BEFORE_MARK = re.compile(r"\s+([!?.,;:])")
+
+
+class ReturnTracker:
+    """When a known person comes back (SPEC 8, Robot expression): per person, the last time
+    they were seen while the robot was awake, and the robot's last wake from sleep or the
+    night. In RAM only (a restart forgets it: the first sighting after one is not a return).
+    No lock of its own: the expressor holds its lock around it."""
+
+    def __init__(self, absence_s: Callable[[], float]) -> None:
+        self.absence_s = absence_s
+        self.last_seen: dict[str, float] = {}
+        self.last_wake: float | None = None
+
+    def woke(self, now: float) -> None:
+        """The robot woke from sleep or the night at ``now``."""
+        self.last_wake = now
+
+    def seen(self, person_id: str, now: float, awake: bool) -> Return:
+        """``person_id`` is in view at ``now``. ``wake``: first seen since the robot woke;
+        ``return``: away at least ``absence_s()`` while the robot was awake; else ``none``.
+        A sighting while the robot is not awake is not recorded and gives ``none``."""
+        if not awake:
+            return "none"
+        prior = self.last_seen.get(person_id)
+        self.last_seen[person_id] = now
+        if self.last_wake is not None and (prior is None or prior < self.last_wake):
+            return "wake"
+        if prior is not None and now - prior >= self.absence_s():
+            return "return"
+        return "none"
 
 
 @dataclass(frozen=True)
@@ -142,8 +181,10 @@ class Expressor:
         asleep: Callable[[], bool],
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
+        registry: Any = None,
     ) -> None:
         self.worker, self.host, self.cfg = worker, host, cfg
+        self.registry = registry  # the person registry: a returning person's name
         self.online, self.asleep, self.clock = online, asleep, clock
         self._stop = threading.Event()
         self.wait = wait if wait is not None else self._stop.wait
@@ -156,16 +197,24 @@ class Expressor:
         self._unsubscribe: list[Callable[[], None]] = []
         self._thread: threading.Thread | None = None
         self._shown_key: str | None = None  # the look at a shown thing now (attention's key)
+        self._returns = ReturnTracker(lambda: self.cfg().expression.reactions.greet_absence_s)
+        self._was_asleep = False  # robot.asleep came: the next robot.awake is a wake
+        self._circadian: tuple[str, str | None] | None = None  # the last state and its reason
 
     # ----------------------------------------------------------------- lifecycle
 
     def attach(self) -> None:
         """Subscribe to the bus topics whose events offer reactions: ``media.stopped`` (a
-        station that failed) and ``attention.target`` (a thing shown)."""
+        station that failed), ``attention.target`` (a thing shown), ``percept.face`` (a known
+        person) and the robot's sleep and circadian states (a wake)."""
         bus = self.host.bus
         self._unsubscribe = [
             bus.subscribe(MEDIA_STOPPED, self._on_media_stopped),
             bus.subscribe(ATTENTION_TARGET, self._on_attention),
+            bus.subscribe(FACE, self._on_face),
+            bus.subscribe(ROBOT_ASLEEP, self._on_asleep),
+            bus.subscribe(ROBOT_AWAKE, self._on_awake),
+            bus.subscribe(CIRCADIAN_STATE, self._on_circadian),
         ]
 
     def start(self) -> None:
@@ -254,6 +303,47 @@ class Expressor:
         )
         self.offer(request)
 
+    def _on_face(self, msg: Message) -> None:
+        """``percept.face`` (vision's thread, every frame): a recognised person in view. Presence
+        is measured from every sighting, not from ``person.recognized``, so a face track that
+        drops and comes back is no return. A return or a wake offers the greeting, keyed by
+        the person (their id is never sent: the name is looked up when it is handled)."""
+        face = msg.payload
+        if not isinstance(face, FacePercept) or not face.owner_id:
+            return
+        awake = not self.resting()  # outside the lock: it takes the runner's
+        now = self.clock()
+        with self._lock:
+            kind = self._returns.seen(face.owner_id, now, awake)
+        if kind == "none":
+            return
+        data = {"wake": "1" if kind == "wake" else ""}
+        self.offer(ReactionRequest(RETURNING, data, now, key=face.owner_id))
+
+    def _on_asleep(self, msg: Message) -> None:
+        """``robot.asleep``: the platform holds the motors off."""
+        with self._lock:
+            self._was_asleep = True
+
+    def _on_awake(self, msg: Message) -> None:
+        """``robot.awake`` after ``robot.asleep`` in this run: a wake (a greeting is due)."""
+        with self._lock:
+            if self._was_asleep:
+                self._was_asleep = False
+                self._returns.woke(self.clock())
+
+    def _on_circadian(self, msg: Message) -> None:
+        """``circadian.state``: leaving a rest of the night (``quiet_hours`` or
+        ``sleepiness``) is a wake; a day nap or a hold is not (the absence rule covers it)."""
+        state = msg.payload
+        if not isinstance(state, CircadianState):
+            return
+        with self._lock:
+            prior, self._circadian = self._circadian, (state.state, state.reason)
+            night = prior is not None and prior[0] == RESTING and prior[1] in NIGHT_REASONS
+            if night and state.state != RESTING:
+                self._returns.woke(self.clock())
+
     def offer_not_heard(self, why: str) -> bool:
         """The listener or the conversation did not hear an addressed utterance (``why``: a
         code, never sent or logged): offer the "did not catch it" reaction, only while a route
@@ -292,7 +382,7 @@ class Expressor:
         """One request, on the expressor's thread (steps 1 to 6 of the module docstring)."""
         reactions = self.cfg().expression.reactions
         sit = reactions.situation(request.situation)
-        outcome = self._handle(request, sit)
+        outcome = self._handle(self._named(request), sit)
         self._outcome(request, outcome)
         return outcome
 
@@ -314,6 +404,8 @@ class Expressor:
                 if self.wait(POLL_S) or self._stop.is_set():
                     return "dropped_busy"
                 continue
+            if request.situation == RETURNING and self.worker.in_session():
+                return "dropped_busy"  # never a greeting into an open session's history
             if not self.online():
                 return self._offline(request)
             if not gestured:
@@ -327,6 +419,19 @@ class Expressor:
                 self._after_spoken()
                 return "spoken"
             return self._offline(request)
+
+    def _named(self, request: ReactionRequest) -> ReactionRequest:
+        """A returning person's request with ``who``: the first word of the confirmed
+        (``active``) record's name, the name the profile summary already sends; "" without
+        one. With ``privacy.pseudonyms_to_cloud`` the whole name, which the cloud route's
+        pseudonym map aliases (it does not catch a first name alone). Looked up here, on the
+        expressor's thread, never on the bus thread; the id itself is never sent."""
+        if request.situation != RETURNING:
+            return request
+        name = person_name(self.registry, request.key) or ""
+        if not self.cfg().privacy.pseudonyms_to_cloud:
+            name = next(iter(name.split()), "")
+        return replace(request, data={**request.data, "who": name})
 
     def _turn(self, request: ReactionRequest) -> str:
         """Start the reaction turn and wait for its result (``no_route`` when it raised or the

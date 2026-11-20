@@ -350,6 +350,7 @@ def start_expressor(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
         stack.effective,
         online=lambda: (rt is not None and rt.up()) or not p.hub.router.offline,
         asleep=lambda: p.sleep.asleep,
+        registry=p.perception.registry,  # a returning person's name (SPEC 6, 8)
     )
     expressor.events = host.events
     cleanup.callback(expressor.close)  # before the conversation it hands turns to

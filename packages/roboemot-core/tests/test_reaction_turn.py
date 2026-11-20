@@ -120,3 +120,42 @@ def test_local_voice_follows_the_built_backend():
         assert rig.worker.local_voice() is False
     finally:
         rig.worker.close()
+
+
+def test_greeting_name_is_aliased_with_pseudonyms(monkeypatch):
+    """SPEC 8 Pseudonyms, 12: with ``privacy.pseudonyms_to_cloud`` the greeting carries the
+    registry's whole name (a first name alone is not caught by the map), and the cloud chat
+    route receives its alias, never the name."""
+    import functools
+    import json
+    from types import SimpleNamespace
+
+    import test_conversation_worker
+    from expressor_rig import Rig as ExpressorRig
+    from roboemot.conversation import ConversationWorker
+    from roboemot.llm.pseudonyms import NameSource
+    from roboemot.runtime.expressor import event_text
+
+    privacy = {"pseudonyms_to_cloud": True}
+    cloud = {"name": "cloud", "base_url": "http://api.example.com/v1", "model": "m1"}
+    source = NameSource(lambda: ["Marcello Barile"])
+    monkeypatch.setattr(
+        test_conversation_worker,
+        "ConversationWorker",
+        functools.partial(ConversationWorker, name_source=source),
+    )
+    reactions = ExpressorRig(app={"privacy": privacy})
+    record = SimpleNamespace(display_name="Marcello Barile", status="active")
+    reactions.expressor.registry = SimpleNamespace(get_person=lambda person_id: record)
+    request = reactions.request("returning_person", {"wake": ""}, key="p1")
+    text = event_text(reactions.expressor._named(request))
+    assert "Marcello Barile" in text
+    rig = audible(test_conversation_worker.build(routes=(cloud,), privacy=privacy))
+    try:
+        fut = rig.worker.reaction_turn(text, "it", timeout_s=5, quiet=lambda: True, profile=False)
+        assert fut.result(5.0) == "spoken"
+        sent = json.dumps([body for _, body in rig.server.requests], ensure_ascii=False)
+        assert "Marcello" not in sent and "Barile" not in sent
+        assert source.peek().to_alias("Marcello Barile") in sent
+    finally:
+        rig.worker.close()
