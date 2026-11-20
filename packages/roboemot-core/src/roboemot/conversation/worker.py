@@ -149,7 +149,7 @@ from ..voice.tts import NO_VOICE, Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import pick
 from .phase import ConversationPhase
-from .transcript import NOT_RECORDED, TranscriptRing
+from .transcript import CLOUD, NOT_RECORDED, ROBOT, TranscriptRing
 
 log = logging.getLogger(__name__)
 
@@ -493,7 +493,10 @@ class ConversationWorker:
         gen = NOT_RECORDED
         if self.transcript is not None:
             _, gen = self.transcript.begin(
-                "user", utterance.text.strip(), utterance.language or cfg.conversation.language
+                "user",
+                utterance.text.strip(),
+                utterance.language or cfg.conversation.language,
+                source=words_source(utterance),
             )
         replaced = []
         with self._lock:
@@ -1563,7 +1566,9 @@ class ConversationWorker:
         if items:
             self._late_items(turn, items)
         if self.transcript is not None and text:
-            self.transcript.add("user", text, utterance.language or turn.language)
+            self.transcript.add(
+                "user", text, utterance.language or turn.language, source=words_source(utterance)
+            )
 
     async def _answer_server(self, st: _ServerTurn) -> None:
         """A turn the server answers on its own (server turns, SPEC 8): its response is already
@@ -2717,6 +2722,14 @@ class ConversationWorker:
                 "first_audio": ms(first_audio),
             }
         return out
+
+
+def words_source(utterance: Utterance) -> str:
+    """Where an utterance's words came from, for the Live transcript (SPEC 12, Live tab; owner
+    decision 2026-11-20): ``CLOUD`` when they are the realtime route's transcript of its audio
+    (its server items are known), else ``ROBOT`` (the robot's own recognizer: Vosk, a local
+    decode after a refusal or a timeout)."""
+    return CLOUD if utterance.realtime is not None else ROBOT
 
 
 def _resolve(future: concurrent.futures.Future[bool], value: bool) -> None:

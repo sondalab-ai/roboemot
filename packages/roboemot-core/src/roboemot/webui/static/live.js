@@ -29,6 +29,7 @@ const LIVE_SECONDS_PER_MINUTE = 60;
 const LIVE_SECONDS_PER_HOUR = 3600;
 const LIVE_MS_PER_S = 1000;
 const LIVE_SCROLL_SLACK_PX = 2; // sub-pixel rounding: a log this close to its end is at the bottom
+const LIVE_WORD_SOURCES = ["robot", "cloud"]; // whose recognizer gave a user turn's words (SPEC 12)
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null, activity: null, resync: 0, reply: { rttMs: 0, receivedMs: 0 } };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
@@ -780,7 +781,9 @@ function liveAudioReset(box) {
 function liveTurnRow(turn) {
   const who = turn.who === "robot" || turn.who === "event" ? turn.who : "user";
   const stamp = when(turn.t * 1000, true);
-  const label = stamp + " " + t("live_transcript_" + who);
+  // a user turn says whose recognizer gave its words: the robot's own, or the cloud's transcript
+  const source = who === "user" && LIVE_WORD_SOURCES.includes(turn.source) ? "_" + turn.source : "";
+  const label = stamp + " " + t("live_transcript_" + who + source);
   const parts = [el("span", { class: "sl-eyebrow" }, label), " ", turn.text];
   if (turn.interrupted) parts.push(" ", badge(t("live_transcript_cut"), "warning"));
   return el("p", { class: "live-turn live-turn--" + who, "data-seq": turn.seq }, parts);

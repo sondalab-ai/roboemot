@@ -41,6 +41,8 @@ const STRINGS = {
   live_transcript_off: "Transcript is off.",
   live_transcript_empty: "Nothing said yet.",
   live_transcript_user: "Heard",
+  live_transcript_user_robot: "Heard (robot)",
+  live_transcript_user_cloud: "Heard (cloud)",
   live_transcript_robot: "Said",
   live_transcript_event: "Event",
   live_transcript_cut: "cut off",
@@ -123,6 +125,19 @@ test("the transcript lists turns oldest first, newest last, with who said it", a
   assert.ok(rows[0].textContent.includes("hello") && rows[0].textContent.includes("Heard"));
   assert.ok(rows[1].textContent.includes("hi there") && rows[1].textContent.includes("Said"));
   assert.ok(rows[0].classList.contains("live-turn--user") && rows[1].classList.contains("live-turn--robot"));
+});
+
+test("a user turn says whose recognizer gave its words: the robot's or the cloud's", async (t) => {
+  const audio = { ...AUDIO, transcript: block([
+    turn(1, "user", "metri semplicità", { source: "robot" }),
+    turn(2, "user", "metti un po' di musica", { source: "cloud" }),
+    turn(3, "user", "ciao", { source: null }),
+    turn(4, "robot", "Ecco.", { source: null }),
+  ]) };
+  const page = await livePage(t, audio);
+  await openLive(page);
+  const labels = turns(page).map((row) => row.querySelector(".sl-eyebrow").textContent.match(/(Heard.*|Said)$/)[1]);
+  assert.deepEqual(labels, ["Heard (robot)", "Heard (cloud)", "Heard", "Said"]);
 });
 
 test("a robot-initiated turn's event is its own kind", async (t) => {

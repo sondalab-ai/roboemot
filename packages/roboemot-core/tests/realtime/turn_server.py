@@ -90,6 +90,10 @@ false). ``strict_cancel`` answers a ``response.cancel`` with no response running
 the cancel, so the order does not depend on how fast the test runs. A hold nobody released
 fails the test when the server closes (``__exit__`` raises): one that ran past ``hold_max_s``
 (the server went on and counted it in ``hold_timeouts``) or one still waiting.
+
+``refuse_connects`` (set after the robot connected) closes that many next connections before
+``session.created`` (a failed connect); ``connect_delay_s`` holds ``session.created`` that long
+(a slow connect).
 """
 
 from __future__ import annotations
@@ -167,6 +171,8 @@ class TurnServer(FakeServer):
     ) -> None:
         super().__init__("normal", **kw)
         assert hold_at in HOLD_POINTS
+        # set by a test once the robot connected: the next connects fail, or are slow
+        self.refuse_connects, self.connect_delay_s = 0, 0.0
         self.hold, self.hold_at, self.hold_max_s = hold, hold_at, hold_max_s
         self.hold_timeouts = 0
         self.holding = 0  # tasks waiting at the hold now
@@ -238,6 +244,12 @@ class TurnServer(FakeServer):
         self._vad_item, self._quiet_ms = None, 0.0  # nor a turn of the old one
         self.session_bursts = 0
         self.open_calls = {}  # a new session holds no call
+        if self.connect_delay_s:  # a slow connect: session.created comes that much later
+            await asyncio.sleep(self.connect_delay_s)
+        if self.refuse_connects > 0:  # the connect fails: closed before session.created
+            self.refuse_connects -= 1
+            await ws.close()
+            return
         await self._send(ws, {"type": "session.created", "session": {}})
         async for frame in ws:
             event = json.loads(frame)
