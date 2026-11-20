@@ -734,7 +734,8 @@ def test_a_slow_reconnect_ends_the_next_burst_at_its_deadline_without_inflated_c
     import time
 
     with TurnServer(heard=[[]]) as server:
-        rig = rig_for(server)
+        # no reserve: the burst waits to its very deadline (the reserve is its own test)
+        rig = rig_for(server, rt={"connect_wait_reserve_s": 0})
         first = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
         server.mode = "no_session"  # the new session never answers its session.update

@@ -255,9 +255,11 @@ def test_an_idle_close_is_no_loss_and_the_next_turn_reconnects(gemini, rigs):
     assert rig.route._resets_in_row == 0 and rig.route._reopen_at == 0.0  # no backoff step
     assert rig.network.realtime.online  # the link never went down
     time.sleep(0.5)
-    assert srv.connections == 1 and not rig.route.connected  # nothing until a turn needs it
+    assert srv.connections == 1 and not rig.route.connected  # nothing until speech or a turn
     srv.idle_close_s = None
-    rig.turn("ciao")  # the turn connects (owner decision 2026-11-12)
+    # the turn connects (owner decision 2026-11-12); speech would connect at its start
+    # (owner decision 2026-11-20: test_realtime_connect_on_speech.py)
+    rig.turn("ciao")
     assert rig.events[-1]["outcome"] == "ok" and rig.chat_hosts() == []
     assert srv.connections == 2 and rig.route.snapshot()["reconnects"] == 1
 

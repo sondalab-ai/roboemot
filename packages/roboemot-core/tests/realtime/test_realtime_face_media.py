@@ -481,25 +481,42 @@ def test_audio_that_can_no_longer_go_at_the_end_is_decoded_not_held(ears):
         assert appended(server) == []
 
 
-def test_a_face_wake_refused_before_it_left_shows_the_not_heard_cue(ears):
+@pytest.mark.parametrize(
+    ("decoded", "addressed"),
+    [("Neve spegni la musica", True), (LYRIC, False)],
+    ids=["name", "lyric"],
+)
+def test_a_face_wake_refused_before_it_left_is_decoded_for_the_wake_word(ears, decoded, addressed):
+    """Owner decision 2026-11-20 (no utterance is lost): a face wake whose audio was refused
+    before it left (its session never came, asleep, the budget) is decoded from its buffer, and
+    over the radio only the name addresses it then; its audio is not offered a second time."""
     from roboemot.realtime.input import InputJob
 
     with TurnServer() as server:
-        ear = radio_ear(ears, server)
+        ear = radio_ear(ears, server, decoded=decoded)
         on_radio(ear)
+        seen = events(ear)
         cues: list[str] = []
         ear.r.listener._on_audio = lambda event, key: cues.append(event)
 
         def refused(samples, rate_hz, **kw):
             job = InputJob(samples, rate_hz)
-            job._end(refused="asleep")
+            job._end(refused="no_session")
             return job
 
         ear.input.submit = refused
         ear.say()
-        assert ear.settle(lambda: "not_heard" in cues)
-        assert ear.utterances == [] and ear.r.asr.decodes == 0
-        assert ear.r.listener.snapshot()["realtime_audio"]["face_wake_unheard"] == 1
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.text == decoded and u.addressed is addressed and u.realtime is None
+        # its audio is never offered again; the person looked at the robot, so a decode with
+        # no name ends with the did-not-get-it cue (review of PR 291)
+        assert cues == ["sent", "unsent" if addressed else "not_heard"]
+        assert ear.r.asr.decodes == 1
+        audio = ear.r.listener.snapshot()["realtime_audio"]
+        assert audio["face_wake_unsent"] == 1 and audio["face_wake_unheard"] == 0
+        if not addressed:  # over the radio without the name: the local media rule
+            assert ("unanswered", "media") in [(k, r) for k, r, _ in seen]
         assert appended(server) == []
 
 

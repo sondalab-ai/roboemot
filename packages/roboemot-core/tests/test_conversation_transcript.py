@@ -40,6 +40,15 @@ def test_a_turn_is_kept_user_first_then_one_robot_turn_with_all_sentences(rigs):
     assert languages == {"it"}
 
 
+def test_local_words_are_marked_as_the_robots(rigs):  # noqa: F811
+    """SPEC 12, Live tab: words with no server items are the robot's own recognizer's (the
+    cloud's come with the realtime route's transcript: test_realtime_connect_on_speech.py)."""
+    rig = with_ring(rigs)
+    rig.turn("ciao")
+    sources = [(t["who"], t["source"]) for t in rig.worker.transcript.snapshot()["turns"]]
+    assert sources[0] == ("user", "robot") and all(s is None for _, s in sources[1:])
+
+
 def test_the_utterance_language_is_kept(rigs):  # noqa: F811
     rig = with_ring(rigs)
     rig.turn("hello", language="en")

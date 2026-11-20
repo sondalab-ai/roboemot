@@ -1,9 +1,12 @@
 """The live transcript: recent turns of the conversation for the web UI's Live tab (SPEC 11A, 12).
 
-An in-memory ring of ``{seq, t, who, text, language, interrupted}``, filled by the conversation
-worker (the user's final utterance, the robot's sentences as they are queued to play) and read by
-the Live tab behind the PIN. Opt-in (``webui.live.transcript``, with the Live tab itself on): while
-either is off ``add`` keeps nothing at all, and turning it off clears what was kept. Bounded by
+An in-memory ring of ``{seq, t, who, text, language, interrupted, source}``, filled by the
+conversation worker (the user's final utterance, the robot's sentences as they are queued to play)
+and read by the Live tab behind the PIN. ``source`` says where a user turn's words came from (SPEC
+12, Live tab; owner decision 2026-11-20): ``robot`` (the robot's own recognizer) or ``cloud`` (the
+realtime route's transcript of its audio); None for the robot's and an event's turns. Opt-in
+(``webui.live.transcript``, with the Live tab itself on): while either is off ``add`` keeps
+nothing at all, and turning it off clears what was kept. Bounded by
 count, age and text length, all from the configuration. Never persisted, logged, repr-ed or put in
 a debug report: this module has no logger and no ``__repr__`` that shows a turn. It is per robot,
 not per login session.
@@ -21,6 +24,8 @@ from typing import Any
 
 from roboemot.config.schema import LiveConfig
 
+# where a user turn's words came from: the robot's own recognizer, or the cloud's transcript
+ROBOT, CLOUD = "robot", "cloud"
 NOT_RECORDED = -1  # the generation of an utterance that was never recorded: its reply never is
 EPOCH_BYTES = 4  # random bytes naming one life of the ring (a restart gives the page a new one)
 
@@ -35,6 +40,7 @@ class _Turn:
     language: str
     interrupted: bool = False
     rev: int = 0  # the ring's revision when this turn was last added to or changed
+    source: str | None = None  # a user turn's: ROBOT or CLOUD
 
 
 class TranscriptRing:
@@ -104,12 +110,15 @@ class TranscriptRing:
             with self._lock:
                 self._trim_locked(self._clock())
 
-    def begin(self, who: str, text: str, language: str) -> tuple[int | None, int]:
+    def begin(
+        self, who: str, text: str, language: str, *, source: str | None = None
+    ) -> tuple[int | None, int]:
         """Record the user's turn and return ``(seq, generation)`` atomically. The reply to it
         passes the generation to ``add``: a clear in between makes the ring refuse it.
-        ``NOT_RECORDED`` as the generation when nothing was kept."""
+        ``NOT_RECORDED`` as the generation when nothing was kept. ``source``: where its words
+        came from (``ROBOT`` or ``CLOUD``)."""
         with self._lock:
-            seq = self._add_locked(who, text, language, False)
+            seq = self._add_locked(who, text, language, False, source)
             return seq, (self._clears if seq is not None else NOT_RECORDED)
 
     def current(self) -> int:
@@ -126,6 +135,7 @@ class TranscriptRing:
         *,
         interrupted: bool = False,
         generation: int | None = None,
+        source: str | None = None,
     ) -> int | None:
         """Keep one turn; returns its ``seq``, or None while the transcript is off or asleep,
         ``text`` is empty, or ``generation`` is not the current one (a clear came after the
@@ -135,9 +145,11 @@ class TranscriptRing:
         with self._lock:
             if generation is not None and generation != self._clears:
                 return None
-            return self._add_locked(who, text, language, interrupted)
+            return self._add_locked(who, text, language, interrupted, source)
 
-    def _add_locked(self, who: str, text: str, language: str, interrupted: bool) -> int | None:
+    def _add_locked(
+        self, who: str, text: str, language: str, interrupted: bool, source: str | None = None
+    ) -> int | None:
         if not self._enabled or self._asleep or not text:
             return None
         now = self._clock()
@@ -153,6 +165,7 @@ class TranscriptRing:
                 language,
                 interrupted,
                 self._rev,
+                source,
             )
         )
         self._trim_locked(now)
@@ -213,6 +226,7 @@ class TranscriptRing:
                     "text": t.text,
                     "language": t.language,
                     "interrupted": t.interrupted,
+                    "source": t.source,
                 }
                 for t in kept
             ]

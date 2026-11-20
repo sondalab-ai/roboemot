@@ -31,9 +31,21 @@ def test_a_turn_has_the_documented_shape_and_newest_is_last():
     turns = r.snapshot(0)["turns"]
     assert [t["seq"] for t in turns] == [a, b] and a < b
     assert turns[0] == {
-        "seq": a, "t": 6000.0, "who": "user", "text": "ciao", "language": "it", "interrupted": False
+        "seq": a, "t": 6000.0, "who": "user", "text": "ciao", "language": "it",
+        "interrupted": False, "source": None,
     }  # fmt: skip
     assert turns[1]["who"] == "robot"
+
+
+def test_a_user_turn_keeps_whose_recognizer_gave_its_words():
+    """SPEC 12, Live tab (owner decision 2026-11-20): the robot's own recognizer, or the cloud's
+    transcript; a robot turn has none."""
+    r, _ = ring()
+    r.begin("user", "metti un po' di musica", "it", source="cloud")
+    r.add("user", "metri semplicità", "it", source="robot")
+    r.add("robot", "Ecco.", "it")
+    sources = [(t["who"], t["source"]) for t in r.snapshot(0)["turns"]]
+    assert sources == [("user", "cloud"), ("user", "robot"), ("robot", None)]
 
 
 def test_the_count_bound_drops_the_oldest():

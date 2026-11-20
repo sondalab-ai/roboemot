@@ -69,7 +69,9 @@ input) and reconnects it in the background; the next turn replays what the new s
 marked interrupted, so its turn asks nothing more. Gemini closes a session idle for about two
 minutes (code 1008, no ``goAway``; S3 run 2026-11-12): a 1008 close of a session at least
 ``idle_close_min_age_s`` old with nothing running on it is no loss (no backoff step, the link
-stays up) and reconnects at the next turn (owner decision 2026-11-12); any other close is a loss.
+stays up) and reconnects on demand (owner decision 2026-11-12): at the next speech start
+(``connect_on_speech``, owner decision 2026-11-20), else at the next turn; any other close is a
+loss.
 ``refusals_to_report`` connects in a row refused with 1008 report ``server_refused`` (the
 backoff goes on). A Gemini setup without the turn's tools is never sent (``setup_unready``).
 A Gemini setup carries the transcription language's ``languageCodes``
@@ -82,6 +84,15 @@ remember the route, model and code, and later connects leave the codes out
 Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
 12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
 session lost (its close reason) and a server error (its code only, never its message).
+
+Connect on speech (SPEC 8, Realtime speech route; owner decision 2026-11-20): a session the
+route reopens only on demand (closed at a conversation's end, or by Gemini's idle close) would
+be reopened by the turn, after the utterance ended, so its audio could not go. The audio input
+calls ``connect_on_speech`` when speech starts: the connect a turn's ``ready`` makes starts now
+on a thread of its own (counted ``connects_on_speech``), and ``pending_connect`` says it is in
+flight, so the utterance's audio waits for it within its deadline. Only from those two closes
+(the state's reason and the last close's), never from a backoff, a refusal or any other close,
+and one at a time.
 """
 
 from __future__ import annotations
@@ -156,6 +167,8 @@ CANCELS_KEPT = 32  # cancel event ids remembered, to tell an error about one (S2
 ESTIMATES_KEPT = 64  # responses whose charged estimate a late usage report corrects (Gemini)
 RESPONSE_CANCELLED = "cancelled"  # the response.done status of a cancelled response
 IDLE_CLOSE = "idle_close"  # a Gemini session its server closed while nothing ran on it
+# the closes a speech start may reopen (``connect_on_speech``): those a turn reopens on demand
+ON_DEMAND_CLOSES = ("conversation_end", IDLE_CLOSE)
 SERVER_REFUSED = "server_refused"  # refusals_to_report connects in a row refused with 1008
 SETUP_UNREADY = "setup_unready"  # a Gemini setup without the turn's tools: not connected
 # the server's refusal of a cancel with no response active (benign: it ended or the server's
@@ -467,6 +480,7 @@ class RealtimeRoute:
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
         self._outputs: set[str] = set()  # event ids of the settling tool results on this session
         self._reopens = 0  # reconnects a reset started that have not returned yet
+        self._speech_connects = 0  # connects a speech start began that have not returned yet
         self.last_reset: tuple[str, float] | None = None  # (reason, clock) of the last reset
         self._reopen_after: str | None = None  # a reset or loss the next session follows
         self._retrying = False  # the background reconnect worker runs (one at a time)
@@ -1277,9 +1291,72 @@ class RealtimeRoute:
                 self._reopens -= 1
 
     def opening(self) -> bool:
-        """A reset's reconnect, or any connect, is in flight: a session may come soon."""
+        """A reset's reconnect, a speech start's connect, or any connect, is in flight: a
+        session may come soon."""
         with self._lock:
-            return self._reopens > 0 or self._connecting is not None
+            return self._in_flight()
+
+    def pending_connect(self) -> str | None:
+        """The connect an utterance's audio may wait for (SPEC 8, Connect on speech):
+        ``reopening`` while a reset's reconnect is in flight, ``connecting`` while a speech
+        start's is, else None. Any other connect (the background retry after a loss or a
+        refusal, a turn's own ``ready``) is not waited for: the local recognizer hears the
+        utterance as before."""
+        with self._lock:
+            if self._reopens > 0:
+                return "reopening"
+            return "connecting" if self._speech_connects > 0 else None
+
+    def _in_flight(self) -> bool:
+        """(``_lock`` held.) A connect is in flight, or a thread is about to make one."""
+        return self._reopens > 0 or self._speech_connects > 0 or self._connecting is not None
+
+    def connect_on_speech(self) -> bool:
+        """Speech starts and the audio input would send it but for the session (SPEC 8,
+        Realtime speech route; owner decision 2026-11-20): when the route waits for a turn to
+        reopen it (closed at a conversation's end or by Gemini's idle close,
+        ``ON_DEMAND_CLOSES``), start that turn's connect now, off the caller's thread (never
+        blocks). Not with ``input: text``, nor when the route is blocked (the opt-in off, the
+        budget, ...), shut down, held by a backoff, or closed for any
+        other reason (asleep, the budget, a reload); not from ``fallback_local`` (a loss, a
+        refusal, ``server_refused``, ``setup_unready``: the reconnect worker and its backoff own
+        it); not while any connect is in flight (one at a time). True when it started one. The
+        connect is ``ready``'s, with the close count read here: a close after this call (sleep,
+        shutdown) means no session."""
+        cfg = self.stack.effective()  # never under _lock
+        if cfg.voice.realtime_route.input != "audio":
+            return False  # text input: the turn's own connect is soon enough (no audio waits)
+        if self.blocked(cfg, self._extra_ok) is not None:
+            return False
+        with self._lock:
+            client = self._client
+            if self._closed or (client is not None and client.state == "connected"):
+                return False
+            if self._in_flight() or self.clock() < self._reopen_at:
+                return False
+            # both: the state's reason (a later detach, reconfigured, rewrites only it) and the
+            # last close's (a close of a session already closed, asleep, rewrites only that)
+            if self.state != "closed" or self.reason not in ON_DEMAND_CLOSES:
+                return False
+            if self._close_reason not in ON_DEMAND_CLOSES:
+                return False
+            self._speech_connects += 1
+            self._counts["connects_on_speech"] += 1
+            closes = self._closes
+        threading.Thread(
+            target=self._speech_connect, args=(closes,), name="realtime-connect", daemon=True
+        ).start()
+        return True
+
+    def _speech_connect(self, closes: int) -> None:
+        """A speech start's connect (its own thread): ``ready`` with the close count it saw."""
+        try:
+            self.ready(closes=closes)
+        except Exception as exc:
+            log.warning("realtime route: connect on speech: %s", type(exc).__name__)
+        finally:
+            with self._lock:
+                self._speech_connects -= 1
 
     def _streak_loss(self) -> None:
         """A stored session was lost: one more step of the reset streak (``_reopen_at``)."""
@@ -1576,7 +1653,8 @@ class RealtimeRoute:
         no turn holding the input (a tool round sends several requests), no burst waiting for
         its turn, nothing the server may still answer on its own (``busy``'s checks). It is
         detached and closed: not a loss (no backoff step, the link stays up); the next one
-        opens in the background (``reconnect``) or at the next turn, and the worker replays the
+        opens in the background (``reconnect``) or on demand (the next speech start or turn),
+        and the worker replays the
         history it lacks. False when it is busy or not the current session (nothing done)."""
         rt = self.stack.effective().voice.realtime_route
         sink = self.input
@@ -1911,7 +1989,7 @@ class RealtimeRoute:
         counts in the reset streak (``streak_delay``): a server that accepts sessions and drops
         them, never answering, is reconnected ever more slowly. A session that lived
         ``probe_max_s`` or more starts a new streak. A Gemini idle close (``_idle``) is no
-        loss: the next turn reconnects."""
+        loss: the next speech start (``connect_on_speech``) or turn reconnects."""
         with self._lock:
             age = self.clock() - self._opened_at
             current = self._current(token)
@@ -2505,7 +2583,13 @@ COUNTERS = (
     "usage_repeats",  # ... naming only responses already reported: not charged again
     "go_aways",  # the server said it would close the session (Gemini goAway)
     "go_away_reconnects",  # ... closed once idle, reconnected in the background
-    "idle_closes",  # Gemini closed an idle session (no loss): the next turn reconnects
+    "idle_closes",  # Gemini closed an idle session (no loss): reconnected on demand
+    # connects a speech start began on a session reopened on demand (connect_on_speech)
+    "connects_on_speech",
+    "audio_connect_wait",  # bursts that waited for a speech start's connect
+    # bursts that waited for a session that failed or came within connect_wait_reserve_s of
+    # their deadline: decoded locally, and answered
+    "audio_connect_fallbacks",
     "setup_unready",  # a Gemini setup without the turn's tools: not sent, retried
     "transcripts",
     "transcript_timeouts",

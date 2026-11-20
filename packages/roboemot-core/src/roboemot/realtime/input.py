@@ -31,6 +31,18 @@ resets the session (``RealtimeRoute.reset_session``), so its late items are stal
 reach the next burst; the next burst waits for the new session while the reset's reconnect is
 in flight (``audio_reopen_wait``), within its listener deadline, else it is decoded locally.
 
+Connect on speech (SPEC 8, owner decision 2026-11-20): a session the route reopens only on
+demand (a conversation's end, Gemini's idle close) is reopened when speech starts
+(``speech_started``, the route's ``connect_on_speech``), and ``wants`` counts that connect, or a
+reset's reconnect, as a session (``RealtimeRoute.pending_connect``; never the retry after a loss
+or a refusal): a burst submitted meanwhile waits for it the same way (``audio_connect_wait``,
+``audio_reopen_wait``) while more than ``connect_wait_reserve_s`` of its listener deadline is
+left, so the server's transcript still has time. A connect that fails, or a session that comes
+with less than that left, refuses it (``late_session``, counted ``audio_connect_fallbacks``) and
+the listener decodes it locally: its words come from the robot's recognizer and it is answered.
+What goes is what would have gone with the session open: every other check of the send gate is
+unchanged.
+
 A server that leaves ``item_id`` out still gives its text (the items are matched in order), but
 such items cannot be deleted: they are counted (``audio_items_unnamed``,
 ``audio_items_undeletable``). While a cancelled burst's id-less item may still come, an id-less
@@ -112,6 +124,16 @@ MS_PER_S = 1000.0
 JOIN_S = 2.0
 HOLD_POLL_S = 0.05  # how often a held burst looks again (a realtime turn, a reconnect)
 ANON = "anon"  # the key of an item the server sent without an id: (ANON, n)
+# what a burst waits for instead of being refused, and the counter of each wait (once a burst)
+WAITS = {
+    "turn": "audio_held",  # a realtime turn in flight
+    "reopening": "audio_reopen_wait",  # the reconnect of a reset this input made
+    "connecting": "audio_connect_wait",  # a speech start's connect (SPEC 8, Connect on speech)
+}
+SESSION_WAITS = frozenset({"reopening", "connecting"})  # the waits for a session to come up
+# the refusal of a burst whose session came, or would come, with less than
+# connect_wait_reserve_s of its deadline left: decoded locally, and answered
+LATE_SESSION = "late_session"
 
 Key = str | tuple[str, int]
 
@@ -190,6 +212,12 @@ class InputJob:
         if self.deadline is None or self._clock is None:
             return False
         return self._clock() >= self.deadline
+
+    def left_s(self) -> float:
+        """Seconds left before its listener deadline (infinite without one)."""
+        if self.deadline is None or self._clock is None:
+            return math.inf
+        return self.deadline - self._clock()
 
     def wait(self, timeout_s: float) -> bool:
         return self._done.wait(timeout_s)
@@ -365,8 +393,17 @@ class RealtimeInput:
 
     def wants(self, cfg: RoboEmotConfig) -> bool:
         """Whether an addressed utterance's audio would go now (cheap, any thread: no network
-        and no lock held across it): audio input with its opt-in and gate, the robot awake, a
-        session open and upload budget left. The route's send gate decides for real."""
+        and no lock held across it): ``would_want``, and a session open or a connect a burst
+        waits for (``RealtimeRoute.pending_connect``: a speech start's or a reset's, within its
+        deadline less ``connect_wait_reserve_s``; never the retry after a loss or a refusal).
+        The route's send gate decides for real."""
+        if not self.would_want(cfg):
+            return False
+        return self.route.connected or self.route.pending_connect() is not None
+
+    def would_want(self, cfg: RoboEmotConfig) -> bool:
+        """``wants`` but for the session: audio input with its opt-in and gate, robot turns,
+        the robot awake and upload budget left (cheap, any thread)."""
         rt = cfg.voice.realtime_route
         return (
             rt.enabled
@@ -375,9 +412,19 @@ class RealtimeInput:
             and rt.audio_gate in (GATE, STREAM_GATE)  # robot turns (a fallback included)
             and cfg.privacy.realtime_audio
             and not self._asleep()
-            and self.route.connected
             and self.route.upload_left_s(cfg) > 0
         )
+
+    def speech_started(self, cfg: RoboEmotConfig) -> bool:
+        """Speech starts (or an utterance is about to be decided) with no session open (SPEC 8,
+        Realtime speech route; owner decision 2026-11-20): when its audio would go but for the
+        session (``would_want``), the route starts the connect a turn would make
+        (``RealtimeRoute.connect_on_speech``: only from a close it reopens on demand, one at a
+        time), so the session is usually up by the utterance's end. Never blocks. True when a
+        connect started now."""
+        if self.route.connected or not self.would_want(cfg):
+            return False
+        return bool(self.route.connect_on_speech())
 
     def stream_refusal(self, cfg: RoboEmotConfig, *, playback: bool = False) -> str | None:
         """Why a speech segment that starts now cannot stream (``turns: server``; cheap, any
@@ -603,9 +650,18 @@ class RealtimeInput:
                 self._burst = burst  # before the send: its first event may come at once
 
         waited: set[str] = set()
+        expired = False
         while True:
-            if self._reopening and not self.route.connected and self.route.opening():
-                why: str | None = "reopening"  # this input's reset reconnects: not a refusal
+            pending = None if self.route.connected else self.route.pending_connect()
+            session_wait = pending is not None or bool(waited & SESSION_WAITS)
+            if session_wait and job.left_s() < rt.connect_wait_reserve_s:
+                # the session came (or would come) with too little time left for the server's
+                # transcript: the robot's own recognizer gives the words, so it is answered
+                why: str | None = LATE_SESSION
+            elif pending is not None:
+                # a reset's reconnect or a speech start's connect is in flight: not a
+                # refusal, the burst waits for it within its deadline
+                why = pending
             else:
                 # built at each attempt, after any wait: a burst held behind a turn sees the
                 # state that turn left (a server answering the commit reads only these)
@@ -613,19 +669,25 @@ class RealtimeInput:
                 why = self.route.send_audio(
                     pcm, gate=GATE, instructions=instructions, hold=hold, track=track
                 )
-            if why not in ("turn", "reopening"):
+            if why not in WAITS:
                 break
             if why not in waited:  # counted once per burst, however long the wait
                 waited.add(why)
                 if why == "turn":
                     with self._lock:
                         self.held += 1
-                self.route.count("audio_held" if why == "turn" else "audio_reopen_wait")
+                self.route.count(WAITS[why])
             if job.wait(HOLD_POLL_S) or self._closed or job.expired():
+                expired = job.expired() and not job.done
                 why = "cancelled"
                 break
         self._reopening = False  # only the first burst after a reset waits for the new session
         if why is not None:
+            # it waited for a session that failed, came too late or not in time: the listener
+            # decodes it locally (a listener's own cancel is not counted)
+            late = why in (LATE_SESSION, "no_session") or expired
+            if (waited & SESSION_WAITS or why == LATE_SESSION) and late:
+                self.route.count("audio_connect_fallbacks")
             job._end(refused=why)
             return
         # one burst at a time: the next waits until this one is over (the listener cancels it
