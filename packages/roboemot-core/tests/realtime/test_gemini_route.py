@@ -484,6 +484,7 @@ def radio_face_ear(rig):
     the stop reasons the listener asked the player for."""
     ear = Ear(rig, script=["ragazzi dopo musica"], bearing=FACE_RAD, yaw=0.0, to_worker=True)
     stops: list[str] = []
+    ear.r.listener.direction_over_media = True
     ear.r.listener.media_audible = lambda at: True
     ear.r.listener.media_set = lambda: True
     ear.r.listener.media_stop = stops.append

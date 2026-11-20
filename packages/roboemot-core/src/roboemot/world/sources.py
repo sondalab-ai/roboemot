@@ -37,6 +37,12 @@ class WorldSource(Protocol):
     """Mandatory member, value may be None. The host sets it before ``start`` to "is the robot
     speaking at this stamp", so a source does not turn towards the robot's own voice. Every
     implementation declares it; None means the source does not use it (or not set yet)."""
+    direction_speaking: Callable[[float], bool] | None
+    """Mandatory member, value may be None. The host sets it only on a robot whose manifest
+    declares hardware echo cancellation, to "is the robot sounding at this stamp, its media
+    aside" (``SpeechActivity.sounding_except_media``). While ``speaking`` holds but this does
+    not (only the radio plays), a sound-direction source may still read, and marks its
+    observation ``listener_only`` (SPEC 8, Radio playback). None: it never reads then."""
 
     def start(self, sink: ObservationSink) -> None:
         """Begin producing; ``sink`` may be called from the source's own thread."""

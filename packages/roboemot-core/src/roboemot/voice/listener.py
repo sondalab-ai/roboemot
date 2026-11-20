@@ -117,16 +117,19 @@ without the name. A local rejection (``rejected_media``) never reaches this rule
 A face over the radio (owner decision 2026-11-20, ``tools.radio.face_addresses``): when the switch
 is on, the policy does not require the wake word (``never``, or ``unless_enrolled_in_view`` with an
 enrolled person in view; under ``always`` Vosk listens for the name as before), the voice-at-face
-check is on and the utterance's audio can go to a realtime route with robot turns
+check is on and reads a real sound direction over the radio (``direction_over_media``: the host
+sets it from the manifest's hardware echo cancellation, whose readings over the radio reach only
+this check) and the utterance's audio can go to a realtime route with robot turns
 (``_wants_audio``), an utterance that starts while the radio is audible skips the local speech
 check (``_face_media_at``: no Vosk, no grammar pass, no local decode; counted ``vosk_skipped``) and
-the voice-at-face check alone decides at its end (``_face_media_end``): passed, the wake gate's
-``face_media``, its audio goes as a media wake the server's words must confirm (counted
-``face_wake_media``, the Live tab's ``media``/``face_wake``), held as a wake, and the rules above
-decide it (answered with the name, the radio stopped by a stop with a media word, else dropped);
-failed, ``rejected_media`` with no words and nothing sent. A face wake whose server final never
-comes is dropped, never decoded (``face_wake_unheard``). With server turns no burst can go, so the
-``media`` gate's local path stays as it is.
+the voice-at-face check alone decides at its end (``_face_media_end``), on direction readings only
+(a degraded check, or audio that can no longer go, decodes the buffer for the wake word instead):
+passed, the wake gate's ``face_media``, its audio goes as a media wake the server's words must
+confirm (counted ``face_wake_media``, the Live tab's ``media``/``face_wake``), held as a wake, and
+the rules above decide it (answered with the name, the radio stopped by a stop with a media word,
+else dropped); failed, ``rejected_media`` with no words and nothing sent. A face wake whose server
+final never comes is dropped, never decoded (``face_wake_unheard``). With server turns no burst can
+go, so the ``media`` gate's local path stays as it is.
 Otherwise a wake in a follow-up window or a reply window (the radio held) needs no
 confirmation. With ``tools.radio.dance`` off the
 music detector ignores the radio while it is audible: its chunks are holes to it, and
@@ -174,7 +177,7 @@ from ..diag import EventSink, no_events
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .decode_worker import DecodeJob, DecodeWorker
-from .direction import VoiceDirection
+from .direction import HEARD, VoiceDirection
 from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
 from .keywords import holds_any
@@ -388,6 +391,10 @@ class VoiceListener:
         # player's duck (``duck_from`` and ``release_from``; the player applies the guard)
         self.media_speech_start: Callable[[float], None] = lambda at: None
         self.media_speech_end: Callable[[float], None] = lambda at: None
+        # whether the voice direction is read over the robot's own radio for the voice-at-face
+        # check (a hardware echo canceller; the host sets it from the manifest): without it the
+        # face rule over the radio cannot pass, so the local check runs (SPEC 8, Radio playback)
+        self.direction_over_media = False
         # the radio's pieces as they play (``hear_media``, the player's thread), taken by this
         # thread only; sized in apply_config to the detector's window
         self._media_pieces: collections.deque[tuple[np.ndarray, float]] = collections.deque()
@@ -1405,10 +1412,15 @@ class VoiceListener:
         switch on, a policy that does not require the wake word now (``never``, or
         ``unless_enrolled_in_view`` with an enrolled person in view), the radio audible, the
         check on and the utterance's audio able to go to a realtime route with robot turns,
-        whose transcript then confirms it. It skips the local
+        whose transcript then confirms it, and a live sound direction over the radio
+        (``direction_over_media``: the robot reads it behind a hardware echo canceller; else the
+        check could only take a degraded path, never trusted here). It skips the local
         recognizer, its grammar pass and any local decode (CPU)."""
         if not self._cfg.tools.radio.face_addresses or self._at_face() is None:
             return False
+        d = self._direction
+        if not (self.direction_over_media and d is not None and d.doa_available):
+            return False  # no reading over the radio: Vosk listens for the name as today
         if self._gate.policy_requires(self._enrolled(start)):
             return False  # the policy needs the wake word: Vosk listens for it as today
         return self._media_at(start) and self._wants_audio()
@@ -1519,35 +1531,54 @@ class VoiceListener:
 
     def _face_media_end(self, ev: SpeechEnd) -> None:
         """An utterance that started over the audible radio with the face rule on ended
-        (``_face_media_at``): no local words. The wake gate decides with the voice-at-face
-        check: ``face_media`` sends its audio as a wake the server's transcript must confirm
-        (``_finish``); ``rejected_media`` drops it, nothing sent, no words. Should the radio no
-        longer count at its start (a hold back-dated to it), the gate's normal rules decide and
-        an addressed one goes as any utterance that skipped Vosk; nothing is decoded locally."""
+        (``_face_media_at``): no local words yet. When the radio still counts at its start, the
+        voice-at-face check ran on direction readings (``HEARD``, never a degraded path) and
+        its audio can still go (``_wants_audio``), the wake gate decides: ``face_media`` sends
+        it as a wake the server's transcript must confirm (``_finish``); a voice the readings
+        put at no face (or a face looking away) is ``rejected_media``, nothing sent, no words.
+        Anything else (a degraded check, the audio no longer able to go, the radio no longer
+        counting at its start) is decoded from its buffer for the wake word, as
+        ``_send_unheard`` does with a reject, and decided on those words (``_deliver``)."""
         face = self._face()
-        p = self._handoff_for(ev, face)
+        d = self._direction
+        heard = d is not None and d.last_path == HEARD
         start = ev.start_stamp
-        outcome = self._gate.outcome(
-            wake_word=False,
-            enrolled_in_view=self._enrolled(start),
-            start=start,
-            last_speech=ev.last_speech_stamp,
-            speaker=self._speaker(),
-            at_face=None if face is None else (lambda: face),
-            face_media=self._realtime is not None,
-        )
-        p.addressed = not outcome.startswith("rejected")
-        self._decided(p, outcome, "", wordless=True)
-        if not p.addressed or self._realtime is None:
-            self._set_active(self._recording or bool(self._queue))
+        if heard and self._media_at(start) and self._wants_audio() and self._realtime:
+            p = self._handoff_for(ev, face)
+            outcome = self._gate.outcome(
+                wake_word=False,
+                enrolled_in_view=self._enrolled(start),
+                start=start,
+                last_speech=ev.last_speech_stamp,
+                speaker=self._speaker(),
+                at_face=None if face is None else (lambda: face),
+                face_media=True,
+            )
+            if outcome == "face_media":
+                p.addressed = p.media = p.media_wake = p.face_wake = True
+                self._decided(p, outcome, "")  # its CPU fallback
+                self._hold_media(ev.last_speech_stamp)  # its turn holds the radio, as a wake's
+                self._count_audio("face_wake_media")
+                self.events("media", FACE_WAKE)
+                self._note_wake(p, outcome)
+                self._send(p)  # no wake word: its burst does not say the conversation is open
+                self._queue.append(p)
+                self.poll_handoff()
+                return
+            if outcome == "rejected_media":
+                p.addressed = False
+                self._decided(p, outcome, "", wordless=True)
+                self._set_active(self._recording or bool(self._queue))
+                return
+            # the policy changed meanwhile: the gate decided already, so decode, not re-decide
+            p.addressed = not outcome.startswith("rejected")
+            self._note_wake(p, outcome)
+            self._decode(p)
+            self._queue.append(p)
+            self.poll_handoff()
             return
-        if outcome == "face_media":
-            p.media = p.media_wake = p.face_wake = True
-            self._hold_media(ev.last_speech_stamp)  # its turn holds the radio, as a wake's
-            self._count_audio("face_wake_media")
-            self.events("media", FACE_WAKE)
-        self._note_wake(p, outcome)
-        self._send(p)  # no wake word: its burst does not say the conversation is open
+        p = self._handoff_for(ev, face)
+        self._decode(p, wake=True)
         self._queue.append(p)
         self.poll_handoff()
 
@@ -1962,7 +1993,9 @@ class VoiceListener:
             if self._media_wake is p:
                 self._gate.close_window()
                 self._media_wake = None
-            self._audio_event(AUDIO_UNSENT, p)  # the listening cue ends, no other cue
+            # refused before it left: the person looked at the robot, so the did-not-get-it
+            # cue shows; one that left and got no transcript ends its listening cue silently
+            self._audio_event(AUDIO_UNSENT if job.sent else AUDIO_NOT_HEARD, p)
             self._cancel_job(job)
             return None
         if p.stream and job.answered:

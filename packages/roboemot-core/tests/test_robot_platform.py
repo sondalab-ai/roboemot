@@ -79,7 +79,7 @@ class DeskSpeaker:
 
 
 class DeskBearing:
-    def get(self, now, max_age_s):
+    def get(self, now, max_age_s, *, listener=False):
         return None
 
     def close(self) -> None: ...

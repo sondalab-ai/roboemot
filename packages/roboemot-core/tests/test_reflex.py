@@ -639,6 +639,18 @@ def test_other_observation_sources_do_not_trigger_the_voice_reflex():
     assert rig.stats("v")["fired"] == 0
 
 
+def test_a_reading_taken_over_the_radio_never_turns_the_head():
+    """SPEC 8, Radio playback (2026-11-20): a bearing read while only the robot's own radio
+    played (``listener_only``) is the voice-at-face check's alone; the reflex keeps today's
+    behaviour, which read nothing then."""
+    rig = Rig(cfg_with(VOICE))
+    rig.tick(3)
+    obs = Observation("unknown", rig.t, "doa", 0.4, 0.0, confidence=0.5, listener_only=True)
+    rig.bus.publish("percept.entity", obs, rig.t, joint_state={YAW: 0.0})
+    rig.run(1.0)
+    assert rig.stats("v")["fired"] == 0
+
+
 def test_the_global_amplitude_cap_limits_every_rule():
     rig = Rig(cfg_with(rule(amplitude_deg=40), max_amplitude_deg=5))
     rig.settle_audio()

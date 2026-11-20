@@ -51,7 +51,8 @@ It is refused (nothing queued) behind speech the speaker already holds.
 ``cut_aside`` drops such a sound still pending or playing, flushed like a stop, when the answer's
 first audio comes (SPEC 8, S3: the answer never waits behind it); it never cuts speech.
 ``push_media`` and ``cut_media`` do the same for the radio (SPEC 8, Radio playback), with a
-stream converter of its own so the music has no click at piece edges.
+stream converter of its own so the music has no click at piece edges; the radio opens the media
+window (``SpeechActivity.extend_media``) instead of the own-sound one.
 
 Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
 never logged or published.
@@ -117,7 +118,7 @@ class ReachySpeaker:
         self._cv = threading.Condition(self._lock)
         # pieces accepted but not handed to the player: (samples at the output rate, accepted at,
         # speech or not)
-        self._pending: collections.deque[tuple[np.ndarray, float, bool]] = collections.deque()
+        self._pending: collections.deque[tuple[np.ndarray, float, bool, bool]] = collections.deque()
         self._pending_n = 0
         self._aside_s = 0.0  # length of the last aside sound (``push_aside``)
         self._handed = -math.inf  # monotonic stamp at which the audio handed over has played
@@ -238,7 +239,7 @@ class ReachySpeaker:
         out = x if stream is None else stream.process(x)
         with self._lock:
             self._aside_s = out.size / self._out_hz  # the own-sound tail: at most one push
-        queued = self._push_pieces(out, generation, speech=False)
+        queued = self._push_pieces(out, generation, speech=False, media=True)
         return self.playing_until() if queued else 0.0
 
     def cut_media(self) -> bool:
@@ -289,11 +290,13 @@ class ReachySpeaker:
         stream, self._stream, self._stream_hz = self._stream, None, 0
         return None if stream is None else stream.flush()
 
-    def _push_pieces(self, out: np.ndarray, generation: int, *, speech: bool = True) -> bool:
+    def _push_pieces(
+        self, out: np.ndarray, generation: int, *, speech: bool = True, media: bool = False
+    ) -> bool:
         """Accept ``out`` (at the output rate) in pieces of ``chunk_ms``: pending, then handed to
         the player as far as the lead allows (all at once with no lead). Stops at a stop or a
         failing push. True if any piece was accepted. ``speech`` False: the pieces extend only
-        the gate's own-sound window."""
+        the gate's own-sound window, or with ``media`` its media window (the radio)."""
         assert self._out_hz is not None
         step = max(1, int(self._chunk_s * self._out_hz))
         queued = False
@@ -302,10 +305,10 @@ class ReachySpeaker:
             with self._cv:
                 if generation != self._generation:
                     break
-                self._pending.append((piece, self._clock(), speech))
+                self._pending.append((piece, self._clock(), speech, media))
                 self._pending_n += piece.size
                 queued = True
-                self._extend(speech)  # the whole answer, not only what was handed
+                self._extend(speech, media)  # the whole answer, not only what was handed
                 if not self._feed_locked():
                     break
                 if generation != self._generation:  # stopped from inside the push
@@ -334,9 +337,9 @@ class ReachySpeaker:
             now = self._clock()
             if self._due_in(now) > TIME_EPS_S:
                 return True
-            piece, accepted, speech = self._pending.popleft()
+            piece, accepted, speech, media = self._pending.popleft()
             self._pending_n -= piece.size
-            if not self._hand(piece, accepted, now, speech):
+            if not self._hand(piece, accepted, now, speech, media):
                 self._drop_pending()
                 self._generation += 1  # the rest of that push is abandoned, as before pacing
                 return False
@@ -349,7 +352,14 @@ class ReachySpeaker:
             return 0.0
         return self._handed - self._lead_s - now
 
-    def _hand(self, piece: np.ndarray, accepted: float, now: float, speech: bool = True) -> bool:
+    def _hand(
+        self,
+        piece: np.ndarray,
+        accepted: float,
+        now: float,
+        speech: bool = True,
+        media: bool = False,
+    ) -> bool:
         """Push one piece to the player with the duck's gain, keyed to when it plays; stamp the
         reference and the gate (its own-sound window for a piece that is not ``speech``). The
         lock is held."""
@@ -381,16 +391,19 @@ class ReachySpeaker:
             self._speech_handed = self._handed
         self._pushed += piece.size
         self._counts["pieces"] += 1
-        self._extend(speech)  # under the lock; a restamp moved the end later
+        self._extend(speech, media)  # under the lock; a restamp moved the end later
         return True
 
-    def _extend(self, speech: bool) -> None:
+    def _extend(self, speech: bool, media: bool = False) -> None:
         """Move the gate's end to ``playing_until``: the speaking window for speech, the
-        own-sound window for a sound that is not speech. The lock is held."""
+        media window for the radio, the own-sound window for another sound that is not speech.
+        The lock is held."""
         if self._activity is None:
             return
         if speech:
             self._activity.extend(self.playing_until())
+        elif media:  # the radio's window (SPEC 8, Radio playback)
+            self._activity.extend_media(self.playing_until(), self._aside_s)
         else:
             self._activity.extend_own(self.playing_until(), self._aside_s)
 
@@ -472,7 +485,7 @@ class ReachySpeaker:
         held): ``cut_aside`` never bumps the generation under a speech push."""
         if self._speech_incoming or self._speech_handed > now:
             return True
-        return any(speech for _, _, speech in self._pending)
+        return any(speech for _, _, speech, _ in self._pending)
 
     def stop(self) -> None:
         """Barge-in: drop the queued audio now (``clear_player``),

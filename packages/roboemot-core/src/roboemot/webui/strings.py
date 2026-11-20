@@ -159,8 +159,8 @@ EN: dict[str, str] = {
     "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
     "live_ev_unanswered_music": "Not answered: music is playing, the wake word is needed",
     "live_ev_unanswered_media": (
-        "Not answered: the radio is playing, the wake word (or a face looking at the robot) "
-        "is needed"
+        "Not answered: the radio is playing and the wake word was not heard (nor, where the "
+        "policy allows it, a voice from a face looking at the robot)"
     ),
     "live_ev_unanswered_media_unconfirmed": (
         "Not answered: the radio is playing and the server's words held no wake word"
@@ -1474,8 +1474,8 @@ IT: dict[str, str] = {
     ),
     "live_ev_unanswered_music": "Senza risposta: c'è musica, serve la parola di attivazione",
     "live_ev_unanswered_media": (
-        "Senza risposta: suona la radio, serve la parola di attivazione (o un volto che guarda "
-        "il robot)"
+        "Senza risposta: suona la radio e la parola di attivazione non è stata sentita (né, "
+        "dove la politica lo consente, una voce da un volto che guarda il robot)"
     ),
     "live_ev_unanswered_media_unconfirmed": (
         "Senza risposta: suona la radio e nelle parole del server non c'era la parola di "

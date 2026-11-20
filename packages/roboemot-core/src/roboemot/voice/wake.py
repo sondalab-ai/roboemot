@@ -23,13 +23,13 @@ voice-at-face check. An utterance with the wake word is addressed over music as 
 
 While the robot's own radio can be heard as the utterance starts (``media(start)``, the media
 player's ``audible_at``, SPEC 8, Radio playback) the same holds with the outcome
-``rejected_media``: only the wake word (the name or a generic wake phrase) addresses the robot,
-so it never answers the lyrics of its own music. The follow-up window, a face in view and the
-policy do not count. It is asked before the music rule. While the player holds the radio (robot
-speech, an open addressed turn, an announcement's reply window, and ``resume_after_s`` after
-them) no lyric can be heard, so the normal rules apply: "Neve" then "stoppa la musica" is a
-follow-up in the window the name opened. An utterance is decided by its start stamp, so one that
-started while the radio was held keeps the normal rules.
+``rejected_media``: only the wake word (the name or a generic wake phrase) addresses the robot, so
+it never answers the lyrics of its own music (one exception, ``face_media``, below). The follow-up
+window, a face in view and the policy do not count. It is asked before the music rule. While the
+player holds the radio (robot speech, an open addressed turn, an announcement's reply window, and
+``resume_after_s`` after them) no lyric can be heard, so the normal rules apply: "Neve" then
+"stoppa la musica" is a follow-up in the window the name opened. An utterance is decided by its
+start stamp, so one that started while the radio was held keeps the normal rules.
 
 Over the audible radio the voice-at-face check can stand in for the wake word (owner decision
 2026-11-20, ``tools.radio.face_addresses``): when the caller says a server transcript can

@@ -464,7 +464,8 @@ class ReflexEngine:
     def _on_entity(self, msg: Message) -> None:
         try:
             obs = msg.payload
-            if isinstance(obs, Observation) and obs.source in self.rmap.voice_sources:
+            voice = isinstance(obs, Observation) and obs.source in self.rmap.voice_sources
+            if voice and not obs.listener_only:  # a reading over the radio: the listener's
                 joints = msg.meta.get("joint_state") or {}
                 head_yaw = float(joints.get(self.rmap.head_yaw, 0.0))
                 self.offer_voice(obs.stamp, obs.azimuth_rad, head_yaw)

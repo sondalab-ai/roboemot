@@ -42,6 +42,7 @@ def on_radio(ear, *, station=True):
     """The robot's radio plays a station and is audible; returns the player calls the listener
     made: ``stop`` reasons and ``hold`` stamps."""
     calls: dict[str, list] = {"stop": [], "hold": []}
+    ear.r.listener.direction_over_media = True  # a hardware echo canceller (the host's wiring)
     ear.r.listener.media_audible = lambda at: True
     ear.r.listener.media_set = lambda: station
     ear.r.listener.media_stop = calls["stop"].append
@@ -354,6 +355,7 @@ def held_by_holds(ear):
     """The radio is audible except within ``resume_after_s`` after a recorded hold."""
     holds: list[float] = []
     resume = ear.rt.stack.effective().tools.media.resume_after_s
+    ear.r.listener.direction_over_media = True
     ear.r.listener.media_audible = lambda at: not any(h <= at <= h + resume for h in holds)
     ear.r.listener.media_hold = holds.append
     return holds
@@ -410,3 +412,124 @@ def test_a_line_riding_an_unconfirmed_local_wake_under_never_is_not_answered(ear
         assert not ear.utterances[0].addressed and not ear.utterances[1].addressed
         assert ear.r.listener.snapshot()["realtime_audio"]["wake_unconfirmed_media"] == 2
         assert server.of("response.create") == []
+
+
+# ------------------------------------- only a real direction reading over the radio counts (B)
+
+
+def test_no_direction_over_the_radio_keeps_vosk_and_the_name(ears):
+    """No hardware echo canceller (``direction_over_media`` off): the face rule cannot pass, so
+    Vosk, its grammar pass and the wake word decide as before; a lyric is ``rejected_media``."""
+    with TurnServer() as server:
+        ear = radio_ear(ears, server)
+        on_radio(ear)
+        ear.r.listener.direction_over_media = False
+        grammar = spy_grammar(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        started, accepted, passes, _ = local_checks(ear, grammar)
+        assert started == 1 and accepted > 0 and passes == 1
+        assert ear.r.listener.snapshot()["wake"]["decisions"]["rejected_media"] == 1
+        assert appended(server) == []
+
+
+@pytest.mark.parametrize(
+    ("decoded", "addressed"), [(LYRIC, False), ("neve spegni la musica", True)]
+)
+def test_a_degraded_face_check_over_the_radio_decodes_for_the_name(ears, decoded, addressed):
+    """No reading reached the check (``degraded_rule: engaged``, attention on a face): a
+    degraded pass is never trusted over the radio. The buffer is decoded for the wake word: a
+    lyric is ``rejected_media`` with nothing sent, the name still wakes the robot."""
+    cfg = app()
+    cfg["voice"] = {**cfg["voice"], "direction": {"degraded_rule": "engaged"}}
+    heard = [["Neve spegni la musica"]] if addressed else None
+    with TurnServer(heard=heard) as server:
+        ear = ears(server, script=[decoded], bearing=FACE_RAD, yaw=LOOKING, app=cfg)
+        ear.bearing = None  # no sound direction over the radio
+        on_radio(ear)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        snap = ear.r.listener.snapshot()
+        assert ear.r.asr.decodes == 1 and snap["realtime_audio"]["face_wake_media"] == 0
+        assert snap["direction"]["checks"]["degraded_passed"] == 1
+        assert ear.utterances[0].addressed is addressed
+        if addressed:
+            assert ear.utterances[0].wake_word
+        else:
+            assert snap["wake"]["decisions"]["rejected_media"] == 1
+            assert appended(server) == []
+
+
+# ------------------------------------------------------------------ refused, late, followed
+
+
+def test_audio_that_can_no_longer_go_at_the_end_is_decoded_not_held(ears):
+    """The session dropped (or the budget ran out, the robot fell asleep) between the start and
+    the end: no radio hold, no face wake, no Live event; the buffer is decoded as today."""
+    with TurnServer() as server:
+        ear = radio_ear(ears, server)
+        calls = on_radio(ear)
+        seen = events(ear)
+        answers = iter([True])
+        ear.input.wants = lambda cfg: next(answers, False)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.r.asr.started == [] and ear.r.asr.decodes == 1
+        assert calls["hold"] == [] and ("media", "face_wake", {}) not in seen
+        assert ear.r.listener.snapshot()["realtime_audio"]["face_wake_media"] == 0
+        assert appended(server) == []
+
+
+def test_a_face_wake_refused_before_it_left_shows_the_not_heard_cue(ears):
+    from roboemot.realtime.input import InputJob
+
+    with TurnServer() as server:
+        ear = radio_ear(ears, server)
+        on_radio(ear)
+        cues: list[str] = []
+        ear.r.listener._on_audio = lambda event, key: cues.append(event)
+
+        def refused(samples, rate_hz, **kw):
+            job = InputJob(samples, rate_hz)
+            job._end(refused="asleep")
+            return job
+
+        ear.input.submit = refused
+        ear.say()
+        assert ear.settle(lambda: "not_heard" in cues)
+        assert ear.utterances == [] and ear.r.asr.decodes == 0
+        assert ear.r.listener.snapshot()["realtime_audio"]["face_wake_unheard"] == 1
+        assert appended(server) == []
+
+
+def test_a_follow_up_riding_a_confirmed_face_wake_is_answered(ears):
+    release = threading.Event()
+    heard = [["Neve, che tempo fa?"], ["e domani?"]]
+    with TurnServer(heard=heard, hold=release) as server:
+        ear = radio_ear(ears, server, to_worker=True)
+        held_by_holds(ear)
+        ear.say()
+        ear.say()  # inside the face wake's hold: not_required, rides it
+        release.set()
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert ear.utterances[0].addressed and ear.utterances[1].addressed
+        assert ear.r.listener.snapshot()["realtime_audio"]["wake_unconfirmed_media"] == 0
+
+
+def test_a_transcript_after_the_deadline_is_deleted_and_never_answered(ears):
+    """``openai_realtime``: the face wake's transcript comes after the listener gave up on it
+    (dropped, ``face_wake_unheard``): its items are deleted and nothing asks for a response."""
+    release = threading.Event()
+    with TurnServer(heard=[["Neve, che tempo fa?"]], hold=release) as server:
+        ear = radio_ear(ears, server, to_worker=True)
+        on_radio(ear)
+        ear.say()
+        assert ear.settle(lambda: len(server.of("input_audio_buffer.commit")) == 1)
+        ear.r.now += ear.rt.stack.effective().voice.realtime_route.transcript_timeout_s
+        assert ear.settle(lambda: not ear.r.listener.awaiting_transcript())
+        assert ear.r.listener.snapshot()["realtime_audio"]["face_wake_unheard"] == 1
+        release.set()
+        assert ear.settle(lambda: len(server.of("conversation.item.delete")) >= 1, 10.0)
+        ear.settle(lambda: False, 0.5)
+        assert ear.utterances == [] and server.of("response.create") == []

@@ -37,6 +37,10 @@ class Observation:
     extent_rad: float | None = None  # angular height of the detection box (SPEC 5A)
     # eye span of the latest landmarks behind facing_yaw_rad, in face-detector pixels (SPEC 12A)
     facing_eye_px: float | None = None
+    # a sound bearing read while only the robot's own media played (hardware echo cancellation,
+    # SPEC 8, Radio playback): for the listener's voice-at-face check alone; the world model,
+    # the reflexes and the fast path's head turn ignore it, as they did before it was read
+    listener_only: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in get_args(ObservationKind):

@@ -28,7 +28,7 @@ class LatestBearing:
     def __init__(self, bus: Bus, frame: FrameSpec) -> None:
         self._frame = frame
         self._lock = threading.Lock()
-        self._readings: deque[tuple[float, float]] = deque(maxlen=HISTORY)
+        self._readings: deque[tuple[float, float, bool]] = deque(maxlen=HISTORY)
         self._unsubscribe = bus.subscribe("percept.entity", self._on_entity)
 
     def close(self) -> None:
@@ -43,13 +43,14 @@ class LatestBearing:
             obs.azimuth_rad, obs.elevation_rad, msg.meta.get("joint_state"), self._frame
         )
         with self._lock:
-            self._readings.append((obs.stamp, az))
+            self._readings.append((obs.stamp, az, obs.listener_only))
 
-    def get(self, now: float, max_age_s: float) -> float | None:
+    def get(self, now: float, max_age_s: float, *, listener: bool = False) -> float | None:
         """The base-frame azimuth of the reading nearest to ``now``, if it is at most
-        ``max_age_s`` away on either side (a reading after ``now`` is a later sound)."""
+        ``max_age_s`` away on either side (a reading after ``now`` is a later sound).
+        ``listener``: readings taken over the radio (``listener_only``) count too."""
         with self._lock:
-            readings = list(self._readings)
+            readings = [(s, a) for s, a, only in self._readings if listener or not only]
         if not readings:
             return None
         stamp, az = min(reversed(readings), key=lambda r: abs(now - r[0]))  # ties: newest

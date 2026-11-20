@@ -12,6 +12,13 @@ not hear the robot's own sound read (the reflex engine and the sound-direction w
 ``speaking`` stays speech only, for the gates about the robot's voice: the listener's drop and
 barge-in, the realtime input's "nothing is sent while the robot speaks", the conversation phase
 and the voice-at-face samples' ``muted`` reason (the blip never mutes an utterance's check).
+
+The robot's media (the radio, SPEC 8, Radio playback) opens a *media* window of its own
+(``extend_media``, with the own-sound tail rule). ``sounding`` covers it too, so every gate that
+reads ``sounding`` is unchanged. ``sounding_except_media`` leaves it out: on a robot whose
+manifest declares hardware echo cancellation the microphone does not hear the radio, so the
+host lets the sound direction be read for the listener's voice-at-face check alone while only
+the radio plays (owner decision 2026-11-20).
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ class SpeechActivity:
         self._tail_s = max(0.0, echo_tail_ms) / MS_PER_S
         self._playing_until = -math.inf
         self._own_until = -math.inf  # a sound that is not speech plays until then, its tail on
+        self._media_until = -math.inf  # the robot's media (the radio) plays until then, tail on
 
     def set_echo_tail_ms(self, echo_tail_ms: float) -> None:
         """Apply a reloaded ``voice.echo_tail_ms``."""
@@ -50,12 +58,21 @@ class SpeechActivity:
                 tail = min(self._tail_s, max(0.0, length_s))
                 self._own_until = max(self._own_until, until + tail)
 
+    def extend_media(self, until: float, length_s: float) -> None:
+        """The robot's media (``length_s`` pushed) is queued to play until ``until``: the media
+        window ends there plus an echo tail of at most that length; never moves earlier."""
+        if math.isfinite(until):
+            with self._lock:
+                tail = min(self._tail_s, max(0.0, length_s))
+                self._media_until = max(self._media_until, until + tail)
+
     def reset(self, now: float) -> None:
         """Playback was cut at ``now`` (barge-in): both ends move to ``now``; the echo tail stays
         on."""
         with self._lock:
             self._playing_until = now
             self._own_until = min(self._own_until, now)
+            self._media_until = min(self._media_until, now)
 
     def until(self) -> float:
         """Stamp until which the robot counts as speaking (``-inf`` before any speech)."""
@@ -69,6 +86,14 @@ class SpeechActivity:
     def sounding(self, now: float) -> bool:
         """Whether the robot's speech or another sound of its own plays at ``now``, echo tail
         included: for the gates that must not take the robot's sound for the room's."""
+        with self._lock:
+            end = max(self._playing_until + self._tail_s, self._own_until, self._media_until)
+        return now < end
+
+    def sounding_except_media(self, now: float) -> bool:
+        """``sounding`` without the media window: the robot's speech or another sound of its
+        own (a cue, a hum) plays at ``now``. Only for a robot with hardware echo cancellation,
+        where the radio does not reach the microphone."""
         with self._lock:
             end = max(self._playing_until + self._tail_s, self._own_until)
         return now < end
