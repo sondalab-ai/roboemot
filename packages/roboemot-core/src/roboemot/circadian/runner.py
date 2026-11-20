@@ -85,6 +85,7 @@ from ..config.schema import RoboEmotConfig, StateEffects
 from ..diag import EventSink, no_events
 from ..manifest import Dof
 from ..motion.core import Command
+from ..reflex.engine import SoundLoud
 from .light import LEVELS
 from .model import (
     HOURS_PER_DAY,
@@ -244,8 +245,8 @@ class CircadianRunner:
         """A loud onset (the reflex engine's, never the robot's own sound): wakes a day nap when
         its ratio over the floor reaches ``circadian.nap_wake_loud_ratio``; a quieter one during
         a nap is only counted."""
-        ratio = getattr(msg.payload, "ratio", None)
-        if not isinstance(ratio, (int, float)) or ratio < self.cfg.circadian.nap_wake_loud_ratio:
+        loud = msg.payload
+        if not isinstance(loud, SoundLoud) or loud.ratio < self.cfg.circadian.nap_wake_loud_ratio:
             with self._lock:
                 if self.nap.napping:
                     self._loud_below += 1
