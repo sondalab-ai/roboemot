@@ -352,8 +352,8 @@ def lit(x, seconds: float, luma: float) -> list[str]:
     return seen
 
 
-def loud(x) -> None:
-    x.bus.publish("sound.loud", SoundLoud(ratio=6.0, level=0.3), x.clock.t)
+def loud(x, ratio: float = 15.0) -> None:
+    x.bus.publish("sound.loud", SoundLoud(ratio=ratio, level=0.3), x.clock.t)
 
 
 def motion(x) -> None:
@@ -997,3 +997,24 @@ def test_a_requested_nap_still_rests_the_robot_while_the_radio_plays():
     run(x, STEP)
     assert x.r.model.state == "resting" and x.r.model.reason == "nap"
     assert seen[-1] == "resting"
+
+
+def test_an_ordinary_sound_over_the_event_bar_but_under_the_startle_bar_does_not_wake_the_nap():
+    """Robot 2026-11-20: 18 of 20 naps ended on sound.loud at 4x the floor (voices, a TV). A day
+    nap ends only at circadian.nap_wake_loud_ratio (12x, the startle's bar); a quieter onset is
+    counted in the report, never a wake."""
+    x = napping(rig())
+    assert x.cfg.circadian.nap_wake_loud_ratio == 12.0
+    loud(x, ratio=6.0)
+    run(x, STEP)
+    assert x.r.model.reason == "nap"
+    nap = x.r.snapshot()["nap"]
+    assert nap["loud_below_ratio"] == 1 and nap["wakes"]["loud"] == 0
+    loud(x, ratio=12.0)
+    woke(x, "loud")
+
+
+def test_a_quieter_onset_while_awake_is_not_counted():
+    x = rig()
+    loud(x, ratio=6.0)
+    assert x.r.snapshot()["nap"]["loud_below_ratio"] == 0
