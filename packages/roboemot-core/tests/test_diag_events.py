@@ -113,6 +113,14 @@ def test_a_number_or_flag_field_takes_nothing_else():
     assert clean({"yaw_deg": "40", "moving": 1, "rounds": True, "level_db": math.inf}) == {}
 
 
+def test_expression_event_is_cleaned():
+    """SPEC 8, Robot expression; SPEC 12: a reaction's event holds its situation and age, never
+    a station, a category or a name."""
+    fields = {"situation": "didnt_catch", "age_s": 1.234, "station": "x", "category": "cup"}
+    assert clean(fields) == {"situation": "didnt_catch", "age_s": 1.23}
+    assert clean({"situation": "Radio Uno"}) == {"situation": "other"}
+
+
 def test_every_kind_and_reason_of_the_catalogue_passes_and_nothing_else():
     for kind, reasons in REASONS.items():
         for reason in reasons:

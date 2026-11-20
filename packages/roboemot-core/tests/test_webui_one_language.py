@@ -134,7 +134,7 @@ def test_every_live_status_and_event_has_a_sentence():
 def test_every_code_inside_a_live_sentence_is_worded():
     codes = [
         *diag.ROUTE_REASONS, *diag.EXCEPTIONS.values(), *diag.PATHS,
-        *diag.FIELDS["released_by"], diag.OTHER,
+        *diag.FIELDS["released_by"], *diag.FIELDS["situation"], diag.OTHER,
     ]  # fmt: skip
     assert must_have("live_code_", codes) == []
 

@@ -172,6 +172,14 @@ def event_fallback(kind: str, language: str, cfg: RoboEmotConfig) -> str:
     return _in_language(_prompt_files(f"event_{kind}"), language, cfg)
 
 
+def expression_fallback(situation: str, language: str, cfg: RoboEmotConfig) -> str:
+    """The fixed line the robot says for a reaction when no route can word it (SPEC 8, Robot
+    expression), from ``prompts/expression_<situation>.<lang>.txt``: ``language``'s, else
+    ``conversation.language``'s, else English's. Its slots (``{station}``, ``{who}``) are the
+    reaction's data keys; the caller fills them."""
+    return _in_language(_prompt_files(f"expression_{situation}"), language, cfg)
+
+
 @functools.cache
 def _prompt_files(stem: str) -> dict[str, str]:
     """Non-empty ``prompts/<stem>.<lang>.txt`` files by language (shipped with the package;

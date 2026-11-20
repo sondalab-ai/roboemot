@@ -44,6 +44,7 @@ from roboemot.voice.speech import MediaSink
 from roboemot.voice.tts import NO_VOICE
 
 from .assembly import Pipeline
+from .expressor import Expressor
 from .host import RuntimeHost
 from .radio_stop import stop_and_nod
 from .webui import WebAdmin, start_webui
@@ -205,6 +206,7 @@ def start_voice_output(
     cleanup.callback(conv.close)
     conv.start()
     start_announcer(host, stack, p, cleanup)
+    start_expressor(host, stack, p, cleanup)
     if realtime is not None:
         realtime.start()
     if bargein is not None:
@@ -325,6 +327,27 @@ def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
     cleanup.callback(announcer.close)  # before the conversation it hands turns to
     announcer.start()
     start_scheduler_runner(host)  # attached first: its first tick reaches the announcer
+
+
+def start_expressor(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:
+    """The robot's own reactions (SPEC 8, Robot expression), once the conversation runs. A
+    route can word a line while the realtime session is up or the chat routes are online; the
+    platform's sleep drops them. Closed before the conversation it hands turns to. Sets
+    ``host.expressor``; nothing without a conversation."""
+    conv = host.conversation
+    if conv is None:
+        return
+    rt = host.realtime_route
+    expressor = host.expressor = Expressor(
+        conv,
+        host,
+        stack.effective,
+        online=lambda: (rt is not None and rt.up()) or not p.hub.router.offline,
+        asleep=lambda: p.sleep.asleep,
+    )
+    expressor.events = host.events
+    cleanup.callback(expressor.close)  # before the conversation it hands turns to
+    expressor.start()
 
 
 def own_sound_cut(output: Any, soothe: SootheRunner) -> Callable[[], bool]:
