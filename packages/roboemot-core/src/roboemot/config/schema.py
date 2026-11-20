@@ -4636,6 +4636,9 @@ class VoiceFacingConfig(Strict):
 TONE_LABELS_MAX = 12  # voice.realtime_route.tone_labels: the note_tone enum stays short
 TONE_LABEL_MAX_CHARS = 24
 TONE_LABEL = re.compile(rf"[a-z][a-z_]{{0,{TONE_LABEL_MAX_CHARS - 1}}}")
+# voice.realtime_route.transcription_language_tags: a language code and its BCP-47 tag
+LANGUAGE_CODE = re.compile(r"[a-z]{2,3}")
+LANGUAGE_TAG = re.compile(r"[a-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}")
 
 
 class RealtimeRouteConfig(Strict):
@@ -4829,6 +4832,22 @@ class RealtimeRouteConfig(Strict):
         "it, and that endpoint gets no hint until the switch or the transcription model changes",
         advanced=True,
     )
+    transcription_language_hint: bool = param(
+        True,
+        "On a gemini_live route, send the transcription language (transcription_language, else "
+        "conversation.language) as a BCP-47 hint in the setup (inputAudioTranscription."
+        "languageCodes, input: audio only), so Gemini does not guess the language of what it "
+        "hears. A language without a code in transcription_language_tags sends none. A setup the "
+        "server closes before it is ready is sent again at once without the hint; when that one "
+        "comes up, the route and model get no hint until this switch, the codes or the model "
+        "change, or a restart. The openai_realtime route always sends the language",
+        advanced=True,
+    )
+    transcription_language_tags: dict[str, str] = param(
+        {"it": "it-IT", "en": "en-US"},
+        "BCP-47 code per conversation language for transcription_language_hint",
+        advanced=True,
+    )
     prebuffer_ms: float = param(
         200.0,
         "Reply audio held before playback starts, against network jitter",
@@ -4973,6 +4992,21 @@ class RealtimeRouteConfig(Strict):
                 f"at most {TONE_LABEL_MAX_CHARS} characters: {bad}"
             )
         return labels
+
+    @field_validator("transcription_language_tags")
+    @classmethod
+    def _language_tags_are_bcp47(cls, tags: dict[str, str]) -> dict[str, str]:
+        bad = [
+            code
+            for code, tag in tags.items()
+            if not LANGUAGE_CODE.fullmatch(code) or not LANGUAGE_TAG.fullmatch(tag)
+        ]
+        if bad:
+            raise ValueError(
+                "voice.realtime_route.transcription_language_tags: a key is a lowercase language "
+                f"code (it) and its value a BCP-47 code (it-IT): {bad}"
+            )
+        return tags
 
     @field_validator("server_gates")
     @classmethod

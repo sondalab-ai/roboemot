@@ -206,6 +206,9 @@ EN: dict[str, str] = {
     "live_ev_session_server_error": "Cloud server error: {code}",
     "live_ev_session_go_away": "Cloud session ending: reconnected once idle",
     "live_ev_session_idle_close": "Idle cloud session closed by the server: next turn reconnects",
+    "live_ev_session_language_refused": (
+        "The cloud refused the transcription language: connected without it"
+    ),
     "live_ev_audio_transcript_timeout": "No transcript from the cloud within {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Facing check skipped: CPU at {cpu_percent}% (limit {cpu_max_percent}%)"
@@ -1525,6 +1528,9 @@ IT: dict[str, str] = {
     "live_ev_session_server_error": "Errore del server cloud: {code}",
     "live_ev_session_go_away": "Sessione cloud in chiusura: ricollegata appena libera",
     "live_ev_session_idle_close": "Sessione cloud inattiva chiusa: il prossimo turno la ricollega",
+    "live_ev_session_language_refused": (
+        "Il cloud ha rifiutato la lingua della trascrizione: collegata senza"
+    ),
     "live_ev_audio_transcript_timeout": "Nessuna trascrizione dal cloud entro {timeout_s} s",
     "live_ev_facing_cpu_high": (
         "Controllo dello sguardo saltato: CPU al {cpu_percent}% (limite {cpu_max_percent}%)"

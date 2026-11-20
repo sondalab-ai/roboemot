@@ -7,10 +7,12 @@ S0 probe saw on ``gemini-3.8-live`` (2026-11-11).
 Out (``encode``):
 
 - the first ``session.update`` is ``setup`` (manual activity, input and output transcription,
-  sliding-window compression, BLOCKING function declarations with their JSON Schema); later
-  ones only keep changed instructions: the lines the session does not hold yet go as context
-  text (``clientContent``, ``turnComplete`` false) right before the next activity or text
-  turn, never between a ``toolCall`` and its ``toolResponse`` (a removed line is not sent);
+  the input transcription's language as a BCP-47 ``languageCodes`` hint when the update names
+  one that ``language_tags`` maps, sliding-window compression, BLOCKING function declarations
+  with their JSON Schema); later ones only keep changed instructions: the lines the session
+  does not hold yet go as context text (``clientContent``, ``turnComplete`` false) right
+  before the next activity or text turn, never between a ``toolCall`` and its
+  ``toolResponse`` (a removed line is not sent);
 - a burst's appends are ``realtimeInput.audio`` after an ``activityStart``, its commit
   ``activityEnd``; ``conversation.item.create`` text (which supersedes an answer still held)
   and ``function_call_output`` are kept until the next ``response.create``;
@@ -160,6 +162,7 @@ COUNTERS = (
     "events_unsupported",
     "commits_without_audio",
     "cancels_idle",
+    "language_codes_sent",  # setups whose inputAudioTranscription carried languageCodes
 )
 
 
@@ -210,15 +213,23 @@ class GeminiWire:
     missing); ``voice`` (the route's own) wins over the update's; ``max_bytes`` caps a frame
     as the client caps the socket. ``session`` (the client's session count) goes into every id
     the codec makes, so no id of one session repeats in the next: the route keys its charges by
-    response id across sessions. ``counts`` holds what was ignored, dropped or emulated."""
+    response id across sessions. ``language_tags`` maps the update's transcription language
+    (``it``) to the BCP-47 code the setup's ``languageCodes`` carries (``it-IT``); empty sends
+    none. ``counts`` holds what was ignored, dropped or emulated."""
 
     def __init__(
-        self, model: str, max_bytes: int, voice: str | None = None, session: int | None = None
+        self,
+        model: str,
+        max_bytes: int,
+        voice: str | None = None,
+        session: int | None = None,
+        language_tags: dict[str, str] | None = None,
     ) -> None:
         self.model = model if model.startswith(MODEL_PREFIX) else MODEL_PREFIX + model
         self._session = "" if session is None else f"{session}_"
         self.voice = voice or None
         self.max_bytes = max_bytes
+        self.language_tags = dict(language_tags or {})
         self.counts: Counter[str] = Counter({name: 0 for name in COUNTERS})
         self._responses = count(1)
         self._items = count(1)
@@ -293,7 +304,8 @@ class GeminiWire:
     def _setup_message(self, session: dict[str, Any], voice: Any) -> dict[str, Any]:
         """The ``setup`` message the S0 probe verified: audio replies, the voice, the system
         instruction, the function declarations (BLOCKING), manual activity, both
-        transcriptions and sliding-window context compression."""
+        transcriptions (the input's ``languageCodes`` when the update's transcription language
+        maps to a BCP-47 code: ``language_codes``) and sliding-window context compression."""
         generation: dict[str, Any] = {"responseModalities": ["AUDIO"]}
         if isinstance(voice, str) and voice:
             generation["speechConfig"] = {
@@ -311,7 +323,10 @@ class GeminiWire:
         if declarations:
             setup["tools"] = [{"functionDeclarations": declarations}]
         setup["realtimeInputConfig"] = {"automaticActivityDetection": {"disabled": True}}
-        setup["inputAudioTranscription"] = {}
+        codes = language_codes(session, self.language_tags)
+        setup["inputAudioTranscription"] = {"languageCodes": codes} if codes else {}
+        if codes:
+            self.counts["language_codes_sent"] += 1
         setup["outputAudioTranscription"] = {}
         setup["contextWindowCompression"] = {"slidingWindow": {}}
         return {"setup": setup}
@@ -982,6 +997,16 @@ def _duration_ms(value: Any) -> Any:
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def language_codes(session: dict[str, Any], tags: dict[str, str]) -> list[str]:
+    """The setup's ``languageCodes`` for a ``session.update``'s session: the BCP-47 code ``tags``
+    maps its input transcription language to (``audio.input.transcription.language``, set
+    with ``input: audio`` only), as a one-item list; empty without a language or a mapping."""
+    transcription = _dict(_dict(_dict(session.get("audio")).get("input")).get("transcription"))
+    language = transcription.get("language")
+    tag = tags.get(language) if isinstance(language, str) else None
+    return [tag] if tag else []
 
 
 def _user(text: str) -> dict[str, Any]:

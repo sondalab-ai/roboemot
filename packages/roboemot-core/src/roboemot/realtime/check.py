@@ -70,7 +70,14 @@ from ..skills.defaults import SkillEnv
 from ..skills.host import tool_host
 from ..skills.plugins import build_skill_registry
 from . import protocol
-from .route import EVENT_PREFIX, ITEM_PREFIX, MS_PER_S, realtime_extra, session_update
+from .route import (
+    EVENT_PREFIX,
+    ITEM_PREFIX,
+    MS_PER_S,
+    realtime_extra,
+    sends_language,
+    session_update,
+)
 from .session import GEMINI_LIVE, NO_KEY, DirectSession, SessionProvider
 from .turn import TONE_NOTED, session_tools
 
@@ -122,8 +129,10 @@ class RealtimeReport:
     did not complete (``timeout``, ``budget``, ``secret``, ``provider``, ``no_extra``,
     ``failed``). ``setup_ms``: the connect, from the tools' build to ``session.updated``.
     ``close_code``: the server's close code when it closed the connect (never its reason
-    text). ``tools_sent``: the tools of a ``gemini_live`` setup. ``usage_reported``: the late
-    token totals a ``gemini_live`` server reported (None: none came in time)."""
+    text). ``tools_sent``: the tools of a ``gemini_live`` setup. ``language_codes_sent``: that
+    setup carried the transcription language's ``languageCodes`` (no fallback here: a server
+    that refuses them closes the connect, ``close_code``). ``usage_reported``: the late token
+    totals a ``gemini_live`` server reported (None: none came in time)."""
 
     route: str
     model: str
@@ -148,6 +157,7 @@ class RealtimeReport:
     setup_ms: float | None = None
     close_code: int | None = None
     tools_sent: int = 0
+    language_codes_sent: bool = False
     usage_reported: int | None = None
 
     @property
@@ -350,6 +360,8 @@ class _Run:
             interrupt_response=False,
             route=self.route,
         )
+        # no fallback: a server that refuses the codes fails the check, which shows it
+        r.language_codes_sent = self.gemini and sends_language(self.cfg, update)
         ok = client.connect(update, **timeout)
         snap = client.snapshot()
         self._hosts(snap, client.reason)
