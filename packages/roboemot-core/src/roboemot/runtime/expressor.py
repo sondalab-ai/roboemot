@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
 from .. import shutdown
+from ..bus import Message
 from ..config.schema import RoboEmotConfig, Situation, SituationConfig
 from ..diag import EventSink, no_events
 from ..llm.prompt import expression_fallback
@@ -94,6 +95,11 @@ ANONYMOUS = "a person you know"  # {who} without an enrolled name
 SLOTS = ("station", "category", "who")  # the data keys a template or a fixed line may hold
 # the cue of a situation whose line cannot be said (SPEC 8, Non-verbal cues), and its reason
 OFFLINE_CUES: dict[str, str] = {"didnt_catch": "not_heard", "failed_action": "fallback"}
+# the media player's stop reasons that are a failure, not a person's or the robot's own stop:
+# the stream ended or stalled (a silent station stops after tools.media.connect_timeout_s), or
+# its feeder failed (SPEC 11, Media player)
+MEDIA_STOPPED = "media.stopped"
+FAILED_STOPS = ("dropped", "error")
 CUE_REASON = "no_route"
 RESTING = "resting"
 RETURNING = "returning_person"
@@ -151,8 +157,10 @@ class Expressor:
     # ----------------------------------------------------------------- lifecycle
 
     def attach(self) -> None:
-        """Subscribe to the bus topics whose events offer reactions."""
-        self._unsubscribe = []
+        """Subscribe to the bus topics whose events offer reactions: ``media.stopped`` (a
+        station that failed)."""
+        bus = self.host.bus
+        self._unsubscribe = [bus.subscribe(MEDIA_STOPPED, self._on_media_stopped)]
 
     def start(self) -> None:
         """Attach and start the expressor's thread (once)."""
@@ -208,6 +216,17 @@ class Expressor:
             self._outcome(replaced, "dropped_replaced")
         self._signal.set()
         return True
+
+    def _on_media_stopped(self, msg: Message) -> None:
+        """``media.stopped`` (the player's thread): a station that dropped or failed offers the
+        failed-action reaction, keyed by the station for its cooldown. A stop a person or the
+        robot asked for (a new station, a stop said or shown, sleep, the settings) is not one.
+        The bus thread only queues."""
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        name = payload.get("station")
+        if payload.get("reason") not in FAILED_STOPS or not isinstance(name, str):
+            return
+        self.offer(ReactionRequest("failed_action", {"station": name}, self.clock(), key=name))
 
     def offer_not_heard(self, why: str) -> bool:
         """The listener or the conversation did not hear an addressed utterance (``why``: a
