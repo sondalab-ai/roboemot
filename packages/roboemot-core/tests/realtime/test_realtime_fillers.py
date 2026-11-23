@@ -29,9 +29,9 @@ class Slow:
     def __init__(self) -> None:
         self.calls = 0
 
-    def __call__(self) -> bool:
+    def __call__(self) -> str:
         self.calls += 1
-        return True
+        return "played"
 
 
 def held_ear(ears, server, slow):  # noqa: F811
@@ -62,7 +62,7 @@ def test_a_transcript_slower_than_the_filler_delay_plays_thinking_once(ears):  #
         hold.set()
         assert ear.settle(lambda: len(ear.utterances) == 1)
         assert ear.utterances[0].filled
-        assert fillers(ear) == {"transcript": 1}
+        assert fillers(ear) == {"transcript": {"played": 1, "missing": 0}}
 
 
 def test_a_fast_transcript_plays_no_filler(ears):  # noqa: F811
@@ -73,20 +73,20 @@ def test_a_fast_transcript_plays_no_filler(ears):  # noqa: F811
         ear.r.now += ear.rt.stack.effective().voice.realtime_route.retry.filler_after_s
         ear.r.listener.poll_handoff()
         assert slow.calls == 0 and not ear.utterances[0].filled
-        assert fillers(ear) == {"transcript": 0}
+        assert fillers(ear) == {"transcript": {"played": 0, "missing": 0}}
 
 
 def test_a_filler_that_did_not_play_leaves_the_utterance_unfilled(ears):  # noqa: F811
     hold = threading.Event()
     with TurnServer(hold=hold, hold_at="transcript") as server:
-        ear = held_ear(ears, server, lambda: False)  # the clip is missing
+        ear = held_ear(ears, server, lambda: "missing")
         assert ear.settle(lambda: ear.r.listener._queue[0].rt.sent)
         ear.r.now += ear.rt.stack.effective().voice.realtime_route.retry.filler_after_s
         ear.r.listener.poll_handoff()
         hold.set()
         assert ear.settle(lambda: len(ear.utterances) == 1)
         assert not ear.utterances[0].filled
-        assert fillers(ear) == {"transcript": 0}
+        assert fillers(ear) == {"transcript": {"played": 0, "missing": 1}}
 
 
 def test_a_transcript_after_the_timeout_is_counted(ears):  # noqa: F811
@@ -113,7 +113,7 @@ def test_a_slow_first_reply_plays_thinking_once_and_the_reply_follows_it(rigs): 
         rig.turn()
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)  # the reply played
         assert rig.clips.played == {"thinking": 1}
-        assert reply_fillers(rig) == {"reply": 1}
+        assert reply_fillers(rig) == {"reply": {"played": 1, "missing": 0}}
         assert rig.events[-1]["outcome"] == "ok"
 
 
@@ -123,7 +123,7 @@ def test_a_fast_first_reply_plays_no_filler(rigs):  # noqa: F811
         rig.turn()
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
         assert rig.clips.played == {}
-        assert reply_fillers(rig) == {"reply": 0}
+        assert reply_fillers(rig) == {"reply": {"played": 0, "missing": 0}}
 
 
 def test_no_second_filler_when_the_transcript_already_had_one(rigs):  # noqa: F811
@@ -135,7 +135,7 @@ def test_no_second_filler_when_the_transcript_already_had_one(rigs):  # noqa: F8
         assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n, 10.0)
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
         assert rig.clips.played == {}
-        assert reply_fillers(rig) == {"reply": 0}
+        assert reply_fillers(rig) == {"reply": {"played": 0, "missing": 0}}
 
 
 def test_no_thinking_filler_after_the_retrying_clip(rigs):  # noqa: F811
@@ -144,7 +144,7 @@ def test_no_thinking_filler_after_the_retrying_clip(rigs):  # noqa: F811
         rig.turn()
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
         assert rig.clips.played == {"retrying": 1}  # one status clip per wait
-        assert reply_fillers(rig) == {"reply": 0}
+        assert reply_fillers(rig) == {"reply": {"played": 0, "missing": 0}}
 
 
 def test_a_missing_retrying_clip_leaves_the_thinking_filler(rigs):  # noqa: F811
@@ -153,7 +153,16 @@ def test_a_missing_retrying_clip_leaves_the_thinking_filler(rigs):  # noqa: F811
         rig.turn()
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
         assert rig.clips.played == {"thinking": 1}
-        assert reply_fillers(rig) == {"reply": 1}
+        assert reply_fillers(rig) == {"reply": {"played": 1, "missing": 0}}
+
+
+def test_a_missing_thinking_clip_is_counted(rigs):  # noqa: F811
+    with TurnServer(first_delta_s=SLOW_S) as srv:
+        rig = rigs(srv, FakeClips(missing=("thinking",)), rt=FAST_REPLY)
+        rig.turn()
+        assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
+        assert rig.clips.played == {}
+        assert reply_fillers(rig) == {"reply": {"played": 0, "missing": 1}}
 
 
 def test_the_filler_must_come_before_the_transcript_timeout():

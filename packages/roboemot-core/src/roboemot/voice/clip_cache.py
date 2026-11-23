@@ -31,6 +31,9 @@ log = logging.getLogger(__name__)
 
 ClipKind = Literal["retrying", "sorry", "thinking"]
 CLIP_KINDS: tuple[ClipKind, ...] = get_args(ClipKind)
+# What a request to play a clip did: it played; the language has the line and its clip is not
+# loaded; or it was refused (no line, no output, or the moment does not allow a sound).
+ClipPlay = Literal["played", "missing", "refused"]
 FOLDER_MODE = 0o700
 FILE_MODE = 0o600
 WAV_CHANNELS = 1  # mono

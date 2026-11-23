@@ -7,14 +7,20 @@ while the cloud does not answer.
 
 Recording: a thread looks every ``RECORD_POLL_S``. When a realtime session is up, the
 conversation is idle (``conversation_idle``) and no media plays, it records one missing clip:
-the conversation worker has the open session say the line once (``record_line``) into a
-:class:`CaptureSpeech`, which keeps the audio and plays none of it. The clip is kept only when
-the reply's transcript says the line (case, accents and punctuation ignored); at most
-``retry.clip_record_attempts`` attempts per clip key in a day. It never opens a session just to
-record.
+the conversation worker has the open session say the line once (``record_line``, holding the
+audio input) into a :class:`CaptureSpeech`, which keeps the audio and plays none of it. The
+clip is kept only when the reply's transcript says the line (case, accents and punctuation
+ignored); at most ``retry.clip_record_attempts`` attempts per clip key in a day. It never opens
+a session just to record.
 
-Playback (``play``): the clip of the current key through the speech output, like a cue; never
-over robot speech or audible media.
+Playback (``play``): the clip of the current key through the speech output at the circadian
+volume (``volume_db``), like a cue; never over robot speech or audible media, and never while
+someone's speech is in progress or starting (``hearing``, the listener's ``voice_active``): a
+clip opens the speaking window and the listener drops what it hears then, so it would cut off
+the person's first words (counted ``skipped_voice_active``). ``play`` runs on the listener's and
+the worker's threads and reads no file: it plays only the clip loaded for the current key. The
+recorder thread loads them (``preload``) before each look for a missing clip, so a new key's clip
+plays within ``RECORD_POLL_S`` and an old key's never.
 
 The key is the provider host and model of the configured realtime route, the voice
 ``session.update`` asks for (``realtime_voice``), ``conversation.language`` and the line: all
@@ -39,7 +45,7 @@ import numpy as np
 
 from .. import shutdown
 from ..config.schema import RetryConfig, RoboEmotConfig, realtime_voice
-from ..voice.clip_cache import CLIP_KINDS, Clip, ClipCache, ClipKey, ClipKind
+from ..voice.clip_cache import CLIP_KINDS, Clip, ClipCache, ClipKey, ClipKind, ClipPlay
 from ..voice.speech import StreamFeed
 from .ticks import conversation_idle, media_on, robot_speaking
 
@@ -104,7 +110,9 @@ class CaptureSpeech:
 class VoiceClips:
     """See the module docstring. ``worker`` is the conversation worker (``record_line``),
     ``host`` the runtime host (``realtime_route``, ``speech_output``, ``media`` and what
-    ``conversation_idle`` reads), ``cfg`` the live configuration, ``cache`` the clip files."""
+    ``conversation_idle`` reads), ``cfg`` the live configuration, ``cache`` the clip files,
+    ``hearing`` whether someone's speech is in progress or starting, ``volume_db`` the
+    circadian volume offset now."""
 
     def __init__(
         self,
@@ -113,12 +121,17 @@ class VoiceClips:
         cfg: Callable[[], RoboEmotConfig],
         cache: ClipCache,
         clock: Callable[[], float],
+        *,
+        hearing: Callable[[], bool],
+        volume_db: Callable[[], float],
     ) -> None:
         self.worker, self.host, self.cfg, self.cache, self.clock = worker, host, cfg, cache, clock
+        self.hearing, self.volume_db = hearing, volume_db
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()  # leaf: the loaded clips, the attempts and the counts
-        self._loaded: dict[ClipKind, tuple[ClipKey, Clip]] = {}
+        # per kind, the key last loaded and its clip (None: no file for that key)
+        self._loaded: dict[ClipKind, tuple[ClipKey, Clip | None]] = {}
         self._attempts: dict[ClipKey, collections.deque[float]] = {}
         self._counts: dict[ClipKind, collections.Counter[str]] = {
             kind: collections.Counter() for kind in CLIP_KINDS
@@ -147,6 +160,7 @@ class VoiceClips:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                self.preload()
                 self.record_next()
             except Exception as exc:
                 log.warning("voice clips: recording failed (%s)", type(exc).__name__)
@@ -172,35 +186,56 @@ class VoiceClips:
         provider = urlsplit(llm.base_url).hostname or llm.base_url
         return ClipKey(provider, llm.model, realtime_voice(llm, settings), language, line)
 
-    def _clip(self, kind: ClipKind, key: ClipKey) -> Clip | None:
-        """The clip of ``kind`` for ``key``: the one in memory, else read from its file."""
-        with self._lock:
-            loaded = self._loaded.get(kind)
-        if loaded is not None and loaded[0] == key:
-            return loaded[1]
-        clip = self.cache.get(kind, key)
-        if clip is not None:
+    def preload(self) -> None:
+        """Load from its file the clip of each kind whose current key is not the one loaded
+        (none there is remembered too, so a missing file is not read again each poll). The
+        recorder's thread, off the audio path; ``play`` reads only what this loaded."""
+        for kind in CLIP_KINDS:
+            key = self.key(kind)
+            if key is None or self._loaded_for(kind, key):
+                continue
+            clip = self.cache.get(kind, key)
             with self._lock:
                 self._loaded[kind] = (key, clip)
-        return clip
+
+    def _loaded_for(self, kind: ClipKind, key: ClipKey) -> bool:
+        """Whether ``kind``'s entry in memory is for ``key`` (its clip, or that none exists)."""
+        with self._lock:
+            loaded = self._loaded.get(kind)
+        return loaded is not None and loaded[0] == key
+
+    def _clip(self, kind: ClipKind, key: ClipKey) -> Clip | None:
+        """The clip of ``kind`` for ``key`` in memory; None when it is not loaded for that key.
+        Never reads a file."""
+        with self._lock:
+            loaded = self._loaded.get(kind)
+        return loaded[1] if loaded is not None and loaded[0] == key else None
 
     # ----------------------------------------------------------------- playback
 
-    def play(self, kind: ClipKind) -> bool:
-        """Queue the clip of ``kind`` on the speech output; False when it is missing, media is
-        audible or the robot speaks. Any thread."""
+    def play(self, kind: ClipKind) -> ClipPlay:
+        """Queue the clip of ``kind`` on the speech output at the circadian volume. ``refused``
+        with no line or no output, while someone speaks (counted), media is audible or the robot
+        speaks, or when the output refuses it; else ``missing`` when its clip is not loaded.
+        Any thread; reads no file."""
         key = self.key(kind)
-        if key is None or media_on(self.host) or robot_speaking(self.host, self.clock()):
-            return False
-        clip = self._clip(kind, key)
         output = self.host.speech_output
-        if clip is None or output is None:
-            return False
-        if output.play(clip.samples, clip.rate_hz) is None:
-            return False
+        if key is None or output is None:
+            return "refused"
+        if self.hearing():
+            with self._lock:
+                self._counts[kind]["skipped_voice_active"] += 1
+            return "refused"
+        if media_on(self.host) or robot_speaking(self.host, self.clock()):
+            return "refused"
+        clip = self._clip(kind, key)
+        if clip is None:
+            return "missing"
+        if output.play(clip.samples, clip.rate_hz, self.volume_db()) is None:
+            return "refused"
         with self._lock:
             self._counts[kind]["played"] += 1
-        return True
+        return "played"
 
     # ----------------------------------------------------------------- recording
 
@@ -217,6 +252,7 @@ class VoiceClips:
         if not retry.enabled:
             return None  # no retry, no clip: nothing goes to the cloud for one
         attempts = retry.clip_record_attempts
+        self.preload()  # a clip already in its file is not recorded again
         for kind in CLIP_KINDS:
             key = self.key(kind)
             if key is None or self._clip(kind, key) is not None or not self._may_try(key, attempts):
@@ -276,10 +312,10 @@ class VoiceClips:
     # ----------------------------------------------------------------- report
 
     def snapshot(self) -> dict[str, Any]:
-        """Per kind: ``cached`` (the clip of the current key is there), ``missing`` (a line
-        exists for the language and its clip does not), and the counts ``recorded``,
-        ``rejected_mismatch``, ``failed`` (no reply, or no audio) and ``played`` (SPEC 12A).
-        Never a line."""
+        """Per kind: ``cached`` (the clip of the current key is loaded), ``missing`` (a line
+        exists for the language and its clip is not loaded), and the counts ``recorded``,
+        ``rejected_mismatch``, ``failed`` (no reply, or no audio), ``played`` and
+        ``skipped_voice_active`` (not played: someone was speaking) (SPEC 12A). Never a line."""
         out: dict[str, Any] = {}
         for kind in CLIP_KINDS:
             key = self.key(kind)
@@ -293,5 +329,6 @@ class VoiceClips:
                     "rejected_mismatch": counts["rejected_mismatch"],
                     "failed": counts["failed"],
                     "played": counts["played"],
+                    "skipped_voice_active": counts["skipped_voice_active"],
                 }
         return out

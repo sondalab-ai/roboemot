@@ -249,6 +249,7 @@ EN: dict[str, str] = {
     "live_ev_reply_retry": "Reply lost: trying again ({attempt} of {limit})",
     "live_ev_reply_recovered": "Reply recovered",
     "live_ev_reply_gave_up": "Reply lost: apologizing",
+    "live_ev_reply_backup": "Reply lost: the backup chat answered",
     "live_ev_expression_spoken": "Reacted in its own words: {situation}",
     "live_ev_expression_gesture_only_music": "Music playing: a gesture only ({situation})",
     "live_ev_expression_dropped_stale": "Reaction dropped, too late: {situation}",
@@ -1593,6 +1594,7 @@ IT: dict[str, str] = {
     "live_ev_reply_retry": "Risposta persa: riprovo ({attempt} di {limit})",
     "live_ev_reply_recovered": "Risposta recuperata",
     "live_ev_reply_gave_up": "Risposta persa: mi scuso",
+    "live_ev_reply_backup": "Risposta persa: ha risposto la chat di riserva",
     "live_ev_expression_spoken": "Ha reagito con parole sue: {situation}",
     "live_ev_expression_gesture_only_music": (
         "Musica in corso: solo un gesto, nessuna parola ({situation})"

@@ -145,7 +145,7 @@ from ..realtime.turn import (
     wait_in_order,
 )
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
-from ..voice.clip_cache import Clip, same_words
+from ..voice.clip_cache import Clip, ClipPlay, same_words
 from ..voice.cues import CueKind, CueSink, NoCues
 from ..voice.keywords import normalise
 from ..voice.listener import Utterance
@@ -282,6 +282,7 @@ class _Turn:
     rt_force_text: bool = False
     rt_lost: str | None = None  # a loss that ended it unanswerable: "played" or "tool_ran"
     rt_gave_up: bool = False  # every retry failed: the fallback line is the sorry line
+    rt_retries: int = 0  # the retries of a lost reply that began (the gave_up event's attempt)
     # a status clip (thinking, retrying) played for it: no thinking clip plays again
     filled: bool = False
     rt_filler: asyncio.Task[None] | None = field(default=None, repr=False)  # the reply filler
@@ -387,11 +388,12 @@ class ConversationWorker:
         # a streamed, addressed utterance no server answer took: whether the robot asks about it
         # in its own words (SPEC 8, Robot expression; the expressor), in the cue sound's place
         self.on_not_heard: Callable[[str], bool] = lambda why: False
-        # plays a saved clip of the cloud voice ("retrying", "sorry"); False when it cannot
-        # (SPEC 8, Lost reply retry; the runtime's voice clips)
-        self.play_clip: Callable[[str], bool] = lambda kind: False
+        # plays a saved clip of the cloud voice ("retrying", "sorry", "thinking") and says what
+        # it did (SPEC 8, Lost reply retry; the runtime's voice clips)
+        self.play_clip: Callable[[str], ClipPlay] = lambda kind: "refused"
         self._retry_counts: collections.Counter[str] = collections.Counter()
-        self._fillers = {"reply": 0}  # thinking clips played for a slow first reply
+        # thinking clips for a slow first reply: played, or not for a missing clip (SPEC 12A)
+        self._fillers = {"reply": {"played": 0, "missing": 0}}
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
         self._reply: tuple[int, list[tuple[int, str]]] | None = (
             None  # (ring seq, queued) of the last reply
@@ -1027,12 +1029,15 @@ class ConversationWorker:
                 # owner decision 2026-10-30: the cue only, no chat request (a silent chat turn
                 # would be _converse here: _say_local already drops every sentence); after
                 # the retries the sorry clip, when there is one, says it in the cloud voice
-                if turn.rt_gave_up and self._play_clip("sorry"):
+                if turn.rt_gave_up and self._play_clip("sorry") == "played":
                     turn.outcome, turn.fell_back = "realtime_lost", True
+                    self._apologised(turn)
                 else:
                     self._unvoiced(turn, router)
             else:
                 await self._converse(turn, router)  # failing, it says the sorry line
+                if turn.rt_gave_up and turn.spoken and not turn.fell_back:
+                    self._retry_event(turn, "backup")  # the chat route answered: no apology
         await self._speak_lines(turn)
 
     def _unvoiced(self, turn: _Turn, router: Any) -> None:
@@ -1230,10 +1235,11 @@ class ConversationWorker:
             if self.clock() - first >= retry.total_budget_s:
                 self._retry_counts["skipped_budget"] += 1
                 break
-            attempt += 1
+            attempt = turn.rt_retries = attempt + 1
             self._retry_counts["attempts"] += 1
             self.events("reply", "retry", attempt=attempt, limit=retry.max_retries)
-            if attempt == 1 and retry.announce_first_retry and self._play_clip("retrying"):
+            announce = attempt == 1 and retry.announce_first_retry
+            if announce and self._play_clip("retrying") == "played":
                 turn.filled = True  # one status clip per wait: no thinking clip after it
             wait_until = min(self.clock() + retry.reconnect_wait_s, first + retry.total_budget_s)
             ready = await self._retry_ready(turn, wait_until)
@@ -1261,9 +1267,18 @@ class ConversationWorker:
         if attempt == 0:
             return False
         turn.rt_gave_up = True
-        self._retry_counts["gave_up"] += 1
-        self.events("reply", "gave_up", attempt=attempt, limit=retry.max_retries)
+        self._retry_counts["gave_up"] += 1  # its Live event comes with the apology, if one is said
         return False
+
+    def _retry_event(self, turn: _Turn, reason: str) -> None:
+        """The Live tab's ``reply`` event ``reason`` for ``turn``'s lost reply, with the retries
+        that ran (SPEC 8, Lost reply retry; SPEC 12A)."""
+        limit = turn.cfg.voice.realtime_route.retry.max_retries
+        self.events("reply", reason, attempt=turn.rt_retries, limit=limit)
+
+    def _apologised(self, turn: _Turn) -> None:
+        """The robot said, or played, its apology for ``turn``'s lost reply: ``gave_up``."""
+        self._retry_event(turn, "gave_up")
 
     def _newer_utterance(self) -> bool:
         """Whether a person's newer words wait for the worker (an utterance, or a response the
@@ -1320,17 +1335,18 @@ class ConversationWorker:
             return  # its reply began: a clip now would only hold it back
         if self.speech.first_audio_at(turn.speech_id) is not None:
             return
-        if self._play_clip("thinking"):
-            turn.filled = True
-            self._fillers["reply"] += 1
+        outcome = self._play_clip("thinking")
+        turn.filled = outcome == "played"
+        if outcome != "refused":
+            self._fillers["reply"][outcome] += 1
 
-    def _play_clip(self, kind: str) -> bool:
-        """``play_clip``; one that raises is logged by type and counts as not played."""
+    def _play_clip(self, kind: str) -> ClipPlay:
+        """``play_clip``; one that raises is logged by type and counts as refused."""
         try:
-            return bool(self.play_clip(kind))
+            return self.play_clip(kind)
         except Exception as exc:
             log.warning("conversation: %s clip failed (%s)", kind, type(exc).__name__)
-            return False
+            return "refused"
 
     async def _realtime_answer(self, turn: _Turn, inner: asyncio.Future) -> bool:
         """``_realtime_turn`` once its rounds run in ``inner``."""
@@ -1854,8 +1870,9 @@ class ConversationWorker:
                 # came from the server); after the retries the sorry clip, else Piper (the sorry
                 # line) or the cue says the fallback, never the server on its own turn
                 turn.outcome, turn.voice = "realtime_lost", "local"
-                if turn.rt_gave_up and self._no_voice() and self._play_clip("sorry"):
+                if turn.rt_gave_up and self._no_voice() and self._play_clip("sorry") == "played":
                     turn.fell_back = True
+                    self._apologised(turn)
                 else:
                     self._say_fallback(turn)
             await self._speak_lines(turn)  # a fixed line a round left (no_text), as _respond
@@ -2210,30 +2227,43 @@ class ConversationWorker:
 
     async def _record_line(self, text: str, language: str, capture: CaptureSpeech) -> Clip | None:
         """``record_line`` on the worker's loop, under ``_rt_lock`` like ``_rt_line``, with no
-        history (no ``_absorb``): the response's server items are deleted afterwards (on
-        Gemini Live the route only emulates the delete)."""
+        history (no ``_absorb``), holding the audio input like a turn: a person's burst waits,
+        so the recording's ``response.create`` never sees it. Skipped while a burst already
+        sent waits for its turn. The response's server items are deleted afterwards (on Gemini
+        Live the route only emulates the delete)."""
         route = self.realtime
         assert self._rt_lock is not None
         async with self._rt_lock:
             if not route.up() or self.busy():
                 return None  # skipped: a person's turn goes first, and it never connects
-            generation = route.generation
-            run = ResponseRun(
-                route,
-                capture,
-                utterance=capture.new_utterance(),
-                mood=None,
-                volume_db=0.0,
-                language=language,
-                clock=self.clock,
-                generation=generation,
-            )
-            name = LANGUAGE_NAMES.get(language, language)
-            capture.outcome = "failed"  # from here a request may go out: an error is an attempt
+            if not route.hold_idle_input():
+                return None  # skipped: a person's words went, their turn comes first
             try:
-                reply = await run.run(line_instructions("", text, name), "none")
+                return await self._record_held(route, text, language, capture)
             finally:
-                route.delete_items(generation, run.reply.item_ids())
+                route.release_input()
+
+    async def _record_held(
+        self, route: Any, text: str, language: str, capture: CaptureSpeech
+    ) -> Clip | None:
+        """``_record_line`` with ``_rt_lock`` and the audio input held."""
+        generation = route.generation
+        run = ResponseRun(
+            route,
+            capture,
+            utterance=capture.new_utterance(),
+            mood=None,
+            volume_db=0.0,
+            language=language,
+            clock=self.clock,
+            generation=generation,
+        )
+        name = LANGUAGE_NAMES.get(language, language)
+        capture.outcome = "failed"  # from here a request may go out: an error is an attempt
+        try:
+            reply = await run.run(line_instructions("", text, name), "none")
+        finally:
+            route.delete_items(generation, run.reply.item_ids())
         if reply.closed or reply.status != "completed":
             capture.outcome = "failed"
             return None
@@ -2900,15 +2930,17 @@ class ConversationWorker:
         intensity: float,
         continued: bool = False,
         cue: CueKind | None = None,
-    ) -> None:
+    ) -> bool:
         """Say a sentence or a fixed line: in a realtime turn it waits for the server's voice
-        (``_speak_lines``), else Piper says it now. ``cue`` shows when no voice can say it."""
+        (``_speak_lines``), else Piper says it now. ``cue`` shows when no voice can say it.
+        Whether a voice took the text (queued for the server's voice, or Piper said it)."""
         if text and not turn.interrupted and turn.voice == "realtime":
             turn.lines.append((text, None, cue))
-            return
+            return True
         spoken = self._say_local(turn, text, mood, intensity, continued)
         if not spoken and cue is not None and not turn.interrupted:
             self._cue(turn, cue)
+        return bool(spoken)
 
     def _cue(self, turn: _Turn, cue: CueKind) -> None:
         """Show ``cue`` for ``turn``: its reason is the turn's outcome, with why the realtime
@@ -2987,7 +3019,9 @@ class ConversationWorker:
         )  # after the retries of a lost reply: the sorry line (SPEC 8, Lost reply retry)
         text = pick(lines, turn.language, turn.cfg.conversation.language)
         state = self.affect.state(self.clock())
-        self._say(turn, text or "", state.label, state.intensity, cue="fallback")
+        said = self._say(turn, text or "", state.label, state.intensity, cue="fallback")
+        if said and turn.rt_gave_up:  # a voice says the sorry line, not the fallback cue
+            self._apologised(turn)
         self._counts["fallbacks"] += 1
 
     def _spoken_until(self, jobs: list[tuple[int, str]]) -> float:
@@ -3109,7 +3143,7 @@ class ConversationWorker:
                 "pending": len(self._pending),
                 **dict(self._counts),
                 "retry": {**dict.fromkeys(RETRY_COUNTS, 0), **self._retry_counts},
-                "fillers": dict(self._fillers),
+                "fillers": {cause: dict(n) for cause, n in self._fillers.items()},
             }
         if last is not None:
             heard = last["heard"]

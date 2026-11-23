@@ -188,6 +188,7 @@ from ..config.schema import RoboEmotConfig
 from ..diag import EventSink, no_events
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
+from .clip_cache import ClipPlay
 from .decode_worker import DecodeJob, DecodeWorker
 from .direction import HEARD, VoiceDirection
 from .fastpath import NAME_FIRST, WAKE, FastPath, GrammarPass, UtteranceState
@@ -460,10 +461,11 @@ class VoiceListener:
         # an addressed utterance was not heard (``no_transcript`` or ``decodes_lost``): whether
         # the robot asks about it in its own words (SPEC 8, Robot expression; the expressor)
         self.on_not_heard: Callable[[str], bool] = lambda why: False
-        # an addressed utterance's transcript is slow (``retry.filler_after_s``): whether the
-        # robot's thinking clip played (SPEC 8, Lost reply retry; the runtime's voice clips)
-        self.on_slow_transcript: Callable[[], bool] = lambda: False
-        self._fillers = {"transcript": 0}
+        # an addressed utterance's transcript is slow (``retry.filler_after_s``): what the
+        # robot's thinking clip did (SPEC 8, Lost reply retry; the runtime's voice clips)
+        self.on_slow_transcript: Callable[[], ClipPlay] = lambda: "refused"
+        # thinking clips for a slow transcript: played, or not for a missing clip (SPEC 12A)
+        self._fillers = {"transcript": {"played": 0, "missing": 0}}
         self._audio = {
             "vosk_skipped": 0,
             "sent": 0,
@@ -700,7 +702,7 @@ class VoiceListener:
             snap["music_classifier"] = self.music_classifier.snapshot()
         with self._lock:
             snap["realtime_audio"] = dict(self._audio)
-            snap["fillers"] = dict(self._fillers)
+            snap["fillers"] = {cause: dict(n) for cause, n in self._fillers.items()}
             snap["grammar_handoff"] = {
                 **self._handoff,
                 "pending": bool(self._queue),
@@ -1855,12 +1857,14 @@ class VoiceListener:
             return  # still held (a session coming up): asked again at the next poll
         p.filler_at = math.inf  # asked once, played or not
         try:
-            p.filled = bool(self.on_slow_transcript())
+            outcome = self.on_slow_transcript()
         except Exception as exc:  # a clip must not stop the listener
             log.warning("voice listener: slow transcript consumer raised %s", type(exc).__name__)
-        if p.filled:
+            return
+        p.filled = outcome == "played"
+        if outcome != "refused":
             with self._lock:
-                self._fillers["transcript"] += 1
+                self._fillers["transcript"][outcome] += 1
 
     def _rt_settled(self, p: _Handoff) -> bool:
         try:

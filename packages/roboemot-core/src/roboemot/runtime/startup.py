@@ -368,13 +368,23 @@ def start_voice_clips(
 ) -> None:
     """The robot's status lines in its cloud voice (SPEC 8, Lost reply retry): recorded while
     the conversation is idle, played while the cloud does not answer (a lost reply's retry, a
-    slow transcript or first reply). Closed before the conversation it records through. Sets
-    ``host.clips``; nothing without a conversation and a realtime route."""
+    slow transcript or first reply), at the circadian volume and never while someone speaks.
+    Closed before the conversation it records through. Sets ``host.clips``; nothing without a
+    conversation and a realtime route."""
     conv = host.conversation
     if conv is None or host.realtime_route is None:
         return
     cache = ClipCache(clip_folder(stack.effective()))
-    clips = host.clips = VoiceClips(conv, host, stack.effective, cache, time.monotonic)
+    clips = host.clips = VoiceClips(
+        conv,
+        host,
+        stack.effective,
+        cache,
+        time.monotonic,
+        # never over someone's speech in progress or starting, as a one-shot cue's sound
+        hearing=lambda: (listener := p.listener) is not None and listener.voice_active(),
+        volume_db=lambda: effects_now(host, stack, p).volume_db,
+    )
     conv.play_clip = clips.play  # a lost reply's retry announces itself, or apologises
     if p.listener is not None:  # a slow transcript: the robot says it is thinking
         p.listener.on_slow_transcript = lambda: clips.play("thinking")

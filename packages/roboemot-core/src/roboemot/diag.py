@@ -113,8 +113,9 @@ REASONS: dict[str, tuple[str, ...]] = {
         "capped",
     ),
     # a realtime reply lost before the robot spoke (SPEC 8, Lost reply retry): a retry began,
-    # one answered, or every one failed
-    "reply": ("retry", "recovered", "gave_up"),
+    # one answered, every one failed and the robot apologised, or every one failed and a chat
+    # route answered
+    "reply": ("retry", "recovered", "gave_up", "backup"),
     # a reaction of the robot in its own words ended (SPEC 8, Robot expression): its outcome
     "expression": (
         "spoken",

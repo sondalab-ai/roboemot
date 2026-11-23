@@ -28,11 +28,11 @@ class FakeClips:
         self.played: collections.Counter[str] = collections.Counter()
         self.missing = missing
 
-    def play(self, kind: str) -> bool:
+    def play(self, kind: str) -> str:
         if kind in self.missing:
-            return False
+            return "missing"
         self.played[kind] += 1
-        return True
+        return "played"
 
 
 @pytest.fixture()
@@ -114,6 +114,7 @@ def test_without_a_sorry_clip_the_fallback_cue_shows(rigs):
         rig.turn()
         assert retry(rig)["gave_up"] == 1
         assert rig.cues.played == ["fallback"]
+        assert [r for r, _ in reply_events(rig)] == ["retry", "retry"]  # no apology was said
 
 
 def test_a_robot_with_a_local_voice_tries_the_chat_route_after_the_retries(rigs):
@@ -124,6 +125,8 @@ def test_a_robot_with_a_local_voice_tries_the_chat_route_after_the_retries(rigs)
         assert counts["attempts"] == 2 and counts["gave_up"] == 1
         assert rig.chat_hosts() == ["lan.local"]
         assert rig.clips.played == {"retrying": 1}  # an answer beats an apology
+        # the Live tab says the backup answered, never that the robot apologised
+        assert [r for r, _ in reply_events(rig)] == ["retry", "retry", "backup"]
 
 
 def test_the_local_voice_apologizes_when_the_chat_route_fails_too(rigs):
@@ -133,6 +136,7 @@ def test_the_local_voice_apologizes_when_the_chat_route_fails_too(rigs):
         rig.turn()
         assert retry(rig)["gave_up"] == 1
         assert wait_for(lambda: rig.speech.backend.texts == [SORRY_IT])
+        assert [r for r, _ in reply_events(rig)] == ["retry", "retry", "gave_up"]
 
 
 def test_no_retry_after_a_skill_ran(rigs):
@@ -268,8 +272,8 @@ def test_the_runtime_wires_the_voice_clips_to_the_worker(tmp_path):
         assert host.clips is not None
         assert worker.play_clip == host.clips.play
         played = []
-        host.clips.play = lambda kind: played.append(kind) or True
-        assert listener.on_slow_transcript() is True
+        host.clips.play = lambda kind: played.append(kind) or "played"
+        assert listener.on_slow_transcript() == "played"
         assert played == ["thinking"]
 
 
