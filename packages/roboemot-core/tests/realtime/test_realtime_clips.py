@@ -3,6 +3,7 @@ in its own cloud voice while the conversation is idle, and plays them."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import time
 from types import SimpleNamespace
 
@@ -194,3 +195,40 @@ def _say_args(rig):
         "intensity": 0.0,
         "utterance": rig.speech.new_utterance(),
     }
+
+
+class RaisingWorker:
+    """A worker whose recording request goes out and then fails."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def record_line(self, text, language, capture):
+        self.calls += 1
+        future = concurrent.futures.Future()
+        future.set_exception(RuntimeError("boom"))
+        return future
+
+    def busy(self) -> bool:
+        return False
+
+
+def test_a_recording_that_raises_counts_as_an_attempt(rigs, tmp_path):
+    with TurnServer() as server:
+        rig = rigs(server, rt={"retry": {"clip_record_attempts": 1}})
+        connect(rig)
+        clips = clips_for(rig, tmp_path)
+        worker = clips.worker = RaisingWorker()
+        clips.host.conversation = worker
+        assert [clips.record_next() for _ in range(4)] == ["retrying", "sorry", "thinking", None]
+        assert worker.calls == 3  # one per kind, then the daily cap holds
+        assert all(clips.snapshot()[k]["failed"] == 1 for k in ("retrying", "sorry", "thinking"))
+
+
+def test_nothing_is_recorded_with_the_retry_off(rigs, tmp_path):
+    with TurnServer(transcript=RETRYING) as server:
+        rig = rigs(server, rt={"retry": {"enabled": False}})
+        connect(rig)
+        clips = clips_for(rig, tmp_path)
+        assert clips.record_next() is None
+        assert server.of("response.create") == []

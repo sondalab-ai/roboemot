@@ -213,14 +213,17 @@ class VoiceClips:
             return None
         if not conversation_idle(self.host, self.clock()) or media_on(self.host):
             return None
-        attempts = self.cfg().voice.realtime_route.retry.clip_record_attempts
+        retry = self.cfg().voice.realtime_route.retry
+        if not retry.enabled:
+            return None  # no retry, no clip: nothing goes to the cloud for one
+        attempts = retry.clip_record_attempts
         for kind in CLIP_KINDS:
             key = self.key(kind)
             if key is None or self._clip(kind, key) is not None or not self._may_try(key, attempts):
                 continue
             capture = CaptureSpeech()
             future = self._inflight = self.worker.record_line(key.line, key.language, capture)
-            clip = self._result(future)
+            clip = self._result(future, capture)
             self._inflight = None
             if capture.outcome == "skipped":
                 return None
@@ -241,8 +244,10 @@ class VoiceClips:
                 stamps.popleft()
             return not stamps or len(stamps) < attempts
 
-    def _result(self, future: concurrent.futures.Future) -> Clip | None:
-        """``future``'s clip once done; None after a failure, a cancel or a close."""
+    def _result(self, future: concurrent.futures.Future, capture: CaptureSpeech) -> Clip | None:
+        """``future``'s clip once done; None after a failure, a cancel or a close. A recording
+        that raised or was cancelled other than by the close is ``failed`` (it counts as an
+        attempt: its request may have gone out); only the worker's own skip stays ``skipped``."""
         while True:
             try:
                 return future.result(timeout=RESULT_POLL_S)
@@ -251,9 +256,12 @@ class VoiceClips:
                     future.cancel()
                     return None
             except concurrent.futures.CancelledError:
+                if not self._stop.is_set():
+                    capture.outcome = "failed"
                 return None
             except Exception as exc:
                 log.warning("voice clips: recording failed (%s)", type(exc).__name__)
+                capture.outcome = "failed"
                 return None
 
     def _store(self, kind: ClipKind, key: ClipKey, clip: Clip) -> None:

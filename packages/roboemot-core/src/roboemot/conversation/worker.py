@@ -2067,6 +2067,7 @@ class ConversationWorker:
                 generation=generation,
             )
             name = LANGUAGE_NAMES.get(language, language)
+            capture.outcome = "failed"  # from here a request may go out: an error is an attempt
             try:
                 reply = await run.run(line_instructions("", text, name), "none")
             finally:
