@@ -8,16 +8,16 @@ import tempfile
 from pathlib import Path
 
 
-def replace_file(path: Path, text: str, mode: int) -> None:
-    """Write ``text`` over ``path`` atomically: a temp file in the same folder with ``mode``
-    (whatever the old file's mode was), synced, renamed over ``path``, then the folder synced
-    as a best effort. A kill at any point leaves the old file or the new one, never a truncated
-    one. ``path`` itself is replaced: a caller that means to write through a symlink resolves
-    it first."""
+def replace_file(path: Path, text: str | bytes, mode: int) -> None:
+    """Write ``text`` (or raw bytes) over ``path`` atomically: a temp file in the same folder
+    with ``mode`` (whatever the old file's mode was), synced, renamed over ``path``, then the
+    folder synced as a best effort. A kill at any point leaves the old file or the new one,
+    never a truncated one. ``path`` itself is replaced: a caller that means to write through a
+    symlink resolves it first."""
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     tmp = Path(name)
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "wb" if isinstance(text, bytes) else "w") as handle:
             os.fchmod(handle.fileno(), mode)
             handle.write(text)
             handle.flush()
