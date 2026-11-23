@@ -1232,16 +1232,17 @@ class ConversationWorker:
             if attempt == 1 and retry.announce_first_retry:
                 self._play_clip("retrying")
             wait_until = min(self.clock() + retry.reconnect_wait_s, first + retry.total_budget_s)
-            if not await self._retry_ready(turn, wait_until):
-                turn.rt_failure, turn.rt_detail = "not_ready", self.realtime.reason
-                if turn.interrupted:
-                    turn.outcome = "interrupted"
-                    return True
-                continue
+            ready = await self._retry_ready(turn, wait_until)
+            if turn.interrupted:  # a barge-in: nothing more is said over the person
+                turn.outcome = "interrupted"
+                return True
             if self._newer_utterance():
                 self._retry_counts["skipped_newer_utterance"] += 1
                 turn.outcome = "realtime_lost"
                 return True
+            if not ready:
+                turn.rt_failure, turn.rt_detail = "not_ready", self.realtime.reason
+                continue
             self._retry_reset(turn)
             if await self._realtime_turn(turn):
                 if turn.rt_lost is not None:
@@ -1269,9 +1270,9 @@ class ConversationWorker:
     async def _retry_ready(self, turn: _Turn, until: float) -> bool:
         """Whether the realtime route is ready for a retry by ``until`` (the worker's clock):
         asked off the loop every ``RETRY_POLL_S`` (a route in its reconnect backoff says no at
-        once); False at once after a barge-in."""
+        once); False at once after a barge-in or when a newer utterance waits (it wins)."""
         route, loop = self.realtime, asyncio.get_running_loop()
-        while not turn.interrupted:
+        while not (turn.interrupted or self._newer_utterance()):
             try:
                 ready = await loop.run_in_executor(None, route.ready, turn.cfg)
             except Exception as exc:

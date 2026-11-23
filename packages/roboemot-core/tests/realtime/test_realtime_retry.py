@@ -286,3 +286,61 @@ def test_a_server_turn_lost_before_its_audio_is_retried_by_the_robot_with_its_wo
             if e["item"]["type"] == "message"
         ]
         assert texts == [HEARD]
+
+
+def lost_and_unreachable(rigs, srv, **kw):
+    """A rig whose session is up; every later connect is refused, so after the loss the route
+    stays not ready (the retry waits for it)."""
+    rig = rigs(srv, **kw)
+    assert rig.route.ready()
+    srv.refuse_connects = 1000
+    return rig
+
+
+def test_a_session_not_back_in_time_is_a_failed_attempt(rigs):
+    rt = {"retry": {"max_retries": 1, "reconnect_wait_s": 0.5}}
+    with TurnServer(["close_before"]) as srv:
+        rig = lost_and_unreachable(rigs, srv, rt=rt, app=NO_VOICE)
+        rig.turn()
+        counts = retry(rig)
+        assert counts["attempts"] == 1 and counts["gave_up"] == 1
+        assert srv.of("response.create") and len(srv.of("response.create")) == 1  # no resend
+        assert rig.clips.played == {"retrying": 1, "sorry": 1}
+        [ended] = [e for e in rig.diag if e["kind"] == "turn"]
+        assert ended["reason"] == "realtime_lost" and ended["failure"] == "not_ready"
+
+
+def test_a_barge_in_during_the_reconnect_wait_ends_the_turn(rigs):
+    """The person cuts in while the retry waits for the session: the turn ends interrupted at
+    once, says nothing, and holds neither the audio input nor the realtime lock."""
+    rt = {"retry": {"reconnect_wait_s": 10}}
+    with TurnServer(["close_before"]) as srv:
+        rig = lost_and_unreachable(rigs, srv, rt=rt, app=NO_VOICE)
+        n = rig.say()
+        assert wait_for(lambda: reply_events(rig), 5.0)  # the first retry is waiting
+        assert rig.worker.interrupt()
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n, 3.0)
+        assert rig.events[-1]["outcome"] == "interrupted"
+        counts = retry(rig)
+        assert counts["attempts"] == 1 and counts["gave_up"] == 0
+        assert rig.clips.played == {"retrying": 1}  # no apology over the person
+        assert rig.cues.played == []
+        assert not rig.route.input_held()
+        assert not rig.worker._rt_lock.locked()
+        srv.refuse_connects = 0
+        rig.turn("ancora")  # the next turn is served
+        assert rig.events[-1]["outcome"] != "interrupted"
+
+
+def test_a_newer_utterance_during_the_reconnect_wait_ends_the_wait(rigs):
+    rt = {"retry": {"reconnect_wait_s": 10}}
+    with TurnServer(["close_before"]) as srv:
+        rig = lost_and_unreachable(rigs, srv, rt=rt, app=NO_VOICE)
+        n = rig.say("prima")
+        assert wait_for(lambda: reply_events(rig), 5.0)  # the first retry is waiting
+        rig.say("seconda")
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n, 3.0)
+        counts = retry(rig)
+        assert counts["skipped_newer_utterance"] == 1 and counts["gave_up"] == 0
+        assert rig.events[0]["outcome"] == "realtime_lost"
+        assert "sorry" not in rig.clips.played
