@@ -373,6 +373,7 @@ def start_voice_clips(host: RuntimeHost, stack: ConfigStack, cleanup: ExitStack)
         return
     cache = ClipCache(clip_folder(stack.effective()))
     clips = host.clips = VoiceClips(conv, host, stack.effective, cache, time.monotonic)
+    conv.play_clip = clips.play  # a lost reply's retry announces itself, or apologises
     cleanup.callback(clips.close)
     clips.start()
 

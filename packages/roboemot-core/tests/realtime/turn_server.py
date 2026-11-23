@@ -23,6 +23,8 @@ Scripts (``scripts``, used in order; the last one repeats):
 - ``unrelated_error``: ``session.updated``, then an ``error`` about another event;
 - ``empty``: ``response.created`` and ``response.done``, no audio;
 - ``created_close``: ``response.created``, then the socket is closed (no audio);
+- ``created_stall``: ``response.created``, then nothing until a cancel (``response.done``
+  ``cancelled``): a stall that keeps the session;
 - ``silent``: nothing at all;
 - ``pending``: the ``error`` ``function_call_output_pending`` that echoes the request;
 - ``cancel_then_tool``: the ``reply`` audio; at a cancel, the ``tool`` call, then
@@ -100,6 +102,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import threading
 from typing import Any
@@ -535,6 +538,11 @@ class TurnServer(FakeServer):
         await self._send(ws, {"type": "response.created", "response": {"id": rid}})
         if script == "created_close":
             await ws.close()
+            return
+        if script == "created_stall":
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(cancel.wait(), HOLD_MAX_S)
+            await self._done(ws, rid, "cancelled")
             return
         if script == "empty":  # a response with no audio
             await self._done(ws, rid, "completed")

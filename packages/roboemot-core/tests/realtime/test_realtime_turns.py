@@ -286,10 +286,20 @@ def test_fallback_at_start_when_the_budget_is_spent(rigs):
 
 def test_a_session_lost_before_any_audio_answers_through_the_chat_routes(rigs):
     with TurnServer(["close_before"]) as srv:
-        rig = rigs(srv)
+        rig = rigs(srv, rt={"retry": {"enabled": False}})
         rig.turn()
         assert rig.chat_hosts() == ["lan.local"]
         assert rig.route.snapshot()["fallbacks_mid_turn"] == 1
+
+
+def test_a_session_lost_before_any_audio_answers_through_the_chat_routes_after_the_retries(rigs):
+    """SPEC 8, Lost reply retry: the cloud is asked again first, then the chat routes answer."""
+    with TurnServer(["close_before"]) as srv:
+        rig = rigs(srv)
+        rig.turn()
+        assert rig.chat_hosts() == ["lan.local"]
+        assert rig.route.snapshot()["fallbacks_mid_turn"] == 3  # the first attempt and 2 retries
+        assert rig.worker.snapshot()["retry"]["gave_up"] == 1
 
 
 def test_a_session_lost_after_audio_cuts_the_reply(rigs):
@@ -542,7 +552,7 @@ def test_a_refused_response_leaves_no_item_and_the_turn_is_replayed(rigs):
     """M3: the chat routes answered; the server must not keep the question, and the next
     realtime request replays the turn it does not hold."""
     with TurnServer(["error", "reply"]) as srv:
-        rig = rigs(srv)
+        rig = rigs(srv, rt={"retry": {"enabled": False}})  # the chat routes answer at once
         rig.turn("prima domanda")
         assert rig.chat_hosts() == ["lan.local"]
         first = srv.of("conversation.item.create")[0]["item"]["id"]
@@ -906,7 +916,7 @@ def test_a_skip_with_a_second_call_leaves_no_call_open(rigs):
 
 def test_a_second_pending_reset_in_a_row_waits_the_backoff(rigs):
     with TurnServer(["pending", "pending", "reply"]) as srv:
-        rig = rigs(srv)
+        rig = rigs(srv, rt={"retry": {"enabled": False}})  # one reset per turn
         rig.turn()
         assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
         assert wait_for(lambda: rig.route.connected)

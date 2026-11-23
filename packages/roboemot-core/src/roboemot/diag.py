@@ -112,6 +112,9 @@ REASONS: dict[str, tuple[str, ...]] = {
         "declined",
         "capped",
     ),
+    # a realtime reply lost before the robot spoke (SPEC 8, Lost reply retry): a retry began,
+    # one answered, or every one failed
+    "reply": ("retry", "recovered", "gave_up"),
     # a reaction of the robot in its own words ended (SPEC 8, Robot expression): its outcome
     "expression": (
         "spoken",
@@ -193,6 +196,7 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "yaw_deg": NUMBER,
     "limit_deg": NUMBER,
     "limit": NUMBER,
+    "attempt": NUMBER,
     "cpu_percent": NUMBER,
     "cpu_max_percent": NUMBER,
     "timeout_s": NUMBER,

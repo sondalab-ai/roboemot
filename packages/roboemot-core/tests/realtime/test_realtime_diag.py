@@ -36,7 +36,7 @@ def test_a_refused_answer_shows_the_fallback_cue_with_the_servers_code(rigs):
     """The owner's case: the server refuses the response (function_call_output_pending), the
     session is reset, no local voice: the fallback cue's reason says all of it."""
     with TurnServer(["pending"]) as srv:
-        rig = rigs(srv, app=NO_VOICE)
+        rig = rigs(srv, app=NO_VOICE, rt={"retry": {"enabled": False}})  # one attempt
         rig.turn()
         assert rig.cues.played == ["fallback"]
         kind, reason, detail = rig.cues.reasons[-1]

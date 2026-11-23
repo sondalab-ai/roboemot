@@ -413,7 +413,9 @@ def test_a_released_held_answer_never_trips_the_first_token_watchdog(gemini, rig
 def test_a_released_hold_with_no_content_yet_stalls_at_the_first_token_timeout(gemini, rigs):
     """The release carries only the codec's response.created: the first token is still due."""
     srv = gemini([["audio"]], delay_s=5.0)
-    rig = rigs(srv, rt=AUDIO, app=OPT_IN, first_token_timeout_s=0.5)
+    # one attempt: the lost reply's retry is off (SPEC 8, Lost reply retry)
+    rt = {**AUDIO, "retry": {"enabled": False}}
+    rig = rigs(srv, rt=rt, app=OPT_IN, first_token_timeout_s=0.5)
     ear = listen(rig, ["x"])
     try:
         ear.say()

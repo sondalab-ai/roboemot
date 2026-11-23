@@ -69,7 +69,7 @@ def test_the_network_down_at_start_is_the_offline_reaction_not_the_fallback_cue(
 
 def test_fallback_mid_turn_before_first_audio_is_the_cue_not_a_local_answer(rigs):
     with TurnServer(["close_before"]) as srv:
-        rig = rigs(srv)
+        rig = rigs(srv, rt={"retry": {"enabled": False}})  # one attempt
         rig.turn()
         assert rig.chat_hosts() == []
         assert rig.cues.played == ["fallback"]
