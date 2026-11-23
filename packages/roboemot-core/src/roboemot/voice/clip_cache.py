@@ -9,6 +9,7 @@ robot's synthetic voice only, never room audio; the line text never appears in a
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -23,6 +24,7 @@ import numpy as np
 from .. import paths
 from ..config.schema import RoboEmotConfig
 from ..fileio import replace_file
+from .keywords import normalise
 from .speech import PCM16_FULL_SCALE
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,13 @@ class Clip:
 
     samples: np.ndarray
     rate_hz: int
+
+
+def same_words(heard: str, line: str) -> bool:
+    """Whether ``heard`` (a reply's output transcript) says ``line``: case, accents,
+    punctuation and spaces ignored. An empty transcript says nothing."""
+    said = normalise(heard).replace(" ", "")
+    return bool(said) and said == normalise(line).replace(" ", "")
 
 
 def clip_folder(cfg: RoboEmotConfig) -> Path:
@@ -94,7 +103,8 @@ class ClipCache:
 
     def put(self, kind: ClipKind, key: ClipKey, clip: Clip) -> None:
         """Store ``clip`` for ``kind`` and ``key`` (atomic, mode 0600), then delete every other
-        file of ``kind``."""
+        file of ``kind`` (best effort: the new clip is stored, a file left behind is only
+        disk)."""
         if not self.folder.exists():
             self.folder.mkdir(mode=FOLDER_MODE, parents=True, exist_ok=True)
             self.folder.chmod(FOLDER_MODE)  # mkdir's mode is masked by the umask
@@ -102,7 +112,8 @@ class ClipCache:
         replace_file(path, _wav(clip), FILE_MODE)
         for old in self.folder.glob(f"{kind}-*.wav"):
             if old != path:
-                old.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    old.unlink(missing_ok=True)
 
     def snapshot(self) -> dict[str, str]:
         """Each kind ``cached`` when a file of that kind exists (for any key), else

@@ -93,7 +93,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .. import shutdown
 from ..bus import Bus
@@ -145,6 +145,7 @@ from ..realtime.turn import (
     wait_in_order,
 )
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
+from ..voice.clip_cache import Clip, same_words
 from ..voice.cues import CueKind, CueSink, NoCues
 from ..voice.keywords import normalise
 from ..voice.listener import Utterance
@@ -156,6 +157,9 @@ from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import pick
 from .phase import ConversationPhase
 from .transcript import CLOUD, NOT_RECORDED, ROBOT, TranscriptRing
+
+if TYPE_CHECKING:  # the runtime imports the conversation: the type only
+    from ..runtime.clips import CaptureSpeech
 
 log = logging.getLogger(__name__)
 
@@ -2026,6 +2030,56 @@ class ConversationWorker:
             self._absorb(turn, reply, instructions)
             route.count("lines")
             return reply.jobs[0][0] if reply.jobs else None
+
+    def record_line(
+        self, text: str, language: str, capture: CaptureSpeech
+    ) -> concurrent.futures.Future[Clip | None]:
+        """Have the open realtime session say ``text`` in ``language`` once, into ``capture``
+        (its audio kept, never played), for a saved clip of the robot's cloud voice (SPEC 8,
+        Lost reply retry). The future is the clip, None when no session is up, a turn is
+        waiting, the response failed or its transcript does not say ``text``;
+        ``capture.outcome`` says which. Any thread; it never waits and never connects."""
+        loop = self._loop
+        if self._closed or loop is None or self.realtime is None:
+            future: concurrent.futures.Future[Clip | None] = concurrent.futures.Future()
+            future.set_result(None)
+            return future
+        return asyncio.run_coroutine_threadsafe(self._record_line(text, language, capture), loop)
+
+    async def _record_line(self, text: str, language: str, capture: CaptureSpeech) -> Clip | None:
+        """``record_line`` on the worker's loop, under ``_rt_lock`` like ``_rt_line``, with no
+        history (no ``_absorb``): the response's server items are deleted afterwards (on
+        Gemini Live the route only emulates the delete)."""
+        route = self.realtime
+        assert self._rt_lock is not None
+        async with self._rt_lock:
+            if not route.up() or self.busy():
+                return None  # skipped: a person's turn goes first, and it never connects
+            generation = route.generation
+            run = ResponseRun(
+                route,
+                capture,
+                utterance=capture.new_utterance(),
+                mood=None,
+                volume_db=0.0,
+                language=language,
+                clock=self.clock,
+                generation=generation,
+            )
+            name = LANGUAGE_NAMES.get(language, language)
+            try:
+                reply = await run.run(line_instructions("", text, name), "none")
+            finally:
+                route.delete_items(generation, run.reply.item_ids())
+        if reply.closed or reply.status != "completed":
+            capture.outcome = "failed"
+            return None
+        if not same_words(reply.text(), text):
+            capture.outcome = "rejected_mismatch"
+            return None
+        clip = capture.clip()
+        capture.outcome = "recorded" if clip is not None else "failed"
+        return clip
 
     def busy(self) -> bool:
         """Whether a turn is open, being served or waiting (a tool round included): the

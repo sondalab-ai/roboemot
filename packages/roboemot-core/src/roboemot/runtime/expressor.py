@@ -62,7 +62,7 @@ from ..diag import EventSink, no_events
 from ..llm.prompt import expression_fallback
 from ..tools.announce import EVENT_PREFIX
 from ..vision.types import FacePercept
-from .ticks import conversation_idle, room_quiet
+from .ticks import conversation_idle, media_on, robot_speaking, room_quiet
 
 log = logging.getLogger(__name__)
 
@@ -581,8 +581,7 @@ class Expressor:
     def music(self) -> bool:
         """Whether the robot's radio plays: a station held by the player, or audible now. Only
         read (never paused, lowered or stopped)."""
-        media = self.host.media
-        return media is not None and (media.playing() or media.audible())
+        return media_on(self.host)
 
     def resting(self) -> bool:
         """Whether the platform sleeps, the robot rests or the quiet hours run (the rhythm on):
@@ -616,8 +615,7 @@ class Expressor:
 
     def _speaking(self) -> bool:
         """Whether robot speech is queued or playing now."""
-        output = self.host.speech_output
-        return output is not None and bool(output.speaking_at(self.clock()))
+        return robot_speaking(self.host, self.clock())
 
     def _gesture(self, sit: SituationConfig) -> None:
         """Play the situation's gesture, when it has one (a manifest ``gesture_map`` name)."""

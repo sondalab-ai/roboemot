@@ -97,3 +97,19 @@ def test_snapshot_tells_each_kind_cached_or_missing(tmp_path):
 def test_the_clip_folder_is_in_the_app_data_folder(tmp_path):
     cfg = SimpleNamespace(data_dir=str(tmp_path / "data"))
     assert clip_folder(cfg) == tmp_path / "data" / "voice-clips"
+
+
+def test_a_stale_file_that_cannot_be_deleted_keeps_the_new_clip(tmp_path, monkeypatch):
+    c = ClipCache(tmp_path)
+    c.put("sorry", KEY, CLIP)
+    new = replace(KEY, voice="Puck")
+    real_unlink = type(tmp_path).unlink
+
+    def refuse(self, missing_ok=False):
+        if self.name.startswith("sorry-") and KEY.digest() in self.name:
+            raise PermissionError("read-only")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(tmp_path), "unlink", refuse)
+    c.put("sorry", new, CLIP)  # best-effort cleanup: no error
+    assert c.get("sorry", new) is not None
