@@ -1,4 +1,4 @@
-# Dropped cloud reply: retry and spoken status (design, 2026-11-23)
+# Dropped or slow cloud reply: retry, wait and spoken status (design, 2026-11-23)
 
 Status: draft for the owner, 2026-11-23. Builds on SPEC 8 (Realtime speech route, conversation
 state, robot-initiated turn) and SPEC 12/12A (privacy, debug report).
@@ -16,6 +16,12 @@ with, so the person hears only a cue.
 
 The robot should try again, tell the person it is doing so, and say sorry if it cannot.
 
+A second case, seen the same day (14:40 to 14:44): «Ciao Neve» said twice, no answer. Debug
+report: Gemini Live, robot turns, 5 utterances sent, 2 transcripts (1.5 s and 8.9 s after the
+audio), 3 transcript timeouts at `transcript_timeout_s` 4.0 s; the robot then asked to repeat
+(its own recognizer heard «ciò neve», unused because the audio had gone to the cloud). Whether
+the 3 transcripts came late or never is not counted anywhere.
+
 ## Owner decisions (2026-11-23)
 
 - **Retry by resending the person's words** in the new session, with the conversation so far.
@@ -30,6 +36,9 @@ The robot should try again, tell the person it is doing so, and say sorry if it 
 - **Robots with a local voice retry the cloud first** too; only after the retries fail does
   today's backup (chat route answers, Piper says it) run. The voice stays the same as long as
   possible.
+- **Slow transcript: wait longer and fill the silence.** The robot waits longer for the cloud's
+  transcript (about 9 s) instead of asking to repeat after 4 s, and fills the wait with a saved
+  phrase of its own voice from the same clip cache («Fammi pensare…»).
 - **Total wait about 15 s:** from the first loss to the apology at most
   `retry.total_budget_s` (default 15). A retry that cannot start before the budget ends is
   skipped.
@@ -106,10 +115,24 @@ response; a retry is always a robot-asked turn (text item plus `response.create`
 - Robot without a local voice: play the `sorry` clip, if cached; else the cue. The turn ends
   (the person can ask again).
 
+### Slow transcript
+
+- `voice.realtime_route.transcript_timeout_s` default goes from 4.0 to 9.0 s (range unchanged).
+- When an addressed utterance's transcript has not come after `retry.filler_after_s` (default
+  2.5 s), the `thinking` clip plays once for that utterance (if cached; else nothing).
+- New counter: transcripts that arrive after the robot stopped waiting
+  (`transcripts_after_timeout`), so the report tells late from missing.
+
+### Slow reply
+
+- The same `thinking` clip plays when a turn's first reply audio has not come
+  `retry.filler_after_s` after the request, at most once per turn (not when it already played
+  for the transcript). Reply audio arriving while it plays queues after it.
+
 ### Voice clips cache
 
-- **Lines:** two fixed lines per language, `prompts/retrying.<lang>.txt` and
-  `prompts/sorry.<lang>.txt` (Italian and English at first).
+- **Lines:** three fixed lines per language, `prompts/retrying.<lang>.txt`,
+  `prompts/sorry.<lang>.txt` and `prompts/thinking.<lang>.txt` (Italian and English at first).
 - **Key:** provider host, model, the voice name actually sent in `session.update` (route `voice`
   or the platform profile's), `conversation.language` (the robot's language, not a turn's detected language: a clip is
   always in the language the robot speaks by default), and a hash of the line text. Any change is
@@ -130,7 +153,7 @@ response; a retry is always a robot-asked turn (text item plus `response.create`
 ### Settings (SPEC 11A)
 
 Under `voice.realtime_route.retry`: `enabled` (on), `max_retries` (2, 0 to 3),
-`total_budget_s` (15), `reconnect_wait_s`, `announce_first_retry` (on), `clip_record_attempts`. Each with a unit,
+`total_budget_s` (15), `filler_after_s` (2.5), `reconnect_wait_s`, `announce_first_retry` (on), `clip_record_attempts`. Each with a unit,
 range and an Italian description in `webui/descriptions_it.json`.
 
 ### Report and Live tab (SPEC 12A)
@@ -138,6 +161,7 @@ range and an Italian description in `webui/descriptions_it.json`.
 - `roboemot.realtime_route.retry`: attempts, recovered (by attempt number), gave_up, skipped (by
   reason: played, tool_ran, newer_utterance, disabled), clips (per line: cached, missing,
   recorded, rejected_mismatch).
+- Fillers: played (by cause: transcript, reply), missing clip.
 - Live events: «Risposta persa: riprovo (1 di 2)», «Risposta recuperata», «Risposta persa:
   mi scuso». No transcript text.
 
@@ -156,6 +180,9 @@ range and an Italian description in `webui/descriptions_it.json`.
 - Both turn modes are in scope; a retry is always robot-asked.
 - Tone, skip and over-cap calls do not block a retry; only a skill that ran does.
 - A clip uses `conversation.language`, not a turn's detected language.
+- The `thinking` filler also covers a slow first reply, not only a slow transcript (same
+  silence for the person).
+- `transcript_timeout_s` default raised for every realtime route, not only Gemini.
 - With Piper, no apology clip before the backup answer: an answer beats an apology.
 
 ## Left to the builder
