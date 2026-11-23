@@ -4762,6 +4762,80 @@ LANGUAGE_TAG = re.compile(
 )
 
 
+class RetryConfig(Strict):
+    """A realtime reply lost before the robot spoke (SPEC 8, Realtime speech route): the turn
+    asks again, and saved clips of the cloud voice fill the wait."""
+
+    enabled: bool = param(
+        True,
+        "Ask the realtime route again when its reply is lost before the robot spoke a word",
+    )
+    max_retries: int = param(
+        2,
+        "Attempts after the first at a reply lost before any of it played; past them the "
+        "robot apologises, or its local voice answers",
+        ge=0,
+        le=3,
+    )
+    total_budget_s: float = param(
+        15.0,
+        "Time from a reply's first loss within which a retry must start; a retry that cannot "
+        "start in time is skipped",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    reconnect_wait_s: float = param(
+        5.0,
+        "Longest wait for the session to come back before a retry; past it the attempt fails",
+        unit="s",
+        ge=0.5,
+        le=30,
+        advanced=True,
+    )
+    filler_after_s: float = param(
+        2.5,
+        "Wait for an utterance's transcript, or for a turn's first reply audio, before the "
+        "robot plays its thinking clip (once)",
+        unit="s",
+        ge=0.5,
+        le=10,
+    )
+    announce_first_retry: bool = param(
+        True,
+        "Play the retrying clip before the first retry, so the person knows the robot is still "
+        "on it",
+    )
+    clip_record_attempts: int = param(
+        3,
+        "Attempts per clip per day at recording it in the cloud voice; past them the clip "
+        "stays missing until the next day",
+        ge=1,
+        le=20,
+        advanced=True,
+    )
+    retrying_lines: dict[str, str] = param(
+        {"it": "Un attimo, riprovo.", "en": "One moment, let me try again."},
+        "Spoken per language, from a saved clip of the cloud voice, before the first retry",
+        advanced=True,
+    )
+    sorry_lines: dict[str, str] = param(
+        {
+            "it": "Scusa, ho perso la connessione. Puoi ripetere?",
+            "en": "Sorry, I lost the connection. Can you say it again?",
+        },
+        "Spoken per language when every retry failed and no backup answered: a saved clip of "
+        "the cloud voice, or the local voice",
+        advanced=True,
+    )
+    thinking_lines: dict[str, str] = param(
+        {"it": "Fammi pensare…", "en": "Let me think…"},
+        "Spoken per language, from a saved clip of the cloud voice, while a slow transcript or "
+        "first reply is awaited",
+        advanced=True,
+    )
+
+
 class RealtimeRouteConfig(Strict):
     """The realtime speech route (SPEC 8, Realtime speech route): whether and how the robot
     answers through a ``kind: realtime`` route, and the client's transport limits. Off by
@@ -4842,7 +4916,7 @@ class RealtimeRouteConfig(Strict):
         advanced=True,
     )
     transcript_timeout_s: float = param(
-        4.0,
+        9.0,
         "Longest wait for the server's transcript of an utterance's audio; past it the robot "
         "shows the did-not-get-it cue and the utterance is not answered (its local decode "
         "still feeds keywords)",
@@ -5118,6 +5192,10 @@ class RealtimeRouteConfig(Strict):
         conservative="higher",
         advanced=True,
     )
+    retry: RetryConfig = param(
+        {},
+        "Retry of a realtime reply lost before the robot spoke, and the clips that fill the wait",
+    )
 
     @field_validator("tone_labels")
     @classmethod
@@ -5162,6 +5240,17 @@ class RealtimeRouteConfig(Strict):
             raise ValueError(
                 "voice.realtime_route.close_silence_ms must exceed server_silence_ms, so the "
                 "server's VAD ends the turn within the burst"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _filler_before_transcript_timeout(self) -> RealtimeRouteConfig:
+        """The thinking clip must be able to play while a transcript is still awaited; with
+        the retry off no clip is recorded or played, so the pair is not checked."""
+        if self.retry.enabled and self.retry.filler_after_s >= self.transcript_timeout_s:
+            raise ValueError(
+                "voice.realtime_route.retry.filler_after_s must be less than "
+                "transcript_timeout_s, so the thinking clip plays while the transcript is awaited"
             )
         return self
 

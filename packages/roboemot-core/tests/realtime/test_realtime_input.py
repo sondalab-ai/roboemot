@@ -677,7 +677,7 @@ def test_a_server_without_end_positions_never_covers_a_burst(rig_for):
     """Start positions but no audio_end_ms: the robot cannot tell the server is done with a
     burst, so it never takes its transcript (a local decode) and resets the session."""
     with TurnServer(heard=[["uno"]], end_positions=False) as server:
-        rig = rig_for(server, rt={"transcript_timeout_s": 0.5})
+        rig = rig_for(server, rt={"transcript_timeout_s": 0.5, "retry": {"enabled": False}})
         job = rig.input.submit(speech(1.0), RATE)
         assert wait_for(lambda: job.done)
         assert job.result is None

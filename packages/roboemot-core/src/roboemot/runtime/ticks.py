@@ -268,6 +268,20 @@ def room_quiet(host: Any, now: float) -> bool:
     return listener is None or not listener.voice_active()
 
 
+def media_on(host: Any) -> bool:
+    """Whether the robot's radio plays: a station held by the player, or audible now (SPEC 8,
+    Radio playback). Only read (never paused, lowered or stopped)."""
+    media = host.media
+    return media is not None and (media.playing() or media.audible())
+
+
+def robot_speaking(host: Any, now: float) -> bool:
+    """Whether robot speech is queued or playing at ``now`` (the speech output's
+    ``speaking_at``); False with no speech output."""
+    output = host.speech_output
+    return output is not None and bool(output.speaking_at(now))
+
+
 def conversation_idle(host: Any, now: float) -> bool:
     """Whether the conversation is idle at ``now`` (SPEC 11, Voice tools, Due items): the room
     is quiet (``room_quiet``) and no turn (a tool round included) is open or waiting. A part the

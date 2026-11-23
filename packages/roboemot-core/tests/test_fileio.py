@@ -25,3 +25,10 @@ def test_replace_file_replaces_a_symlink_itself_not_its_target(tmp_path):
     replace_file(link, "new", 0o600)
     assert real.read_text() == "kept"
     assert not link.is_symlink() and link.read_text() == "new"
+
+
+def test_replace_file_writes_bytes_as_they_are(tmp_path):
+    target = tmp_path / "clip.wav"
+    replace_file(target, b"RIFF\x00\xff", 0o600)
+    assert target.read_bytes() == b"RIFF\x00\xff"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600

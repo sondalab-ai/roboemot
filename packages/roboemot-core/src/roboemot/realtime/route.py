@@ -2100,6 +2100,18 @@ class RealtimeRoute:
             self._input_holds += 1
             self._burst_at = None  # its burst's turn began
 
+    def hold_idle_input(self) -> bool:
+        """``hold_input`` for a robot request that is no turn (a voice clip's recording),
+        only while no burst sent waits for its turn (``_burst_left``): False, nothing held,
+        when one does. Atomic with the bursts' own check of the hold."""
+        wait = self.stack.effective().voice.realtime_route.transcript_timeout_s
+        with self._lock:
+            at = self._burst_at
+            if at is not None and at + wait > time.monotonic():
+                return False
+            self._input_holds += 1
+            return True
+
     def release_input(self) -> None:
         """The turn ended: bursts may go again, and a session its server is leaving closes
         now if nothing else runs on it (``_leave``)."""
@@ -2593,6 +2605,8 @@ COUNTERS = (
     "setup_unready",  # a Gemini setup without the turn's tools: not sent, retried
     "transcripts",
     "transcript_timeouts",
+    # transcripts that came after the listener stopped waiting (late, not missing)
+    "transcripts_after_timeout",
     "unrequested",
     "server_responses",  # server-created responses a server turn took (turns: server)
     "server_fragments",  # ... for a stream cut, revoked or still streaming: cancelled, unheard

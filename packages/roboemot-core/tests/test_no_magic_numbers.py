@@ -94,6 +94,7 @@ BEHAVIOUR_MODULES = [
     "runtime/loop.py",
     "runtime/radio_stop.py",
     "runtime/expressor.py",
+    "runtime/clips.py",
     "runtime/reload.py",
     "runtime/sleep.py",
     "runtime/reports.py",

@@ -2,7 +2,8 @@
 
 One folder holds everything RoboEmot writes: the registry (``registry/``), the persona trait
 ratings (``llm_traits.json``) and, unless ``vision.models_dir`` says otherwise, the downloaded
-models (``models/``, and ``voice-models/`` for the voice ones). Keeping it in one
+models (``models/``, and ``voice-models/`` for the voice ones) and the saved clips of the
+cloud voice (``voice-clips/``). Keeping it in one
 place lets the installer record it and the uninstaller remove it with a single path.
 
 The folder is, in order: the ``data_dir`` config value, ``$ROBOEMOT_DATA_DIR``, or
@@ -26,6 +27,7 @@ GROUP_OTHER_BITS = 0o077
 REGISTRY_SUBDIR = "registry"
 MODELS_SUBDIR = "models"
 VOICE_MODELS_SUBDIR = "voice-models"
+VOICE_CLIPS_SUBDIR = "voice-clips"
 TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
 SECRETS_FILE = "secrets.json"

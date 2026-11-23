@@ -258,8 +258,9 @@ class StreamFeed:
         with self._lock:
             return self._ended or self._closed or self._buffered_s >= prebuffer_s
 
-    def _take(self) -> tuple[list[tuple[np.ndarray, int]], bool]:
-        """Everything held, and whether the feed has ended (or was closed)."""
+    def take(self) -> tuple[list[tuple[np.ndarray, int]], bool]:
+        """Everything held, and whether the feed has ended (or was closed): the speech output's
+        player, or a capture that keeps the audio instead of playing it."""
         with self._lock:
             chunks = list(self._chunks)
             self._chunks.clear()
@@ -1196,7 +1197,7 @@ class SpeechOutput:
                 await wake.wait()
             while True:
                 wake.clear()
-                chunks, ended = feed._take()
+                chunks, ended = feed.take()
                 for samples, rate_hz in chunks:
                     if first:
                         first = False

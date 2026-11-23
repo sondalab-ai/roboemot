@@ -333,7 +333,7 @@ def test_a_barge_in_while_a_tone_call_is_pending_answers_it_and_still_emits(rigs
 @pytest.mark.parametrize("second", ["close_before", "error"])
 def test_a_loss_in_the_extra_response_falls_back_to_chat_and_emits_once(rigs, second):
     with TurnServer(["tool", second], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
-        rig = rigs(srv, rt=TONE)
+        rig = rigs(srv, rt={**TONE, "retry": {"enabled": False}})  # one attempt, then chat
         rig.turn()
         assert len(srv.of("response.create")) == 2
         assert rig.chat_hosts() == ["lan.local"]  # nothing played, no skill: chat answers

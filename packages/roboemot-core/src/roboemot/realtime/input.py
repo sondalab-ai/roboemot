@@ -173,6 +173,9 @@ class InputJob:
         self.generation: int | None = None  # the session it was sent on
         self.sent = False  # its burst (or a stream's opening piece) left the robot
         self.cancelled = False
+        # the listener stopped waiting for its transcript (``transcript_timeout_s``): a
+        # transcript of its items that still comes is counted ``transcripts_after_timeout``
+        self.timed_out = False
         self.stream = False  # a live stream's job (turns: server), not a burst's
         # a burst's: the local wake gate's wake decision held for it (its turn is addressed)
         self.wake_word = False
@@ -358,8 +361,9 @@ class RealtimeInput:
         self._lock = threading.Lock()
         self._queue: queue.Queue[InputJob | None] = queue.Queue()
         self._burst: _Burst | None = None
-        # items of ended bursts still to come, as (session, id): deleted on arrival
-        self._dead: dict[tuple[int, str], None] = {}
+        # items of ended bursts still to come, as (session, id): deleted on arrival; the value
+        # says the listener had stopped waiting for it (``InputJob.timed_out``)
+        self._dead: dict[tuple[int, str], bool] = {}
         self._dead_anon = 0  # items without id of ended bursts still to come
         # how many ended items are remembered (transcript_max_items, set by each burst's send)
         self._dead_limit = 0
@@ -553,11 +557,14 @@ class RealtimeInput:
             job.dropped = True
             return True
 
-    def cancel(self, job: InputJob) -> None:
+    def cancel(self, job: InputJob, *, timed_out: bool = False) -> None:
         """The listener stopped waiting for ``job`` (its deadline, a newer utterance, a stop):
         it is never sent if it was not yet, it ends without a transcript, and its server items
-        are deleted (those still to come as their transcripts arrive)."""
+        are deleted (those still to come as their transcripts arrive). ``timed_out``: its
+        transcript wait ran out, so a transcript of it that still comes is counted
+        (``transcripts_after_timeout``)."""
         job.cancelled = True
+        job.timed_out = timed_out
         self._close(job)
 
     def close(self) -> None:
@@ -700,7 +707,7 @@ class RealtimeInput:
             self._reopening = True  # the next burst waits for the new session (its deadline)
             with self._lock:  # the old session's items die with it
                 self._reset_gen = max(self._reset_gen, burst.generation)
-                self._dead = {k: None for k in self._dead if k[0] > burst.generation}
+                self._dead = {k: v for k, v in self._dead.items() if k[0] > burst.generation}
                 self._dead_anon = 0
         with self._lock:
             if self._burst is burst:
@@ -878,7 +885,7 @@ class RealtimeInput:
             self._stream_reopening = True
             with self._lock:
                 self._reset_gen = max(self._reset_gen, burst.generation)
-                self._dead = {k: None for k in self._dead if k[0] > burst.generation}
+                self._dead = {k: v for k, v in self._dead.items() if k[0] > burst.generation}
                 self._dead_anon = 0
                 self._streams = [s for s in self._streams if s.generation > burst.generation]
 
@@ -1043,7 +1050,7 @@ class RealtimeInput:
             self._stream_event(event, gen)
             return
         delete: list[tuple[str, int]] = []
-        undeletable = 0
+        undeletable = after_timeout = 0
         ambiguous = False
         finished: tuple[InputJob, Heard | None] | None = None
         with self._lock:
@@ -1058,7 +1065,7 @@ class RealtimeInput:
             elif isinstance(event, protocol.InputTranscript) and event.final:
                 item = event.item_id
                 if item is not None and (gen, item) in self._dead:
-                    del self._dead[(gen, item)]
+                    after_timeout += self._dead.pop((gen, item))
                     delete.append((item, gen))
                 elif live is None:
                     if item is not None:
@@ -1091,6 +1098,8 @@ class RealtimeInput:
                     live.closed = True
         if ambiguous:
             self.route.count("audio_items_ambiguous")
+        if after_timeout:
+            self.route.count("transcripts_after_timeout", after_timeout)
         if undeletable:
             self.route.count("audio_items_undeletable", undeletable)
         self._delete(delete)
@@ -1121,8 +1130,9 @@ class RealtimeInput:
                     burst.open.add(key)
                 if live is not None:
                     return
-            if item is not None:
-                self._bury(item, gen)
+            if item is not None:  # a timed-out burst's late start: its transcript is late too
+                held = burst is not None and burst.job.timed_out and burst.holds(event.audio_ms)
+                self._bury(item, gen, held)
             else:
                 self._dead_anon += 1
             return
@@ -1184,7 +1194,7 @@ class RealtimeInput:
         of the session the server has not covered, a stop and a transcript to the stream that
         holds the item; an item of no open stream is deleted."""
         delete: list[tuple[str, int]] = []
-        undeletable = 0
+        undeletable = after_timeout = 0
         with self._lock:
             if gen <= self._reset_gen:
                 return  # a reset session's event still in flight: it ended with the session
@@ -1201,7 +1211,7 @@ class RealtimeInput:
                 if item is None:
                     owner = next((s for s in streams if s.anon_waiting() is not None), None)
                 if item is not None and (gen, item) in self._dead:
-                    del self._dead[(gen, item)]
+                    after_timeout += self._dead.pop((gen, item))
                     delete.append((item, gen))
                 elif owner is not None and owner.closed and owner.job.answered:
                     pass  # a server turn answered it: its items leave with that turn
@@ -1217,6 +1227,8 @@ class RealtimeInput:
             late, self._late_confirms = self._late_confirms, 0
         if late:
             self.route.count("playback_unconfirmed_late", late)
+        if after_timeout:
+            self.route.count("transcripts_after_timeout", after_timeout)
         if confirm is not None:
             self.route.count("playback_confirms")
         if confirm is not None and self.on_confirm is not None:  # first: the barge-in's stop
@@ -1259,8 +1271,9 @@ class RealtimeInput:
                     head.open.add(key)
                 if not head.closed:
                     return confirm
-            if item is not None:
-                self._bury(item, gen)
+            if item is not None:  # a timed-out stream's late start: its transcript is late too
+                held = head is not None and head.job.timed_out and head.holds(event.audio_ms)
+                self._bury(item, gen, held)
             else:
                 self._dead_anon += 1
             return confirm
@@ -1345,10 +1358,11 @@ class RealtimeInput:
         live.open.discard(key)
         live.texts[key] = text
 
-    def _bury(self, item: str, generation: int) -> None:
+    def _bury(self, item: str, generation: int, timed_out: bool = False) -> None:
         """An ended burst's item, deleted when its transcript comes (lock held; bounded: no
-        configuration read here, the stack's lock must never be taken under this one)."""
-        self._dead[(generation, item)] = None
+        configuration read here, the stack's lock must never be taken under this one);
+        ``timed_out``: the listener had stopped waiting for it."""
+        self._dead[(generation, item)] = timed_out
         while len(self._dead) > self._dead_limit:
             self._dead.pop(next(iter(self._dead)))
 
@@ -1412,7 +1426,7 @@ class RealtimeInput:
             elif k in burst.texts:
                 delete.append((k, burst.generation))
             else:
-                self._bury(k, burst.generation)
+                self._bury(k, burst.generation, burst.job.timed_out)
         return delete, undeletable
 
     def _delete(self, items: list[tuple[str, int]]) -> None:
