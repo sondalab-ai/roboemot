@@ -10,7 +10,7 @@ from roboemot.config.schema import PrivacyConfig, RealtimeRouteConfig, RoboEmotC
 def test_audio_defaults_and_ranges():
     rt = RealtimeRouteConfig()
     assert rt.audio_gate == "addressed"
-    assert rt.transcript_timeout_s == 4.0
+    assert rt.transcript_timeout_s == 9.0
     assert rt.server_silence_ms == 600.0
     assert rt.close_silence_ms == 900.0
     assert rt.daily_upload_budget_s == 1800.0

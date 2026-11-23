@@ -164,7 +164,7 @@ The profile writes these keys into `app.yaml`. The values come from `cloud_voice
 | `voice.realtime_route.mode` | `platform` | `direct` |
 | `voice.realtime_route.input` | `audio` | `text` |
 | `voice.realtime_route.skip_tool` | `true` | `false` |
-| `voice.realtime_route.transcript_timeout_s` | `10.0` | `4.0` |
+| `voice.realtime_route.transcript_timeout_s` | `10.0` | `9.0` |
 | `privacy.realtime_audio` | `true` | `false` |
 | `privacy.realtime_audio_unaddressed` | `true` | `false` |
 | `voice.backend` | `none` | `piper` |
@@ -250,7 +250,7 @@ Pick **Local voice** in **Voice provider** (above), or:
 | `voice.realtime_route.input` | `text` | `text`, `audio` | What leaves the robot for an addressed utterance. `text` sends the local Vosk transcript. `audio` sends the utterance's audio, and the server transcribes it. `audio` needs `privacy.realtime_audio`; without it the route is blocked (`no_opt_in`). |
 | `voice.realtime_route.skip_tool` | `false` | on/off | Lets the server's model stay silent for speech not meant for the robot. Examples are a phone call, people talking to each other, and TV. A skipped utterance gets no answer. Its audio still reached the server. |
 | `voice.realtime_route.daily_upload_budget_s` | `1800.0` | s per day, 0 to 86400 | Microphone audio the robot may send per day. Past it, utterances go as text. The count survives a restart. |
-| `voice.realtime_route.transcript_timeout_s` | `4.0` | s, 0.5 to 15 | Longest wait for the server's transcript of the audio. Past it, the robot shows the did-not-get-it cue and does not answer. |
+| `voice.realtime_route.transcript_timeout_s` | `9.0` | s, 0.5 to 15 | Longest wait for the server's transcript of the audio. Past it, the robot shows the did-not-get-it cue and does not answer. |
 | `voice.realtime_route.voice` | `""` | name | The server's voice. Empty uses the server's default. |
 
 After a change of `voice.realtime_route.enabled`, `voice.realtime_route.route` or
