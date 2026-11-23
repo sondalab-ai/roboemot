@@ -7,7 +7,8 @@ Scripts (``scripts``, used in order; the last one repeats):
 - ``reply``: ``response.created``, ``deltas`` audio deltas (a list: per response, the last
   repeats) of ``delta_ms`` each ``gap_s`` apart, the reply transcript (``transcript``),
   ``response.output_audio.done`` and ``response.done`` with usage ``usage`` (None leaves usage
-  out);
+  out); ``first_delta_s`` holds the first delta back that long after ``response.created`` (a
+  slow first reply);
 - ``tool``: ``response.created``, one ``response.function_call_arguments.done`` (``tool_name``,
   ``tool_args``) and ``response.done``;
 - ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
@@ -170,6 +171,7 @@ class TurnServer(FakeServer):
         ignore_interrupt: bool = False,
         strict_cancel: bool = False,
         cancel_error_ids: bool = True,
+        first_delta_s: float = 0.0,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -203,6 +205,7 @@ class TurnServer(FakeServer):
         self.sent: list[dict[str, Any]] = []
         self.stream_vad = stream_vad
         self.answer_delay_s = answer_delay_s
+        self.first_delta_s = first_delta_s
         self.refuse_cancel_id, self.ignore_cancel = refuse_cancel_id, ignore_cancel
         self.interrupt_first, self.late_deltas = interrupt_first, late_deltas
         self.ignore_interrupt, self.strict_cancel = ignore_interrupt, strict_cancel
@@ -568,6 +571,8 @@ class TurnServer(FakeServer):
             return
         if script == "tool_then_audio":
             await self._call(ws, rid)
+        if self.first_delta_s:
+            await asyncio.sleep(self.first_delta_s)
         delta = base64.b64encode(pcm(self.delta_ms)).decode()
         count = (
             self.deltas

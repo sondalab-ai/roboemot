@@ -282,6 +282,9 @@ class _Turn:
     rt_force_text: bool = False
     rt_lost: str | None = None  # a loss that ended it unanswerable: "played" or "tool_ran"
     rt_gave_up: bool = False  # every retry failed: the fallback line is the sorry line
+    # a status clip (thinking, retrying) played for it: no thinking clip plays again
+    filled: bool = False
+    rt_filler: asyncio.Task[None] | None = field(default=None, repr=False)  # the reply filler
 
 
 @dataclass
@@ -388,6 +391,7 @@ class ConversationWorker:
         # (SPEC 8, Lost reply retry; the runtime's voice clips)
         self.play_clip: Callable[[str], bool] = lambda kind: False
         self._retry_counts: collections.Counter[str] = collections.Counter()
+        self._fillers = {"reply": 0}  # thinking clips played for a slow first reply
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
         self._reply: tuple[int, list[tuple[int, str]]] | None = (
             None  # (ring seq, queued) of the last reply
@@ -1229,8 +1233,8 @@ class ConversationWorker:
             attempt += 1
             self._retry_counts["attempts"] += 1
             self.events("reply", "retry", attempt=attempt, limit=retry.max_retries)
-            if attempt == 1 and retry.announce_first_retry:
-                self._play_clip("retrying")
+            if attempt == 1 and retry.announce_first_retry and self._play_clip("retrying"):
+                turn.filled = True  # one status clip per wait: no thinking clip after it
             wait_until = min(self.clock() + retry.reconnect_wait_s, first + retry.total_budget_s)
             ready = await self._retry_ready(turn, wait_until)
             if turn.interrupted:  # a barge-in: nothing more is said over the person
@@ -1303,6 +1307,23 @@ class ConversationWorker:
         turn.tone_retry = turn.cut = turn.rt_partial = turn.rt_cut = False
         turn.outcome = "ok"
 
+    async def _reply_filler(self, turn: _Turn) -> None:
+        """``retry.filler_after_s`` after an attempt's request, while none of the turn's reply
+        audio came, the robot's ``thinking`` clip plays, at most once per turn (none after the
+        listener's for its transcript, or the ``retrying`` clip); the reply queues behind it.
+        Cancelled when the attempt ends (SPEC 8, Lost reply retry)."""
+        await asyncio.sleep(turn.cfg.voice.realtime_route.retry.filler_after_s)
+        run = turn.rt_run
+        if turn.filled or turn.interrupted or turn.done or turn.skipped:
+            return
+        if (run is not None and run.reply.first_audio is not None) or turn.spoken:
+            return  # its reply began: a clip now would only hold it back
+        if self.speech.first_audio_at(turn.speech_id) is not None:
+            return
+        if self._play_clip("thinking"):
+            turn.filled = True
+            self._fillers["reply"] += 1
+
     def _play_clip(self, kind: str) -> bool:
         """``play_clip``; one that raises is logged by type and counts as not played."""
         try:
@@ -1354,6 +1375,9 @@ class ConversationWorker:
             try:
                 return await self._realtime_rounds_held(turn)
             finally:
+                if turn.rt_filler is not None:
+                    turn.rt_filler.cancel()
+                    turn.rt_filler = None
                 if turn.rt_hold:
                     turn.rt_hold = False
                     route.release_input()
@@ -1413,6 +1437,8 @@ class ConversationWorker:
         if turn.conversation is not None:
             route.count_state("turns", turn.conversation)
         turn.stamps["request"] = self.clock()
+        if rt_cfg.retry.enabled and not (turn.event or turn.filled or turn.utterance.filled):
+            turn.rt_filler = asyncio.ensure_future(self._reply_filler(turn))
         self.phase.begin_thinking()
         self.phase.set_route(turn.route)
         delivery = self._delivery(turn)
@@ -3083,6 +3109,7 @@ class ConversationWorker:
                 "pending": len(self._pending),
                 **dict(self._counts),
                 "retry": {**dict.fromkeys(RETRY_COUNTS, 0), **self._retry_counts},
+                "fillers": dict(self._fillers),
             }
         if last is not None:
             heard = last["heard"]

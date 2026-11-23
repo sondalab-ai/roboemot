@@ -15,7 +15,7 @@ from test_realtime_server_turns import OPT_INS, SERVER, tail
 from test_voice_listener import silence, voice
 from turn_server import TurnServer
 
-SHORT_WAIT = {**SERVER, "transcript_timeout_s": 0.5}
+SHORT_WAIT = {**SERVER, "transcript_timeout_s": 0.5, "retry": {"enabled": False}}
 
 
 def recorded(ear) -> list[tuple[str, float]]:

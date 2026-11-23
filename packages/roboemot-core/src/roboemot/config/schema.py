@@ -5243,6 +5243,17 @@ class RealtimeRouteConfig(Strict):
             )
         return self
 
+    @model_validator(mode="after")
+    def _filler_before_transcript_timeout(self) -> RealtimeRouteConfig:
+        """The thinking clip must be able to play while a transcript is still awaited; with
+        the retry off no clip is recorded or played, so the pair is not checked."""
+        if self.retry.enabled and self.retry.filler_after_s >= self.transcript_timeout_s:
+            raise ValueError(
+                "voice.realtime_route.retry.filler_after_s must be less than "
+                "transcript_timeout_s, so the thinking clip plays while the transcript is awaited"
+            )
+        return self
+
 
 class CueConfig(Strict):
     """Non-verbal cues: a gesture of the manifest's ``gesture_map`` plus a short sound of the

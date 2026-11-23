@@ -2593,6 +2593,8 @@ COUNTERS = (
     "setup_unready",  # a Gemini setup without the turn's tools: not sent, retried
     "transcripts",
     "transcript_timeouts",
+    # transcripts that came after the listener stopped waiting (late, not missing)
+    "transcripts_after_timeout",
     "unrequested",
     "server_responses",  # server-created responses a server turn took (turns: server)
     "server_fragments",  # ... for a stream cut, revoked or still streaming: cancelled, unheard

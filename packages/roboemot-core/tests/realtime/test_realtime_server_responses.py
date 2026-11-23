@@ -240,7 +240,7 @@ def test_the_listening_cue_ends_when_the_answer_starts(ears):  # noqa: F811
 
 def test_an_answered_stream_whose_transcript_never_comes_shows_no_cue(ears):  # noqa: F811
     hold = threading.Event()
-    rt = {**SERVER, "transcript_timeout_s": 1.0}
+    rt = {**SERVER, "transcript_timeout_s": 1.0, "retry": {"filler_after_s": 0.5}}
     with TurnServer(stream_vad=True, vad_answers=True, hold=hold, hold_at="transcript") as server:
         ear = ears(server, rt=rt, app=OPT_INS, script=["x"], to_worker=True)
         ear.say()

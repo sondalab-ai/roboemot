@@ -753,7 +753,7 @@ def test_a_transcript_timeout_is_decoded_off_the_listener_thread(ears):
             bearing=FACE_RAD,
             decode_s=slow,
             background=True,
-            rt={"transcript_timeout_s": 0.5},
+            rt={"transcript_timeout_s": 0.5, "retry": {"enabled": False}},
         )
         total = paced(ear, lambda: bool(ear.utterances), slow + 5.0)
         assert len(ear.utterances) == 1

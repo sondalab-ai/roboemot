@@ -269,6 +269,9 @@ class Utterance:
     # the voice-at-face rule addressed it (the voice came from a face): speech clearly meant
     # for the robot, which the model asks about when unclear (SPEC 8, Robot expression)
     at_face: bool = False
+    # the robot's thinking clip played while its transcript was awaited: its turn plays no
+    # second one for a slow reply (SPEC 8, Lost reply retry)
+    filled: bool = False
 
 
 @dataclass(frozen=True)
@@ -329,6 +332,8 @@ class _Handoff:
     # the voice-at-face check stood in for the wake word over the radio (``face_media``): only a
     # server final may confirm it, never a local one (Vosk never heard it)
     face_wake: bool = False
+    filler_at: float = math.inf  # the listener's clock: its transcript is slow from then on
+    filled: bool = False  # the thinking clip played while its transcript was awaited
 
 
 @dataclass
@@ -455,6 +460,10 @@ class VoiceListener:
         # an addressed utterance was not heard (``no_transcript`` or ``decodes_lost``): whether
         # the robot asks about it in its own words (SPEC 8, Robot expression; the expressor)
         self.on_not_heard: Callable[[str], bool] = lambda why: False
+        # an addressed utterance's transcript is slow (``retry.filler_after_s``): whether the
+        # robot's thinking clip played (SPEC 8, Lost reply retry; the runtime's voice clips)
+        self.on_slow_transcript: Callable[[], bool] = lambda: False
+        self._fillers = {"transcript": 0}
         self._audio = {
             "vosk_skipped": 0,
             "sent": 0,
@@ -691,6 +700,7 @@ class VoiceListener:
             snap["music_classifier"] = self.music_classifier.snapshot()
         with self._lock:
             snap["realtime_audio"] = dict(self._audio)
+            snap["fillers"] = dict(self._fillers)
             snap["grammar_handoff"] = {
                 **self._handoff,
                 "pending": bool(self._queue),
@@ -1709,7 +1719,10 @@ class VoiceListener:
         server's transcript until ``transcript_timeout_s``. ``wake_word``: the wake gate's wake
         decision held for it (its burst then says the conversation is open)."""
         rate = self._cfg.voice.sample_rate_hz
-        p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s
+        rt = self._cfg.voice.realtime_route
+        now = self._clock()
+        p.deadline = now + rt.transcript_timeout_s
+        p.filler_at = now + rt.retry.filler_after_s if rt.retry.enabled else math.inf
         # past its deadline it is never sent: the listener has decoded it locally by then
         p.rt = self._realtime.submit(
             self._speech_audio(p.ev),
@@ -1814,7 +1827,10 @@ class VoiceListener:
                     continue
             if p.rt is not None:
                 if not self._rt_settled(p):
-                    if self._clock() < p.deadline:
+                    now = self._clock()
+                    if now < p.deadline:
+                        if now >= p.filler_at:
+                            self._fill(p)
                         return
                     if p.rt.sent:
                         self._count_audio("transcript_timeouts")
@@ -1829,6 +1845,22 @@ class VoiceListener:
                 self._hand_off(frozenset())
             else:
                 return
+
+    def _fill(self, p: _Handoff) -> None:
+        """``p``'s transcript is slow: once its audio left, the robot's thinking clip is asked
+        for once (``on_slow_transcript``), so the person knows it is working. Only a burst the
+        wake gate addressed has a ``filler_at`` (``_send``): a streamed segment streamed on the
+        server gates, with no wake decision, so it may be a television (as ``_not_heard``)."""
+        if not p.rt.sent:
+            return  # still held (a session coming up): asked again at the next poll
+        p.filler_at = math.inf  # asked once, played or not
+        try:
+            p.filled = bool(self.on_slow_transcript())
+        except Exception as exc:  # a clip must not stop the listener
+            log.warning("voice listener: slow transcript consumer raised %s", type(exc).__name__)
+        if p.filled:
+            with self._lock:
+                self._fillers["transcript"] += 1
 
     def _rt_settled(self, p: _Handoff) -> bool:
         try:
@@ -1853,7 +1885,7 @@ class VoiceListener:
             timeout_s=self._cfg.voice.realtime_route.transcript_timeout_s,
         )
         try:
-            self._realtime.cancel(p.rt)
+            self._realtime.cancel(p.rt, timed_out=True)
             self._realtime.route.count("transcript_timeouts")
         except Exception as exc:
             log.warning("voice listener: realtime input: %s", type(exc).__name__)
@@ -2224,6 +2256,7 @@ class VoiceListener:
             local_only=local_only,
             stream=stream,
             at_face=addressed and AT_FACE in (p.face, p.face_seen),
+            filled=p.filled,
         )
         self._fast.stats.record("final_vs_last_speech", self._clock() - ev.last_speech_stamp)
         self._count("utterances")

@@ -214,7 +214,7 @@ def start_voice_output(
     conv.start()
     start_announcer(host, stack, p, cleanup)
     start_expressor(host, stack, p, cleanup)
-    start_voice_clips(host, stack, cleanup)
+    start_voice_clips(host, stack, p, cleanup)
     if realtime is not None:
         realtime.start()
     if bargein is not None:
@@ -363,17 +363,21 @@ def start_expressor(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
         p.listener.on_not_heard = expressor.offer_not_heard
 
 
-def start_voice_clips(host: RuntimeHost, stack: ConfigStack, cleanup: ExitStack) -> None:
+def start_voice_clips(
+    host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
+) -> None:
     """The robot's status lines in its cloud voice (SPEC 8, Lost reply retry): recorded while
-    the conversation is idle, played while the cloud does not answer. Closed before the
-    conversation it records through. Sets ``host.clips``; nothing without a conversation and a
-    realtime route."""
+    the conversation is idle, played while the cloud does not answer (a lost reply's retry, a
+    slow transcript or first reply). Closed before the conversation it records through. Sets
+    ``host.clips``; nothing without a conversation and a realtime route."""
     conv = host.conversation
     if conv is None or host.realtime_route is None:
         return
     cache = ClipCache(clip_folder(stack.effective()))
     clips = host.clips = VoiceClips(conv, host, stack.effective, cache, time.monotonic)
     conv.play_clip = clips.play  # a lost reply's retry announces itself, or apologises
+    if p.listener is not None:  # a slow transcript: the robot says it is thinking
+        p.listener.on_slow_transcript = lambda: clips.play("thinking")
     cleanup.callback(clips.close)
     clips.start()
 

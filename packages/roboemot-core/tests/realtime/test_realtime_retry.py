@@ -251,7 +251,8 @@ def test_the_report_has_every_retry_count_from_the_start(rigs):
 
 
 def test_the_runtime_wires_the_voice_clips_to_the_worker(tmp_path):
-    """``start_voice_clips`` hands ``VoiceClips.play`` to the worker (``play_clip``)."""
+    """``start_voice_clips`` hands ``VoiceClips.play`` to the worker (``play_clip``) and the
+    ``thinking`` clip to the listener (``on_slow_transcript``)."""
     from contextlib import ExitStack
     from types import SimpleNamespace
 
@@ -260,11 +261,16 @@ def test_the_runtime_wires_the_voice_clips_to_the_worker(tmp_path):
 
     worker = SimpleNamespace(play_clip=None)
     host = SimpleNamespace(conversation=worker, realtime_route=object(), clips=None)
+    listener = SimpleNamespace(on_slow_transcript=None)
     stack = ConfigStack(app={"data_dir": str(tmp_path)})
     with ExitStack() as cleanup:
-        start_voice_clips(host, stack, cleanup)
+        start_voice_clips(host, stack, SimpleNamespace(listener=listener), cleanup)
         assert host.clips is not None
         assert worker.play_clip == host.clips.play
+        played = []
+        host.clips.play = lambda kind: played.append(kind) or True
+        assert listener.on_slow_transcript() is True
+        assert played == ["thinking"]
 
 
 def test_a_server_turn_lost_before_its_audio_is_retried_by_the_robot_with_its_words(ears):  # noqa: F811
