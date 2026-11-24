@@ -161,6 +161,7 @@ from .transcript import CLOUD, NOT_RECORDED, ROBOT, TranscriptRing
 
 if TYPE_CHECKING:  # the runtime imports the conversation: the type only
     from ..runtime.clips import CaptureSpeech
+    from ..skill_packs.session import SkillPackSession
 
 log = logging.getLogger(__name__)
 
@@ -380,6 +381,7 @@ class ConversationWorker:
         realtime: Any = None,
         cues: CueSink | None = None,
         emit: Callable[[str, float, dict[str, Any]], None] | None = None,
+        skill_packs: SkillPackSession | None = None,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
         # appraisal events to the affect runner, the fast path's path (the tone tool, SPEC 7)
@@ -400,6 +402,7 @@ class ConversationWorker:
             None  # (ring seq, queued) of the last reply
         )
         self.names = names if names is not None else RobotName()
+        self.skill_packs = skill_packs  # the active skill pack (SPEC 8, design 2026-11-24)
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
         self._register, self._circadian = register, circadian
@@ -694,7 +697,10 @@ class ConversationWorker:
 
     def expire(self, now: float) -> bool:
         """End the session when it has been idle for ``session_timeout_min``; returns whether it
-        ended. The loop's timer calls it; tests call it with their own clock."""
+        ended. The loop's timer calls it; tests call it with their own clock. It also ends an
+        idle skill pack first (``skill_packs.idle_end_s``)."""
+        if self.skill_packs is not None:
+            self.skill_packs.tick()
         timeout = self._timeout_s()
         with self._lock:
             session = self._session
@@ -713,10 +719,28 @@ class ConversationWorker:
             self._turns.clear()
             self._confirm = None
             self._tail = None
+        if self.skill_packs is not None:
+            self.skill_packs.end("conversation_end")
         if had:
             log.debug("conversation: session ended (%s)", why)
             if self.realtime is not None and why != "closed":
                 self.realtime.close_soon("conversation_end")  # the server session ends with it
+
+    def _skill_pack_heard(self, addressed: bool) -> None:
+        """A person's turn starts: an idle skill pack ends first, then addressed speech starts
+        its idle time again (``skill_packs.idle_end_s``)."""
+        if self.skill_packs is None:
+            return
+        self.skill_packs.tick()
+        if addressed:
+            self.skill_packs.heard_addressed()
+
+    def _with_skill_packs(self, text: str) -> str:
+        """``text`` followed by the skill pack catalogue, the active skill pack and pending end
+        lines (SPEC 8; design 2026-11-24-skill-packs 5.4, 5.5). After the fixed parts, so the
+        cached prefix of the instructions stays the same."""
+        extra = self.skill_packs.instructions() if self.skill_packs is not None else ""
+        return f"{text}\n{extra}" if extra and text else (extra or text)
 
     def _who(self) -> str | None:
         try:
@@ -974,6 +998,7 @@ class ConversationWorker:
         self.expire(now)
         speaker = self._who()
         self._touch(now, speaker)
+        self._skill_pack_heard(utterance.addressed)
         register = self._register_for(cfg)
         turn = _Turn(
             utterance,
@@ -1104,12 +1129,14 @@ class ConversationWorker:
             route = self.realtime
             tone_rule = route is not None and TONE_TOOL in route.tools_offered
         cfg = self.stack.effective()
-        return realtime_instructions(
-            cfg,
-            self._register_for(cfg),
-            robot_name=self._prompt_name(cfg),
-            extra_names=self._prompt_extra_names(cfg),
-            tone_rule=tone_rule,
+        return self._with_skill_packs(
+            realtime_instructions(
+                cfg,
+                self._register_for(cfg),
+                robot_name=self._prompt_name(cfg),
+                extra_names=self._prompt_extra_names(cfg),
+                tone_rule=tone_rule,
+            )
         )
 
     def _burst_instructions(self, job: Any) -> str:
@@ -1125,13 +1152,15 @@ class ConversationWorker:
         state = None
         if cfg.voice.realtime_route.skip_tool:
             state = self._state_of(job.wake_word, cfg, self.clock())
-        return realtime_instructions(
-            cfg,
-            self._register_for(cfg),
-            robot_name=self._prompt_name(cfg),
-            extra_names=self._prompt_extra_names(cfg),
-            tone_rule=tone_rule,
-            conversation=state,
+        return self._with_skill_packs(
+            realtime_instructions(
+                cfg,
+                self._register_for(cfg),
+                robot_name=self._prompt_name(cfg),
+                extra_names=self._prompt_extra_names(cfg),
+                tone_rule=tone_rule,
+                conversation=state,
+            )
         )
 
     def _delivery(self, turn: _Turn) -> Delivery:
@@ -1170,16 +1199,18 @@ class ConversationWorker:
         meant = turn.conversation == ADDRESSED or turn.utterance.at_face
         ask = cfg.expression.reactions.model_asks and meant and not (line or turn.event)
         system = build_messages(
-            system=realtime_instructions(
-                cfg,
-                turn.register,
-                language=turn.language,
-                robot_name=self._prompt_name(cfg),
-                extra_names=self._prompt_extra_names(cfg),
-                skip_rule=not (line or turn.event),
-                conversation=None if line else turn.conversation,
-                tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
-                ask_rule=ask,
+            system=self._with_skill_packs(
+                realtime_instructions(
+                    cfg,
+                    turn.register,
+                    language=turn.language,
+                    robot_name=self._prompt_name(cfg),
+                    extra_names=self._prompt_extra_names(cfg),
+                    skip_rule=not (line or turn.event),
+                    conversation=None if line else turn.conversation,
+                    tone_rule=not (line or turn.tone_retry or turn.rounds or turn.event),
+                    ask_rule=ask,
+                )
             ),
             profile_summary=(
                 self._summary(self._profile, conv.profile_summary_max_chars)
@@ -1826,6 +1857,7 @@ class ConversationWorker:
         self.expire(now)
         speaker = self._who()
         self._touch(now, speaker)
+        self._skill_pack_heard(True)  # a server turn answers speech meant for the robot
         heard = job.speech_end if job.speech_end is not None else now
         start = job.start_stamp if job.start_stamp is not None else heard
         quiet = Prosody(0.0, None, None, 0.0)
@@ -2582,12 +2614,14 @@ class ConversationWorker:
             self._say_fallback(turn)
             return
         messages = build_messages(
-            system=system_prompt(
-                cfg,
-                turn.register,
-                language=turn.language,
-                robot_name=self._prompt_name(cfg),
-                extra_names=self._prompt_extra_names(cfg),
+            system=self._with_skill_packs(
+                system_prompt(
+                    cfg,
+                    turn.register,
+                    language=turn.language,
+                    robot_name=self._prompt_name(cfg),
+                    extra_names=self._prompt_extra_names(cfg),
+                )
             ),
             profile_summary=(
                 self._summary(self._profile, conv.profile_summary_max_chars)

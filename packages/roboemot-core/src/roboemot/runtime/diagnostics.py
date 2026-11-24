@@ -33,6 +33,10 @@ def build_diagnostics(
             "roboemot.realtime_route",
             lambda: r.snapshot() if (r := host.realtime_route) is not None else {"state": "off"},
         ),
+        FnSource(
+            "roboemot.skill_packs",
+            lambda: s.report() if (s := host.skill_packs) is not None else {"state": "off"},
+        ),
         FnSource("roboemot.vision", p.perception.vision_snapshot),
         FnSource("roboemot.world", lambda: world_snapshot(p.world.entries, time.monotonic())),
         FnSource("roboemot.attention", p.selector.snapshot),

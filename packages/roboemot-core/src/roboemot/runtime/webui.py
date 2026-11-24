@@ -13,6 +13,7 @@ from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.realtime.check import offline_tools
 from roboemot.secret_store import SecretStore
+from roboemot.skill_packs.admin import SkillPacksAdmin
 from roboemot.webui import Server, make_server
 from roboemot.webui.routes import RouteChecker
 from roboemot.webui.secrets_admin import SecretsAdmin
@@ -162,6 +163,11 @@ def start_webui(
             live=live,
             emotions=emotions,
             tools=tools,
+            skill_packs=SkillPacksAdmin(
+                lambda: host.skill_packs,  # set when the conversation starts; read per call
+                lambda names: settings.change_owned("skill_packs.enabled", names, "webui"),
+                stack.effective,
+            ),
         )
     except Exception as exc:
         stop()

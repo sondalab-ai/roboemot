@@ -47,6 +47,7 @@ from .api import (
     RoutesPort,
     SecretsPort,
     SettingsPort,
+    SkillPacksPort,
     ToolsPort,
     WebApi,
 )
@@ -524,6 +525,7 @@ def make_server(
     live: LivePort | None = None,
     emotions: EmotionsPort | None = None,
     tools: ToolsPort | None = None,
+    skill_packs: SkillPacksPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -550,6 +552,7 @@ def make_server(
         live=live,
         emotions=emotions,
         tools=tools,
+        skill_packs=skill_packs,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)

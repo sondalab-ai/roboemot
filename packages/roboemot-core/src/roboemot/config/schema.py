@@ -6301,6 +6301,8 @@ class ConversationConfig(Strict):
             "radio_play",
             "radio_stop",
             "radio_volume",
+            "skill_pack_start",
+            "skill_pack_end",
         ],
         "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
         "llm_visible in code; this list can only narrow the set. Empty: no tools",
@@ -7966,6 +7968,68 @@ class ToolsConfig(Strict):
     radio: RadioConfig = param({}, "SPEC 11, 11A, 12: internet radio (admin opt-in)")
 
 
+SKILL_PACK_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+SKILL_PACK_NAME_MAX_CHARS = 64
+
+
+class SkillPacksConfig(Strict):
+    """Skill packs: text-only ``SKILL.md`` folders an admin adds to the robot (SPEC 11, 11A, 12;
+    design 2026-11-24-skill-packs). Every field but the idle end is admin-only: the list decides
+    which untrusted text reaches the model, and the caps bound it."""
+
+    enabled: list[str] = param(
+        [],
+        "Skill packs turned on, by folder name; a new skill pack is off until the admin turns "
+        "it on",
+        admin_only=True,
+    )
+    max_enabled: int = param(
+        20, "Most skill packs turned on at once", ge=1, le=100, admin_only=True, advanced=True
+    )
+    description_max_chars: int = param(
+        200,
+        "Longest skill pack description (one catalogue line in every turn)",
+        ge=20, le=500, admin_only=True, advanced=True,
+    )  # fmt: skip
+    body_max_chars: int = param(
+        4000,
+        "Longest skill pack instructions (in every turn while it is active)",
+        ge=200, le=8000, admin_only=True, advanced=True,
+    )  # fmt: skip
+    upload_max_bytes: int = param(
+        262144,
+        "Largest skill pack upload, compressed and uncompressed",
+        unit="B", ge=1024, le=4194304, admin_only=True, advanced=True,
+    )  # fmt: skip
+    upload_max_files: int = param(
+        50, "Most files in a skill pack upload", ge=1, le=500, admin_only=True, advanced=True
+    )
+    idle_end_s: float = param(
+        300.0,
+        "An active skill pack ends after this long without speech addressed to the robot",
+        unit="s", ge=30, le=3600, advanced=True,
+    )  # fmt: skip
+
+    @field_validator("enabled")
+    @classmethod
+    def _names(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if len(name) > SKILL_PACK_NAME_MAX_CHARS or not SKILL_PACK_NAME.fullmatch(name):
+                raise ValueError(f"skill pack name {name!r}: use a-z, 0-9 and single hyphens")
+        if len(set(names)) != len(names):
+            raise ValueError("skill_packs.enabled holds a name twice")
+        return names
+
+    @model_validator(mode="after")
+    def _cap(self) -> SkillPacksConfig:
+        if len(self.enabled) > self.max_enabled:
+            raise ValueError(
+                f"skill_packs.enabled holds {len(self.enabled)} names; max_enabled is "
+                f"{self.max_enabled}"
+            )
+        return self
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -8033,6 +8097,7 @@ with warnings.catch_warnings():
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         tools: ToolsConfig = param({}, "SPEC 11, 11A: voice tools")
+        skill_packs: SkillPacksConfig = param({}, "SPEC 11, 11A, 12: skill packs")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
         llm_check: LLMCheckConfig = param({}, "SPEC 8: route conformance test", advanced=True)
         safety: SafetyConfig = param({}, "SPEC 12")

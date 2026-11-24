@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     import httpx
 
     from ..media.player import MediaPlayer
+    from ..skill_packs.session import SkillPackSession
     from ..tools.scheduler import Scheduler
 
 
@@ -34,7 +35,8 @@ class ToolHost:
     startup. ``http`` builds an HTTP client for one call (the caller closes it); runtime startup
     sets it, a test injects one over ``httpx.MockTransport``, and a network tool without it is
     unavailable. ``media`` is the run's media player (SPEC 11, Media player), set by runtime
-    startup only when the speaker can play media."""
+    startup only when the speaker can play media. ``skill_packs`` is the run's active skill pack
+    state (SPEC 11, skill packs), set by runtime startup."""
 
     config: Callable[[], RoboEmotConfig]
     wall_now: Callable[[], datetime]
@@ -43,6 +45,7 @@ class ToolHost:
     scheduler: Scheduler | None = None
     http: Callable[[], httpx.Client] | None = None
     media: MediaPlayer | None = None
+    skill_packs: SkillPackSession | None = None
 
 
 def http_client() -> httpx.Client:
