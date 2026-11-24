@@ -257,7 +257,7 @@ def test_extra_safety_rules_and_summary_caps_count_toward_the_budget():
 
 
 def test_the_worst_register_is_checked_not_the_active_one():
-    route = {**ROUTE, "context_budget_tokens": 800}
+    route = {**ROUTE, "context_budget_tokens": 900}
     ConfigStack(app={"llm_routes": [route]})
     long_fragment = {"persona_fragment": "f" * 300}
     assert "'lan'" in refused(

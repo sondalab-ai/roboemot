@@ -50,6 +50,12 @@ NO_CONVERSATION, IN_PROGRESS, ADDRESSED = "none", "in_progress", "addressed"
 CONVERSATION_STATES = (NO_CONVERSATION, IN_PROGRESS, ADDRESSED)
 START_PROMPT = "conversation_start"  # prompts/conversation_start.en.txt (state none)
 OPEN_PROMPT = "conversation_open"  # prompts/conversation_open.en.txt (the other states)
+# Speech recognition can turn the name into a similar word (robot, 2026-11-24: «ehi Neve vai a
+# dormire» heard as «Il bebè va a dormire»); added to the name line whenever there is a name.
+SOUND_ALIKE_RULE = (
+    "Speech recognition can turn your name into a word that sounds like it: such a word, above "
+    "all at the start of the speech, is your name, and the request after it is meant for you."
+)
 
 
 def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
@@ -207,14 +213,14 @@ def _prompt_files(stem: str) -> dict[str, str]:
 def _name_rule(robot_name: str, extra_names: tuple[str, ...]) -> str:
     """The prompt's name line: the robot's name, then the extra names it answers to, each
     quoted (both already sanitised); the extra names count as its name for the Conversation
-    start rule (SPEC 8). '' without any."""
+    start rule (SPEC 8), then ``SOUND_ALIKE_RULE``. '' without any."""
     own = f'Your name is "{robot_name}".' if robot_name else ""
     if not extra_names:
-        return own
+        return f"{own} {SOUND_ALIKE_RULE}" if own else ""
     quoted = ", ".join(f'"{n}"' for n in extra_names)
     also = "also " if robot_name else ""
     counts = "it counts" if len(extra_names) == 1 else "they count"
-    return f"{own} You {also}answer to {quoted}: {counts} as your name.".strip()
+    return f"{own} You {also}answer to {quoted}: {counts} as your name. {SOUND_ALIKE_RULE}".strip()
 
 
 def _prompt(

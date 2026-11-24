@@ -234,3 +234,17 @@ def test_a_common_word_name_does_not_wake_in_a_long_sentence():
         endpoint_stamp=0.0,
     )
     assert "name" in r.keywords and not r.wake_word  # speech.name_called fires, no wake
+
+
+def test_the_prompt_says_a_sound_alike_word_is_the_name():
+    """Regression (robot, 2026-11-24): Gemini heard «ehi Neve vai a dormire» as «Il bebè va a
+    dormire» and asked who should sleep; the name line now says a word that sounds like the
+    name is the name, and the request after it is for the robot."""
+    from roboemot.llm.prompt import SOUND_ALIKE_RULE, realtime_instructions, system_prompt
+
+    cfg = RoboEmotConfig()
+    params = cfg.register.params
+    assert SOUND_ALIKE_RULE in system_prompt(cfg, params, robot_name="Neve")
+    assert SOUND_ALIKE_RULE in realtime_instructions(cfg, params, robot_name="Neve")
+    assert SOUND_ALIKE_RULE in system_prompt(cfg, params, robot_name="", extra_names=("Robot",))
+    assert SOUND_ALIKE_RULE not in system_prompt(cfg, params, robot_name="")
