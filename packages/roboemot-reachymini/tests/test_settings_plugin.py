@@ -397,12 +397,16 @@ def test_the_route_preset_is_the_installer_route_entry_without_its_key():
 def test_the_route_preset_is_offered_until_the_route_exists(tmp_path):
     bare = ConfigStack(app={}, audit_path=tmp_path / "a.jsonl")
     editor = SettingsEditor(bare, store=tmp_path / "a.json", manifest=MANIFEST)
-    assert [p["id"] for p in editor.route_presets("en")] == [CLOUD_VOICE.name, "gemini_live"]
+    assert [p["id"] for p in editor.route_presets("en")] == [
+        CLOUD_VOICE.name,
+        "gemini_live",
+        "gemini_pictures",
+    ]
     installed = ConfigStack(
         app={"llm_routes": [CLOUD_VOICE.entry()]}, audit_path=tmp_path / "b.jsonl"
     )
     editor = SettingsEditor(installed, store=tmp_path / "b.json", manifest=MANIFEST)
-    assert [p["id"] for p in editor.route_presets("en")] == ["gemini_live"]
+    assert [p["id"] for p in editor.route_presets("en")] == ["gemini_live", "gemini_pictures"]
 
 
 def test_the_web_ui_plugin_does_not_load_the_installer():
