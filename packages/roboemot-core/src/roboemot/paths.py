@@ -21,6 +21,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 ENV_DIR = "ROBOEMOT_DATA_DIR"
+SKILL_PACKS_SUBDIR = "skill_packs"
 DEFAULT_REL = Path(".local") / "share" / "roboemot"
 DIR_MODE = 0o700
 GROUP_OTHER_BITS = 0o077
@@ -129,6 +130,12 @@ def schedule_path(configured: str = "") -> Path:
     Voice tools, Scheduler store; 12 Data; not created here). Mode 0o600; inside the data
     folder, so uninstall removes it."""
     return data_path(configured) / SCHEDULE_FILE
+
+
+def skill_packs_dir(configured: str = "") -> Path:
+    """``<data folder>/skill_packs``, one folder per skill pack (SPEC 11, 12 Data; not created
+    here). Folders 0o700 and files 0o600; inside the data folder, so uninstall removes it."""
+    return data_path(configured) / SKILL_PACKS_SUBDIR
 
 
 PIPER_VENV_SUBDIR = "piper-venv"
