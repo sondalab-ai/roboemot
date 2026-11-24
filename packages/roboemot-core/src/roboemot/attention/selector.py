@@ -144,6 +144,12 @@ class AttentionSelector:
         h = self._hint
         return h is not None and now - h.stamp <= self.cfg.speaker_hold_s
 
+    def speed_dps(self, entry_id: str) -> float | None:
+        """The last measured angular speed of ``entry_id`` (deg/s, SPEC 5A Motion speed), None
+        when it is not tracked. Read from another thread: one dict lookup and one float read."""
+        motion = self._motion.get(entry_id)
+        return None if motion is None else motion.speed_dps
+
     @property
     def target(self) -> AttentionTarget | None:
         """The target chosen by the last ``update`` (None: no target)."""

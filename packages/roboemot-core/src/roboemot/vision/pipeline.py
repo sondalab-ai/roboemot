@@ -221,6 +221,8 @@ CHANNEL_ORDER = "BGR"
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
 LightTap = Callable[[np.ndarray], object]
+# the surroundings snapshot tap (SPEC 8): the frame, the fresh face boxes, the shown track's box
+SnapshotTap = Callable[[Frame, list[Box], Box | None], object]
 
 
 @dataclass
@@ -407,6 +409,8 @@ class VisionPipeline:
         self._visible: list[Track] = []
         self._object_visible: list[Track] = []
         self.light_tap: LightTap | None = None
+        self.snapshot_tap: SnapshotTap | None = None
+        self.snapshot_wanted: Callable[[], bool] = lambda: False
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
         self.face_embedder = face_embedder
@@ -518,6 +522,7 @@ class VisionPipeline:
                 self._process_objects(frame, camera, reason, episode)
                 objects = True
         self._follow_shown(frame, camera, episode, objects)
+        self._tap_snapshot(frame)
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
 
@@ -532,6 +537,25 @@ class VisionPipeline:
             self.light_tap(frame.image)
         except Exception as exc:
             log.warning("light tap failed: %s", type(exc).__name__)
+
+    def _tap_snapshot(self, frame: Frame) -> None:
+        """Hand the frame, the fresh face boxes and the shown track's box to the surroundings
+        snapshot tap (SPEC 8, Surroundings snapshots), only while it wants a frame: idle, the cost
+        is one call. A failure is logged by type and never costs the frame (SPEC 12: no data)."""
+        if self.snapshot_tap is None:
+            return
+        try:
+            if self.snapshot_wanted():
+                self.snapshot_tap(frame, self._fresh_face_boxes(frame.stamp), self._shown_box())
+        except Exception as exc:
+            log.warning("snapshot tap failed: %s", type(exc).__name__)
+
+    def _shown_box(self) -> Box | None:
+        """The box of the track the shown-thing follow holds, None without one."""
+        target = self.follower.target
+        if target is None:
+            return None
+        return next((t.box for t in self._object_visible if t.track_id == target), None)
 
     def _watch_motion(self, frame: Frame) -> None:
         """Hand the frame to the nap's motion watch (SPEC 7A) and publish a confirmed change.
