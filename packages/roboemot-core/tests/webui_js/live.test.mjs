@@ -764,3 +764,66 @@ test("a beating pulse replaces the beat card on each poll (the resync), and only
   assert.notEqual(page.document.querySelector("#live-pulse"), pulse, "a new pulse element restarts the animation");
   assert.ok([...grid.children].every((node, i) => i === index || node === first[i]));
 });
+
+// ---- the Surroundings card (SPEC 8, Surroundings snapshots)
+
+const SURROUNDINGS = {
+  state: "on", route: "eye", attempt: null, counts: { described: 2, too_blurry: 1 },
+  last: { kind: "shown", age_s: 3, bytes: 20480, sharpness: 88 }, latency_s: 1.2,
+  unsupported: null, paused_s: 0,
+};
+
+const SURR_STRINGS = {
+  "GET /api/strings": {
+    language: "en",
+    strings: {
+      ...STRINGS,
+      live_surr_unsupported: "The image route refused the image ({code}).",
+      live_surr_last_value: "{kind}, {n} s ago, {kb} KB, sharpness {score}",
+    },
+  },
+};
+
+const surroundingsCard = (page) =>
+  [...page.document.querySelectorAll("#live-cards > *")].find((c) => c.id === "live-surroundings-card");
+
+test("surroundings: no card without the service", async (t) => {
+  const page = await livePage(t);
+  await openLive(page);
+  assert.equal(surroundingsCard(page), undefined);
+});
+
+test("surroundings: the card shows the state, the last snapshot and the counts, no image with video off", async (t) => {
+  const page = await livePage(t, { ...SURR_STRINGS, "GET /api/live/state": { ...STATE, surroundings: SURROUNDINGS } });
+  await openLive(page);
+  const card = surroundingsCard(page);
+  assert.ok(card, "card drawn");
+  for (const expected of ["eye", "88", "too_blurry"]) assert.ok(card.textContent.includes(expected), expected);
+  assert.equal(card.querySelector("img"), null);
+  assert.equal(page.calls.filter((c) => c.path === "/api/live/surroundings.jpg").length, 0);
+});
+
+test("surroundings: with video on the card shows the descriptions and the last snapshot once", async (t) => {
+  const described = { shown: "a silver <b>laptop</b>", room: "a study" };
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: 333 }, surroundings: { ...SURROUNDINGS, described } },
+    "GET /api/live/surroundings.jpg": () => reply(200, {}, { "Content-Type": "image/jpeg" }),
+    "GET /api/live/frame.jpg": reply(503, { error: "video_no_frame" }),
+  });
+  await openLive(page);
+  await pollsReach(page, 3);
+  await settle();
+  const card = surroundingsCard(page);
+  assert.ok(card.textContent.includes("a silver <b>laptop</b>"), "the text is shown as text");
+  assert.equal(card.querySelector("b"), null, "never parsed as markup");
+  assert.ok(card.textContent.includes("a study"));
+  assert.equal(page.calls.filter((c) => c.path === "/api/live/surroundings.jpg").length, 1);
+  assert.ok(card.querySelector("img").getAttribute("src").startsWith("blob:"));
+});
+
+test("surroundings: an unsupported route shows its reason", async (t) => {
+  const s = { ...SURROUNDINGS, state: "unsupported", unsupported: "http_400" };
+  const page = await livePage(t, { ...SURR_STRINGS, "GET /api/live/state": { ...STATE, surroundings: s } });
+  await openLive(page);
+  assert.ok(surroundingsCard(page).textContent.includes("http_400"));
+});

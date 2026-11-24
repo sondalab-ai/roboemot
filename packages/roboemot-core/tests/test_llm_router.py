@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import datetime as dt
 import json
@@ -76,6 +77,16 @@ class Server:
             await asyncio.sleep(1.0)
         if host == "down.local":
             return httpx.Response(503, json={"error": {"message": "down"}})
+        if host == "novision.local":
+            return httpx.Response(400, json={"error": {"message": "image input not supported"}})
+        if host == "unsupported.local":
+            return httpx.Response(415, json={"error": {"message": "unsupported media"}})
+        if host == "nousage.local":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse([chunk("a red mug")]),
+            )
         if host == "tools.local":
             return httpx.Response(
                 200,
@@ -672,3 +683,63 @@ async def test_reasoning_streamed_in_both_fields_counts_once():
     msgs = [{"role": "user", "content": "x"}]
     _ = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
     assert timing.reasoning_chars == 6
+
+
+# ---- describe one image (SPEC 8, Surroundings snapshots)
+
+JPEG = b"\xff\xd8" + b"x" * 4000
+
+
+async def test_describe_image_sends_one_text_and_one_image_part():
+    srv = Server()
+    r = router(srv, [route("eye", "lan.local")])
+    text = await r.describe_image(route("eye", "lan.local"), "Describe it.", JPEG, 64)
+    assert text == "Ciao Marcello!"
+    body = srv.requests[0][1]
+    assert body["stream"] is True and body["max_tokens"] == 64
+    (msg,) = body["messages"]
+    assert msg["role"] == "user"
+    text_part, image_part = msg["content"]
+    assert text_part == {"type": "text", "text": "Describe it."}
+    assert image_part["type"] == "image_url"
+    url = image_part["image_url"]["url"]
+    assert url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == JPEG
+    assert "tools" not in body and "response_format" not in body
+
+
+async def test_a_400_raises_images_unsupported_and_is_not_retried():
+    from roboemot.llm.router import ImagesUnsupported
+
+    srv = Server()
+    r = router(srv, [route("eye", "novision.local"), route("b", "lan.local")])
+    with pytest.raises(ImagesUnsupported) as caught:
+        await r.describe_image(route("eye", "novision.local"), "Describe it.", JPEG, 64)
+    assert caught.value.code == "http_400"
+    assert len(srv.requests) == 1
+
+
+async def test_a_415_raises_images_unsupported():
+    from roboemot.llm.router import ImagesUnsupported
+
+    srv = Server()
+    r = router(srv, [route("eye", "unsupported.local")])
+    with pytest.raises(ImagesUnsupported):
+        await r.describe_image(route("eye", "unsupported.local"), "Describe it.", JPEG, 64)
+
+
+async def test_describe_charges_the_budget_without_counting_image_bytes():
+    srv = Server()
+    eye = route("eye", "nousage.local")
+    r = router(srv, [eye])
+    await r.describe_image(eye, "Describe it.", JPEG, 64)
+    assert r.used("eye") == (len("Describe it.") + len("a red mug")) // 4
+
+
+async def test_describe_refuses_a_route_over_budget():
+    srv = Server()
+    eye = route("eye", "lan.local", daily_token_budget=0)
+    r = router(srv, [eye])
+    with pytest.raises(NoRouteAvailable):
+        await r.describe_image(eye, "Describe it.", JPEG, 64)
+    assert srv.requests == []

@@ -148,6 +148,12 @@ class LiveVideo:
         if gone and not self._seen:
             self._release()
 
+    def note_viewer(self, client: str) -> None:
+        """Count ``client`` as a viewer now (it was sent a camera image other than the preview,
+        the surroundings snapshot), so the banner every open page shows says so."""
+        with self._lock:
+            self._serve(client, self._clock())
+
     def viewers(self) -> dict[str, Any]:
         """The banner's answer: whether any client was sent a frame within the window, and how
         many. Cheap: no config read, no encode."""

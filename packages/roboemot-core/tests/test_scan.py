@@ -694,3 +694,47 @@ def test_target_lost_jitter_may_not_exceed_the_delay():
     WorldScanConfig(target_lost_delay_s=3.0, target_lost_jitter_s=3.0)
     with pytest.raises(ValueError, match="target_lost_jitter_s"):
         WorldScanConfig(target_lost_delay_s=3.0, target_lost_jitter_s=3.5)
+
+
+def test_a_finished_sweep_is_reported_once_and_a_cancelled_one_never():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    run_controller(ctrl, 0.0, 70.0, pose)
+    assert ctrl.active and not ctrl.take_finished_sweep()
+    t = 70.0
+    while ctrl.active:
+        t += 0.05
+        ctrl.tick(ctx(t), pose, 1.0)
+    assert ctrl.take_finished_sweep()
+    assert not ctrl.take_finished_sweep()
+    cancelled = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    run_controller(cancelled, 0.0, 70.0, pose)
+    cancelled.tick(ctx(70.0, alone=True), pose, 1.0)
+    assert not cancelled.take_finished_sweep()
+
+
+def test_scan_tick_publishes_scan_finished_at_the_end_of_a_sweep():
+    from roboemot.runtime.ticks import scan_tick
+
+    class Loop:
+        def pose(self):
+            return {"head.yaw": 0.0, "body_yaw": 0.0}
+
+        def feed(self, cmd):
+            pass
+
+        def clear(self, source):
+            pass
+
+    class Cfg:
+        class world:
+            camera_fov_h_deg = 57.0
+
+    bus, got = Bus(), []
+    bus.subscribe("world.scan_finished", got.append)
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    t = 0.0
+    while not got and t < 400.0:
+        scan_tick(ctx(t), ctrl, Loop(), Cfg, bus=bus)
+        t += 0.05
+    assert len(got) == 1

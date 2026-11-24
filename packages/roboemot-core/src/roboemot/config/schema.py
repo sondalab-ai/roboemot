@@ -6575,6 +6575,108 @@ def route_url_ok(url: str, schemes: tuple[str, ...] = ROUTE_SCHEMES) -> bool:
     return parsed.scheme in schemes and bool(parsed.host)
 
 
+class SurroundingsShownConfig(Strict):
+    """The snapshot of a thing a person shows the robot (design 2026-11-24, SPEC 8)."""
+
+    max_speed_deg_s: float = param(
+        15.0,
+        "A shown thing must move slower than this for its frame to be a snapshot candidate",
+        unit="deg/s", ge=1, le=180,
+    )  # fmt: skip
+    margin: float = param(
+        0.25,
+        "The crop around the shown thing grows by this share of its box on each side",
+        unit="share", ge=0, le=1, advanced=True,
+    )  # fmt: skip
+    wait_s: float = param(
+        4.0,
+        "Longest wait for a sharp frame and its description; the reaction then uses the "
+        "detector's category",
+        unit="s", ge=0.5, le=30,
+    )  # fmt: skip
+    max_chars: int = param(
+        80, "Cap on a shown thing's description", unit="chars", ge=20, le=300, advanced=True
+    )
+
+
+class SurroundingsRoomConfig(Strict):
+    """The snapshot of the room in view (design 2026-11-24, SPEC 8)."""
+
+    min_interval_s: float = param(
+        300.0,
+        "At most one room snapshot in this time",
+        unit="s", ge=60, le=86400,
+    )  # fmt: skip
+    changed_share: float = param(
+        0.5,
+        "Share of the view that must change, with the head still, for a new room snapshot",
+        unit="share", ge=0, le=1, advanced=True,
+    )  # fmt: skip
+    check_interval_s: float = param(
+        5.0,
+        "How often the view is compared with the last room snapshot, once min_interval_s "
+        "passed",
+        unit="s", ge=1, le=60, advanced=True,
+    )  # fmt: skip
+    wait_s: float = param(
+        10.0,
+        "Longest wait for a sharp frame of the room",
+        unit="s", ge=1, le=60, advanced=True,
+    )  # fmt: skip
+    max_chars: int = param(
+        160, "Cap on the room description", unit="chars", ge=40, le=400, advanced=True
+    )
+    max_age_s: float = param(
+        3600.0,
+        "A room description older than this is dropped from the scene summary",
+        unit="s", ge=60, le=86400,
+    )  # fmt: skip
+
+
+class SurroundingsConfig(Strict):
+    """Camera snapshots described as text by the route with images on (design 2026-11-24;
+    SPEC 5, 8, 12). The feature is on exactly when one llm_routes entry has images: true."""
+
+    settle_s: float = param(
+        0.5,
+        "The head must be still this long before a frame is a snapshot candidate",
+        unit="s", ge=0.1, le=5, advanced=True,
+    )  # fmt: skip
+    window_s: float = param(
+        1.0,
+        "Candidate frames are compared within this window; the sharpest is sent",
+        unit="s", ge=0.2, le=5, advanced=True,
+    )  # fmt: skip
+    candidates: int = param(
+        5, "At most this many candidate frames are kept in memory", ge=1, le=20, advanced=True
+    )
+    min_sharpness: float = param(
+        20.0,
+        "Nothing is sent when the sharpest candidate scores below this (variance of the "
+        "Laplacian of a grey copy)",
+        ge=0, le=10000, advanced=True,
+    )  # fmt: skip
+    max_side_px: int = param(
+        768, "Longest side of a snapshot sent", unit="px", ge=256, le=1600, advanced=True
+    )
+    jpeg_quality: int = param(80, "JPEG quality of a snapshot", ge=40, le=95, advanced=True)
+    max_failures: int = param(
+        3,
+        "Failed descriptions in a row before the snapshots pause",
+        ge=1, le=20, advanced=True,
+    )  # fmt: skip
+    pause_s: float = param(
+        600.0,
+        "How long the snapshots pause after max_failures",
+        unit="s", ge=60, le=86400, advanced=True,
+    )  # fmt: skip
+    describe_max_tokens: int = param(
+        120, "Reply token cap of one description request", ge=16, le=1024, advanced=True
+    )
+    shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
+    room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
+
+
 class LLMRoute(Strict):
     @field_validator("api_key")
     @classmethod
@@ -6657,6 +6759,14 @@ class LLMRoute(Strict):
         "that makes a route local (this field, base_url or a new route) needs the admin",
     )
 
+    images: bool = param(
+        False,
+        "Sees images: this chat route describes camera snapshots (a shown thing, the room) as "
+        "short text for the scene summary. The snapshots leave the robot; at most one route "
+        "(SPEC 8, 12)",
+        opt_in=True,
+    )
+
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
         if not ROUTE_NAME.fullmatch(self.name) or len(self.name) > ROUTE_NAME_MAX_CHARS:
@@ -6666,6 +6776,8 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
+        if self.images and self.kind != "chat":
+            raise ValueError(f"llm_routes.{self.name}.images needs kind: chat")
         if self.protocol == "gemini_live":
             if self.kind != "realtime":
                 raise ValueError(f"route {self.name}: protocol gemini_live needs kind: realtime")
@@ -6686,6 +6798,12 @@ class LLMRoute(Strict):
                 "spaces, control characters or '\\'"
             )
         return self
+
+
+def image_route(cfg: RoboEmotConfig) -> LLMRoute | None:
+    """The ``llm_routes`` entry with ``images: true``, or None: the surroundings feature is on
+    exactly when it exists (design 2026-11-24). The load checks allow at most one."""
+    return next((r for r in cfg.llm_routes if r.images), None)
 
 
 def active_realtime_route(cfg: RoboEmotConfig) -> LLMRoute | None:
@@ -7988,6 +8106,7 @@ with warnings.catch_warnings():
         runtime: RuntimeConfig = param({}, "SPEC 8, 11A")
         webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
         catalogue: CatalogueConfig = param({}, "SPEC 6", advanced=True)
+        surroundings: SurroundingsConfig = param({}, "SPEC 5, 8, 12: camera snapshots as text")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:
@@ -7995,6 +8114,12 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _one_image_route(self) -> RoboEmotConfig:
+            if sum(r.images for r in self.llm_routes) > 1:
+                raise ValueError("llm_routes: at most one route may have images on")
             return self
 
         @model_validator(mode="after")

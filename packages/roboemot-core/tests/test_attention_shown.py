@@ -455,6 +455,18 @@ def test_one_hz_observations_read_as_moving_on_every_tick():
     assert all(tg is not None and tg.priority == "salient_motion" for tg in targets)
 
 
+def test_speed_dps_reports_the_measured_speed_of_a_waved_thing():
+    sel = AttentionSelector(CFG)
+    assert sel.speed_dps("o1") is None
+    t = 0.0
+    while t < 3.0:
+        stamp = math.floor(t)
+        sel.update(t, [thing(stamp, 30.0 * stamp)])
+        t = round(t + TICK, 6)
+    assert sel.speed_dps("o1") == pytest.approx(30.0, rel=0.01)
+    assert sel.speed_dps("nobody") is None
+
+
 # ---- the governor's episode rate
 
 

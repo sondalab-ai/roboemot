@@ -738,13 +738,13 @@ PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 class Violation:
     """A leaf that is less safe than approved. ``check`` says which rule found it: ``field`` (the
     field's own direction, opt-in or admin flag) or one of the cross-field rules ``reflex``,
-    ``locality``, ``secret``, which a caller can refuse whatever its authority."""
+    ``locality``, ``secret``, ``image``, which a caller can refuse whatever its authority."""
 
     kind: Literal["safety", "privacy", "admin"]
     path: str
     approved: Any
     candidate: Any
-    check: Literal["field", "reflex", "locality", "secret"] = "field"
+    check: Literal["field", "reflex", "locality", "secret", "image"] = "field"
 
     def __str__(self) -> str:
         return (
@@ -967,6 +967,7 @@ def violations(
         + reflex_violations(approved, candidate)
         + locality_violations(approved, candidate)
         + secret_violations(approved, candidate)
+        + image_violations(approved, candidate)
     )
 
 
@@ -1042,6 +1043,32 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
         )
         for r in candidate.llm_routes
         if r.api_key not in NO_KEY and not same(r)
+    ]
+
+
+def image_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Image routes whose approval does not cover where the snapshots go (SPEC 8, Surroundings
+    snapshots; 12). Every route with ``images`` on needs an approved route of the same name with
+    ``images`` on and the same ``base_url`` (exact, path included), ``model`` and ``kind``;
+    otherwise one violation whose candidate names them, so an approval (matched on path and
+    candidate) covers exactly that endpoint and model and never a later change of either. The
+    ``images`` field check also fires for a switch turned on. The values are exact;
+    ``Violation.__str__`` redacts them."""
+    trusted = {r.name: r for r in approved.llm_routes if r.images}
+
+    def trust(r: Any) -> str:
+        return f"{r.base_url} {r.model} {r.kind}"
+
+    return [
+        Violation(
+            "privacy",
+            f"llm_routes.{r.name}.images",
+            trust(trusted[r.name]) if r.name in trusted else "absent",
+            trust(r),
+            "image",
+        )
+        for r in candidate.llm_routes
+        if r.images and (r.name not in trusted or trust(trusted[r.name]) != trust(r))
     ]
 
 

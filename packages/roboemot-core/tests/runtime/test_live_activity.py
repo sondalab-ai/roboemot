@@ -35,6 +35,7 @@ def rig(**live_cfg):
         activity=ring,
         voice_listener=Listener(),
         dance=None,
+        surroundings=None,
         realtime_route=SimpleNamespace(state="connected", reason=None),
     )
     p = parts()

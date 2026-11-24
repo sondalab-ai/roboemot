@@ -29,6 +29,7 @@ def served(tmp_path, stack):  # noqa: F811
     host = SimpleNamespace(
         circadian=SimpleNamespace(state="awake", reason=None), phase=ConversationPhase(),
         activity=None, realtime_route=None, voice_listener=None, dance=None, levels=None,
+        surroundings=None,
         transcript=None, prompts=ring,
     )  # fmt: skip
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)

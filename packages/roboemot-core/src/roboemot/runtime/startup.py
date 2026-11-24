@@ -39,6 +39,8 @@ from roboemot.skills.plugins import (
 )
 from roboemot.skills.registry import SkillRegistry
 from roboemot.soothe import SootheRunner
+from roboemot.surroundings.image import opencv_available
+from roboemot.surroundings.service import Surroundings
 from roboemot.tools.announce import Announcer
 from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.voice.clip_cache import ClipCache, clip_folder
@@ -58,6 +60,7 @@ from .clips import VoiceClips
 from .expressor import Expressor
 from .host import RuntimeHost
 from .radio_stop import stop_and_nod
+from .ticks import conversation_idle, media_on, robot_resting
 from .webui import WebAdmin, start_webui
 
 
@@ -191,6 +194,8 @@ def start_voice_output(
             registry,
             lambda: stack.effective().attention.stale_s,
             p.value_cap,
+            surroundings=lambda: host.surroundings,
+            room_cap=lambda: stack.effective().surroundings.room.max_chars,
         ),
         speaker=p.conv_speaker,
         names=p.names,
@@ -219,6 +224,7 @@ def start_voice_output(
     cleanup.callback(conv.close)
     conv.start()
     start_announcer(host, stack, p, cleanup)
+    start_surroundings(host, stack, p, cleanup)
     start_expressor(host, stack, p, cleanup)
     start_voice_clips(host, stack, p, cleanup)
     if realtime is not None:
@@ -363,6 +369,41 @@ def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
     cleanup.callback(announcer.close)  # before the conversation it hands turns to
     announcer.start()
     start_scheduler_runner(host)  # attached first: its first tick reaches the announcer
+
+
+def start_surroundings(
+    host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
+) -> None:
+    """Camera snapshots described as text (SPEC 8, Surroundings snapshots): built whether or
+    not a route has images on, so the switch works without a restart. The pipeline's snapshot
+    tap feeds it; the gate reads the robot's sleep, rest, quiet hours, radio and conversation.
+    Sets ``host.surroundings``."""
+    pipeline = p.perception.pipeline
+
+    def gate(kind: str) -> str | None:
+        if robot_resting(host, lambda: p.sleep.asleep):
+            return "asleep"
+        if media_on(host):
+            return "music"
+        if kind == "room" and not conversation_idle(host, time.monotonic()):
+            return "busy"
+        return None
+
+    surroundings = host.surroundings = Surroundings(
+        stack.effective,
+        lambda: p.hub.router,
+        gate=gate,
+        speed=lambda entry_id: p.selector.speed_dps(entry_id),
+        vision=pipeline is not None and opencv_available(),
+        frame_spec=pipeline.frame_spec if pipeline is not None else None,
+    )
+    surroundings.events = host.events
+    stack.subscribe(lambda change: surroundings.apply_config(change.config))
+    if pipeline is not None:
+        pipeline.snapshot_wanted = surroundings.wanted
+        pipeline.snapshot_tap = surroundings.tap
+    cleanup.callback(surroundings.close)
+    surroundings.start(host.bus)
 
 
 def start_expressor(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack) -> None:

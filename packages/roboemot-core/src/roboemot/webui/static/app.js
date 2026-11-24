@@ -1269,6 +1269,31 @@ function checkReason(c) {
   return parts.join("; ");
 }
 
+// The "Sees images" switch of a chat route (SPEC 8, Surroundings snapshots): turning it on asks
+// for the PIN after saying what leaves the robot, and turns any other image route off in the same
+// batch (at most one); turning it off takes the PIN too. A cancelled dialog puts the switch back.
+// The state line shows codes only (`images_state`, `images_reason`).
+function imagesSwitch(r, routes) {
+  const id = "route-" + r.name + "-images";
+  const box = el("input", { type: "checkbox", id, role: "switch" });
+  box.checked = !!r.images;
+  box.addEventListener("change", () => guarded(async () => {
+    const on = box.checked;
+    const changes = routes.filter((o) => on && o.name !== r.name && o.images)
+      .map((o) => ({ path: "llm_routes." + o.name + ".images", value: false }));
+    changes.push({ path: "llm_routes." + r.name + ".images", value: on });
+    const result = await pinnedCall(t(on ? "route_images_on_message" : "route_images_off_message", { name: r.name }),
+      t(on ? "route_images_on" : "route_images_off"),
+      (pin) => api("POST", "/api/settings/batch", { changes, pin }), null, t("route_images_title", { name: r.name }));
+    if (!result) { box.checked = !on; return; }
+    await routesView();
+  }));
+  const state = r.images
+    ? [el("p", { class: "hint", id: id + "-state" }, t("route_images_state_" + r.images_state) + (r.images_reason ? " (" + r.images_reason + ")" : ""))]
+    : [];
+  return [el("p", {}, el("label", { for: id }, box, " " + t("route_images"))), ...state];
+}
+
 async function routesView() {
   const current = newView();
   const view = document.getElementById("view");
@@ -1338,6 +1363,7 @@ async function routesView() {
         (r.protocol && r.protocol !== ROUTE_PROTOCOL_DEFAULT ? ", " + t("route_protocol_" + r.protocol) : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
+      r.kind === "realtime" ? [] : imagesSwitch(r, data.routes),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, sessionFacts(r.session), edit), r.running);
     routeCard.dataset.row = r.name;
     return routeCard;

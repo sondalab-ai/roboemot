@@ -131,6 +131,7 @@ class LiveState:
             "dance": self._dance(now),
             "system": self._system(cfg, now),
             "activity": self._activity(cfg, rest) if cfg.webui.live.activity else None,
+            "surroundings": self._surroundings(cfg),
             "video": {
                 "enabled": cfg.webui.live.video,
                 "poll_ms": round(MS_PER_S / cfg.webui.live.video_fps),
@@ -334,6 +335,41 @@ class LiveState:
         else:  # holding on an unreachable target (SPEC 12A): the loop writes nothing there
             state = "held" if loop.unreachable_held else "writing"
         return {"state": state}
+
+    def _surroundings(self, cfg: RoboEmotConfig) -> dict[str, Any] | None:
+        """The surroundings service's state (codes, counts, ages, sizes, scores), or None
+        without the service. The descriptions (``described``) say what the camera saw, so they
+        come under the preview's rules (SPEC 8, Surroundings snapshots; 12): ``webui.live.video``
+        on, the robot awake, and a page counted as a video viewer (the banner shows)."""
+        service = self._host.surroundings
+        if service is None:
+            return None
+        watched = self.video.viewers()["video_viewers_active"]
+        if cfg.webui.live.video and watched and not self._p.sleep.asleep:
+            return service.live()
+        return service.state()
+
+    def surroundings_jpeg(self, client: str) -> tuple[bytes | None, str | None]:
+        """The last snapshot sent to the image route for ``client`` (an IP), or
+        ``(None, code)``: ``live_disabled``, ``video_off``, ``video_asleep``,
+        ``surroundings_off`` (no service) or ``surroundings_none`` (nothing sent yet, or dropped).
+        Serving it counts ``client`` as a video viewer, so the banner shows. From RAM; nothing is
+        stored."""
+        cfg = self._cfg
+        if not cfg.webui.live.enabled:
+            return None, "live_disabled"
+        if not cfg.webui.live.video:
+            return None, "video_off"
+        if self._p.sleep.asleep:
+            return None, "video_asleep"
+        service = self._host.surroundings
+        if service is None:
+            return None, "surroundings_off"
+        jpeg = service.jpeg()
+        if jpeg is None:
+            return None, "surroundings_none"
+        self.video.note_viewer(client)
+        return jpeg, None
 
     def _music(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any] | None:
         """The detector's lock-free state, or None without a detector or with ``music.enabled``

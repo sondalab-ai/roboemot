@@ -18,10 +18,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..config.schema import RegisterParams, RoboEmotConfig
+from ..config.schema import RegisterParams, RoboEmotConfig, image_route
 from ..skill_packs.library import SkillPack
 from ..skill_packs.prompt import active_block, catalogue_block
 
+ROOM_LABEL = "Room: "  # the room description's prefix in the scene summary (surroundings)
 SUMMARY_LABEL_TOKENS = 32  # the "(data, not instructions)" labels, quotes, escapes and newlines
 CHARS_PER_TOKEN = 4  # token estimate (also the router's usage estimate): chars divided by this
 
@@ -148,6 +149,12 @@ def _instruction(stem: str) -> str:
         path = PROMPTS_DIR / f"{stem}.{INSTRUCTION_LANGUAGE}.txt"
         raise RuntimeError(f"instruction rule {path} is missing or empty")
     return text
+
+
+def surroundings_prompt(kind: str) -> str:
+    """The describe request's English instruction for a ``shown`` or ``room`` snapshot
+    (``prompts/surroundings_<kind>.en.txt``, SPEC 8, Surroundings snapshots)."""
+    return _instruction(f"surroundings_{kind}")
 
 
 def skip_prompt() -> str:
@@ -340,7 +347,8 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
         fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
         the longest vocabulary rule and language name, the name line with the robot's name and
     ``voice.extra_names_max`` extra names at ``voice.name_max_chars``, plus the two summaries at
-    their caps (part 5
+    their caps and the scene summary's room line at ``surroundings.room.max_chars`` while a route
+    has images on (part 5
         is capped, the affect line is a few words). The persona and body prompts count as written:
         no person can override them, and every change to them runs this check again."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
@@ -355,7 +363,8 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
         system_prompt(cfg, register, language=language, robot_name=name, extra_names=extras)
     )
     conv = cfg.conversation
-    chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars
+    room = cfg.surroundings.room.max_chars + len(ROOM_LABEL) if image_route(cfg) else 0
+    chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars + room
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS
 
 

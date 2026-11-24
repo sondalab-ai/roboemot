@@ -88,22 +88,39 @@ def scene_source(
     stale_s: Callable[[], float],
     value_cap: Callable[[], int],
     clock: Callable[[], float] = time.monotonic,
+    surroundings: Callable[[], Any] = lambda: None,
+    room_cap: Callable[[], int] = lambda: 0,
 ) -> Callable[[int], str | None]:
-    """``scene(max_chars)``: what is in view, the attention target first."""
+    """``scene(max_chars)``: what is in view, the attention target first, with the
+    surroundings service's description of the target and its room line (SPEC 8, Surroundings
+    snapshots) when there is one."""
 
     def name_of(entry: Entry) -> str | None:
         return entry_name(registry, entry)
 
     def scene(max_chars: int) -> str | None:
         target = selector.target
+        target_id = target.entry_id if target is not None else None
+        now = clock()
+        service = surroundings()
+        descriptions: dict[str, str] = {}
+        room = None
+        if service is not None:
+            text = service.description(target_id) if target_id else None
+            if text:
+                descriptions[target_id] = text
+            room = service.room(now)
         return scene_summary(
             world.entries,
-            now=clock(),
+            now=now,
             stale_s=stale_s(),
-            target_id=target.entry_id if target is not None else None,
+            target_id=target_id,
             name_of=name_of,
             max_chars=max_chars,
             value_max_chars=value_cap(),
+            descriptions=descriptions,
+            room=room,
+            room_max_chars=room_cap(),
         )
 
     return scene
