@@ -39,6 +39,23 @@ def test_shown_object_spoken_with_category():
     assert rig.worker.turns[0]["profile"] is True
 
 
+def test_shown_object_event_asks_for_a_remark_not_a_hedge():
+    rig = attached()
+    show(rig, "e1", "laptop")
+    rig.expressor.handle(rig.expressor._take())
+    text = rig.worker.turns[0]["text"]
+    assert "Say what you think it is" in text
+    assert "looks like a laptop" in text
+    assert "or ask about it" not in text
+
+
+def test_shown_object_event_uses_an_before_a_vowel():
+    rig = attached()
+    show(rig, "e1", "umbrella")
+    rig.expressor.handle(rig.expressor._take())
+    assert "looks like an umbrella" in rig.worker.turns[0]["text"]
+
+
 def test_the_same_look_offers_once():
     rig = attached()
     show(rig, "e1", "cup")
