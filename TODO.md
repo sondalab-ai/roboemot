@@ -249,3 +249,12 @@ later decision needs no new measure.
       the platform holds the motors off at start, or keep the wake as intended. Related: the daemon's
       `POST /api/move/play/wake_up` alone does not enable the motors after a REST `goto_sleep`.
 
+
+## Feature ideas (owner: parked)
+
+- [ ] Learn a shown object's name from the person (owner, 2026-11-24). Today the shown-object
+      reaction (SPEC 8, Robot expression) only comments: a question such as "quella è una sedia?"
+      had no use, because no model tool stores the answer and auto-enrollment (SPEC 5A, Known
+      individuals) learns from embeddings only, with placeholder names. Idea: the robot may ask
+      what the thing is, and a model tool links the answer to the shown track's registry record
+      (name, or category correction), so the robot recognises and names it next time.
