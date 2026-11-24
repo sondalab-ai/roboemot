@@ -482,11 +482,11 @@ class Surroundings:
             }
 
     def live(self) -> dict[str, Any]:
-        """``state`` plus the texts, for the Live card only."""
+        """``state`` plus the texts (``described``), for the Live card only."""
         now = self.clock()
         with self._lock:
             shown = self._shown[1] if self._shown is not None else None
-        return {**self.state(), "text": {"shown": shown, "room": self.room(now)}}
+        return {**self.state(), "described": {"shown": shown, "room": self.room(now)}}
 
     # ------------------------------------------------------------------- config
 

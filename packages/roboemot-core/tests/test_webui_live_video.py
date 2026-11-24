@@ -76,7 +76,7 @@ def served(tmp_path, stack):
     srv.set_pin(PIN)
     srv.start()
     client = Client(srv.port)
-    yield SimpleNamespace(client=client, server=srv, runner=runner, service=service, p=p)
+    yield SimpleNamespace(client=client, server=srv, runner=runner, service=service, p=p, host=host)
     srv.stop()
 
 
@@ -376,3 +376,31 @@ def test_no_live_poll_extends_an_idle_session_unless_the_page_saw_input(tmp_path
         assert client.request("GET", "/api/registry").status == 200  # the input counted
     finally:
         srv.stop()
+
+
+# ---- the last surroundings snapshot (SPEC 8, Surroundings snapshots)
+
+
+def test_surroundings_jpeg_needs_same_origin_and_video_on(served, caplog):
+    c = served.client
+    c.login()
+    r = c.request("GET", "/api/live/surroundings.jpg")
+    assert (r.status, r.json) == (404, {"error": "live_disabled"})
+    set_flag(c, "enabled", True)
+    r = c.request("GET", "/api/live/surroundings.jpg")
+    assert (r.status, r.json) == (404, {"error": "video_off"})
+    set_flag(c, "video", True)
+    r = c.request("GET", "/api/live/surroundings.jpg")
+    assert (r.status, r.json) == (404, {"error": "surroundings_off"})
+    jpeg = b"\xff\xd8SNAPSHOT-BYTES"
+    served.host.surroundings = SimpleNamespace(jpeg=lambda: jpeg)
+    r = c.request("GET", "/api/live/surroundings.jpg", headers={"Sec-Fetch-Site": "cross-site"})
+    assert (r.status, r.json) == (403, {"error": "cross_site"})
+    with caplog.at_level(logging.DEBUG):
+        r = c.request("GET", "/api/live/surroundings.jpg")
+    assert r.status == 200 and r.body == jpeg
+    assert r.headers["Content-Type"] == "image/jpeg"
+    assert "SNAPSHOT-BYTES" not in caplog.text
+    served.host.surroundings = SimpleNamespace(jpeg=lambda: None)
+    r = c.request("GET", "/api/live/surroundings.jpg")
+    assert (r.status, r.json) == (404, {"error": "surroundings_none"})

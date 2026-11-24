@@ -123,7 +123,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
-        "video", "audio_egress", "activity", "music", "dance",
+        "video", "audio_egress", "activity", "music", "dance", "surroundings",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
@@ -197,6 +197,21 @@ def test_nothing_private_is_in_the_answer_and_nothing_is_logged(served, caplog):
     for secret in (SECRET_ID.encode(), b"entry-5", b"0.3179", b"1.4627", b"embedding", b"azimuth"):
         assert secret not in resp.body, secret
     assert "Mia" not in caplog.text and SECRET_ID not in caplog.text
+
+
+def test_surroundings_descriptions_stay_out_of_the_answer_with_video_off(served, caplog):
+    caplog.set_level(logging.DEBUG)
+    state = {"state": "on", "route": "eye", "counts": {}, "last": None}
+    served.host.surroundings = SimpleNamespace(
+        state=lambda: state,
+        live=lambda: {**state, "described": {"shown": "Mia's red mug", "room": None}},
+    )
+    c = served.client
+    c.login()
+    switch(c, True)
+    resp = c.request("GET", "/api/live/state")
+    assert resp.json["surroundings"]["state"] == "on"
+    assert b"red mug" not in resp.body and "red mug" not in caplog.text
 
 
 HEARD = "ehi neva ferma la musica"

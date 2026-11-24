@@ -304,4 +304,4 @@ def test_state_and_logs_hold_no_text_and_no_image_bytes(caplog):
     assert "laptop" not in state and "Marcello" not in state and "e1" not in state
     assert "laptop" not in caplog.text and "Marcello" not in caplog.text
     assert all("laptop" not in repr(f) for _, _, f in rig.events)
-    assert rig.s.live()["text"]["shown"] == "Marcello's silver laptop"
+    assert rig.s.live()["described"]["shown"] == "Marcello's silver laptop"

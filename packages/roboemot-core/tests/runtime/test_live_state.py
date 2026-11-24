@@ -126,6 +126,7 @@ def test_the_payload_shape():
         "video",
         "audio_egress",
         "activity",
+        "surroundings",
     }
     assert s["audio_egress"] is False  # no realtime route: no audio leaves
     assert s["poll_ms"] == 750
@@ -460,3 +461,56 @@ def test_a_stopped_tick_reads_as_an_idle_dance_block():
         "state": "idle", "source": None, "tempo_bpm": None, "beat_age_s": None,
         "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
     }  # fmt: skip
+
+
+# ---- the Surroundings card (SPEC 8, Surroundings snapshots)
+
+
+class FakeSurroundings:
+    def __init__(self, jpeg=b"\xff\xd8jpeg") -> None:
+        self._jpeg = jpeg
+
+    def state(self):
+        return {"state": "on", "route": "eye", "attempt": None, "counts": {"described": 1},
+                "last": {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5},
+                "latency_s": 1.2, "unsupported": None, "paused_s": 0.0}  # fmt: skip
+
+    def live(self):
+        return {**self.state(), "described": {"shown": "a silver laptop", "room": "a study"}}
+
+    def jpeg(self):
+        return self._jpeg
+
+
+def host_with(surroundings):
+    return SimpleNamespace(
+        circadian=SimpleNamespace(state="awake", reason=None), phase=ConversationPhase(),
+        activity=None, realtime_route=None, voice_listener=None, dance=None,
+        surroundings=surroundings,
+    )  # fmt: skip
+
+
+def test_surroundings_block_shape():
+    block = live(host=host_with(FakeSurroundings())).state()["surroundings"]
+    assert block["state"] == "on" and block["route"] == "eye"
+    assert block["last"] == {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5}
+    assert "described" not in block
+    assert live().state()["surroundings"] is None  # no service
+
+
+def test_surroundings_text_only_with_video_on():
+    block = live(host=host_with(FakeSurroundings()), config=cfg(video=True)).state()
+    assert block["surroundings"]["described"] == {"shown": "a silver laptop", "room": "a study"}
+
+
+def test_surroundings_jpeg_needs_live_video_and_a_snapshot():
+    off = live(host=host_with(FakeSurroundings()))
+    assert off.surroundings_jpeg() == (None, "video_off")
+    on = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
+    assert on.surroundings_jpeg() == (b"\xff\xd8jpeg", None)
+    none = live(host=host_with(FakeSurroundings(jpeg=None)), config=cfg(video=True))
+    assert none.surroundings_jpeg() == (None, "surroundings_none")
+    absent = live(config=cfg(video=True))
+    assert absent.surroundings_jpeg() == (None, "surroundings_off")
+    disabled = live(host=host_with(FakeSurroundings()), config=ConfigStack().effective())
+    assert disabled.surroundings_jpeg() == (None, "live_disabled")
