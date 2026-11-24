@@ -103,8 +103,9 @@ class SkillPackSession:
             return "not_found", None
         now = self._clock()
         with self._lock:
+            self._ended = []
             if self._active is not None and self._active.name != pack.name:
-                self._ended.append(self._active.name)
+                self._ended = [self._active.name]
                 self._counts["end_replaced"] += 1
             self._active = pack
             self._started_at = self._heard_at = now
@@ -122,7 +123,9 @@ class SkillPackSession:
             if pack is None:
                 return False
             self._active = None
-            self._ended.append(pack.name)
+            # the end line stays in every build until the next start: a build that is never
+            # sent (a held burst) must not use it up; a conversation end needs none
+            self._ended = [] if reason == "conversation_end" else [pack.name]
             self._counts[f"end_{reason}"] += 1
         log.info("skill pack %s ended: %s", pack.name, reason)
         return True
@@ -148,16 +151,27 @@ class SkillPackSession:
             self.end("disabled")
 
     def instructions(self) -> str:
-        """The catalogue block, the active block and each pending end line (sent once)."""
+        """The catalogue block, the end line of the skill pack that ended last (until the next
+        start), then the active block. An active skill pack that is no longer usable (turned
+        off, removed, broken on a rescan) ends here first."""
         packs = self.usable(self._config())
         with self._lock:
-            active, ended = self._active, self._ended
-            self._ended = []
-        parts = [catalogue_block(packs)]
+            active = self._active
+        if active is not None and active not in packs:
+            self.end("disabled")
+            active = None
+        with self._lock:
+            ended = list(self._ended)
+        parts = [catalogue_block(packs), *(ended_line(n) for n in ended)]
         if active is not None:
             parts.append(active_block(active))
-        parts.extend(ended_line(n) for n in ended if active is None or n != active.name)
         return "\n".join(p for p in parts if p)
+
+    def active_text(self) -> str | None:
+        """The framed block of the active skill pack, for the start tool's result."""
+        with self._lock:
+            active = self._active
+        return active_block(active) if active is not None else None
 
     def snapshot(self) -> dict[str, Any]:
         """The debug report's view: the active name, its start time and the counts (no body)."""

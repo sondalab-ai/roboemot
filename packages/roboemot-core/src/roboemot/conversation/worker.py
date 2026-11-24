@@ -726,6 +726,15 @@ class ConversationWorker:
             if self.realtime is not None and why != "closed":
                 self.realtime.close_soon("conversation_end")  # the server session ends with it
 
+    def _skill_pack_heard(self, addressed: bool) -> None:
+        """A person's turn starts: an idle skill pack ends first, then addressed speech starts
+        its idle time again (``skill_packs.idle_end_s``)."""
+        if self.skill_packs is None:
+            return
+        self.skill_packs.tick()
+        if addressed:
+            self.skill_packs.heard_addressed()
+
     def _with_skill_packs(self, text: str) -> str:
         """``text`` followed by the skill pack catalogue, the active skill pack and pending end
         lines (SPEC 8; design 2026-11-24-skill-packs 5.4, 5.5). After the fixed parts, so the
@@ -989,10 +998,7 @@ class ConversationWorker:
         self.expire(now)
         speaker = self._who()
         self._touch(now, speaker)
-        if self.skill_packs is not None:
-            self.skill_packs.tick()  # an idle skill pack ends before this speech counts
-            if utterance.addressed:
-                self.skill_packs.heard_addressed()
+        self._skill_pack_heard(utterance.addressed)
         register = self._register_for(cfg)
         turn = _Turn(
             utterance,
@@ -1851,6 +1857,7 @@ class ConversationWorker:
         self.expire(now)
         speaker = self._who()
         self._touch(now, speaker)
+        self._skill_pack_heard(True)  # a server turn answers speech meant for the robot
         heard = job.speech_end if job.speech_end is not None else now
         start = job.start_stamp if job.start_stamp is not None else heard
         quiet = Prosody(0.0, None, None, 0.0)

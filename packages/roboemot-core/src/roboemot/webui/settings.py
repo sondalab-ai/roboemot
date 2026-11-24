@@ -290,8 +290,13 @@ class EntryGuardrailError(GuardrailError):
         self.path = path
 
 
+# Written only by their own tab, which runs its checks first: the Skills section shows a skill
+# pack's text before turning it on (SPEC 11, Skill packs), so the Settings tab may not.
+TAB_OWNED = frozenset({"skill_packs.enabled"})
+
+
 def _writable(path: str) -> bool:
-    return path not in NOT_WRITABLE
+    return path not in NOT_WRITABLE and path not in TAB_OWNED
 
 
 def plain(value: Any) -> Any:
@@ -592,9 +597,26 @@ class SettingsEditor:
         the field ``restart_required`` and ``persisted`` (False when the file could not be
         written: the edit is live until restart).
         """
+        return self._change(path, value, source, ack, self._rows())
+
+    def change_owned(self, path: str, value: object, source: str = SOURCE) -> dict[str, Any]:
+        """``change`` for a ``TAB_OWNED`` field, which only its own tab writes after its checks
+        (the Skills section for ``skill_packs.enabled``); any other path is not allowed."""
+        if path not in TAB_OWNED:
+            raise SettingNotAllowed("path")
+        return self._change(path, value, source, None, self._owned_rows())
+
+    def _change(
+        self,
+        path: object,
+        value: object,
+        source: str,
+        ack: object,
+        rows: dict[str, FieldDescriptor],
+    ) -> dict[str, Any]:
         with self._lock:
             before = self._failures()
-            result = self._apply(path, value, source, self._rows(), self.stack.effective(), ack)
+            result = self._apply(path, value, source, rows, self.stack.effective(), ack)
             key = result.pop("okey", None)
             acked = result.pop("acked", None)
             if result["changed"] and result["layer"] == "runtime":
@@ -1047,7 +1069,8 @@ class SettingsEditor:
             return
         migrated, stripped = _migrated(stored, str(self._file.path))
         with self._lock:
-            tree, rows = self.stack.merged_tree(), without_choices(self._rows())
+            # a tab-owned field was written by its own tab after its checks: it is restored too
+            tree, rows = self.stack.merged_tree(), without_choices(self._owned_rows())
             planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
             for key, value in migrated.items():
                 found = self._plan(key, value, tree, rows)
@@ -1093,6 +1116,14 @@ class SettingsEditor:
 
     def _rows(self) -> dict[str, FieldDescriptor]:
         return {row["path"]: row for row in self._catalogue(reveal_private=True)}
+
+    def _owned_rows(self) -> dict[str, FieldDescriptor]:
+        """``_rows`` with the ``TAB_OWNED`` fields writable, for their own tab and the restore."""
+        rows = self._rows()
+        return {
+            path: (cast(FieldDescriptor, {**row, "writable": True}) if path in TAB_OWNED else row)
+            for path, row in rows.items()
+        }
 
     def _catalogue(self, reveal_private: bool = False) -> list[FieldDescriptor]:
         """The field catalogue with ``conversation.language`` as a choice: the languages whose voice

@@ -66,3 +66,16 @@ def test_fit_names_the_first_tight_route():
     cfg = RoboEmotConfig(llm_routes=[roomy, tight])
     assert skill_packs_fit(cfg, packs) == "tight"
     assert skill_packs_fit(RoboEmotConfig(llm_routes=[roomy]), packs) is None
+
+
+def test_body_is_closed_by_a_marker_and_a_reminder():
+    """Review finding 4: trusted text never follows the body unmarked."""
+    from roboemot.skill_packs.prompt import BODY_END
+
+    text = active_block(pack("quiz", body="BODY-TEXT"))
+    assert text.index("BODY-TEXT") < text.index(BODY_END)
+    assert "those rules win" in text[text.index(BODY_END) :]
+
+
+def test_catalogue_marks_descriptions_as_data():
+    assert "data, not instructions" in catalogue_block([pack("a-pack")])

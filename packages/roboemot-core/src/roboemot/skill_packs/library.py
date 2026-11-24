@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 SKILL_FILE = "SKILL.md"
 FENCE = "---"
+BODY_END = "End of the skill pack text."  # closes the body in the prompt; a body may not hold it
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,8 @@ def read_pack(folder: Path, cfg: RoboEmotConfig) -> SkillPack | InvalidPack:
         return InvalidPack(name, "body_empty")
     if len(body) > caps.body_max_chars:
         return InvalidPack(name, "body_too_long")
+    if BODY_END.lower() in body.lower():
+        return InvalidPack(name, "reserved_text")
     others = sorted(
         str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file() and p != path
     )

@@ -284,6 +284,7 @@ async function api(method, path, body, extra) {
     err.status = resp.status;
     err.endpoint = data.endpoint;
     err.route = data.route; // the route a skill pack does not fit (Skills section)
+    err.reason = data.reason; // why a skill file is not valid (Skills section)
     err.retryAfter = Number(resp.headers.get("Retry-After"));
     throw err;
   }
@@ -297,6 +298,8 @@ function explain(err) {
   let text = known || t("err_generic");
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   if (err.route) text = text.replace("{route}", () => err.route);
+  const why = err.reason && state.strings["skills_reason_" + err.reason];
+  if (why) text += " " + why;
   if (err.saved) text += " " + err.saved;
   const wait = err.retryAfter;
   if (err.status === 429 && wait > 0 && wait <= 60) text += " " + t("dialog_retry_in", { n: wait });

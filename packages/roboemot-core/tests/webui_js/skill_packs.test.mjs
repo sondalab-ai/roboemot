@@ -10,7 +10,7 @@ const STATE = { poll_ms: 60000, tools: [], items: [], missed: [], playing: null 
 const PACKS = {
   packs: [
     { name: "bedtime", state: "on", reason: null, route: null, description: "A bedtime story.", meta: {}, ignored_files: [], size_bytes: 10 },
-    { name: "broken", state: "invalid", reason: "no_front_matter", route: null },
+    { name: "broken", state: "invalid", reason: "no_front_matter", route: null, enabled: true },
     { name: "huge", state: "too_large", reason: null, route: "lan", description: "Big.", meta: {}, ignored_files: [], size_bytes: 9000 },
     { name: "quiz", state: "off", reason: null, route: null, description: "A quiz.", meta: { author: "me" }, ignored_files: ["run.py"], size_bytes: 50 },
   ],
@@ -22,7 +22,7 @@ const EN = {
   tab_tools: "Tools", skills_title: "Skills", skills_state_on: "On", skills_state_off: "Off",
   skills_state_invalid: "Invalid", skills_state_too_large: "Too large", skills_too_large: "Too large for route {route}.",
   skills_reason_no_front_matter: "No front matter.", skills_turn_on: "Turn on", skills_turn_off: "Turn off",
-  skills_end: "End", skills_active: "Active now: {name}", skills_ignored: "not used: {files}",
+  skills_end: "End", err_invalid: "The skill file is not valid.", skills_active: "Active now: {name}", skills_ignored: "not used: {files}",
   err_too_large_for_route: "Too large for route {route}.", pin: "PIN",
 };
 
@@ -111,4 +111,20 @@ test("active pack shows End", async (t) => {
   for (let i = 0; i < 6; i++) await settle();
   await submitDialog(p, "1234567");
   assert.ok(ended);
+});
+
+test("an enabled invalid row offers Turn off", async (t) => {
+  const p = await page(t);
+  assert.ok(buttonIn(rowOf(p, "broken"), "Turn off"));
+});
+
+test("a refused upload says why", async (t) => {
+  const p = await page(t, {
+    "POST /api/tools/skill_packs/upload": reply(422, { error: "invalid", reason: "no_front_matter" }),
+  });
+  const file = new p.window.File(["x"], "quiz.md", { type: "text/markdown" });
+  p.run("skillsUploadFile")(file);
+  for (let i = 0; i < 10; i++) await settle();
+  await submitDialog(p, "1234567");
+  assert.equal(p.document.querySelector("#dialog-error").textContent, "The skill file is not valid. No front matter.");
 });

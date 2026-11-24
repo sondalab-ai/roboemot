@@ -578,7 +578,7 @@ function skillsRow(pack) {
   }
   const actions = [];
   if (pack.state === "off") actions.push(button(t("skills_turn_on"), "primary", () => guarded(() => skillsEnable(pack.name, true)), { small: true }));
-  if (pack.state === "on" || pack.state === "too_large") {
+  if (pack.state === "on" || pack.state === "too_large" || (pack.enabled && pack.state !== "off")) {
     actions.push(button(t("skills_turn_off"), "plain", () => guarded(() => skillsEnable(pack.name, false)), { small: true }));
   }
   if (pack.state !== "missing") actions.push(button(t("skills_remove"), "danger", () => guarded(() => skillsRemove(pack.name)), { small: true }));

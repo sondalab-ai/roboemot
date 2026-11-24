@@ -17,6 +17,7 @@ import shutil
 import stat
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 from ..config.schema import RoboEmotConfig
@@ -28,6 +29,17 @@ FILE_MODE = 0o600
 CHUNK_BYTES = 65536
 PLACEHOLDER = "pack"
 DRIVE = re.compile(r"^[A-Za-z]:")
+FINDER_EXTRAS = ("__MACOSX", ".DS_Store")  # macOS Finder's Compress adds these: skipped
+BROKEN_ZIP = (
+    zipfile.BadZipFile,  # a bad CRC, a truncated entry
+    RuntimeError,  # an encrypted entry
+    NotImplementedError,  # an unsupported compression
+    zlib.error,
+    EOFError,
+    FileExistsError,  # a duplicate entry
+    NotADirectoryError,  # an entry under a path that is a file
+    IsADirectoryError,
+)
 
 
 class InstallError(Exception):
@@ -91,6 +103,8 @@ def _entries(data: bytes, cfg: RoboEmotConfig) -> tuple[zipfile.ZipFile, list[En
         parts = _parts(info.filename)
         if stat.S_ISLNK(info.external_attr >> 16):
             raise InstallError("link")
+        if any(p in FINDER_EXTRAS for p in parts):
+            continue
         if parts and not info.is_dir():
             out.append((info, parts))
     return zf, out
@@ -164,7 +178,10 @@ def install(
             _private_dir(folder)
             _write(folder / SKILL_FILE, data)
         else:
-            folder = _unpack_zip(data, cfg, work)
+            try:
+                folder = _unpack_zip(data, cfg, work)
+            except BROKEN_ZIP as exc:
+                raise InstallError("bad_zip") from exc
         pack = read_pack(folder, cfg)
         if isinstance(pack, InvalidPack):
             raise InstallError("invalid", pack.reason)

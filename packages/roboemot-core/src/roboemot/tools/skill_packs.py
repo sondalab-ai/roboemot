@@ -43,7 +43,7 @@ def skills(host: ToolHost) -> list[Callable[..., Any]]:
         status, body = session.start(name)
         if body is None:
             return SkillResult({"status": status, "enabled": session.enabled_names()})
-        return SkillResult({"status": status, "instructions": body})
+        return SkillResult({"status": status, "instructions": session.active_text() or body})
 
     @skill(llm_visible=True, description=END_DESCRIPTION, available=available, follow_up=False)
     def skill_pack_end() -> SkillResult:

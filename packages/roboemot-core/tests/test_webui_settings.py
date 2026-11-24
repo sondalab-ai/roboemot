@@ -82,7 +82,7 @@ def test_list_carries_the_whole_catalogue_with_every_plain_leaf_writable(served,
     writable = {p for p, f in fields.items() if f["writable"]}
     assert writable == {
         p for p, f in fields.items() if f["kind"] not in CONTAINERS and not f["secret"]
-    } - {"schema_version"}
+    } - {"schema_version", "skill_packs.enabled"}  # the Skills section owns the list
     assert {WAKE, NAME, PROMPT, TEMPLATES, "voice.base.volume_db"} <= writable
     assert fields[WAKE]["kind"] == "string_list" and fields[WAKE]["source"] == "schema"
     assert fields[NAME]["nullable"] and fields[PROMPT]["admin_only"]

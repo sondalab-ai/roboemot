@@ -150,3 +150,19 @@ def test_end_active(tmp_path):
 def test_unavailable_without_session(tmp_path):
     admin = SkillPacksAdmin(lambda: None, lambda names: None, RoboEmotConfig)
     assert code(admin.listing) == "skill_packs_unavailable"
+
+
+def test_upload_under_an_enabled_missing_name_stays_off(tmp_path):
+    """Review finding 2: text never goes live without the admin turning it on."""
+    env = Env(tmp_path, skill_packs={"enabled": ["quiz"]})
+    env.upload("quiz")
+    assert env.writes[-1] == []
+    assert env.session.enabled_names() == []
+
+
+def test_rows_say_whether_the_name_is_enabled(tmp_path):
+    env = Env(tmp_path, skill_packs={"enabled": ["broken", "gone"]})
+    (tmp_path / "broken").mkdir()
+    env.admin.rescan()
+    rows = {r["name"]: r for r in env.admin.listing()["packs"]}
+    assert rows["broken"]["enabled"] is True and rows["gone"]["enabled"] is True

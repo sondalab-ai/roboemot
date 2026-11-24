@@ -62,6 +62,7 @@ def test_start_replaces_and_queues_end_line(env):
     text = session.instructions()
     assert ended_line("quiz-night") in text
     assert "BED-BODY" in text and "QUIZ-BODY" not in text
+    assert ended_line("quiz-night") in session.instructions()
 
 
 @pytest.mark.parametrize("reason", sorted(END_REASONS))
@@ -80,12 +81,43 @@ def test_unknown_end_reason_rejected(env):
         session.end("whatever")
 
 
-def test_end_line_sent_once(env):
+def test_end_line_repeats_until_the_next_start(env):
+    """Review finding 1: a build that is never sent (a held burst) must not use the line up."""
     session, _, _ = env
     session.start("quiz-night")
     session.end("tool")
     assert ended_line("quiz-night") in session.instructions()
-    assert ended_line("quiz-night") not in session.instructions()
+    assert ended_line("quiz-night") in session.instructions()
+    session.start("bedtime")
+    assert "quiz-night has ended" not in session.instructions()
+
+
+def test_conversation_end_leaves_no_end_line(env):
+    session, _, _ = env
+    session.start("quiz-night")
+    session.end("conversation_end")
+    assert "has ended" not in session.instructions()
+
+
+def test_end_lines_come_before_the_active_block(env):
+    session, _, _ = env
+    session.start("quiz-night")
+    session.start("bedtime")
+    text = session.instructions()
+    assert text.index(ended_line("quiz-night")) < text.index("BED-BODY")
+
+
+def test_an_active_pack_that_left_the_library_ends(env, tmp_path):
+    """Review finding 5: a Rescan after the folder is gone ends the active pack."""
+    import shutil
+
+    session, _, _ = env
+    session.start("quiz-night")
+    shutil.rmtree(session.library.root / "quiz-night")
+    session.library.scan()
+    text = session.instructions()
+    assert "QUIZ-BODY" not in text
+    assert session.snapshot()["counts"]["end_disabled"] == 1
 
 
 def test_instructions_carry_catalogue_and_active_block(env):

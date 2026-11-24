@@ -40,7 +40,7 @@ def served(tmp_path):
     stack.subscribe(lambda change: session.on_config(change.config))
     admin = SkillPacksAdmin(
         lambda: session,
-        lambda names: editor.change("skill_packs.enabled", names, "webui"),
+        lambda names: editor.change_owned("skill_packs.enabled", names, "webui"),
         stack.effective,
     )
     srv = make_server(
@@ -159,3 +159,26 @@ def test_unavailable_without_a_port(tmp_path):
         assert c.request("GET", BASE).status == 503
     finally:
         srv.stop()
+
+
+def test_the_settings_tab_cannot_write_the_enabled_list(tmp_path):
+    """Review finding 2: only the Skills section turns a skill on (after showing its text)."""
+    from roboemot.webui.settings import SettingNotAllowed
+
+    stack = ConfigStack(app={"data_dir": str(tmp_path / "d")})
+    editor = SettingsEditor(stack, store=tmp_path / "s.json")
+    row = next(f for f in editor.fields() if f["path"] == "skill_packs.enabled")
+    assert row["writable"] is False
+    with pytest.raises(SettingNotAllowed):
+        editor.change("skill_packs.enabled", ["quiz"], "webui")
+    editor.change_owned("skill_packs.enabled", ["quiz"], "webui")
+    assert stack.effective().skill_packs.enabled == ["quiz"]
+
+
+def test_a_skill_turned_on_stays_on_after_a_restart(tmp_path):
+    store = tmp_path / "s.json"
+    first = SettingsEditor(ConfigStack(app={"data_dir": str(tmp_path / "d")}), store=store)
+    first.change_owned("skill_packs.enabled", ["quiz"], "webui")
+    stack = ConfigStack(app={"data_dir": str(tmp_path / "d")})
+    SettingsEditor(stack, store=store).restore()
+    assert stack.effective().skill_packs.enabled == ["quiz"]

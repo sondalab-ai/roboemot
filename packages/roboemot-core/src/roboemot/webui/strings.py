@@ -1346,6 +1346,10 @@ EN: dict[str, str] = {
     "err_link": "The archive holds a link, which is not allowed.",
     "err_not_zip": "Upload a SKILL.md file or a .zip archive.",
     "err_no_skill_md": "The upload has no SKILL.md file.",
+    "err_bad_zip": "The archive is damaged or uses a format that cannot be read.",
+    "skills_reason_reserved_text": (
+        'The instructions contain the reserved line "End of the skill pack text."'
+    ),
     "skills_title": "Skills",
     "skills_intro": (
         "Skills are text files (SKILL.md) that teach the robot an activity, such as a quiz. A "
@@ -2822,6 +2826,10 @@ IT: dict[str, str] = {
     "err_link": "L'archivio contiene un collegamento, che non è permesso.",
     "err_not_zip": "Carica un file SKILL.md o un archivio .zip.",
     "err_no_skill_md": "Il caricamento non contiene un file SKILL.md.",
+    "err_bad_zip": "L'archivio è danneggiato o usa un formato che non si può leggere.",
+    "skills_reason_reserved_text": (
+        'Le istruzioni contengono la riga riservata "End of the skill pack text."'
+    ),
     "skills_title": "Abilità",
     "skills_intro": (
         "Le abilità sono file di testo (SKILL.md) che insegnano al robot un'attività, per "

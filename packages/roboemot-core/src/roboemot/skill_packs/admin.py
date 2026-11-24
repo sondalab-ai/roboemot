@@ -60,7 +60,12 @@ class SkillPacksAdmin:
         too_large = session.too_large()
         rows: list[dict[str, Any]] = []
         for pack in session.library.packs():
-            row: dict[str, Any] = {"name": pack.name, "reason": None, "route": None}
+            row: dict[str, Any] = {
+                "name": pack.name,
+                "reason": None,
+                "route": None,
+                "enabled": pack.name in enabled,
+            }
             if isinstance(pack, InvalidPack):
                 row.update(state="invalid", reason=pack.reason)
             else:
@@ -78,7 +83,7 @@ class SkillPacksAdmin:
             rows.append(row)
         listed = {r["name"] for r in rows}
         rows += [
-            {"name": n, "state": "missing", "reason": None, "route": None}
+            {"name": n, "state": "missing", "reason": None, "route": None, "enabled": True}
             for n in sorted(enabled - listed)
         ]
         return {
@@ -118,7 +123,9 @@ class SkillPacksAdmin:
         self._write(sorted([*names, name]))
 
     def upload(self, filename: str, data_b64: str, replace: bool) -> str:
-        """Install an upload (base64); a replacement turns the skill pack off."""
+        """Install an upload (base64). The skill pack is always off afterwards, even when its
+        name was already on (a replacement, or a missing folder): text reaches the model only
+        after the admin turns it on (design G2)."""
         session = self._live()
         try:
             data = base64.b64decode(data_b64, validate=True)
@@ -128,10 +135,9 @@ class SkillPacksAdmin:
             name = install(session.library.root, data, filename, self._config(), replace=replace)
         except InstallError as exc:
             raise SkillPacksError(exc.code, {"reason": exc.reason} if exc.reason else None) from exc
-        if replace:
-            if session.snapshot()["active"] == name:
-                session.end("disabled")
-            self._drop(name)
+        if session.snapshot()["active"] == name:
+            session.end("disabled")
+        self._drop(name)
         session.library.scan()
         return name
 

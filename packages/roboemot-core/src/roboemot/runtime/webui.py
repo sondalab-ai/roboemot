@@ -164,7 +164,7 @@ def start_webui(
             tools=tools,
             skill_packs=SkillPacksAdmin(
                 lambda: host.skill_packs,  # set when the conversation starts; read per call
-                lambda names: settings.change("skill_packs.enabled", names, "webui"),
+                lambda names: settings.change_owned("skill_packs.enabled", names, "webui"),
                 stack.effective,
             ),
         )

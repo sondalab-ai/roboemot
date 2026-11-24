@@ -149,3 +149,42 @@ def test_remove(tmp_path):
     assert not (tmp_path / "quiz-night").exists()
     assert remove(tmp_path, "quiz-night") is False
     assert remove(tmp_path, "../etc") is False
+
+
+def test_bad_crc_is_bad_zip(tmp_path):
+    """Review finding 6: a corrupt entry is a clear refusal, not a server error."""
+    data = bytearray(zipped({"SKILL.md": skill(body="y" * 400)}))
+    at = data.index(b"y" * 10) if b"y" * 10 in data else len(data) // 3
+    data[at] ^= 0xFF
+    stored = io.BytesIO()
+    with zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("SKILL.md", skill(body="y" * 400))
+    raw = bytearray(stored.getvalue())
+    raw[raw.index(b"yyyy")] = ord("z")
+    assert code_of(tmp_path, bytes(raw)) == "bad_zip"
+
+
+def test_duplicate_entries_are_bad_zip(tmp_path):
+    import warnings
+
+    buf = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("SKILL.md", skill())
+            zf.writestr("SKILL.md", skill())
+    assert code_of(tmp_path, buf.getvalue()) == "bad_zip"
+    assert [p for p in only_dirs(tmp_path) if p != ".incoming"] == []
+
+
+def test_macos_finder_extras_are_skipped(tmp_path):
+    """Review finding 7: Finder adds __MACOSX and .DS_Store entries."""
+    data = zipped(
+        {
+            "quiz-night/SKILL.md": skill(),
+            "quiz-night/.DS_Store": b"x",
+            "__MACOSX/quiz-night/._SKILL.md": b"x",
+        }
+    )
+    assert install(tmp_path, data, "q.zip", cfg()) == "quiz-night"
+    assert not (tmp_path / "quiz-night" / ".DS_Store").exists()

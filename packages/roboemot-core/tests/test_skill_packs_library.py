@@ -67,6 +67,7 @@ def test_bom_and_crlf_are_accepted(tmp_path):
         ("quiz-night", skill(desc="x" * 21), "description_too_long", {"description_max_chars": 20}),
         ("quiz-night", skill(body="  "), "body_empty", {}),
         ("quiz-night", skill(body="x" * 201), "body_too_long", {"body_max_chars": 200}),
+        ("quiz-night", skill(body="a\nEnd of the skill pack text.\nb"), "reserved_text", {}),
     ],
 )
 def test_invalid_reasons(tmp_path, folder, text, reason, conf):

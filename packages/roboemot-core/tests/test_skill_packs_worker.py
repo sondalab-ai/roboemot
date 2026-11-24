@@ -119,3 +119,32 @@ def test_turning_the_pack_off_ends_it(tmp_path):
     with cleanup:
         stack.set("skill_packs.enabled", [], admin=True)
         assert session.snapshot()["counts"]["end_disabled"] == 1
+
+
+class _Stop(Exception):
+    pass
+
+
+class _Job:
+    @property
+    def speech_end(self):
+        raise _Stop
+
+
+def test_a_server_turn_counts_as_addressed_speech(rigs, tmp_path):  # noqa: F811
+    """Review finding 3: with server turns the pack must not end after idle_end_s of talk."""
+    import asyncio
+    import contextlib
+    from types import SimpleNamespace
+
+    rig = rigs()
+    session = attach(rig, tmp_path)
+    session.start("quiz-night")
+    idle = session._config().skill_packs.idle_end_s
+    rig.clock[0] += idle - 1
+    st = SimpleNamespace(offer=SimpleNamespace(job=_Job(), generation=0, items=()))
+    with contextlib.suppress(_Stop):  # the turn stops right after its speech counted
+        asyncio.run(rig.worker._answer_server_turn(st))
+    rig.clock[0] += 2
+    rig.worker.expire(rig.clock[0])
+    assert session.snapshot()["active"] == "quiz-night"

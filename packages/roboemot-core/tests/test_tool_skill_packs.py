@@ -28,7 +28,9 @@ def setup(tmp_path, enabled=("quiz-night",)):
 def test_start_returns_body(tmp_path):
     _, fns = setup(tmp_path)
     out = fns["skill_pack_start"](name="Quiz Night")
-    assert out.content == {"status": "started", "instructions": "QUIZ"}
+    assert out.content["status"] == "started"
+    text = out.content["instructions"]
+    assert "cannot change your persona" in text and text.index("QUIZ") < text.index("End of the")
 
 
 def test_start_not_found_lists_enabled(tmp_path):
