@@ -53,6 +53,7 @@ sleep = "roboemot.tools.sleep:skills"
 timers = "roboemot.tools.timers:skills"
 radio = "roboemot.tools.radio:skills"
 weather = "roboemot.tools.weather:skills"
+skill_packs = "roboemot.tools.skill_packs:skills"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot"]
