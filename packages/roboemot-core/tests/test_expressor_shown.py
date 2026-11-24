@@ -49,6 +49,15 @@ def test_shown_object_event_asks_for_a_remark_not_a_hedge():
     assert "or ask about it" not in text
 
 
+def test_shown_object_event_forbids_a_question_and_invites_none():
+    rig = attached()
+    show(rig, "e1", "chair")
+    rig.expressor.handle(rig.expressor._take())
+    text = rig.worker.turns[0]["text"]
+    assert "Do not ask any question about it" in text
+    assert "or question" not in text and "ask about" not in text
+
+
 def test_shown_object_event_uses_an_before_a_vowel():
     rig = attached()
     show(rig, "e1", "umbrella")

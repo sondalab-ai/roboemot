@@ -99,8 +99,8 @@ FAILED_ACTION_EVENT = (
     "Tell the person in one short sentence."
 )
 SHOWN_OBJECT_EVENT = (
-    "A person is showing you {thing}. Say what you think it is and add one short remark or "
-    "question about it, in one short sentence."
+    "A person is showing you {thing}. Say what you think it is and add one short remark about "
+    "it, in one short sentence. Do not ask any question about it, not even to confirm what it is."
 )
 SHOWN_THING = "something that looks like {article} {category}"
 # a surroundings description of the thing: quoted data, never prose of the event (it is text the
