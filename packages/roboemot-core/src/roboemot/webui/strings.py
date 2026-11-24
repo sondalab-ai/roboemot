@@ -265,6 +265,20 @@ EN: dict[str, str] = {
     "live_ev_surroundings_interval": "No room snapshot, the last one is too recent",
     "live_ev_surroundings_route_unavailable": "No snapshot, image route unavailable: {snapshot}",
     "live_ev_surroundings_no_vision": "No snapshot, no camera or image encoder: {snapshot}",
+    "route_images": "Sees images (describes camera snapshots as text)",
+    "route_images_title": "Sees images: {name}",
+    "route_images_on": "Turn on",
+    "route_images_off": "Turn off",
+    "route_images_on_message": (
+        "Camera snapshots will leave the robot and go to {name}: a thing someone shows, and the "
+        "room now and then. Detected faces are covered; a face the camera misses is not. Check "
+        "the provider's terms: some bar users under 18. Only text comes back."
+    ),
+    "route_images_off_message": "{name} stops receiving camera snapshots.",
+    "route_images_state_on": "Snapshots are on",
+    "route_images_state_unsupported": "This model does not accept images",
+    "route_images_state_paused": "Snapshots paused after repeated failures",
+    "route_images_state_no_vision": "No camera or image encoder on this robot",
     "live_snap_shown": "a shown thing",
     "live_snap_room": "the room",
     "live_ev_expression_spoken": "Reacted in its own words: {situation}",
@@ -1627,6 +1641,21 @@ IT: dict[str, str] = {
     "live_ev_surroundings_interval": "Nessuna istantanea della stanza, l'ultima è troppo recente",
     "live_ev_surroundings_route_unavailable": "Route immagini non disponibile: {snapshot}",
     "live_ev_surroundings_no_vision": "Nessuna istantanea, niente camera o JPEG: {snapshot}",
+    "route_images": "Vede immagini (descrive a parole le istantanee della camera)",
+    "route_images_title": "Vede immagini: {name}",
+    "route_images_on": "Attiva",
+    "route_images_off": "Disattiva",
+    "route_images_on_message": (
+        "Le istantanee della camera usciranno dal robot verso {name}: un oggetto che qualcuno "
+        "mostra e, ogni tanto, la stanza. I volti rilevati sono coperti; un volto che la camera "
+        "non vede no. Controlla i termini del fornitore: alcuni escludono i minori di 18 anni. "
+        "Torna solo testo."
+    ),
+    "route_images_off_message": "{name} non riceve più istantanee della camera.",
+    "route_images_state_on": "Istantanee attive",
+    "route_images_state_unsupported": "Questo modello non accetta immagini",
+    "route_images_state_paused": "Istantanee in pausa dopo errori ripetuti",
+    "route_images_state_no_vision": "Su questo robot manca la camera o il codificatore",
     "live_snap_shown": "un oggetto mostrato",
     "live_snap_room": "la stanza",
     "live_ev_expression_spoken": "Ha reagito con parole sue: {situation}",

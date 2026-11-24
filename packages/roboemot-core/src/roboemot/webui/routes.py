@@ -102,6 +102,7 @@ class RouteChecker:
         realtime_provider: Callable[[], SessionProvider | None] | None = None,
         realtime_tools: Callable[[], list[dict[str, Any]] | None] | None = None,
         realtime_status: Callable[[], dict[str, Any] | None] | None = None,
+        images_status: Callable[[], dict[str, Any] | None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._clock = clock
@@ -110,6 +111,7 @@ class RouteChecker:
         self._realtime_provider = realtime_provider
         self._realtime_tools = realtime_tools
         self._realtime_status = realtime_status
+        self._images_status = images_status
         self._names = names
         self._factory = http_client_factory
         self._private: Router | None = None
@@ -129,6 +131,7 @@ class RouteChecker:
         realtime route (``_session``), else null."""
         cfg = self.cfg()
         session = self._session(cfg)  # outside the lock: the route takes its own
+        images = self._images_status() if self._images_status is not None else None
         active = active_realtime_route(cfg)
         with self._lock:
             running = self._running
@@ -149,7 +152,7 @@ class RouteChecker:
                     **(
                         {"session": session if r is active else None}
                         if r.kind == "realtime"
-                        else {}
+                        else _images_fields(r, images)
                     ),
                 }
                 for r in cfg.llm_routes
@@ -437,3 +440,17 @@ def _now_iso() -> str:
 def _nonzero(counts: dict[str, int] | None) -> dict[str, int]:
     """The non-zero entries of a codec's counts (none for the plain subset)."""
     return {k: v for k, v in (counts or {}).items() if v}
+
+
+def _images_fields(route: LLMRoute, status: dict[str, Any] | None) -> dict[str, Any]:
+    """A chat route's "Sees images" switch and its state (SPEC 8, Surroundings snapshots):
+    ``off`` while the switch is off, else the service's state (``on``, ``unsupported``,
+    ``paused``, ``no_vision``) and the unsupported reason code. Codes only."""
+    if not route.images:
+        return {"images": False, "images_state": "off", "images_reason": None}
+    state = (status or {}).get("state") or "on"
+    return {
+        "images": True,
+        "images_state": "on" if state == "off" else state,
+        "images_reason": (status or {}).get("unsupported"),
+    }

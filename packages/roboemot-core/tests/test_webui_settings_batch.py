@@ -402,3 +402,22 @@ def test_the_preview_api_returns_the_diff(served, stack):
         (ROUTE, "gemini"),
     ]
     assert stack.effective().voice.realtime_route.route == "platform"
+
+
+def test_the_image_switch_moves_between_two_routes_in_one_save(tmp_path):
+    routes = [
+        {"name": n, "base_url": "https://api.example.com/v1", "model": "m", "images": n == "a"}
+        for n in ("a", "b")
+    ]
+    stack = ConfigStack(app={"llm_routes": routes}, audit_path=tmp_path / "audit.jsonl")
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.change_many(
+        [
+            {"path": "llm_routes.a.images", "value": False},
+            {"path": "llm_routes.b.images", "value": True},
+        ]
+    )
+    assert [r.images for r in stack.effective().llm_routes] == [False, True]
+    replayed = ConfigStack(app={"llm_routes": routes}, audit_path=tmp_path / "audit2.jsonl")
+    SettingsEditor(replayed, store=tmp_path / FILE).restore()
+    assert [r.images for r in replayed.effective().llm_routes] == [False, True]

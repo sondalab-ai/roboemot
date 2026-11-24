@@ -750,3 +750,59 @@ test("route edit: a chat route sends no connect timeout", async () => {
   await answerPin(page);
   assert.deepEqual(sent, ["llm_routes.lan.model"]);
 });
+
+// ---- the "Sees images" switch (SPEC 8, Surroundings snapshots)
+
+const chatRow = (name, extra = {}) => ({
+  name, model: "m", endpoint: "api.example.com", base_url: "https://api.example.com/v1",
+  locality: "cloud", kind: "chat", key: "none", running: false, secret: null, last_check: null,
+  removable: true, images: false, images_state: "off", images_reason: null, ...extra,
+});
+
+test("images: switching on posts one batch that turns the other route off first", async () => {
+  const page = await routesPage({
+    "GET /api/routes": { routes: [chatRow("a", { images: true, images_state: "on" }), chatRow("b")] },
+    "POST /api/settings/batch": { changed: true, results: {} },
+  });
+  const box = page.document.querySelector("#route-b-images");
+  assert.equal(box.checked, false);
+  box.checked = true;
+  box.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch")[0].body, {
+    changes: [
+      { path: "llm_routes.a.images", value: false },
+      { path: "llm_routes.b.images", value: true },
+    ],
+    pin: PIN,
+  });
+  noTrace(page, PIN);
+});
+
+test("images: a cancelled dialog puts the switch back", async () => {
+  const page = await routesPage({ "GET /api/routes": { routes: [chatRow("b")] } });
+  const box = page.document.querySelector("#route-b-images");
+  box.checked = true;
+  box.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  await settle();
+  page.document.querySelector("dialog").close();
+  await settle();
+  await settle();
+  assert.equal(box.checked, false);
+  assert.equal(posts(page, "/api/settings/batch").length, 0);
+});
+
+test("images: the switch is absent on a realtime card", async () => {
+  const rt = { ...chatRow("rt"), kind: "realtime", session: null };
+  delete rt.images;
+  const page = await routesPage({ "GET /api/routes": { routes: [rt] } });
+  assert.equal(page.document.querySelector("#route-rt-images"), null);
+});
+
+test("images: an unsupported state shows its reason", async () => {
+  const row = chatRow("a", { images: true, images_state: "unsupported", images_reason: "http_400" });
+  const page = await routesPage({ "GET /api/routes": { routes: [row] } });
+  const hint = page.document.querySelector("#route-a-images-state");
+  assert.ok(hint.textContent.includes("http_400"));
+});
