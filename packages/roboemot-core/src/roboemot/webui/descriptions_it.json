@@ -1028,5 +1028,6 @@
  "Snapshots of a thing a person shows": "Istantanee di un oggetto che una persona mostra",
  "Snapshots of the room in view": "Istantanee della stanza inquadrata",
  "Sees images: this chat route describes camera snapshots (a shown thing, the room) as short text for the scene summary. The snapshots leave the robot; at most one route (SPEC 8, 12)": "Vede immagini: questa route chat descrive le istantanee della camera (un oggetto mostrato, la stanza) con un breve testo per il riassunto della scena. Le istantanee escono dal robot; al massimo una route (SPEC 8, 12)",
- "SPEC 5, 8, 12: camera snapshots as text": "SPEC 5, 8, 12: istantanee della camera come testo"
+ "SPEC 5, 8, 12: camera snapshots as text": "SPEC 5, 8, 12: istantanee della camera come testo",
+ "How often the view is compared with the last room snapshot, once min_interval_s passed": "Ogni quanto la vista si confronta con l'ultima istantanea della stanza, passato min_interval_s"
 }

@@ -11,6 +11,7 @@ from typing import Any
 
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController, InterestMod, interest_mod
+from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, in_window
 from roboemot.conversation.phase import IDLE, SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
@@ -20,10 +21,12 @@ from roboemot.soothe import SootheRunner
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.speech import SpeechOutput
 from roboemot.world import ScanContext, ScanController, WorldModel, camera_in_view
+from roboemot.world.scan import SCAN_FINISHED
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
+RESTING = "resting"  # the circadian state of a rest
 OBJECTS = "objects"  # the governor stage of the object detector
 
 
@@ -167,7 +170,9 @@ def scan_context(
     )
 
 
-def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
+def scan_tick(
+    ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any, bus: Bus | None = None
+) -> bool:
     """One scan step, run right after ``attention_tick``: feed the sweep command or release it.
 
     The policy cancels a sweep the tick attention engages with a person or a speaker, and this
@@ -176,7 +181,8 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
     (the policy); once the sweep runs, that command is dropped here (it is also idle tier), so
     the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
-    sweep is dropped and idle motion carries on; the app keeps running.
+    sweep is dropped and idle motion carries on; the app keeps running. A sweep that ran to
+    its end publishes ``world.scan_finished`` on ``bus`` (SPEC 8, Surroundings snapshots).
     """
     try:
         was_active = scan.active
@@ -188,6 +194,8 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
             loop.feed(cmd)
         elif was_active:
             loop.clear(SCAN_SOURCE)
+        if scan.take_finished_sweep() and bus is not None:
+            bus.publish(SCAN_FINISHED, None, ctx.now)
         return scan.active
     except Exception as exc:
         log.warning("scan: %s: %s", type(exc).__name__, exc)
@@ -266,6 +274,17 @@ def room_quiet(host: Any, now: float) -> bool:
         return False
     listener = host.voice_listener
     return listener is None or not listener.voice_active()
+
+
+def robot_resting(host: Any, asleep: Callable[[], bool]) -> bool:
+    """Whether the platform sleeps (``asleep``), the robot rests or the quiet hours run (the
+    rhythm on): no reaction and no snapshot then (SPEC 7A, 8)."""
+    if asleep():
+        return True
+    runner = host.circadian_runner
+    if runner is None or not runner.enabled:
+        return False
+    return runner.model.state == RESTING or bool(runner.quiet_now())
 
 
 def media_on(host: Any) -> bool:

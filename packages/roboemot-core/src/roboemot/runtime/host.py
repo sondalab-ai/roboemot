@@ -37,6 +37,7 @@ from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
 from roboemot.soothe import SootheRunner
+from roboemot.surroundings.service import Surroundings
 from roboemot.tools.announce import Announcer
 from roboemot.tools.scheduler import Scheduler, SchedulerRunner
 from roboemot.vision import FrameSource
@@ -94,6 +95,7 @@ class RuntimeHost:
     scheduler_runner: SchedulerRunner | None = None  # tools.due; an announcer set_consumer(True)
     announcer: Announcer | None = None  # announces due items (SPEC 11, robot-initiated turn)
     expressor: Expressor | None = None  # the robot's own reactions (SPEC 8, Robot expression)
+    surroundings: Surroundings | None = None  # camera snapshots as text (SPEC 8)
     clips: VoiceClips | None = None  # status lines in the cloud voice (SPEC 8, Lost reply retry)
     media: MediaPlayer | None = None  # the radio's player (SPEC 11); a speaker that can play media
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)

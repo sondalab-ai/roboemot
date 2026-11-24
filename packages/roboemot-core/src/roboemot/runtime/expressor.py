@@ -63,7 +63,7 @@ from ..diag import EventSink, no_events
 from ..llm.prompt import expression_fallback
 from ..tools.announce import EVENT_PREFIX
 from ..vision.types import FacePercept
-from .ticks import conversation_idle, media_on, robot_speaking, room_quiet
+from .ticks import conversation_idle, media_on, robot_resting, robot_speaking, room_quiet
 
 log = logging.getLogger(__name__)
 
@@ -588,12 +588,7 @@ class Expressor:
     def resting(self) -> bool:
         """Whether the platform sleeps, the robot rests or the quiet hours run (the rhythm on):
         a reaction never wakes the robot. Never called with the expressor's lock held."""
-        if self.asleep():
-            return True
-        runner = self.host.circadian_runner
-        if runner is None or not runner.enabled:
-            return False
-        return runner.model.state == RESTING or bool(runner.quiet_now())
+        return robot_resting(self.host, self.asleep)
 
     def idle(self) -> bool:
         """Whether the conversation is idle, no confirmation question waits for its answer and

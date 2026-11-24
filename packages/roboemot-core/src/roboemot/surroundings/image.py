@@ -18,6 +18,15 @@ from ..vision.types import Box
 MASK_BGR = (128, 128, 128)  # flat grey over a detected face
 
 
+def opencv_available() -> bool:
+    """Whether OpenCV (the vision extra) can be imported: no JPEG without it."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 class NoEncoder(RuntimeError):
     """OpenCV (the vision extra) is not installed: no JPEG can be made."""
 

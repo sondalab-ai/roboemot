@@ -381,6 +381,7 @@ function liveEventText(ev) {
   if (ev.conversation !== undefined) extra.conversation = liveWord("live_conv_", ev.conversation);
   if (ev.kind === "session" && ev.reason === "reset") extra.why = liveWord("live_reset_", ev.why);
   if (ev.voice !== undefined) extra.voice = liveWord("live_voice_", ev.voice);
+  if (ev.snapshot !== undefined) extra.snapshot = liveWord("live_snap_", ev.snapshot);
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
   if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);

@@ -6610,6 +6610,12 @@ class SurroundingsRoomConfig(Strict):
         "Share of the view that must change, with the head still, for a new room snapshot",
         unit="share", ge=0, le=1, advanced=True,
     )  # fmt: skip
+    check_interval_s: float = param(
+        5.0,
+        "How often the view is compared with the last room snapshot, once min_interval_s "
+        "passed",
+        unit="s", ge=1, le=60, advanced=True,
+    )  # fmt: skip
     wait_s: float = param(
         10.0,
         "Longest wait for a sharp frame of the room",

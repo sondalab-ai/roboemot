@@ -166,7 +166,7 @@ def _tick_until_stopped(
                 alone=alone,
                 music=calm,
             )
-            scan_tick(ctx, p.scan, p.loop, live)
+            scan_tick(ctx, p.scan, p.loop, live, bus=host.bus)
         if host.soothe_runner is not None and host.speech_output is not None:
             soothe_tick(
                 host.soothe_runner,

@@ -109,6 +109,7 @@ BEHAVIOUR_MODULES = [
     "surroundings/describer.py",
     "surroundings/image.py",
     "surroundings/picker.py",
+    "surroundings/service.py",
     "soothe/synth.py",
     "soothe/runner.py",
     "persona/__init__.py",

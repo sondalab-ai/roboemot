@@ -326,7 +326,8 @@ def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slo
         cfg=cfg, bus=bus, speaker=SimpleNamespace(close=lambda: None, start_playing=lambda: None),
         listener=listener, bargein=None, responder=SimpleNamespace(cue=None),
         runner=SimpleNamespace(engine=None, on_event=lambda *a: None),
-        perception=SimpleNamespace(registry=None), sleep=SimpleNamespace(asleep=False),
+        perception=SimpleNamespace(registry=None, pipeline=None),
+        sleep=SimpleNamespace(asleep=False),
         hub=None, network=None, realtime_provider=None, selector=None, world=None,
         value_cap=None, conv_speaker=None, names=None, tracker=SimpleNamespace(active=None),
         echo_cancelled=False,
@@ -339,3 +340,29 @@ def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slo
         assert announced.wait(5.0), "the due item never reached the announcer"
     assert len(turns) == 1 and "pasta" in turns[0]
     assert host.scheduler is not None and host.scheduler.get(item.id) is None  # fired once
+
+
+def test_start_surroundings_wires_the_snapshot_tap_and_follows_the_switch():
+    from roboemot.bus import Bus
+    from roboemot.runtime.startup import start_surroundings
+
+    pipeline = SimpleNamespace(frame_spec=None, snapshot_tap=None, snapshot_wanted=None)
+    router = SimpleNamespace(offline=False, eligible=lambda: [])
+    p = SimpleNamespace(
+        perception=SimpleNamespace(pipeline=pipeline),
+        hub=SimpleNamespace(router=router),
+        selector=SimpleNamespace(speed_dps=lambda entry_id: None),
+        sleep=SimpleNamespace(asleep=False),
+    )
+    stack = ConfigStack()
+    host = RuntimeHost()
+    host.bus = Bus()
+    with ExitStack() as cleanup:
+        start_surroundings(host, stack, p, cleanup)
+        s = host.surroundings
+        assert s is not None
+        assert pipeline.snapshot_tap == s.tap and pipeline.snapshot_wanted == s.wanted
+        assert s.state()["state"] == "off"
+        route = {"name": "eye", "base_url": "https://api.example.com/v1", "model": "m"}
+        stack.set("llm_routes", [{**route, "images": True}], layer="app", admin=True)
+        assert s.state()["route"] == "eye"
