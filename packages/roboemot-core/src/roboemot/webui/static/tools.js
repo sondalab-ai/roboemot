@@ -15,6 +15,11 @@
 // Polling: the timer is `state.timer` (stopPolling clears it), only while the tab is open and the
 // document visible; `toolsState.serial` retires a request in flight when the tab is left or hidden.
 // The tool cards are built once per settings read and keep their edits across polls.
+//
+// Skills (SPEC 11A, 12; design 2026-11-24-skill-packs 5.6): the skill packs from
+// GET /api/tools/skill_packs, read when the tab opens and after each write (not polled). Turning
+// one on first shows its text (GET /api/tools/skill_packs/<name>); every write re-enters the PIN
+// and sends `confirm: true` once the dialog is confirmed. The upload reads the file as base64.
 
 const TOOLS_RETRY_MS = 5000;
 const TOOLS_LLM_SKILLS = "conversation.llm_skills";
@@ -558,6 +563,122 @@ async function toolsReload() {
   await toolsRefresh();
 }
 
+// ---------------------------------------------------------------- skills
+
+const SKILLS = "/api/tools/skill_packs";
+
+function skillsRow(pack) {
+  const tones = { on: "success", off: "info", invalid: "warning", missing: "warning", too_large: "warning" };
+  const parts = [el("strong", {}, pack.name), " ", badge(t("skills_state_" + pack.state), tones[pack.state] || "info")];
+  if (pack.description) parts.push(" ", el("span", {}, pack.description));
+  if (pack.state === "invalid") parts.push(" ", el("span", { class: "hint" }, t("skills_reason_" + pack.reason)));
+  if (pack.state === "too_large") parts.push(" ", el("span", { class: "hint" }, t("skills_too_large", { route: pack.route })));
+  if (pack.ignored_files && pack.ignored_files.length) {
+    parts.push(" ", el("span", { class: "hint" }, t("skills_ignored", { files: pack.ignored_files.join(", ") })));
+  }
+  const actions = [];
+  if (pack.state === "off") actions.push(button(t("skills_turn_on"), "primary", () => guarded(() => skillsEnable(pack.name, true)), { small: true }));
+  if (pack.state === "on" || pack.state === "too_large") {
+    actions.push(button(t("skills_turn_off"), "plain", () => guarded(() => skillsEnable(pack.name, false)), { small: true }));
+  }
+  if (pack.state !== "missing") actions.push(button(t("skills_remove"), "danger", () => guarded(() => skillsRemove(pack.name)), { small: true }));
+  return el("li", { "data-skill": pack.name }, parts, actions.length ? el("div", { class: "row" }, actions) : []);
+}
+
+function skillsCard(data) {
+  const upload = el("input", { type: "file", accept: ".md,.zip", id: "skills-file", class: "sl-input",
+    onchange: (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) guarded(() => skillsUploadFile(f)); } });
+  const active = data.active
+    ? el("p", { id: "skills-active" }, t("skills_active", { name: data.active }), " ",
+      button(t("skills_end"), "danger", () => guarded(skillsEnd), { small: true }))
+    : [];
+  const list = data.packs.length
+    ? el("ul", { class: "sl-list", id: "skills-list" }, data.packs.map(skillsRow))
+    : el("p", { class: "hint", id: "skills-list" }, t("skills_none"));
+  return card(t("tab_tools"), t("skills_title"),
+    el("p", { class: "hint" }, t("skills_intro")),
+    data.tools_listed ? [] : el("p", { class: "hint" }, t("skills_tools_missing")),
+    active, list,
+    el("div", { class: "row" }, field("skills-file", t("skills_add"), upload),
+      button(t("skills_rescan"), "plain", () => guarded(skillsRescan), { small: true })));
+}
+
+async function skillsLoad() {
+  const box = document.getElementById("skills-section");
+  if (!box) return;
+  try {
+    box.replaceChildren(skillsCard(await api("GET", SKILLS)));
+  } catch (err) {
+    if (err.status === 401) throw err;
+    box.replaceChildren(card(t("tab_tools"), t("skills_title"), el("p", { class: "hint" }, explain(err))));
+  }
+}
+
+// One PIN-confirmed Skills write; the section is read again after it.
+async function skillsWrite(title, message, confirmLabel, call, opts = {}) {
+  const done = await ask({ title, message, items: opts.items, pin: true, confirm: confirmLabel, danger: opts.danger,
+    run: async ({ pin }) => { await call(pin); } });
+  if (done) {
+    if (opts.notice) notice(opts.notice);
+    await skillsLoad();
+  }
+  return done;
+}
+
+async function skillsEnable(name, on) {
+  const path = `${SKILLS}/${encodeURIComponent(name)}/enable`;
+  const call = (pin) => api("POST", path, { on, pin, confirm: true });
+  if (!on) return skillsWrite(t("skills_turn_off"), t("skills_off_message", { name }), t("skills_turn_off"), call);
+  const detail = await api("GET", `${SKILLS}/${encodeURIComponent(name)}`);
+  return skillsWrite(t("skills_turn_on"), t("skills_on_message", { name }), t("skills_turn_on"), call,
+    { items: [detail.body], notice: t("skills_on_done", { name }) });
+}
+
+async function skillsRemove(name) {
+  return skillsWrite(t("skills_remove"), t("skills_remove_message", { name }), t("skills_remove"),
+    (pin) => api("POST", `${SKILLS}/${encodeURIComponent(name)}/remove`, { pin, confirm: true }), { danger: true });
+}
+
+async function skillsEnd() {
+  return skillsWrite(t("skills_end"), t("skills_end_message"), t("skills_end"),
+    (pin) => api("POST", `${SKILLS}/end`, { pin }), { danger: true });
+}
+
+async function skillsRescan() {
+  return skillsWrite(t("skills_rescan"), t("skills_rescan_message"), t("skills_rescan"),
+    (pin) => api("POST", `${SKILLS}/rescan`, { pin }));
+}
+
+function skillsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(Object.assign(new Error("bad_upload"), { status: 0 }));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Upload one file; a name already installed asks once more, to replace it.
+async function skillsUploadFile(file) {
+  const data = await skillsBase64(file);
+  const send = (replace) => (pin) => api("POST", `${SKILLS}/upload`,
+    { filename: file.name, data_b64: data, replace, pin, confirm: true });
+  let exists = false;
+  const done = await ask({ title: t("skills_add"), message: t("skills_add_message", { file: file.name }), pin: true,
+    confirm: t("skills_add"), run: async ({ pin }) => {
+      try { await send(false)(pin); } catch (err) { if (err.message !== "exists") throw err; exists = true; }
+    } });
+  if (done && exists) {
+    await skillsWrite(t("skills_replace"), t("skills_replace_message", { file: file.name }), t("skills_replace"), send(true),
+      { danger: true, notice: t("skills_added") });
+    return;
+  }
+  if (done) {
+    notice(t("skills_added"));
+    await skillsLoad();
+  }
+}
+
 async function toolsView() {
   const current = newView();
   const view = document.getElementById("view");
@@ -566,12 +687,13 @@ async function toolsView() {
   toolsState.live = el("div", { class: "live-grid", id: "tools-live" });
   pollForget();
   view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("tools_intro")), staleNote("tools-stale", ["tools-live"]),
-    toolsState.live, el("div", { class: "stack", id: "tools-cards" })));
+    toolsState.live, el("div", { class: "stack", id: "tools-cards" }), el("div", { class: "stack", id: "skills-section" })));
   const [rows, catalogue] = await Promise.all([toolsRowsFetch(), toolsCatalogueFetch()]);
   if (!current()) return;
   toolsState.rows = rows;
   toolsState.catalogue = catalogue;
   toolsBuild();
+  await skillsLoad();
   await toolsRefresh();
 }
 

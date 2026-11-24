@@ -1346,6 +1346,56 @@ EN: dict[str, str] = {
     "err_link": "The archive holds a link, which is not allowed.",
     "err_not_zip": "Upload a SKILL.md file or a .zip archive.",
     "err_no_skill_md": "The upload has no SKILL.md file.",
+    "skills_title": "Skills",
+    "skills_intro": (
+        "Skills are text files (SKILL.md) that teach the robot an activity, such as a quiz. A "
+        "new skill is off until you turn it on after reading its text. The robot starts one "
+        "only when someone asks for it."
+    ),
+    "skills_none": "No skill is installed. Add a SKILL.md file or a .zip archive.",
+    "skills_tools_missing": (
+        "The tools skill_pack_start and skill_pack_end are not in conversation.llm_skills, so "
+        "no skill can be used."
+    ),
+    "skills_state_on": "On",
+    "skills_state_off": "Off",
+    "skills_state_invalid": "Invalid",
+    "skills_state_missing": "Missing",
+    "skills_state_too_large": "Too large",
+    "skills_reason_no_skill_md": "The folder has no SKILL.md file.",
+    "skills_reason_not_utf8": "SKILL.md is not UTF-8 text.",
+    "skills_reason_no_front_matter": "SKILL.md does not start with a --- block.",
+    "skills_reason_bad_name": "The name uses characters other than a-z, 0-9 and hyphens.",
+    "skills_reason_name_mismatch": "The name differs from the folder name.",
+    "skills_reason_no_description": "The description is missing.",
+    "skills_reason_description_too_long": "The description is too long.",
+    "skills_reason_body_empty": "The instructions are empty.",
+    "skills_reason_body_too_long": "The instructions are too long.",
+    "skills_too_large": "Too large for the route {route}: the robot skips it.",
+    "skills_ignored": "Not used, because RoboEmot runs no code from skills: {files}",
+    "skills_turn_on": "Turn on",
+    "skills_turn_off": "Turn off",
+    "skills_remove": "Remove",
+    "skills_end": "End",
+    "skills_active": "Active now: {name}",
+    "skills_add": "Add skill",
+    "skills_rescan": "Rescan",
+    "skills_replace": "Replace",
+    "skills_on_message": (
+        "Read the text of “{name}”. Once on, the robot follows it when someone asks for this "
+        "activity."
+    ),
+    "skills_on_done": "“{name}” is on.",
+    "skills_off_message": "Turn off “{name}”? If it is active now, it ends.",
+    "skills_remove_message": "Remove “{name}” from the robot? Its folder is deleted.",
+    "skills_end_message": "End the active skill now?",
+    "skills_rescan_message": "Read the skill folders again?",
+    "skills_add_message": "Add “{file}”? The new skill stays off until you turn it on.",
+    "skills_replace_message": (
+        "A skill with the name in “{file}” is installed. Replace it? The replaced skill is "
+        "turned off."
+    ),
+    "skills_added": "Skill added. It is off until you turn it on.",
     "err_unknown_item": "That timer or reminder is gone.",
     "err_unknown_station": "No station has that name.",
     "err_geocode_unreachable": "The place search could not be reached.",
@@ -2772,6 +2822,58 @@ IT: dict[str, str] = {
     "err_link": "L'archivio contiene un collegamento, che non è permesso.",
     "err_not_zip": "Carica un file SKILL.md o un archivio .zip.",
     "err_no_skill_md": "Il caricamento non contiene un file SKILL.md.",
+    "skills_title": "Abilità",
+    "skills_intro": (
+        "Le abilità sono file di testo (SKILL.md) che insegnano al robot un'attività, per "
+        "esempio un quiz. Una nuova abilità resta spenta finché non la accendi dopo averne "
+        "letto il testo. Il robot ne avvia una solo quando qualcuno la chiede."
+    ),
+    "skills_none": "Nessuna abilità installata. Aggiungi un file SKILL.md o un archivio .zip.",
+    "skills_tools_missing": (
+        "Gli strumenti skill_pack_start e skill_pack_end non sono in conversation.llm_skills, "
+        "quindi nessuna abilità può essere usata."
+    ),
+    "skills_state_on": "Accesa",
+    "skills_state_off": "Spenta",
+    "skills_state_invalid": "Non valida",
+    "skills_state_missing": "Mancante",
+    "skills_state_too_large": "Troppo grande",
+    "skills_reason_no_skill_md": "La cartella non contiene un file SKILL.md.",
+    "skills_reason_not_utf8": "SKILL.md non è testo UTF-8.",
+    "skills_reason_no_front_matter": "SKILL.md non inizia con un blocco ---.",
+    "skills_reason_bad_name": "Il nome usa caratteri diversi da a-z, 0-9 e trattini.",
+    "skills_reason_name_mismatch": "Il nome è diverso dal nome della cartella.",
+    "skills_reason_no_description": "Manca la descrizione.",
+    "skills_reason_description_too_long": "La descrizione è troppo lunga.",
+    "skills_reason_body_empty": "Le istruzioni sono vuote.",
+    "skills_reason_body_too_long": "Le istruzioni sono troppo lunghe.",
+    "skills_too_large": "Troppo grande per la route {route}: il robot la salta.",
+    "skills_ignored": "Non usati, perché RoboEmot non esegue codice dalle abilità: {files}",
+    "skills_turn_on": "Accendi",
+    "skills_turn_off": "Spegni",
+    "skills_remove": "Rimuovi",
+    "skills_end": "Termina",
+    "skills_active": "Attiva ora: {name}",
+    "skills_add": "Aggiungi abilità",
+    "skills_rescan": "Rileggi",
+    "skills_replace": "Sostituisci",
+    "skills_on_message": (
+        "Leggi il testo di “{name}”. Una volta accesa, il robot la segue quando qualcuno "
+        "chiede questa attività."
+    ),
+    "skills_on_done": "“{name}” è accesa.",
+    "skills_off_message": "Spegnere “{name}”? Se è attiva ora, termina.",
+    "skills_remove_message": "Rimuovere “{name}” dal robot? La sua cartella viene eliminata.",
+    "skills_end_message": "Terminare ora l'abilità attiva?",
+    "skills_rescan_message": "Rileggere le cartelle delle abilità?",
+    "skills_add_message": (
+        "Aggiungere “{file}”? La nuova abilità resta spenta finché non la accendi."
+    ),
+    "skills_replace_message": (
+        "Un'abilità con il nome contenuto in “{file}” è già installata. Sostituirla? L'abilità "
+        "sostituita viene spenta."
+    ),
+    "skills_added": "Abilità aggiunta. Resta spenta finché non la accendi.",
     "err_unknown_item": "Quel timer o promemoria non c'è più.",
     "err_unknown_station": "Nessuna stazione ha questo nome.",
     "err_geocode_unreachable": "La ricerca luoghi non è raggiungibile.",
