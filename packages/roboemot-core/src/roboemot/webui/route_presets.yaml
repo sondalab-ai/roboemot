@@ -12,12 +12,26 @@ presets:
       en: Gemini Live (Google)
       it: Gemini Live (Google)
     secret: gemini_key
-    # docs/realtime-voice-setup.md, Gemini Live: the owner's tested setup (2026-11-16)
+    # docs/realtime-voice-setup.md, Gemini Live: the owner's voice model (2026-11-24; the
+    # tested wire setup of 2026-11-16 is unchanged)
     fields:
       name: gemini
       kind: realtime
       protocol: gemini_live
       base_url: wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
-      model: gemini-3.8-live
+      model: gemini-3.1-flash-live-preview
       locality: cloud
       connect_timeout_s: 15.0
+  - id: gemini_pictures
+    label:
+      en: Gemini pictures (Google)
+      it: Gemini immagini (Google)
+    secret: gemini_key
+    # SPEC 8, Surroundings snapshots: a chat route on Google's OpenAI-compatible endpoint with
+    # the same key, for the "Sees images" switch (off until the owner turns it on, PIN-gated)
+    fields:
+      name: gemini_pictures
+      kind: chat
+      base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+      model: gemini-3.8-flash
+      locality: cloud

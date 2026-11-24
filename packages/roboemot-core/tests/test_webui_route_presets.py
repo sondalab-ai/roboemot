@@ -24,6 +24,8 @@ from test_webui import PIN, Client, FakeService
 
 KEY = "sk-PRESET-CANARY-5c21"
 GEMINI = "gemini_live"
+PICTURES = "gemini_pictures"
+PICTURES_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_ORIGIN = "wss://generativelanguage.googleapis.com"
 TIMEOUT = "connect_timeout_s"
 
@@ -105,10 +107,23 @@ def test_the_gemini_preset_is_the_documented_recipe():
         "protocol": "gemini_live",
         "base_url": GEMINI_ORIGIN
         + "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
-        "model": "gemini-3.8-live",
+        "model": "gemini-3.1-flash-live-preview",
         "locality": "cloud",
         TIMEOUT: 15.0,
     }
+
+
+def test_the_gemini_pictures_preset_is_a_chat_route_on_the_same_key():
+    preset = rp.labelled(next(p for p in rp.core_presets() if p["id"] == PICTURES), "en")
+    assert preset.secret == "gemini_key"
+    assert preset.fields == {
+        "name": "gemini_pictures",
+        "kind": "chat",
+        "base_url": PICTURES_URL,
+        "model": "gemini-3.8-flash",
+        "locality": "cloud",
+    }
+    assert "images" not in preset.fields  # the switch stays the owner's, behind the PIN
 
 
 # ------------------------------------------------------------------ the list
@@ -116,7 +131,8 @@ def test_the_gemini_preset_is_the_documented_recipe():
 
 def test_the_list_returns_the_presets_and_the_timeout_range(web):
     data = listing(web)
-    (preset,) = data["presets"]
+    assert [p["id"] for p in data["presets"]] == [GEMINI, PICTURES]
+    preset = data["presets"][0]
     assert set(preset) == {"id", "label", "fields", "secret"}
     assert (preset["id"], preset["secret"], preset["fields"]) == (
         GEMINI,
@@ -129,7 +145,8 @@ def test_the_list_returns_the_presets_and_the_timeout_range(web):
 def test_a_preset_is_hidden_when_a_route_of_its_name_exists(tmp_path):
     other = {"name": "gemini", "base_url": "https://lan.example/v1", "model": "m"}
     stack = ConfigStack(app={"llm_routes": [other]}, audit_path=tmp_path / "a.jsonl")
-    assert SettingsEditor(stack, store=tmp_path / "w.json").route_presets() == []
+    offered = SettingsEditor(stack, store=tmp_path / "w.json").route_presets()
+    assert [p["id"] for p in offered] == [PICTURES]
 
 
 def test_the_installed_platform_route_hides_its_preset_and_stays_as_installed():
@@ -137,7 +154,7 @@ def test_the_installed_platform_route_hides_its_preset_and_stays_as_installed():
     admin, cfg, _ = start(app_stack())
     assert admin is not None
     presets = admin.settings.route_presets("en")
-    assert [p["id"] for p in presets] == [GEMINI]
+    assert [p["id"] for p in presets] == [GEMINI, PICTURES]
     assert platform_route() in {r.name for r in cfg.llm_routes}
 
 
@@ -146,14 +163,14 @@ def test_a_robot_without_the_platform_route_is_offered_it_first():
     admin, _, _ = start(app_stack())
     assert admin is not None
     presets = admin.settings.route_presets("en")
-    assert [p["fields"]["name"] for p in presets] == [platform_route(), "gemini"]
+    assert [p["fields"]["name"] for p in presets] == [platform_route(), "gemini", PICTURES]
 
 
-def test_a_robot_with_both_routes_is_offered_no_preset():
+def test_a_robot_with_both_voice_routes_is_offered_only_the_pictures_preset():
     robot_data("gemini_switch")
     admin, _, _ = start(app_stack())
     assert admin is not None
-    assert admin.settings.route_presets("en") == []
+    assert [p["id"] for p in admin.settings.route_presets("en")] == [PICTURES]
 
 
 # ------------------------------------------------------------------ adding from a preset
@@ -161,7 +178,7 @@ def test_a_robot_with_both_routes_is_offered_no_preset():
 
 def test_an_add_from_the_gemini_preset_passes_the_endpoint_acknowledgement(web, stack, caplog):
     caplog.set_level(logging.DEBUG)
-    (preset,) = listing(web)["presets"]
+    preset = next(p for p in listing(web)["presets"] if p["id"] == GEMINI)
     body = {**preset["fields"], "secret": preset["secret"]}
     first = post(web, "/api/routes/add", body)
     assert first.status == 422
@@ -176,11 +193,23 @@ def test_an_add_from_the_gemini_preset_passes_the_endpoint_acknowledgement(web, 
     assert route.model_dump(include=set(preset["fields"])) == preset["fields"]
     assert route.api_key == "${secret:gemini_key}"
     data = listing(web)
-    assert data["presets"] == []
+    assert [p["id"] for p in data["presets"]] == [PICTURES]
     row = next(r for r in data["routes"] if r["name"] == "gemini")
     assert row[TIMEOUT] == 15.0 and row["protocol"] == "gemini_live"
     for text in (first.body, done.body, str(data).encode(), caplog.text.encode()):
         assert KEY.encode() not in text
+
+
+def test_an_add_from_the_pictures_preset_gives_a_chat_route_with_the_switch_off(web, stack):
+    preset = next(p for p in listing(web)["presets"] if p["id"] == PICTURES)
+    body = {**preset["fields"], "secret": preset["secret"]}
+    origin = "https://generativelanguage.googleapis.com"
+    done = post(web, "/api/routes/add", {**body, "ack_endpoint": origin})
+    assert done.status == 200, done.json
+    route = next(r for r in stack.effective().llm_routes if r.name == PICTURES)
+    assert (route.kind, route.images, route.api_key) == ("chat", False, "${secret:gemini_key}")
+    row = next(r for r in listing(web)["routes"] if r["name"] == PICTURES)
+    assert row["images"] is False and row["images_state"] == "off"
 
 
 # ------------------------------------------------------------------ connect_timeout_s
@@ -246,7 +275,8 @@ def test_a_plugin_without_the_method_offers_none():
 
 
 def test_the_platform_preset_comes_first_and_a_broken_plugin_gives_none(caplog):
-    assert [p["id"] for p in rp.route_presets(set(), [PLATFORM], "en")] == ["platform", GEMINI]
+    offered = rp.route_presets(set(), [PLATFORM], "en")
+    assert [p["id"] for p in offered] == ["platform", GEMINI, PICTURES]
     caplog.set_level(logging.WARNING)
     assert platform_presets(Offers(RuntimeError(KEY)), "en") == []
     assert platform_presets(Offers([{"id": "x"}, PLATFORM]), "en") == [PLATFORM]
@@ -275,11 +305,14 @@ def test_the_platform_preset_comes_first_and_a_broken_plugin_gives_none(caplog):
 def test_a_preset_with_a_key_an_invalid_route_or_a_taken_id_is_dropped(bad, caplog):
     caplog.set_level(logging.WARNING)
     offered = rp.route_presets(set(), [bad], "en")
-    assert [(p["id"], p["fields"]["name"]) for p in offered] == [(GEMINI, "gemini")]
+    assert [(p["id"], p["fields"]["name"]) for p in offered] == [
+        (GEMINI, "gemini"),
+        (PICTURES, PICTURES),
+    ]
     assert KEY not in caplog.text
 
 
-def test_a_malformed_plugin_preset_still_lists_the_core_preset(tmp_path, stack, caplog):
+def test_a_malformed_plugin_preset_still_lists_the_core_presets(tmp_path, stack, caplog):
     caplog.set_level(logging.WARNING)
     bad = RoutePreset("bad", "Bad", {**PLATFORM.fields, "name": ["a"]}, "platform_token")
     srv, client = serve(tmp_path, stack, plugin=Offers([bad]))
@@ -288,7 +321,7 @@ def test_a_malformed_plugin_preset_still_lists_the_core_preset(tmp_path, stack, 
     finally:
         srv.stop()
     assert reply.status == 200
-    assert [p["id"] for p in reply.json["presets"]] == [GEMINI]
+    assert [p["id"] for p in reply.json["presets"]] == [GEMINI, PICTURES]
 
 
 @pytest.mark.parametrize("installed", ["pollen", "gemini"])

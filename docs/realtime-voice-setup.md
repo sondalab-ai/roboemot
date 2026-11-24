@@ -207,7 +207,7 @@ from a preset**. The preset fills in every field below except the voice:
 | Kind | Realtime speech (`realtime`) |
 | Realtime protocol | Gemini Live (`gemini_live`) |
 | Base URL | `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` |
-| Model | `gemini-3.8-live` |
+| Model | `gemini-3.1-flash-live-preview` |
 | Locality | Cloud |
 | Connect timeout (s) | `15` |
 | Key | `gemini_key`, when it is stored |
@@ -222,6 +222,21 @@ from a preset**. The preset fills in every field below except the voice:
 - Adding the route does not turn the Gemini voice on. The robot keeps speaking as before until
   you pick Gemini in the **Voice provider** row of the **Settings** tab (step 4).
 
+**Gemini pictures (Google)**, the second preset, adds a chat route for camera snapshots
+(SPEC 8, Surroundings snapshots). It uses the same `gemini_key`:
+
+| Field | Value |
+| --- | --- |
+| Name | `gemini_pictures` |
+| Kind | Chat (`chat`) |
+| Base URL | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| Model | `gemini-3.8-flash` |
+| Locality | Cloud |
+
+- After the add, turn on **Sees images** on the route's card (PIN). Only then do snapshots leave
+  the robot. Press **Check** first: it confirms that the key and the model work.
+- Google's docs name several Flash models; if the check fails on the model, edit it on the card.
+
 The same route in `app.yaml`:
 
 ```yaml
@@ -230,7 +245,7 @@ llm_routes:
     kind: realtime
     protocol: gemini_live
     base_url: wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
-    model: gemini-3.8-live
+    model: gemini-3.1-flash-live-preview
     api_key: ${secret:gemini_key}
     locality: cloud
     voice: Kore
