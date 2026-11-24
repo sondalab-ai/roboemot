@@ -269,6 +269,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
             "radio_play", "radio_stop", "radio_volume",
+            "skill_pack_start", "skill_pack_end",
             "go_to_sleep", "timer_set", "timer_cancel", "reminder_set", "reminder_cancel",
             "schedule_list", "weather",
         ]  # fmt: skip
@@ -282,6 +283,9 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         assert app.voice_listener.media_set == app.media.playing
         assert app.media.on_piece == app.voice_listener.hear_media  # the dance hears the radio
         assert skills.get("go_to_sleep").is_available()  # the run's nap part is wired
+        # skill packs are wired, but none is on by default: both tools stay hidden (SPEC 11)
+        assert app.skill_packs is not None
+        assert not skills.get("skill_pack_start").is_available()
         # weather is listed by default but an admin opt-in, off by default (SPEC 11, 12)
         assert not skills.get("weather").is_available()
         weather_host = inspect.getclosurevars(skills.get("weather").fn).nonlocals["host"]
