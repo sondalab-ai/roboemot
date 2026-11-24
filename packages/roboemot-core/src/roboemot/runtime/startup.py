@@ -16,16 +16,20 @@ from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 from roboemot import paths, timezones
+from roboemot.bus import Message
+from roboemot.circadian.model import CircadianState
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
-from roboemot.media.player import MediaPlayer
+from roboemot.media.player import RESTING, MediaPlayer
 from roboemot.persona import apply_to_register, effects
 from roboemot.realtime.input import RealtimeInput
 from roboemot.realtime.route import RealtimeRoute
+from roboemot.skill_packs.library import SkillPackLibrary
+from roboemot.skill_packs.session import SkillPackSession
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.host import http_client, tool_host
 from roboemot.skills.plugins import (
@@ -153,6 +157,7 @@ def start_voice_output(
         return
     cut_own = own_sound_cut(output, soothe)
     listener.bind_own_sound(cut_own)
+    skill_packs = start_skill_packs(host, stack, p, cleanup)
     realtime = host.realtime_route = (
         RealtimeRoute(
             stack,
@@ -205,6 +210,7 @@ def start_voice_output(
         realtime=realtime,
         cues=cues,
         emit=p.runner.on_event,  # the tone tool's speech.tone events, as the fast path's
+        skill_packs=skill_packs,
     )
     conv.events = host.events
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
@@ -258,6 +264,27 @@ def start_media(
     return player
 
 
+def start_skill_packs(
+    host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
+) -> SkillPackSession:
+    """The run's skill packs (SPEC 11; design 2026-11-24-skill-packs): the folders under
+    ``<data_dir>/skill_packs`` read once, and the active skill pack, which ends on a config
+    change that turns it off, on ``robot.asleep`` and when the circadian state rests. Sets
+    ``host.skill_packs``."""
+    library = SkillPackLibrary(paths.skill_packs_dir(p.cfg.data_dir), stack.effective)
+    library.scan()
+    session = host.skill_packs = SkillPackSession(library, stack.effective, time.monotonic)
+
+    def on_rest(msg: Message) -> None:
+        if isinstance(msg.payload, CircadianState) and msg.payload.state == RESTING:
+            session.end("resting")
+
+    cleanup.callback(stack.subscribe(lambda change: session.on_config(change.config)))
+    cleanup.callback(p.bus.subscribe("robot.asleep", lambda msg: session.end("asleep")))
+    cleanup.callback(p.bus.subscribe("circadian.state", on_rest))
+    return session
+
+
 def skill_registry(
     stack: ConfigStack, p: Pipeline, registry: Any, runtime: RuntimeHost
 ) -> SkillRegistry:
@@ -272,6 +299,7 @@ def skill_registry(
     host.scheduler = runtime.scheduler
     host.http = http_client
     host.media = runtime.media
+    host.skill_packs = runtime.skill_packs
     plugins = load_plugin_skill_sets(host)
     warn_hidden_core_skills(plugins, stack.effective().conversation.llm_skills)
     env = SkillBridge(p.expression, p.selector, p.world, registry, stack.effective).env(
