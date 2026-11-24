@@ -51,7 +51,9 @@ def test_images_is_a_privacy_opt_in():
     approved = RoboEmotConfig(llm_routes=[chat("a")])
     candidate = RoboEmotConfig(llm_routes=[chat("a", images=True)])
     found = [v for v in violations(approved, candidate) if v.kind == "privacy"]
-    assert found and "images" in found[0].path
+    assert found and all(v.path == "llm_routes.a.images" for v in found)
+    image = [v for v in found if v.check == "image"]
+    assert image and "https://api.example.com/v1" in image[0].candidate  # the approval names where
     assert not [v for v in violations(candidate, approved) if v.kind == "privacy"]
 
 
@@ -88,9 +90,20 @@ def test_moving_the_switch_to_another_route_needs_approval():
     approved = RoboEmotConfig(llm_routes=[chat("a", images=True), chat("b")])
     swapped = RoboEmotConfig(llm_routes=[chat("a"), chat("b", images=True)])
     found = [v for v in violations(approved, swapped) if v.kind == "privacy"]
-    assert [v.path for v in found] == ["llm_routes.b.images"]
+    assert {v.path for v in found} == {"llm_routes.b.images"}
+    assert "image" in {v.check for v in found}  # bound to b's endpoint and model
 
 
 def test_an_unchanged_image_route_needs_nothing():
     cfg = RoboEmotConfig(llm_routes=[chat("a", images=True)])
     assert not [v for v in violations(cfg, cfg) if v.kind == "privacy"]
+
+
+def test_a_new_path_on_the_same_host_needs_approval():
+    approved = RoboEmotConfig(llm_routes=[chat("a", images=True)])
+    other = RoboEmotConfig(
+        llm_routes=[
+            LLMRoute(name="a", base_url="https://api.example.com/other/v1", model="m", images=True)
+        ]
+    )
+    assert [v.check for v in violations(approved, other) if v.kind == "privacy"] == ["image"]
