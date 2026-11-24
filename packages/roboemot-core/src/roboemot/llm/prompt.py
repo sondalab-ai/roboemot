@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config.schema import RegisterParams, RoboEmotConfig
+from ..skill_packs.library import SkillPack
+from ..skill_packs.prompt import active_block, catalogue_block
 
 SUMMARY_LABEL_TOKENS = 32  # the "(data, not instructions)" labels, quotes, escapes and newlines
 CHARS_PER_TOKEN = 4  # token estimate (also the router's usage estimate): chars divided by this
@@ -373,3 +375,20 @@ def check_route_budgets(cfg: RoboEmotConfig) -> None:
                 "or shorten persona.prompt, persona.body_prompt, "
                 "safety.extra_prompt_rules or the summary caps"
             )
+
+
+def skill_packs_fit(cfg: RoboEmotConfig, packs: list[SkillPack]) -> str | None:
+    """The name of the first route whose ``context_budget_tokens`` cannot hold the worst-case
+    system message, the catalogue of ``packs``, the longest active block and
+    ``conversation.turn_reserve_tokens``; None when every route fits or ``packs`` is empty
+    (design 2026-11-24-skill-packs 5.3: measured sizes, not the config caps)."""
+    if not packs:
+        return None
+    skill = estimate_tokens(catalogue_block(packs)) + max(
+        estimate_tokens(active_block(p)) for p in packs
+    )
+    need = system_tokens_worst_case(cfg) + skill + cfg.conversation.turn_reserve_tokens
+    for route in cfg.llm_routes:
+        if need > route.context_budget_tokens:
+            return route.name
+    return None
