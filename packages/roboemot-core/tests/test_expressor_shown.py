@@ -119,3 +119,65 @@ def test_existing_reaction_is_whole_response_under_music():
     assert rig.host.expression.requests == []  # shown_object.gesture is ""
     assert rig.counts("shown_object") == {"gesture_only_music": 1}
     assert rig.worker.turns == [] and rig.media.calls == []
+
+
+# ---- surroundings: a description of the shown thing (SPEC 8, Surroundings snapshots)
+
+
+class FakeSurroundings:
+    def __init__(self, text=None) -> None:
+        self.text, self.requests, self.waits = text, [], []
+
+    def request(self, kind, token="", hint=""):
+        self.requests.append((kind, token, hint))
+
+    def wait_description(self, token, timeout_s):
+        self.waits.append((token, timeout_s))
+        return self.text
+
+
+def with_surroundings(text=None) -> Rig:
+    rig = attached()
+    rig.host.surroundings = FakeSurroundings(text)
+    return rig
+
+
+def test_a_new_look_asks_for_a_snapshot_of_the_thing():
+    rig = with_surroundings()
+    show(rig, "e1", "laptop")
+    assert rig.host.surroundings.requests == [("shown", "e1", "laptop")]
+    show(rig, "e1", "laptop")  # the same look: no second snapshot
+    assert len(rig.host.surroundings.requests) == 1
+
+
+def test_shown_reaction_uses_the_description_when_it_arrives_in_time():
+    rig = with_surroundings("a silver laptop with stickers")
+    show(rig, "e1", "laptop")
+    assert rig.expressor.handle(rig.expressor._take()) == "spoken"
+    text = rig.worker.turns[0]["text"]
+    assert "showing you a silver laptop with stickers." in text
+    assert "looks like" not in text
+
+
+def test_shown_reaction_falls_back_to_the_category_after_wait_s():
+    rig = with_surroundings(None)
+    show(rig, "e1", "laptop")
+    rig.expressor.handle(rig.expressor._take())
+    assert "looks like a laptop" in rig.worker.turns[0]["text"]
+
+
+def test_reaction_waits_no_longer_than_wait_s_from_the_look():
+    rig = with_surroundings(None)
+    show(rig, "e1", "laptop")
+    rig.clock.wait(1.5)
+    rig.expressor.handle(rig.expressor._take())
+    wait_s = rig.stack.effective().surroundings.shown.wait_s
+    ((token, timeout),) = rig.host.surroundings.waits
+    assert token == "e1" and abs(timeout - (wait_s - 1.5)) < 1e-6
+
+
+def test_no_snapshot_is_asked_when_the_reaction_is_not_queued():
+    rig = with_surroundings()
+    rig.asleep = True
+    show(rig, "e1", "laptop")
+    assert rig.host.surroundings.requests == []

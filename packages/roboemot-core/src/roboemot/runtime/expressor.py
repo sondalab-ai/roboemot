@@ -184,9 +184,9 @@ class ReturnTracker:
 @dataclass(frozen=True)
 class ReactionRequest:
     """One reaction to offer: its situation, the data its event text may hold (``station``,
-    ``category``, ``who``, ``wake``), when its cause happened (the expressor's clock), the
-    cooldown ``key`` ("", a station, a category or a person id) and the shown look's ``token``.
-    ``key`` and ``token`` are never sent."""
+    ``category``, ``who``, ``wake``, and ``description`` from the surroundings snapshot), when
+    its cause happened (the expressor's clock), the cooldown ``key`` ("", a station, a category
+    or a person id) and the shown look's ``token``. ``key`` and ``token`` are never sent."""
 
     situation: Situation
     data: Mapping[str, str] = field(repr=False)
@@ -347,7 +347,9 @@ class Expressor:
         request = ReactionRequest(
             "shown_object", {"category": category}, self.clock(), key=category, token=key
         )
-        self.offer(request)
+        surroundings = getattr(self.host, "surroundings", None)
+        if self.offer(request) and surroundings is not None:
+            surroundings.request("shown", key, category)  # its description fills {thing}
 
     def _on_face(self, msg: Message) -> None:
         """``percept.face`` (vision's thread, every frame): a recognised person in view. Presence
@@ -527,6 +529,7 @@ class Expressor:
         text goes out, that it is not past its max age and still valid (``fresh``)."""
         cfg = self.cfg()
         reactions = cfg.expression.reactions
+        request = self._described(request, cfg)
 
         def fresh() -> bool:
             young = self.clock() - request.created_at <= sit.max_age_s
@@ -547,6 +550,19 @@ class Expressor:
         finally:
             self._inflight = None
         return "no_route" if result is None else str(result)
+
+    def _described(self, request: ReactionRequest, cfg: RoboEmotConfig) -> ReactionRequest:
+        """A shown-object request with the surroundings description of its thing, waited for at
+        most ``surroundings.shown.wait_s`` from the look (SPEC 8, Surroundings snapshots); as is
+        without one."""
+        surroundings = getattr(self.host, "surroundings", None)
+        if request.situation != "shown_object" or surroundings is None:
+            return request
+        left = cfg.surroundings.shown.wait_s - (self.clock() - request.created_at)
+        text = surroundings.wait_description(request.token, max(0.0, left))
+        if not text:
+            return request
+        return replace(request, data={**request.data, "description": text})
 
     def _after_spoken(self) -> None:
         """Once the reaction's audio ended, open the follow-up window, so the person can answer

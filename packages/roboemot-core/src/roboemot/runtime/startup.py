@@ -189,6 +189,8 @@ def start_voice_output(
             registry,
             lambda: stack.effective().attention.stale_s,
             p.value_cap,
+            surroundings=lambda: host.surroundings,
+            room_cap=lambda: stack.effective().surroundings.room.max_chars,
         ),
         speaker=p.conv_speaker,
         names=p.names,
