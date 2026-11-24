@@ -48,7 +48,7 @@ def valid_name(name: str) -> bool:
     return len(name) <= SKILL_PACK_NAME_MAX_CHARS and SKILL_PACK_NAME.fullmatch(name) is not None
 
 
-def _front_matter(text: str) -> tuple[dict[str, str], str] | None:
+def front_matter(text: str) -> tuple[dict[str, str], str] | None:
     """The ``key: value`` pairs between the opening and closing fence, and the body after it;
     None when the text has no complete front matter block."""
     lines = text.split("\n")
@@ -78,7 +78,7 @@ def read_pack(folder: Path, cfg: RoboEmotConfig) -> SkillPack | InvalidPack:
         text = raw.decode("utf-8-sig").replace("\r\n", "\n")
     except UnicodeDecodeError:
         return InvalidPack(name, "not_utf8")
-    parsed = _front_matter(text)
+    parsed = front_matter(text)
     if parsed is None:
         return InvalidPack(name, "no_front_matter")
     meta, body = parsed
