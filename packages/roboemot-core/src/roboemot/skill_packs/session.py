@@ -27,6 +27,15 @@ END_REASONS = frozenset(
 )
 
 
+TOOLS = ("skill_pack_start", "skill_pack_end")
+
+
+def tools_listed(cfg: RoboEmotConfig) -> bool:
+    """Whether ``conversation.llm_skills`` offers both skill pack tools: without them the
+    catalogue would point the model at a tool it does not have."""
+    return all(t in cfg.conversation.llm_skills for t in TOOLS)
+
+
 def normalise(name: str) -> str:
     """A model's spelling of a skill pack name in folder form: trimmed, lower case, spaces and
     underscores as hyphens."""
@@ -56,7 +65,10 @@ class SkillPackSession:
 
     def usable(self, cfg: RoboEmotConfig) -> list[SkillPack]:
         """The enabled valid skill packs that fit every route's budget, in name order. A skill
-        pack that would break a route's budget is skipped and logged once with the route."""
+        pack that would break a route's budget is skipped and logged once with the route. None
+        is usable while ``conversation.llm_skills`` does not offer both skill pack tools."""
+        if not tools_listed(cfg):
+            return []
         accepted: list[SkillPack] = []
         too_large: dict[str, str] = {}
         for pack in self.library.enabled(cfg):
@@ -156,3 +168,21 @@ class SkillPackSession:
                 "started_at": self._started_at if active else None,
                 "counts": dict(self._counts),
             }
+
+    def report(self) -> dict[str, Any]:
+        """The debug report section (SPEC 12A): installed, enabled and invalid skill packs with
+        the reasons, enabled names with no valid folder, the ones too large for a route, the
+        active name and the counts. Names and reasons only, never a body."""
+        cfg = self._config()
+        packs = self.library.packs()
+        valid = {p.name for p in packs if isinstance(p, SkillPack)}
+        invalid = {p.name: p.reason for p in packs if not isinstance(p, SkillPack)}
+        return {
+            "installed": len(packs),
+            "enabled": len(self.usable(cfg)),
+            "invalid": invalid,
+            "missing": sorted(n for n in cfg.skill_packs.enabled if n not in valid),
+            "too_large": self.too_large(),
+            "tools_listed": tools_listed(cfg),
+            **self.snapshot(),
+        }

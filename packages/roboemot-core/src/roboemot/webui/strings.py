@@ -1330,6 +1330,22 @@ EN: dict[str, str] = {
     "err_scheduler_unavailable": "Timers and reminders are not available on this run.",
     "err_radio_unavailable": "This robot's speaker cannot play the radio.",
     "err_radio_disabled": "The radio is off: turn it on first.",
+    "err_skill_packs_unavailable": "Skills are not available: turn on the robot's voice first.",
+    "err_unknown_pack": "That skill is not installed.",
+    "err_llm_skills_missing": (
+        "Skills need the tools skill_pack_start and skill_pack_end in conversation.llm_skills."
+    ),
+    "err_max_enabled": "Too many skills are on: turn one off first.",
+    "err_too_large_for_route": "This skill is too large for the route {route}.",
+    "err_exists": "A skill with this name is already installed: choose Replace.",
+    "err_invalid": "The skill file is not valid.",
+    "err_bad_upload": "The upload could not be read.",
+    "err_too_large": "The upload is too large.",
+    "err_too_many_files": "The archive holds too many files.",
+    "err_bad_path": "The archive holds a path outside its folder.",
+    "err_link": "The archive holds a link, which is not allowed.",
+    "err_not_zip": "Upload a SKILL.md file or a .zip archive.",
+    "err_no_skill_md": "The upload has no SKILL.md file.",
     "err_unknown_item": "That timer or reminder is gone.",
     "err_unknown_station": "No station has that name.",
     "err_geocode_unreachable": "The place search could not be reached.",
@@ -2737,6 +2753,25 @@ IT: dict[str, str] = {
     "err_scheduler_unavailable": "Timer e promemoria non sono disponibili in questa esecuzione.",
     "err_radio_unavailable": "L'altoparlante di questo robot non può suonare la radio.",
     "err_radio_disabled": "La radio è spenta: prima accendila.",
+    "err_skill_packs_unavailable": (
+        "Le abilità non sono disponibili: prima accendi la voce del robot."
+    ),
+    "err_unknown_pack": "Questa abilità non è installata.",
+    "err_llm_skills_missing": (
+        "Le abilità richiedono gli strumenti skill_pack_start e skill_pack_end in "
+        "conversation.llm_skills."
+    ),
+    "err_max_enabled": "Troppe abilità accese: prima spegnine una.",
+    "err_too_large_for_route": "Questa abilità è troppo grande per la route {route}.",
+    "err_exists": "Un'abilità con questo nome è già installata: scegli Sostituisci.",
+    "err_invalid": "Il file dell'abilità non è valido.",
+    "err_bad_upload": "Non è stato possibile leggere il caricamento.",
+    "err_too_large": "Il caricamento è troppo grande.",
+    "err_too_many_files": "L'archivio contiene troppi file.",
+    "err_bad_path": "L'archivio contiene un percorso fuori dalla sua cartella.",
+    "err_link": "L'archivio contiene un collegamento, che non è permesso.",
+    "err_not_zip": "Carica un file SKILL.md o un archivio .zip.",
+    "err_no_skill_md": "Il caricamento non contiene un file SKILL.md.",
     "err_unknown_item": "Quel timer o promemoria non c'è più.",
     "err_unknown_station": "Nessuna stazione ha questo nome.",
     "err_geocode_unreachable": "La ricerca luoghi non è raggiungibile.",

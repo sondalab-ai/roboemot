@@ -48,6 +48,7 @@ from roboemot.realtime.preview import KNOWN_VOICES, PreviewFailed
 from roboemot.registry.records import Consent, ConsentError
 from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
+from ..skill_packs.admin import SkillPacksError
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
 from .descriptions import localize
@@ -102,6 +103,20 @@ TOOLS_STATUS = {
 }
 # A timer or reminder id as the scheduler gives them (``t<n>``, ``r<n>``) or a hand edit made.
 TOOLS_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+SKILL_PACKS = "/api/tools/skill_packs"
+SKILL_PACKS_UPLOAD = f"{SKILL_PACKS}/upload"
+SKILL_PACK_PATH = re.compile(rf"{SKILL_PACKS}/([a-z0-9-]{{1,64}})(?:/(enable|remove))?")
+SKILL_PACK_ACTIONS = {("GET", None), ("POST", "enable"), ("POST", "remove")}
+SKILL_PACK_UPLOAD_SLACK_BYTES = 4096  # the JSON keys, the filename and the PIN around the data
+SKILL_PACK_FILENAME_MAX_CHARS = 255
+SKILL_PACKS_STATUS = {
+    "skill_packs_unavailable": HTTPStatus.SERVICE_UNAVAILABLE,
+    "unknown_pack": HTTPStatus.NOT_FOUND,
+    "llm_skills_missing": HTTPStatus.CONFLICT,
+    "max_enabled": HTTPStatus.CONFLICT,
+    "too_large_for_route": HTTPStatus.CONFLICT,
+    "exists": HTTPStatus.CONFLICT,
+}
 GEOCODE_QUERY_MAX_CHARS = 100  # a place name typed in the search box; the page has no copy
 ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
@@ -296,6 +311,20 @@ class ToolsPort(Protocol):
     def catalogue(self) -> dict[str, Any]: ...
 
 
+class SkillPacksPort(Protocol):
+    """``roboemot.skill_packs.admin.SkillPacksAdmin`` (SPEC 11A, 12): the Skills section. The
+    list never carries a skill pack's text; ``detail`` does, for the admin to read. Writes raise
+    ``SkillPacksError`` with a ``code`` and an ``extra`` field (``route``, ``reason``)."""
+
+    def listing(self) -> dict[str, Any]: ...
+    def detail(self, name: str) -> dict[str, Any]: ...
+    def enable(self, name: str, on: bool) -> None: ...
+    def upload(self, filename: str, data_b64: str, replace: bool) -> str: ...
+    def remove(self, name: str) -> None: ...
+    def rescan(self) -> None: ...
+    def end(self) -> bool: ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -445,7 +474,9 @@ class WebApi:
         live: LivePort | None = None,
         emotions: EmotionsPort | None = None,
         tools: ToolsPort | None = None,
+        skill_packs: SkillPacksPort | None = None,
     ) -> None:
+        self.skill_packs = skill_packs
         self.live = live
         self.emotions = emotions
         self.tools = tools
@@ -509,11 +540,21 @@ class WebApi:
         makes the server read more than ``max_body_bytes``.
         """
         web = self.web
-        if (method, path) == ("POST", CATALOGUE_IMPORT):
+        big = {
+            CATALOGUE_IMPORT: web.catalogue_max_body_bytes,
+            SKILL_PACKS_UPLOAD: self._upload_body_bytes(),
+        }
+        if method == "POST" and path in big:
             token = parse_cookie(headers.get("cookie"))
             if self.sessions.get(token, self.clock(), self.pins.version()) is not None:
-                return max(web.max_body_bytes, web.catalogue_max_body_bytes)
+                return max(web.max_body_bytes, big[path])
         return web.max_body_bytes
+
+    def _upload_body_bytes(self) -> int:
+        """The skill pack upload's body: ``skill_packs.upload_max_bytes`` as base64, plus room
+        for the rest of the JSON (SPEC 11A; design 2026-11-24-skill-packs 5.2)."""
+        raw = self.config.skill_packs.upload_max_bytes
+        return -(-raw // BASE64_GROUP_IN) * BASE64_GROUP_OUT + SKILL_PACK_UPLOAD_SLACK_BYTES
 
     def _dispatch(self, req: Request) -> Response:
         method, path = req.method, req.path
@@ -575,6 +616,10 @@ class WebApi:
             ("POST", "/api/tools/radio/stop"): self._tools_radio_stop,
             ("POST", "/api/tools/radio/test"): self._tools_radio_test,
             ("POST", "/api/tools/geocode"): self._tools_geocode,
+            ("GET", SKILL_PACKS): self._skill_packs_list,
+            ("POST", SKILL_PACKS_UPLOAD): self._skill_packs_upload,
+            ("POST", f"{SKILL_PACKS}/rescan"): self._skill_packs_rescan,
+            ("POST", f"{SKILL_PACKS}/end"): self._skill_packs_end,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
@@ -607,6 +652,13 @@ class WebApi:
         )
         if method == "POST" and check:
             return self._route_check(check.group(1))
+        pack = SKILL_PACK_PATH.fullmatch(path)
+        if pack and (method, pack.group(2)) in (
+            ("GET", None),
+            ("POST", "enable"),
+            ("POST", "remove"),
+        ):
+            return self._skill_pack(req, pack.group(1), pack.group(2))
         confirm = re.fullmatch(r"/api/catalogue/([^/]+)/confirm", path)
         if method == "POST" and confirm:
             return self._catalogue_confirm(req, v.record_id(confirm.group(1)))
@@ -1113,6 +1165,87 @@ class WebApi:
             if exc.code not in TOOLS_STATUS:
                 raise
             raise ApiError(TOOLS_STATUS[exc.code], exc.code, retry_after=exc.retry_after) from exc
+
+    # ------------------------------------------------------------------ skill packs
+
+    def _skill_packs_port(self) -> SkillPacksPort:
+        if self.skill_packs is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "skill_packs_unavailable")
+        return self.skill_packs
+
+    @staticmethod
+    def _skill_packs_call(fn: Callable[[], Any]) -> Any:
+        """Run a Skills action; a ``SkillPacksError`` becomes its status (an upload refusal is
+        422) with its ``extra`` field; a folder that cannot be written is ``persist_failed``."""
+        try:
+            return fn()
+        except SkillPacksError as exc:
+            status = SKILL_PACKS_STATUS.get(exc.code, HTTPStatus.UNPROCESSABLE_ENTITY)
+            raise ApiError(status, exc.code, extra=exc.extra) from exc
+        except OSError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
+
+    def _skill_packs_write(self, req: Request, keys: set[str]) -> dict[str, Any]:
+        """A Skills write's body: exactly ``keys`` plus ``pin`` and ``confirm``; the shape is
+        checked before the PIN, so a malformed body costs no attempt (SPEC 11A)."""
+        body = self._json_body(req)
+        v.only_keys(body, keys | {"pin", "confirm"})
+        if not v.confirmed(body):
+            raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        return body
+
+    def _skill_packs_list(self, req: Request) -> Response:
+        """The Skills section (SPEC 11A): every skill pack with its state, never its text."""
+        port = self._skill_packs_port()
+        return Response(HTTPStatus.OK, self._skill_packs_call(port.listing))
+
+    def _skill_pack(self, req: Request, name: str, action: str | None) -> Response:
+        """``GET`` one skill pack with its text; ``POST .../enable`` (body ``on``) and
+        ``POST .../remove``, both with ``pin`` and ``confirm``."""
+        port = self._skill_packs_port()
+        if action is None:
+            return Response(HTTPStatus.OK, self._skill_packs_call(lambda: port.detail(name)))
+        if action == "remove":
+            body = self._skill_packs_write(req, set())
+            self._check_pin(req, body.get("pin"))
+            self._skill_packs_call(lambda: port.remove(name))
+            return Response(HTTPStatus.OK, {"ok": True})
+        body = self._skill_packs_write(req, {"on"})
+        on = body.get("on")
+        if not isinstance(on, bool):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        self._skill_packs_call(lambda: port.enable(name, on))
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _skill_packs_upload(self, req: Request) -> Response:
+        """Add a skill pack (SPEC 11A, 12). Body: ``filename`` (``.md`` or ``.zip``),
+        ``data_b64``, ``replace``, ``pin``, ``confirm``. A new skill pack is off."""
+        port = self._skill_packs_port()
+        body = self._skill_packs_write(req, {"filename", "data_b64", "replace"})
+        filename, data, replace = body.get("filename"), body.get("data_b64"), body.get("replace")
+        if not isinstance(filename, str) or not 0 < len(filename) <= SKILL_PACK_FILENAME_MAX_CHARS:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        if not isinstance(data, str) or not isinstance(replace, bool):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        name = self._skill_packs_call(lambda: port.upload(filename, data, replace))
+        return Response(HTTPStatus.OK, {"name": name})
+
+    def _skill_packs_rescan(self, req: Request) -> Response:
+        """Read the skill pack folders again. Body: ``pin``."""
+        port = self._skill_packs_port()
+        body = self._tools_body(req, set())
+        self._check_pin(req, body.get("pin"))
+        self._skill_packs_call(port.rescan)
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _skill_packs_end(self, req: Request) -> Response:
+        """End the active skill pack (the End button). Body: ``pin``."""
+        port = self._skill_packs_port()
+        body = self._tools_body(req, set())
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"ended": self._skill_packs_call(port.end)})
 
     # ------------------------------------------------------------------ settings
 

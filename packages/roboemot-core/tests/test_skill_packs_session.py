@@ -153,3 +153,15 @@ def test_instructions_empty_when_nothing_enabled(tmp_path):
     session = SkillPackSession(lib, lambda: cfg, Clock())
     assert session.instructions() == ""
     assert session.start("x") == ("not_found", None)
+
+
+def test_nothing_usable_without_the_tools_listed(tmp_path):
+    write(tmp_path, "quiz-night")
+    cfg = RoboEmotConfig(
+        skill_packs={"enabled": ["quiz-night"]}, conversation={"llm_skills": ["play"]}
+    )
+    lib = SkillPackLibrary(tmp_path, lambda: cfg)
+    lib.scan()
+    session = SkillPackSession(lib, lambda: cfg, Clock())
+    assert session.enabled_names() == []
+    assert session.instructions() == ""
