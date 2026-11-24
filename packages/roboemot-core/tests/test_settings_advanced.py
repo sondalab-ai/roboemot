@@ -56,6 +56,11 @@ ADVANCED_ADMIN_ONLY = {
     "webui.frame_ancestors",
     "tools.weather.base_url",
     "tools.weather.geocode_url",
+    "skill_packs.max_enabled",
+    "skill_packs.description_max_chars",
+    "skill_packs.body_max_chars",
+    "skill_packs.upload_max_bytes",
+    "skill_packs.upload_max_files",
 }
 ADVANCED_CONSERVATIVE = {
     "catalogue": 6,

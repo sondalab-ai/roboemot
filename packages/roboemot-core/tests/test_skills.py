@@ -278,6 +278,8 @@ def test_the_default_llm_skills_are_the_five_and_the_voice_tools():
         "radio_play",
         "radio_stop",
         "radio_volume",
+        "skill_pack_start",
+        "skill_pack_end",
     ]
 
 
