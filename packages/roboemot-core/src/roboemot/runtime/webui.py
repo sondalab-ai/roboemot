@@ -157,6 +157,7 @@ def start_webui(
                 realtime_provider=lambda: p.realtime_provider,  # the runtime's own (SPEC 8)
                 realtime_tools=check_tools(stack, p),
                 realtime_status=route_status(host),
+                images_status=lambda: s.state() if (s := host.surroundings) is not None else None,
             ),
             live=live,
             emotions=emotions,

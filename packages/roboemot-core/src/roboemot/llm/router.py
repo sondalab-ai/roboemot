@@ -16,6 +16,7 @@ of leaving the robot waiting.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import datetime as dt
 import json
@@ -93,6 +94,19 @@ class NoRouteAvailable(RuntimeError):
 
 class Offline(NoRouteAvailable):
     """No route is reachable (SPEC 12A): reply nonverbally, do not wait for timeouts."""
+
+
+class ImagesUnsupported(RuntimeError):
+    """The route refused a request with an image part (HTTP 400 or 415): its model takes no
+    image input (SPEC 8, Surroundings snapshots). ``code`` is ``http_<status>``."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+IMAGE_REFUSED = (400, 415)  # the statuses that mean "no image input" on a describe request
+IMAGE_DATA_URL = "data:image/jpeg;base64,"
 
 
 # A timeout may be a slow model on a fine network: it triggers a reachability check instead.
@@ -381,12 +395,46 @@ class Router:
         finally:
             await events.aclose()
 
+    async def describe_image(
+        self, route: LLMRoute, prompt: str, jpeg: bytes, max_tokens: int
+    ) -> str:
+        """Ask ``route`` once to describe one JPEG (SPEC 8, Surroundings snapshots): one user
+        message with a ``text`` part and an ``image_url`` part (a ``data:`` URL), streamed,
+        ``max_tokens`` as given; the joined reply text. No fallback and no retry. Raises
+        ``Offline`` while offline, ``NoRouteAvailable`` when the route's key is unavailable, it
+        is unreachable or its budget is spent, ``ImagesUnsupported`` on HTTP 400 or 415; other
+        errors propagate. The budget is charged as for any request, image bytes excluded."""
+        if route.kind != "chat":
+            raise ValueError(f"route {route.name} is a {route.kind} route, not a chat route")
+        if self.offline:
+            raise Offline("offline")
+        if not self._usable(route):
+            raise NoRouteAvailable(route.name)
+        url = IMAGE_DATA_URL + base64.b64encode(jpeg).decode("ascii")
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": url}},
+        ]
+        parts: list[str] = []
+        try:
+            async for ev in self._stream_route(
+                route, [{"role": "user", "content": content}], None, max_tokens=max_tokens
+            ):
+                if isinstance(ev, TextDelta):
+                    parts.append(ev.text)
+        except APIStatusError as exc:
+            if exc.status_code in IMAGE_REFUSED:
+                raise ImagesUnsupported(f"http_{exc.status_code}") from None
+            raise
+        return "".join(parts)
+
     async def _stream_route(
         self,
         route: LLMRoute,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         timing: FirstToken | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[Event]:
         """Stream one route. ``first_token_timeout_s`` bounds the time from the request to the
         first real content (text or tool call; role-only chunks do not count);
@@ -406,7 +454,7 @@ class Router:
             "model": route.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": route.max_tokens,
+            "max_tokens": max_tokens or route.max_tokens,
         }
         if tools:
             kwargs["tools"] = tools
@@ -414,7 +462,7 @@ class Router:
         stream = None
         out_chars, usage_tokens = 0, None
         reasoning_chars, finish_reason = 0, None
-        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        prompt_chars = sum(_text_chars(m) for m in messages)
         try:
             create = client.chat.completions.create  # untimed: the first access imports lazily
             await _probe_platform_once()  # untimed too: the SDK's first request spawns processes
@@ -515,6 +563,15 @@ class Router:
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
+
+
+def _text_chars(message: dict[str, Any]) -> int:
+    """The characters of a message's text: a list content counts its ``text`` parts only, so an
+    image's base64 never inflates the budget estimate."""
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return sum(len(p.get("text", "")) for p in content if isinstance(p, dict))
+    return len(str(content))
 
 
 def tool_arguments(text: str) -> Any:

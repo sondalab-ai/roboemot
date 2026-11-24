@@ -97,6 +97,9 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "base_url": None,  # it holds user info: never sent, only replaceable whole
             "locality": "auto",
             "kind": "chat",
+            "images": False,
+            "images_state": "off",
+            "images_reason": None,
             "key": "literal",
             "running": False,
             "secret": None,
@@ -345,3 +348,26 @@ def test_a_cloud_route_check_without_a_name_source_keeps_owner_text_out(tmp_path
     finally:
         srv.stop()
     assert fake.bodies and all("PERSONA-4c1d" not in json.dumps(b) for b in fake.bodies)
+
+
+def test_route_row_reports_images_and_state(tmp_path):
+    store = tmp_path / "route_checks.json"
+    on = make_cfg(route=ROUTE | {"images": True})
+    status = {"state": "unsupported", "unsupported": "http_400"}
+    row = RouteChecker(lambda: on, store, images_status=lambda: status).list_routes()[0]
+    assert (row["images"], row["images_state"], row["images_reason"]) == (
+        True,
+        "unsupported",
+        "http_400",
+    )
+    status = {"state": "on", "unsupported": None}
+    row = RouteChecker(lambda: on, store, images_status=lambda: status).list_routes()[0]
+    assert (row["images_state"], row["images_reason"]) == ("on", None)
+    off = RouteChecker(lambda: make_cfg(), store, images_status=lambda: status).list_routes()[0]
+    assert (off["images"], off["images_state"], off["images_reason"]) == (False, "off", None)
+
+
+def test_a_realtime_row_has_no_images_fields(tmp_path):
+    rt = ROUTE | {"name": "rt", "kind": "realtime"}
+    row = RouteChecker(lambda: make_cfg(route=rt), tmp_path / "c.json").list_routes()[0]
+    assert "images" not in row

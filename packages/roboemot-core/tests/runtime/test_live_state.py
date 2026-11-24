@@ -83,6 +83,7 @@ def live(p=None, config=None, host=None, **kw):
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     kw.setdefault("hardware", dict)
     return LiveState(
@@ -126,6 +127,7 @@ def test_the_payload_shape():
         "video",
         "audio_egress",
         "activity",
+        "surroundings",
     }
     assert s["audio_egress"] is False  # no realtime route: no audio leaves
     assert s["poll_ms"] == 750
@@ -156,6 +158,7 @@ def test_modes_follow_the_parts():
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     p = parts(
         sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["vision", "listener"]),
@@ -203,6 +206,7 @@ def test_the_modes_card_names_the_circadian_rest_apart_from_the_motors(state, re
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     s = live(host=host).state()
     assert s["modes"]["rest"] == rest
@@ -218,6 +222,7 @@ def test_motors_off_and_a_nap_show_both_and_the_status_says_motors_off():
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     p = parts(sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["app_tick"]))
     s = live(p, host=host).state()
@@ -233,6 +238,7 @@ def test_the_conversation_card_is_the_phase():
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     host.phase.begin_thinking()
     host.phase.set_route("lan")
@@ -321,6 +327,7 @@ def test_the_temperature_is_read_once_per_cache_window():
             realtime_route=None,
             voice_listener=None,
             dance=None,
+            surroundings=None,
         ),
         parts(),
         cfg(system_cache_s=5.0),
@@ -378,6 +385,7 @@ def music_host(detector, frame=None):
         realtime_route=None,
         voice_listener=SimpleNamespace(music=detector, awaiting_transcript=lambda: False),
         dance=None if frame is None else SimpleNamespace(live_snapshot=lambda now: frame),
+        surroundings=None,
     )
 
 
@@ -460,3 +468,75 @@ def test_a_stopped_tick_reads_as_an_idle_dance_block():
         "state": "idle", "source": None, "tempo_bpm": None, "beat_age_s": None,
         "bob": 0.0, "sway": 0.0, "last_accent_age_s": None,
     }  # fmt: skip
+
+
+# ---- the Surroundings card (SPEC 8, Surroundings snapshots)
+
+
+class FakeSurroundings:
+    def __init__(self, jpeg=b"\xff\xd8jpeg") -> None:
+        self._jpeg = jpeg
+
+    def state(self):
+        return {"state": "on", "route": "eye", "attempt": None, "counts": {"described": 1},
+                "last": {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5},
+                "latency_s": 1.2, "unsupported": None, "paused_s": 0.0}  # fmt: skip
+
+    def live(self):
+        return {**self.state(), "described": {"shown": "a silver laptop", "room": "a study"}}
+
+    def jpeg(self):
+        return self._jpeg
+
+
+def host_with(surroundings):
+    return SimpleNamespace(
+        circadian=SimpleNamespace(state="awake", reason=None), phase=ConversationPhase(),
+        activity=None, realtime_route=None, voice_listener=None, dance=None,
+        surroundings=surroundings,
+    )  # fmt: skip
+
+
+def test_surroundings_block_shape():
+    block = live(host=host_with(FakeSurroundings())).state()["surroundings"]
+    assert block["state"] == "on" and block["route"] == "eye"
+    assert block["last"] == {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5}
+    assert "described" not in block
+    assert live().state()["surroundings"] is None  # no service
+
+
+def test_surroundings_text_only_with_video_on():
+    state = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
+    state.surroundings_jpeg("10.0.0.7")  # a page that shows the snapshot is a video viewer
+    block = state.state()["surroundings"]
+    assert block["described"] == {"shown": "a silver laptop", "room": "a study"}
+
+
+def test_surroundings_text_needs_a_registered_viewer_and_an_awake_robot():
+    state = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
+    assert "described" not in state.state()["surroundings"]  # nobody watching: no banner
+    state.surroundings_jpeg("10.0.0.7")
+    asleep = parts(sleep=SimpleNamespace(asleep=True, paused_parts=lambda: []))
+    sleeping = live(p=asleep, host=host_with(FakeSurroundings()), config=cfg(video=True))
+    assert sleeping.surroundings_jpeg("10.0.0.7") == (None, "video_asleep")
+    assert "described" not in sleeping.state()["surroundings"]
+
+
+def test_serving_the_snapshot_registers_the_viewer_for_the_banner():
+    state = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
+    assert state.video_viewers()["count"] == 0
+    state.surroundings_jpeg("10.0.0.7")
+    assert state.video_viewers()["video_viewers_active"] is True
+
+
+def test_surroundings_jpeg_needs_live_video_and_a_snapshot():
+    off = live(host=host_with(FakeSurroundings()))
+    assert off.surroundings_jpeg("10.0.0.7") == (None, "video_off")
+    on = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
+    assert on.surroundings_jpeg("10.0.0.7") == (b"\xff\xd8jpeg", None)
+    none = live(host=host_with(FakeSurroundings(jpeg=None)), config=cfg(video=True))
+    assert none.surroundings_jpeg("10.0.0.7") == (None, "surroundings_none")
+    absent = live(config=cfg(video=True))
+    assert absent.surroundings_jpeg("10.0.0.7") == (None, "surroundings_off")
+    disabled = live(host=host_with(FakeSurroundings()), config=ConfigStack().effective())
+    assert disabled.surroundings_jpeg("10.0.0.7") == (None, "live_disabled")

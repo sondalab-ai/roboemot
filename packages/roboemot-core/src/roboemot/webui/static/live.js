@@ -59,6 +59,7 @@ const LIVE_CARDS = [
   { key: "beat", render: liveBeatCard },
   { key: "system", render: liveSystemCard },
   { key: "video", render: liveVideoCard },
+  { key: "surroundings", render: liveSurroundingsCard },
 ];
 
 function liveRow(label, ...value) {
@@ -142,6 +143,60 @@ function liveMotionCard(d) {
   const s = d.motion.state;
   const tone = { writing: "success", external: "warning", held: "warning", motors_off: "info" }[s] || "info";
   return card(t("tab_live"), t("live_motion"), el("p", {}, badge(state.strings["live_motion_" + s] || s, tone)));
+}
+
+// Surroundings card (SPEC 8, Surroundings snapshots): what the image route was last sent and said.
+// Codes, sizes and scores always; the descriptions and the last snapshot only with the video
+// preview on (the server sends `described` then). The snapshot is fetched once per new snapshot
+// (its kind, size and score), kept as a blob URL; text is set as text, never parsed as markup.
+const liveSnap = { key: null, url: null };
+const LIVE_SURR_TONE = { on: "success", unsupported: "danger", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning" };
+
+function liveSurroundingsCard(d) {
+  const s = d.surroundings;
+  if (!s) return null;
+  const parts = [el("p", {}, badge(liveWord("live_surr_state_", s.state), LIVE_SURR_TONE[s.state] || "info"),
+    s.route ? " " + s.route : "")];
+  if (s.unsupported) parts.push(el("p", { class: "hint" }, t("live_surr_unsupported", { code: s.unsupported })));
+  if (s.paused_s > 0) parts.push(el("p", { class: "hint" }, t("live_surr_paused", { n: num(s.paused_s, 0) })));
+  if (s.last) {
+    parts.push(liveRow(t("live_surr_last"), t("live_surr_last_value", {
+      kind: liveWord("live_snap_", s.last.kind), n: num(s.last.age_s, 0),
+      kb: num(s.last.bytes / 1024, 1), score: num(s.last.sharpness, 0),
+    })));
+  } else {
+    parts.push(el("p", { class: "hint" }, t("live_surr_none")));
+  }
+  const said = s.described;
+  if (said && said.shown) parts.push(liveRow(t("live_surr_shown"), said.shown));
+  if (said && said.room) parts.push(liveRow(t("live_surr_room"), said.room));
+  const counts = Object.entries(s.counts || {}).filter(([, n]) => n > 0);
+  if (counts.length) parts.push(el("p", { class: "hint" }, counts.map(([k, n]) => k + " " + n).join(", ")));
+  if (said && s.last) parts.push(liveSnapshot(s.last));
+  const node = card(t("tab_live"), t("live_surroundings"), parts);
+  node.id = "live-surroundings-card";
+  return node;
+}
+
+function liveSnapshot(last) {
+  const key = last.kind + ":" + last.bytes + ":" + last.sharpness;
+  if (liveSnap.key !== key) { liveSnap.key = key; liveFetchSnapshot(key); }
+  return liveSnap.url
+    ? el("img", { src: liveSnap.url, alt: t("live_surr_image_alt"), class: "live-video" })
+    : el("p", { class: "hint" }, t("live_surr_loading"));
+}
+
+async function liveFetchSnapshot(key) {
+  try {
+    const resp = await request("/api/live/surroundings.jpg", { method: "GET", credentials: "same-origin", cache: "no-store" });
+    if (!resp.ok || liveSnap.key !== key) return;
+    const blob = await resp.blob();
+    if (liveSnap.key !== key) return;
+    if (liveSnap.url !== null) URL.revokeObjectURL(liveSnap.url);
+    liveSnap.url = URL.createObjectURL(blob);
+  } catch (e) {
+    liveSnap.key = null; // the next poll asks again
+  }
 }
 
 function liveHasBeat(block) {
@@ -320,7 +375,7 @@ function liveKeep(box, fresh) {
 
 function liveRender(box, data) {
   liveRenderActivity(data.activity || null);
-  liveKeep(box, LIVE_CARDS.map((c) => c.render(data)));
+  liveKeep(box, LIVE_CARDS.map((c) => c.render(data)).filter(Boolean));
 }
 
 // ---------------------------------------------------------------- what's happening
@@ -381,6 +436,7 @@ function liveEventText(ev) {
   if (ev.conversation !== undefined) extra.conversation = liveWord("live_conv_", ev.conversation);
   if (ev.kind === "session" && ev.reason === "reset") extra.why = liveWord("live_reset_", ev.why);
   if (ev.voice !== undefined) extra.voice = liveWord("live_voice_", ev.voice);
+  if (ev.snapshot !== undefined) extra.snapshot = liveWord("live_snap_", ev.snapshot);
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
   if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);

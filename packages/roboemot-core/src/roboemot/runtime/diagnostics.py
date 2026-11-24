@@ -36,6 +36,10 @@ def build_diagnostics(
         FnSource("roboemot.vision", p.perception.vision_snapshot),
         FnSource("roboemot.world", lambda: world_snapshot(p.world.entries, time.monotonic())),
         FnSource("roboemot.attention", p.selector.snapshot),
+        FnSource(
+            "roboemot.surroundings",
+            lambda: s.state() if (s := host.surroundings) is not None else {"state": "off"},
+        ),
         FnSource("roboemot.registry", p.perception.registry_snapshot),
         FnSource("roboemot.register", lambda: register_report(p.tracker)),
         FnSource("roboemot.circadian", p.circ.snapshot),

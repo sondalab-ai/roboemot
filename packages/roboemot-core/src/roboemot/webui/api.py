@@ -74,6 +74,7 @@ PASSIVE_POLLS = frozenset(
         "/api/live/audio",
         LIVE_PROMPTS,
         "/api/live/frame.jpg",
+        "/api/live/surroundings.jpg",
         LIVE_VIEWERS,
         EMOTIONS_STATE,
         TOOLS_STATE,
@@ -257,6 +258,10 @@ class LivePort(Protocol):
 
     def video_viewers(self) -> dict[str, Any]:
         """``{"video_viewers_active", "count", "poll_ms"}``: is a page watching (the banner)."""
+        ...
+
+    def surroundings_jpeg(self, client: str) -> tuple[bytes | None, str | None]:
+        """The last surroundings snapshot sent for ``client``, or ``(None, code)``."""
         ...
 
 
@@ -561,6 +566,7 @@ class WebApi:
             ("GET", "/api/live/state"): self._live_state,
             ("GET", "/api/live/audio"): self._live_audio,
             ("GET", "/api/live/frame.jpg"): self._live_frame,
+            ("GET", "/api/live/surroundings.jpg"): self._live_surroundings,
             ("GET", LIVE_VIEWERS): self._live_viewers,
             ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
             ("GET", LIVE_PROMPTS): self._live_prompts,
@@ -931,6 +937,23 @@ class WebApi:
                 HTTPStatus.NOT_FOUND
                 if code in ("live_disabled", "video_off")
                 else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            raise ApiError(status, code or "generic")
+        return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")
+
+    def _live_surroundings(self, req: Request) -> Response:
+        """The last snapshot the robot sent to the image route (SPEC 8, Surroundings snapshots;
+        12), or a JSON error with no picture: ``live_disabled``, ``video_off``,
+        ``surroundings_off``, ``surroundings_none`` (404), ``video_asleep`` (503). Same-origin
+        only, like the preview, and it counts the client as a video viewer (the banner); from
+        RAM, nothing stored or logged."""
+        site = req.headers.get("sec-fetch-site", "same-origin")
+        if site not in ("same-origin", "none"):
+            raise ApiError(HTTPStatus.FORBIDDEN, "cross_site")
+        jpeg, code = self._live_source().surroundings_jpeg(req.client_ip)
+        if jpeg is None:
+            status = (
+                HTTPStatus.SERVICE_UNAVAILABLE if code == "video_asleep" else HTTPStatus.NOT_FOUND
             )
             raise ApiError(status, code or "generic")
         return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")

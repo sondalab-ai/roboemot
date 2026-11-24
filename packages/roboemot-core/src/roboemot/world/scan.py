@@ -37,6 +37,7 @@ from ..persona import PersonaEffects
 from .sources import ScanPlanner, ScanWaypoint
 
 SOURCE = "scan"
+SCAN_FINISHED = "world.scan_finished"  # a sweep ran to its end (SPEC 8, Surroundings snapshots)
 SLEW_EPS = 1e-9
 Reason = Literal["idle", "wakeup", "unexplained"]
 
@@ -337,6 +338,8 @@ class ScanController:
         self.policy = ScanPolicy(cfg, rng)
         self.runner = SweepRunner(dofs, cfg)
         self._engaged_glance = False
+        self._kind: str | None = None  # the running decision's kind
+        self._finished_sweep = False
 
     @property
     def active(self) -> bool:
@@ -373,7 +376,14 @@ class ScanController:
         if cmd is None:
             self.policy.finished()
             self._engaged_glance = False
+            self._finished_sweep = self._kind == "sweep"
         return cmd
+
+    def take_finished_sweep(self) -> bool:
+        """Whether a sweep ran to its end since the last call (a cancelled sweep and a glance
+        do not count): a new view for the surroundings room snapshot (SPEC 8)."""
+        done, self._finished_sweep = self._finished_sweep, False
+        return done
 
     def _begin(
         self, ctx: ScanContext, d: ScanDecision, pose: Mapping[str, float], fov_h_rad: float
@@ -390,5 +400,6 @@ class ScanController:
             home = {n: self.runner.dofs[n].home for n in names}
             wps = [*wps, ScanWaypoint(0.0, home, 0.0)]
         self._engaged_glance = d.engaged
+        self._kind = d.kind
         priority = Priority.EXPRESSION if d.engaged else Priority.IDLE
         self.runner.start(ctx.now, pose, wps, pace_x=d.pace_x, priority=priority)

@@ -11,12 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from ..llm.prompt import ROOM_LABEL
 from ..world import Entry
 from ..world.types import UNKNOWN_IDENTITY
 
 KIND_ORDER = ("person", "animal", "object")
 SCALARS = (str, int, float, bool)
 SEPARATOR = ", "
+ROOM_SEPARATOR = "; "  # before the room line
 VOWELS = "aeiou"
 
 
@@ -77,22 +79,34 @@ def scene_summary(
     name_of: Callable[[Entry], str | None],
     max_chars: int,
     value_max_chars: int,
+    descriptions: Mapping[str, str] | None = None,
+    room: str | None = None,
+    room_max_chars: int = 0,
 ) -> str | None:
     """Entities in view by attention priority until ``max_chars``: the attention target first,
     then people, animals and objects, the more confident first. An entity that would cross the
-    cap is left out whole (the summary is never cut mid-name). None when nothing is in view."""
+    cap is left out whole (the summary is never cut mid-name). An entity with a surroundings
+    description (``descriptions``, by entry id) reads ``label: text``. The room description
+    ends the summary as ``Room: text``, cut to ``room_max_chars`` and outside ``max_chars``
+    (SPEC 8, Surroundings snapshots). None when there is nothing to say."""
     fresh = [e for e in entries if now - e.last_seen <= stale_s]
 
     def rank(e: Entry) -> tuple[bool, int, float]:
         return (e.entry_id != target_id, KIND_ORDER.index(e.kind), -e.confidence)
 
+    described = descriptions or {}
     out = ""
     for entry in sorted(fresh, key=rank):
         piece = label(entry, name_of, value_max_chars)
+        if text := described.get(entry.entry_id):
+            piece = f"{piece}: {text}"
         joined = piece if not out else out + SEPARATOR + piece
         if len(joined) > max_chars:
             break
         out = joined
+    room_line = one_line(room or "", room_max_chars).strip()
+    if room_line:
+        out = f"{out}{ROOM_SEPARATOR if out else ''}{ROOM_LABEL}{room_line}"
     return out or None
 
 
