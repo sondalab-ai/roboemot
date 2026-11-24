@@ -387,7 +387,7 @@ def test_lowering_the_cap_trims_the_stored_turns(rigs):
 
 def test_the_history_is_trimmed_per_route_by_the_router(rigs):
     rig = rigs(
-        routes=({**LAN, "context_budget_tokens": 600},), conversation={"turn_reserve_tokens": 16}
+        routes=({**LAN, "context_budget_tokens": 650},), conversation={"turn_reserve_tokens": 16}
     )
     rig.server.scripts["lan.local"] = ["x" * 300 + ". "]
     for _ in range(3):
@@ -475,11 +475,36 @@ def test_the_default_register_gets_the_conversation_cap_and_no_child_rule(rigs):
 
 
 def test_a_register_cap_overrides_the_conversation_cap(rigs):
-    rig = rigs(conversation={"max_reply_sentences": 5})
+    """The register shortens the prompt's reply rule; a person's turn is cut at the story cap."""
+    rig = rigs(conversation={"max_reply_sentences": 5, "max_story_sentences": 2})
     rig.register[0] = RegisterParams(max_reply_sentences=1)
     rig.server.scripts["lan.local"] = ["Uno. Due. Tre."]
     rig.turn("ciao")
-    assert rig.speech.texts() == ["Uno."] and "at most 1 sentences" in rig.system()
+    assert rig.speech.texts() == ["Uno.", "Due."] and "at most 1 sentences" in rig.system()
+
+
+def test_the_story_cap_is_never_below_the_reply_cap(rigs):
+    rig = rigs(conversation={"max_reply_sentences": 5, "max_story_sentences": 2})
+    rig.turn("ciao")
+    assert "tell it in full, in at most 5 sentences" in rig.system()
+
+
+def test_a_story_longer_than_the_reply_cap_is_spoken_in_full(rigs):
+    """Regression: a fable was cut after 3 sentences (SPEC 8, System prompt part 3)."""
+    rig = rigs()
+    story = " ".join(f"Frase numero {n}." for n in range(1, 11))
+    rig.server.scripts["lan.local"] = [story]
+    rig.turn("raccontami una favola")
+    assert len(rig.speech.texts()) == 10
+    assert rig.events[-1]["outcome"] != "capped"
+    assert "a story, a fable, a tale or a poem, tell it in full, in at most 15" in rig.system()
+
+
+def test_a_reply_past_the_story_cap_is_cut(rigs):
+    rig = rigs(conversation={"max_story_sentences": 4})
+    rig.server.scripts["lan.local"] = ["Uno. Due. Tre. Quattro. Cinque. Sei."]
+    rig.turn("raccontami una favola")
+    assert rig.speech.texts() == ["Uno.", "Due.", "Tre.", "Quattro."]
 
 
 def test_every_sentence_is_spoken_as_written(rigs):
