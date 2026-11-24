@@ -86,7 +86,7 @@ class Surroundings:
     keeps a copy up to date: the stack validates on every read), ``router`` the live router,
     ``gate(kind)`` a reason code or None from the robot's state, ``speed(entry_id)`` a shown
     thing's angular speed (deg/s) or None, ``vision`` whether frames and OpenCV are there,
-    ``frame_spec`` the head's dofs."""
+    ``frame_spec`` the head's dofs, ``encode`` the JPEG encoder (OpenCV's)."""
 
     def __init__(
         self,
@@ -98,8 +98,9 @@ class Surroundings:
         vision: bool,
         frame_spec: FrameSpec | None,
         clock: Callable[[], float] = time.monotonic,
+        encode: Callable[[np.ndarray, int], bytes] = encode_jpeg,
     ) -> None:
-        self.router, self.gate, self.speed = router, gate, speed
+        self.router, self.gate, self.speed, self.encode = router, gate, speed, encode
         self.vision, self.frame_spec, self.clock = vision, frame_spec, clock
         self.events: EventSink = no_events
         self._cfg = cfg()
@@ -298,7 +299,7 @@ class Surroundings:
         if reason is not None:
             return reason
         try:
-            jpeg = encode_jpeg(result.image, self._cfg.surroundings.jpeg_quality)
+            jpeg = self.encode(result.image, self._cfg.surroundings.jpeg_quality)
         except NoEncoder:
             self.vision = False
             return "no_vision"

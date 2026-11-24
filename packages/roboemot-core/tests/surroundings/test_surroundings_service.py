@@ -69,6 +69,7 @@ class Rig:
             vision=vision,
             frame_spec=SPEC,
             clock=self.clock,
+            encode=lambda image, quality: b"\xff\xd8" + image.tobytes()[:64],  # no cv2 in CI
         )
         self.s.events = lambda kind, reason, **f: self.events.append((kind, reason, f))
 
