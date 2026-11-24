@@ -51,7 +51,8 @@ def profile_summary(
     return out or None
 
 
-def _article(noun: str) -> str:
+def article(noun: str) -> str:
+    """The English indefinite article for ``noun``."""
     return "an" if noun[:1].lower() in VOWELS else "a"
 
 
@@ -63,8 +64,8 @@ def label(entry: Entry, name_of: Callable[[Entry], str | None], value_max_chars:
         return one_line(name, value_max_chars) if name else "a person"
     noun = one_line(entry.category, value_max_chars) or entry.kind
     if name:
-        return f"{one_line(name, value_max_chars)} ({_article(noun)} {noun})"
-    return f"{_article(noun)} {noun}"
+        return f"{one_line(name, value_max_chars)} ({article(noun)} {noun})"
+    return f"{article(noun)} {noun}"
 
 
 def scene_summary(
@@ -95,4 +96,4 @@ def scene_summary(
     return out or None
 
 
-__all__ = ["label", "profile_summary", "scene_summary"]
+__all__ = ["article", "label", "profile_summary", "scene_summary"]

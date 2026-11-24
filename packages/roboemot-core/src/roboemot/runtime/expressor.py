@@ -58,6 +58,7 @@ from ..bus import Message
 from ..circadian.model import CircadianState
 from ..config.schema import RoboEmotConfig, Situation, SituationConfig
 from ..conversation.sources import person_name
+from ..conversation.summaries import article
 from ..diag import EventSink, no_events
 from ..llm.prompt import expression_fallback
 from ..tools.announce import EVENT_PREFIX
@@ -97,9 +98,10 @@ FAILED_ACTION_EVENT = (
     "Tell the person in one short sentence."
 )
 SHOWN_OBJECT_EVENT = (
-    "A person is showing you something that looks like a {category}. Comment on it or ask about "
-    "it in one short sentence."
+    "A person is showing you {thing}. Say what you think it is and add one short remark or "
+    "question about it, in one short sentence."
 )
+SHOWN_THING = "something that looks like {article} {category}"  # {thing} without a description
 NO_MEMORY = (
     "Never mention anything from an earlier conversation, their preferences or what they told "
     "you before."
@@ -673,7 +675,11 @@ def event_text(request: ReactionRequest) -> str:
     elif situation == "failed_action":
         body = FAILED_ACTION_EVENT.format(station=data.get("station", ""))
     elif situation == "shown_object":
-        body = SHOWN_OBJECT_EVENT.format(category=data.get("category", ""))
+        category = data.get("category", "")
+        thing = data.get("description") or SHOWN_THING.format(
+            article=article(category), category=category
+        )
+        body = SHOWN_OBJECT_EVENT.format(thing=thing)
     else:
         template = WAKE_EVENT if data.get("wake") else RETURNING_EVENT
         body = template.format(who=data.get("who") or ANONYMOUS)
