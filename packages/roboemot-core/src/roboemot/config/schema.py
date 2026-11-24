@@ -5453,7 +5453,7 @@ class VoiceConfig(Strict):
         unit="ms", ge=0, le=2000, advanced=True,
     )  # fmt: skip
     queue_max_sentences: int = param(
-        16,
+        32,
         "Sentences waiting for synthesis; a further one is dropped",
         ge=1,
         le=256,
@@ -6228,6 +6228,13 @@ class ConversationConfig(Strict):
     )
     history_turns: int = param(12, "Short-term turns kept in RAM", ge=0, le=100, advanced=True)
     max_reply_sentences: int = param(3, "Reply length cap", ge=1, le=20)
+    max_story_sentences: int = param(
+        15,
+        "Reply length cap when the person asks for a story, a fable, a tale or a poem; never "
+        "below the reply length cap",
+        ge=1,
+        le=40,
+    )
     language: str = param(
         "it", "Default conversation language (the web UI offers those with installed voice models)"
     )
@@ -6599,7 +6606,7 @@ class LLMRoute(Strict):
         le=60,
         advanced=True,
     )
-    max_tokens: int = param(300, "Reply token cap", ge=16, le=8192, advanced=True)
+    max_tokens: int = param(800, "Reply token cap", ge=16, le=8192, advanced=True)
     daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
     context_budget_tokens: int = param(
         8192,

@@ -115,6 +115,7 @@ from ..llm.prompt import (
     LANGUAGE_NAMES,
     NO_CONVERSATION,
     max_reply_sentences,
+    max_story_sentences,
     realtime_instructions,
     system_prompt,
 )
@@ -980,7 +981,7 @@ class ConversationWorker:
             utterance.language or cfg.conversation.language,
             register,
             self.speech.new_utterance(),
-            max_reply_sentences(cfg, register),
+            max_story_sentences(cfg, register),
             speaker=speaker,
         )
         turn.ring_gen = ring_gen
@@ -1840,7 +1841,7 @@ class ConversationWorker:
             language,
             register,
             self.speech.new_utterance(),
-            max_reply_sentences(cfg, register),
+            max_story_sentences(cfg, register),
             speaker=speaker,
             server=st,
             voice="realtime",

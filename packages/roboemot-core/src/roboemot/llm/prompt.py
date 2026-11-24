@@ -65,6 +65,13 @@ def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
     return base if own is None else min(own, base)
 
 
+def max_story_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
+    """Length cap of a story, a fable, a tale or a poem the person asks for: the conversation's
+    ``max_story_sentences``, never below the reply cap. A register shortens normal replies only.
+    The prompt asks for it; a person's turn is cut there (the model cannot be told apart)."""
+    return max(cfg.conversation.max_story_sentences, max_reply_sentences(cfg, register))
+
+
 def system_prompt(
     cfg: RoboEmotConfig,
     register: RegisterParams,
@@ -235,6 +242,8 @@ def _prompt(
         name_rule,
         VOCABULARY_RULES[register.vocabulary],
         f"Reply in at most {max_reply_sentences(cfg, register)} sentences.",
+        f"When asked for a story, a fable, a tale or a poem, tell it in full, in at most "
+        f"{max_story_sentences(cfg, register)} sentences.",
         f"Always reply in {LANGUAGE_NAMES.get(lang, lang)}.",
     ]
     if mood_tags:

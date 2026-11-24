@@ -53,6 +53,18 @@ def test_event_turn_on_chat_route_speaks_and_is_not_a_user_line():
         rig.worker.close()
 
 
+def test_event_turn_keeps_the_reply_cap_not_the_story_cap():
+    """A timer or reminder announcement is cut at the reply cap (3), not the story cap."""
+    rig = audible(build())
+    try:
+        rig.server.scripts["lan.local"] = ["Uno. Due. Tre. Quattro. Cinque."]
+        assert rig.worker.event_turn(EVENT, "it").result(5.0) is True
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) == 1)
+        assert rig.speech.texts() == ["Uno.", "Due.", "Tre."]
+    finally:
+        rig.worker.close()
+
+
 def test_event_turn_returns_false_when_route_down():
     rig = audible(build())
     try:
