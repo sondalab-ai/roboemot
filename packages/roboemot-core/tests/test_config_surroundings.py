@@ -61,3 +61,36 @@ def test_worst_case_counts_the_room_line():
         llm_routes=[chat("a", images=True)], surroundings={"room": {"max_chars": 400}}
     )
     assert system_tokens_worst_case(on) - system_tokens_worst_case(off) >= 400 // 4
+
+
+def test_moving_an_approved_image_route_to_another_host_needs_approval():
+    approved = RoboEmotConfig(llm_routes=[chat("a", images=True)])
+    moved = RoboEmotConfig(
+        llm_routes=[
+            LLMRoute(name="a", base_url="https://elsewhere.example.net/v1", model="m", images=True)
+        ]
+    )
+    found = [v for v in violations(approved, moved) if v.kind == "privacy"]
+    assert [v.check for v in found] == ["image"]
+
+
+def test_changing_the_model_of_an_approved_image_route_needs_approval():
+    approved = RoboEmotConfig(llm_routes=[chat("a", images=True)])
+    other = RoboEmotConfig(
+        llm_routes=[
+            LLMRoute(name="a", base_url="https://api.example.com/v1", model="m2", images=True)
+        ]
+    )
+    assert [v.check for v in violations(approved, other) if v.kind == "privacy"] == ["image"]
+
+
+def test_moving_the_switch_to_another_route_needs_approval():
+    approved = RoboEmotConfig(llm_routes=[chat("a", images=True), chat("b")])
+    swapped = RoboEmotConfig(llm_routes=[chat("a"), chat("b", images=True)])
+    found = [v for v in violations(approved, swapped) if v.kind == "privacy"]
+    assert [v.path for v in found] == ["llm_routes.b.images"]
+
+
+def test_an_unchanged_image_route_needs_nothing():
+    cfg = RoboEmotConfig(llm_routes=[chat("a", images=True)])
+    assert not [v for v in violations(cfg, cfg) if v.kind == "privacy"]

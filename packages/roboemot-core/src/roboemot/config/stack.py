@@ -744,7 +744,7 @@ class Violation:
     path: str
     approved: Any
     candidate: Any
-    check: Literal["field", "reflex", "locality", "secret"] = "field"
+    check: Literal["field", "reflex", "locality", "secret", "image"] = "field"
 
     def __str__(self) -> str:
         return (
@@ -967,6 +967,7 @@ def violations(
         + reflex_violations(approved, candidate)
         + locality_violations(approved, candidate)
         + secret_violations(approved, candidate)
+        + image_violations(approved, candidate)
     )
 
 
@@ -1042,6 +1043,30 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
         )
         for r in candidate.llm_routes
         if r.api_key not in NO_KEY and not same(r)
+    ]
+
+
+def image_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Image routes whose approval does not cover where the snapshots would go (SPEC 8,
+    Surroundings snapshots; 12). The ``images`` field check catches a switch turned on, a new
+    route and a switch moved to another route; this catches an approved image route whose
+    endpoint (scheme, host, port), model or kind changed, so a runtime change cannot point the
+    snapshots at a host of its choosing. The values are exact; ``Violation.__str__`` redacts."""
+    trusted = {r.name: r for r in approved.llm_routes if r.images}
+
+    def trust(r: Any) -> str:
+        return f"{r.base_url} {r.model} {r.kind}"
+
+    return [
+        Violation("privacy", f"llm_routes.{r.name}.images", trust(ref), trust(r), "image")
+        for r in candidate.llm_routes
+        if r.images
+        and (ref := trusted.get(r.name)) is not None
+        and (
+            endpoint_key(ref.base_url) != endpoint_key(r.base_url)
+            or ref.model != r.model
+            or ref.kind != r.kind
+        )
     ]
 
 
