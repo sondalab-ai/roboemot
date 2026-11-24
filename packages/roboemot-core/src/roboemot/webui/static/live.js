@@ -150,7 +150,7 @@ function liveMotionCard(d) {
 // preview on (the server sends `described` then). The snapshot is fetched once per new snapshot
 // (its kind, size and score), kept as a blob URL; text is set as text, never parsed as markup.
 const liveSnap = { key: null, url: null };
-const LIVE_SURR_TONE = { on: "success", unsupported: "danger", paused: "warning", no_vision: "warning" };
+const LIVE_SURR_TONE = { on: "success", unsupported: "danger", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning" };
 
 function liveSurroundingsCard(d) {
   const s = d.surroundings;

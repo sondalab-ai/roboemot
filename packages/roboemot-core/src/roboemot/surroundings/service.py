@@ -2,7 +2,8 @@
 
 The feature is on exactly while one route has ``images`` on. A trigger asks for a snapshot
 (``request``): a shown thing (the expressor, on a new shown look), the room (a wake from sleep or
-rest, the end of a scan sweep, a scene change with the head still, and once at start). A request
+rest, the end of a scan sweep, a scene change against the last room snapshot with the head
+still). A request
 is refused with a reason code when the feature is off or cannot run (``no_vision``,
 ``unsupported``, ``paused``, ``offline``, ``route_unavailable``), when the robot sleeps, rests or
 the quiet hours run (``asleep``), the radio plays (``music``), a room snapshot finds the
@@ -15,7 +16,8 @@ chosen frame is encoded once and handed to the service thread (``step``), which 
 route for one line of text (``describe``). A reply that arrives after the switch went off or the
 route changed (the generation moved) is dropped. HTTP 400 or 415 marks the route unsupported until
 its base URL, model or key changes or the switch goes off and on; ``max_failures`` failures in a
-row pause the snapshots for ``pause_s``.
+row pause the snapshots for ``pause_s``. The gate is checked again before a frame is chosen and
+before it is sent; going to sleep or rest drops the attempt, the chosen frame and the kept image.
 
 Privacy (SPEC 12): frames, crops, JPEGs and texts stay in RAM. Logs, decision events and
 ``state`` carry codes, counts, ages, sizes and scores; only ``live`` (the Live card) and the
@@ -128,13 +130,23 @@ class Surroundings:
     # ------------------------------------------------------------------ triggers
 
     def attach(self, bus: Bus) -> None:
-        """Subscribe the room triggers: ``robot.awake``, leaving a rest (``circadian.state``)
-        and ``world.scan_finished``."""
+        """Subscribe the room triggers (``robot.awake``, leaving a rest, ``world.scan_finished``)
+        and the drops (``robot.asleep``, entering a rest)."""
         self._unsubscribe = [
             bus.subscribe("robot.awake", lambda msg: self.request("room")),
+            bus.subscribe("robot.asleep", lambda msg: self._sleep()),
             bus.subscribe("circadian.state", self._on_circadian),
             bus.subscribe("world.scan_finished", lambda msg: self.request("room")),
         ]
+
+    def _sleep(self) -> None:
+        """The robot sleeps or rests: drop the open attempt, the chosen frame and the kept
+        snapshot, and ignore a reply in flight (its generation moves). The texts stay."""
+        with self._lock:
+            self._attempt = self._pending = None
+            self._jpeg = None
+            self._generation += 1
+            self._lock.notify_all()
 
     def _on_circadian(self, msg: Message) -> None:
         state = msg.payload
@@ -142,6 +154,7 @@ class Surroundings:
             return
         if state.state == RESTING:
             self._rested = True
+            self._sleep()
         elif self._rested:
             self._rested = False
             self.request("room")
@@ -202,6 +215,14 @@ class Surroundings:
         elif self._shown is not None and self._shown[0] != token:
             self._shown = None
         self._lock.notify_all()
+
+    def cancel(self, token: str) -> None:
+        """Close the open shown attempt for ``token`` (its reaction was not queued): nothing is
+        sent for it."""
+        with self._lock:
+            if self._attempt is not None and self._attempt.token == token:
+                self._attempt = None
+                self._lock.notify_all()
 
     # ------------------------------------------------------------- vision thread
 
@@ -273,6 +294,9 @@ class Surroundings:
         self._attempt = None
         if not isinstance(result, Candidate):
             return result
+        reason = self.gate(attempt.kind)  # the robot's state may have changed since the request
+        if reason is not None:
+            return reason
         try:
             jpeg = encode_jpeg(result.image, self._cfg.surroundings.jpeg_quality)
         except NoEncoder:
@@ -337,14 +361,6 @@ class Surroundings:
             attempt = self._attempt
             expired = self._settle(attempt, now) if attempt is not None else None
             sent, self._pending = self._pending, None
-            if sent is not None:
-                self._jpeg = sent.jpeg
-                self._last = {
-                    "kind": sent.kind,
-                    "stamp": now,
-                    "bytes": len(sent.jpeg),
-                    "sharpness": round(sent.sharpness, ROUND_DIGITS),
-                }
         if expired is not None and attempt is not None:
             self._count(expired, attempt.kind)
         if sent is not None:
@@ -352,12 +368,23 @@ class Surroundings:
 
     def _describe(self, sent: _Sent) -> None:
         route = image_route(self._cfg)
-        if route is None or sent.generation != self._generation:
+        reason = self.gate(sent.kind)  # checked again right before the image leaves
+        if reason is not None:
+            self._count(reason, sent.kind)
             return
         started = self.clock()
         text, unsupported = None, None
         with self._lock:
+            if route is None or sent.generation != self._generation:
+                return  # the switch went off, the route changed or the robot slept meanwhile
             self._describing = sent.token
+            self._jpeg = sent.jpeg
+            self._last = {
+                "kind": sent.kind,
+                "stamp": started,
+                "bytes": len(sent.jpeg),
+                "sharpness": round(sent.sharpness, ROUND_DIGITS),
+            }
         try:
             text = asyncio.run(
                 describe(self.router(), route, sent.kind, sent.jpeg, sent.hint, self._cfg)
@@ -453,6 +480,7 @@ class Surroundings:
         """Codes, counts, ages, sizes and scores (SPEC 12A): no text, token or image."""
         now = self.clock()
         route = image_route(self._cfg)
+        reach = self._reach(route)
         with self._lock:
             if route is None:
                 code = OFF
@@ -463,7 +491,7 @@ class Surroundings:
             elif now < self._paused_until:
                 code = "paused"
             else:
-                code = "on"
+                code = reach or "on"
             last = None
             if self._last is not None:
                 last = {k: v for k, v in self._last.items() if k != "stamp"}
@@ -480,6 +508,18 @@ class Surroundings:
                 "unsupported": self._unsupported,
                 "paused_s": round(max(0.0, self._paused_until - now), ROUND_DIGITS),
             }
+
+    def _reach(self, route: Any) -> str | None:
+        """``offline`` or ``route_unavailable`` (key missing, budget spent, unreachable) for
+        the image route now, None when a request could go out."""
+        if route is None:
+            return None
+        router = self.router()
+        if router.offline:
+            return "offline"
+        if route.name not in {r.name for r in router.eligible()}:
+            return "route_unavailable"
+        return None
 
     def live(self) -> dict[str, Any]:
         """``state`` plus the texts (``described``), for the Live card only."""

@@ -305,3 +305,64 @@ def test_state_and_logs_hold_no_text_and_no_image_bytes(caplog):
     assert "laptop" not in caplog.text and "Marcello" not in caplog.text
     assert all("laptop" not in repr(f) for _, _, f in rig.events)
     assert rig.s.live()["described"]["shown"] == "Marcello's silver laptop"
+
+
+def test_cancel_closes_the_open_shown_attempt():
+    rig = Rig()
+    rig.s.request("shown", "e1", "laptop")
+    rig.s.cancel("e2")
+    assert rig.s.wanted()
+    rig.s.cancel("e1")
+    assert rig.s.state()["attempt"] is None
+
+
+# ---- the gate holds for the whole attempt (review I2)
+
+
+def test_a_gate_that_closes_during_the_attempt_sends_nothing():
+    rig = Rig()
+    rig.s.request("room")
+    rig.gate_reason = "asleep"
+    rig.settle()
+    rig.s.step()
+    assert rig.router.calls == []
+    assert "asleep" in rig.reasons()
+
+
+def test_the_gate_is_checked_again_right_before_sending():
+    rig = Rig()
+    rig.s.request("room")
+    rig.settle()  # a frame was chosen
+    rig.gate_reason = "music"
+    rig.s.step()
+    assert rig.router.calls == []
+    assert "music" in rig.reasons()
+
+
+def test_going_to_sleep_or_rest_drops_the_attempt_and_the_kept_snapshot():
+    for topic, payload in (
+        ("robot.asleep", None),
+        ("circadian.state", circadian("resting", "quiet_hours")),
+    ):
+        rig = Rig()
+        bus = Bus()
+        rig.s.attach(bus)
+        rig.s.request("room")
+        rig.settle()
+        rig.s.step()
+        assert rig.s.jpeg() is not None
+        rig.clock.now += rig.cfg.surroundings.room.min_interval_s
+        rig.s.request("room")
+        bus.publish(topic, payload, rig.clock.now)
+        assert rig.s.jpeg() is None and rig.s.state()["attempt"] is None
+
+
+def test_the_state_shows_offline_and_route_unavailable():
+    rig = Rig()
+    rig.router.offline = True
+    assert rig.s.state()["state"] == "offline"
+    rig.router.offline = False
+    rig.router.usable = False
+    assert rig.s.state()["state"] == "route_unavailable"
+    rig.router.usable = True
+    assert rig.s.state()["state"] == "on"

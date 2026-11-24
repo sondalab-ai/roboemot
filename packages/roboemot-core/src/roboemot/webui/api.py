@@ -260,8 +260,8 @@ class LivePort(Protocol):
         """``{"video_viewers_active", "count", "poll_ms"}``: is a page watching (the banner)."""
         ...
 
-    def surroundings_jpeg(self) -> tuple[bytes | None, str | None]:
-        """The last surroundings snapshot sent, or ``(None, code)``."""
+    def surroundings_jpeg(self, client: str) -> tuple[bytes | None, str | None]:
+        """The last surroundings snapshot sent for ``client``, or ``(None, code)``."""
         ...
 
 
@@ -944,14 +944,18 @@ class WebApi:
     def _live_surroundings(self, req: Request) -> Response:
         """The last snapshot the robot sent to the image route (SPEC 8, Surroundings snapshots;
         12), or a JSON error with no picture: ``live_disabled``, ``video_off``,
-        ``surroundings_off``, ``surroundings_none`` (404). Same-origin only, like the preview;
-        from RAM, nothing stored or logged."""
+        ``surroundings_off``, ``surroundings_none`` (404), ``video_asleep`` (503). Same-origin
+        only, like the preview, and it counts the client as a video viewer (the banner); from
+        RAM, nothing stored or logged."""
         site = req.headers.get("sec-fetch-site", "same-origin")
         if site not in ("same-origin", "none"):
             raise ApiError(HTTPStatus.FORBIDDEN, "cross_site")
-        jpeg, code = self._live_source().surroundings_jpeg()
+        jpeg, code = self._live_source().surroundings_jpeg(req.client_ip)
         if jpeg is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, code or "generic")
+            status = (
+                HTTPStatus.SERVICE_UNAVAILABLE if code == "video_asleep" else HTTPStatus.NOT_FOUND
+            )
+            raise ApiError(status, code or "generic")
         return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")
 
     def _live_viewers(self, req: Request) -> Response:

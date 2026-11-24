@@ -66,6 +66,7 @@ def served(tmp_path, stack):
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
     )
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)
     stack.subscribe(live.apply_config)
@@ -336,6 +337,7 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
         webui=None,
         bus=None,
     )
@@ -372,6 +374,7 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
         name_source=None, route_check_router=lambda: None, circadian=None,
         phase=ConversationPhase(), activity=None, realtime_route=None, voice_listener=None,
         webui=None, bus=None, dance=None,  # gets as far as make_server, which fails
+        surroundings=None,
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
     p = pipeline()
@@ -457,6 +460,7 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
         webui=None,
         bus=bus,
         live_video=None,

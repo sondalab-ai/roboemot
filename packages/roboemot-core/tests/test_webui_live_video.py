@@ -64,6 +64,7 @@ def served(tmp_path, stack):
         realtime_route=None,
         voice_listener=None,
         dance=None,
+        surroundings=None,
         perception=SimpleNamespace(service=service, pipeline=faces),
     )
     p = pipeline()

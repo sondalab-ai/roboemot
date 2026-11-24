@@ -178,6 +178,7 @@ class Rig:
             bus=Bus(),
             media=self.media,
             announcer=None,
+            surroundings=None,
         )
         self.expressor = Expressor(
             self.worker,
