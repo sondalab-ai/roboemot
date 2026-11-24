@@ -1,0 +1,1 @@
+Describe the object in the centre of this photo in at most 12 words: what it is, its colour and one detail. A detector thinks it is: {hint}. Plain text only. Do not describe people.

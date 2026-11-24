@@ -149,6 +149,12 @@ def _instruction(stem: str) -> str:
     return text
 
 
+def surroundings_prompt(kind: str) -> str:
+    """The describe request's English instruction for a ``shown`` or ``room`` snapshot
+    (``prompts/surroundings_<kind>.en.txt``, SPEC 8, Surroundings snapshots)."""
+    return _instruction(f"surroundings_{kind}")
+
+
 def skip_prompt() -> str:
     """The skip tool's rule, from ``prompts/ignore_utterance.en.txt`` (SPEC 8, Skip tool)."""
     return _instruction(SKIP_PROMPT)

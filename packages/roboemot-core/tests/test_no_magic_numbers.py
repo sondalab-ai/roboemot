@@ -106,6 +106,7 @@ BEHAVIOUR_MODULES = [
     "conversation/confirm.py",
     "conversation/preferences.py",
     "soothe/__init__.py",
+    "surroundings/describer.py",
     "surroundings/image.py",
     "surroundings/picker.py",
     "soothe/synth.py",
