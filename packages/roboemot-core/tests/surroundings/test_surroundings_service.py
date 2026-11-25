@@ -400,3 +400,26 @@ def test_the_first_room_snapshot_is_taken_once():
     rig.settle(frames=int(rig.cfg.surroundings.room.check_interval_s / 0.1) + 2)
     rig.s.step()
     assert len(rig.router.calls) == 1
+
+
+# ---- the head holds still for a snapshot (owner, 2026-11-25)
+
+
+def test_holding_lasts_hold_s_after_an_attempt_opens():
+    rig = Rig(cfg=config(hold_s=2.0))
+    rig.s._want_first = False
+    assert not rig.s.holding(rig.clock.now)
+    rig.s.request("room")
+    start = rig.clock.now
+    assert rig.s.holding(start) and rig.s.holding(start + 1.9)
+    assert not rig.s.holding(start + 2.1)
+
+
+def test_no_hold_with_hold_s_zero_or_after_the_attempt_ends():
+    rig = Rig(cfg=config(hold_s=0.0))
+    rig.s.request("room")
+    assert not rig.s.holding(rig.clock.now)
+    rig = Rig(cfg=config(hold_s=5.0))
+    rig.s.request("room")
+    rig.settle()  # the attempt picked its frame and closed
+    assert not rig.s.holding(rig.clock.now)

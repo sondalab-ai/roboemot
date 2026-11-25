@@ -229,6 +229,21 @@ class Surroundings:
                 self._attempt = None
                 self._lock.notify_all()
 
+    def hold_until(self) -> float | None:
+        """When the head hold of the open attempt ends (its start plus ``surroundings.hold_s``),
+        None without an open attempt or with ``hold_s`` 0 (owner, 2026-11-25)."""
+        hold_s = self._cfg.surroundings.hold_s
+        with self._lock:
+            attempt = self._attempt
+        if attempt is None or hold_s <= 0:
+            return None
+        return attempt.picker.start + hold_s
+
+    def holding(self, now: float) -> bool:
+        """Whether the head should hold still at ``now``."""
+        until = self.hold_until()
+        return until is not None and now < until
+
     # ------------------------------------------------------------- vision thread
 
     def wanted(self) -> bool:

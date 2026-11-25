@@ -6642,6 +6642,12 @@ class SurroundingsConfig(Strict):
         "The head must be still this long before a frame is a snapshot candidate",
         unit="s", ge=0.1, le=5, advanced=True,
     )  # fmt: skip
+    hold_s: float = param(
+        2.0,
+        "The head and body hold still this long when a snapshot starts, so a sharp frame comes "
+        "soon; reflexes and safety still move them. 0 does not hold",
+        unit="s", ge=0, le=10, advanced=True,
+    )  # fmt: skip
     window_s: float = param(
         1.0,
         "Candidate frames are compared within this window; the sharpest is sent",
