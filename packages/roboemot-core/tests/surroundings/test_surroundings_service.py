@@ -448,15 +448,15 @@ def test_unsupported_stops_pictures_until_the_route_changes():
     assert rig.s.state()["state"] == "unsupported"
     assert rig.s.state()["unsupported"] == "http_400"
     rig.later()
-    assert rig.s.trigger() == "unsupported"
+    assert not rig.due()  # owed, but never sent to a route that refuses images
     rig.s.apply_config(rig.cfg)  # an unrelated reload keeps the mark
-    assert rig.s.trigger() == "unsupported"
+    assert not rig.due() and rig.s.state()["state"] == "unsupported"
     rig.cfg = RoboEmotConfig(
         llm_routes=[eye().model_copy(update={"model": "m2"})],
         surroundings=rig.cfg.surroundings,
     )
     rig.s.apply_config(rig.cfg)
-    assert rig.s.trigger() is None
+    assert rig.due()  # another model: a first picture is owed again
 
 
 def test_max_failures_pauses_for_pause_s():
@@ -465,9 +465,9 @@ def test_max_failures_pauses_for_pause_s():
     for _ in range(2):
         rig.picture()
         rig.later()
-    assert rig.s.trigger() == "paused"
+    assert not rig.due() and rig.s.state()["state"] == "paused"
     rig.clock.now += rig.cfg.surroundings.pause_s
-    assert rig.s.trigger() is None
+    assert rig.due()  # the failed picture is still owed
 
 
 def test_a_route_error_at_send_time_is_counted_as_unavailable():
@@ -545,9 +545,68 @@ def test_a_429_stops_pictures_until_the_next_day():
     rig.picture()
     assert "daily_limit" in rig.reasons()
     rig.later()
-    assert rig.s.trigger() == "daily_limit"
+    assert not rig.due()  # still owed, but the head does not turn for it today
+    assert rig.s.state()["state"] == "daily_limit"
     rig.day = rig.day + dt.timedelta(days=1)
-    assert rig.s.trigger() is None
+    assert rig.due()  # due again the next day, with no new trigger
+
+
+# ---- a failed describe leaves the picture due (review 2026-11-25)
+
+
+def test_a_failed_describe_leaves_the_picture_due_after_the_interval():
+    for error in (TimeoutError(), NoRouteAvailable("eye"), RuntimeError("boom")):
+        rig = Rig(router=FakeRouter(error=error))
+        rig.picture()
+        assert len(rig.router.calls) == 1
+        assert not rig.due()  # no back-to-back sweep: the interval gates it
+        rig.clock.now += rig.cfg.surroundings.room.min_interval_s / 2
+        assert not rig.due()
+        rig.later()
+        assert rig.due(), type(error).__name__
+
+
+def test_an_empty_reply_leaves_the_picture_due():
+    rig = Rig(router=FakeRouter("   "))
+    rig.picture()
+    rig.later()
+    assert rig.due()
+
+
+def test_a_described_picture_is_no_longer_due():
+    rig = Rig()
+    rig.picture()
+    rig.later()
+    assert not rig.due()
+
+
+def test_the_first_picture_survives_a_failure():
+    rig = Rig(router=FakeRouter(error=TimeoutError()), first=True)
+    rig.s.step()
+    rig.sweep()
+    assert len(rig.router.calls) == 1
+    rig.later()
+    rig.router.error = None
+    assert rig.due()
+    rig.sweep()
+    assert rig.s.room(rig.clock.now) == "a living room"
+
+
+def test_sleep_during_a_describe_leaves_the_picture_due():
+    rig = Rig()
+    rig.s.trigger()
+    rig.sweep(done=False)
+
+    class Sleepy(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            rig.bus.publish("robot.asleep", None, rig.clock.now)
+            return "a living room"
+
+    rig.router = Sleepy()
+    rig.finish()
+    assert rig.s.room(rig.clock.now) is None  # the reply is ignored
+    rig.later()
+    assert rig.due()
 
 
 def test_the_last_picture_carries_its_outcome_and_a_failure_its_reason():

@@ -17,10 +17,11 @@ sharp frame, the service thread masks them, joins them left to right by
 descending azimuth (``tile``), encodes one JPEG and asks the image route for one line of text
 (``describe``). Otherwise nothing is sent (``views_missing``) and the picture stays due. Going to
 sleep or rest drops the views and the kept picture; at send time sleep, rest or the radio drop
-it (the picture stays due), a conversation does not. A reply that arrives after the switch went
-off or the route changed (the generation moved) is dropped. HTTP 400 or 415 marks the route
-unsupported until its base URL, model or key changes or the switch goes off and on;
-``max_failures`` failures in a row pause the pictures for ``pause_s``.
+it (the picture stays due), a conversation does not. A picture whose description failed (any
+outcome but ``described``) stays due; the refusal checks hold it until one could go out. A reply
+that arrives after the switch went off or the route changed (the generation moved) is dropped.
+HTTP 400 or 415 marks the route unsupported until its base URL, model or key changes or the
+switch goes off and on; ``max_failures`` failures in a row pause the pictures for ``pause_s``.
 
 The scene check: with no picture due, the head still and ``min_interval_s`` past, about every
 ``check_interval_s`` a frame is compared with the sent view within ``room.view_match_deg`` of
@@ -178,11 +179,11 @@ class Surroundings:
         ]
 
     def _sleep(self) -> None:
-        """The robot sleeps or rests: drop the views, a picture not yet sent (it stays due)
-        and the kept picture, and ignore a reply in flight (its generation moves). The texts
-        stay."""
+        """The robot sleeps or rests: drop the views, a picture not yet sent or still being
+        described (it stays due) and the kept picture, and ignore a reply in flight (its
+        generation moves). The texts stay."""
         with self._lock:
-            if self._job is not None:
+            if self._job is not None or self._describing:
                 self._due = True
             self._views, self._view_index, self._job = {}, None, None
             self._jpeg = None
@@ -498,6 +499,9 @@ class Surroundings:
             if self._last is not None:
                 self._last.update(outcome=outcome, detail=detail)
             self._remember(now, outcome, detail, text, views, span)
+            # a failed picture stays due: the refusal checks (interval, pause, cap, 429 today,
+            # unsupported) hold the head until one could go out again
+            self._due, self._due_ok = text is None, False
             if text is not None:
                 self._failures = 0
                 self._room = (text, now)
