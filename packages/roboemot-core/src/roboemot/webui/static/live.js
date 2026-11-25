@@ -164,6 +164,7 @@ function liveSurroundingsCard(d) {
       kind: liveWord("live_snap_", s.last.kind), n: num(s.last.age_s, 0),
       kb: num(s.last.bytes / 1024, 1), score: num(s.last.sharpness, 0),
     })));
+    if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail)));
   } else {
     parts.push(el("p", { class: "hint" }, t("live_surr_none")));
   }
@@ -173,9 +174,21 @@ function liveSurroundingsCard(d) {
   const counts = Object.entries(s.counts || {}).filter(([, n]) => n > 0);
   if (counts.length) parts.push(el("p", { class: "hint" }, counts.map(([k, n]) => k + " " + n).join(", ")));
   if (said && s.last) parts.push(liveSnapshot(s.last));
+  if (s.history && s.history.length) {
+    parts.push(el("details", {}, el("summary", {}, t("live_surr_history", { n: s.history.length })),
+      el("ol", {}, s.history.map((h) => el("li", {},
+        liveWord("live_snap_", h.kind) + ", " + t("live_surr_ago", { n: num(h.age_s, 0) }) + ": ",
+        h.text || liveSurrOutcome(h.outcome, h.detail))))));
+  }
   const node = card(t("tab_live"), t("live_surroundings"), parts);
   node.id = "live-surroundings-card";
   return node;
+}
+
+// A snapshot's outcome in words, with the reason of a failure: "failed (timed out)".
+function liveSurrOutcome(outcome, detail) {
+  const word = liveWord("live_surr_outcome_", outcome);
+  return detail ? word + " (" + liveWord("live_surr_detail_", detail) + ")" : word;
 }
 
 function liveSnapshot(last) {

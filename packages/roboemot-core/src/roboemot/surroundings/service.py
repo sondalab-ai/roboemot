@@ -57,6 +57,8 @@ log = logging.getLogger(__name__)
 EVENT_KIND = "surroundings"  # the decision events' kind (roboemot.diag)
 OUTCOMES = REASONS[EVENT_KIND]  # every outcome code (roboemot.diag)
 OFF = "off"  # a request while no route has images on: neither counted nor an event
+DESCRIBING = "describing"  # the last snapshot's outcome while its request is open
+TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
 DAILY_LIMIT = "daily_limit"  # today's cap reached, or the provider said 429 today
 RESTING = "resting"
 POLL_S = 0.1  # how often the service thread looks for an attempt past its wait
@@ -120,6 +122,7 @@ class Surroundings:
         self._room: tuple[str, float] | None = None  # (text, stamp)
         self._jpeg: bytes | None = None
         self._last: dict[str, Any] | None = None
+        self._history: list[dict[str, Any]] = []  # the snapshots sent, oldest first (RAM only)
         self._latency_s: float | None = None
         self._counts = dict.fromkeys(OUTCOMES, 0)
         self._unsupported: str | None = None
@@ -436,22 +439,25 @@ class Surroundings:
                 "stamp": started,
                 "bytes": len(sent.jpeg),
                 "sharpness": round(sent.sharpness, ROUND_DIGITS),
+                "outcome": DESCRIBING,
+                "detail": None,
             }
+        detail: str | None = None
         try:
             text = asyncio.run(
                 describe(self.router(), route, sent.kind, sent.jpeg, sent.hint, self._cfg)
             )
             outcome = "described"
         except ImagesUnsupported as exc:
-            outcome, unsupported = "unsupported", exc.code
-        except RateLimited:
-            outcome = DAILY_LIMIT
+            outcome, unsupported, detail = "unsupported", exc.code, exc.code
+        except RateLimited as exc:
+            outcome, detail = DAILY_LIMIT, exc.code
         except Offline:
             outcome = "offline"
         except NoRouteAvailable:
             outcome = "route_unavailable"
         except Exception as exc:
-            outcome = "failed"
+            outcome, detail = "failed", _failure(exc)
             if not isinstance(exc, EmptyDescription):
                 log.warning("surroundings: describe failed: %s", type(exc).__name__)
         now = self.clock()
@@ -461,6 +467,9 @@ class Surroundings:
             if sent.generation != self._generation:
                 return  # the switch went off or the route changed meanwhile
             self._latency_s = now - started
+            if self._last is not None:
+                self._last.update(outcome=outcome, detail=detail)
+            self._remember(sent.kind, now, outcome, detail, text)
             if text is not None:
                 self._failures = 0
                 if sent.kind == "shown":
@@ -478,6 +487,15 @@ class Surroundings:
                     self._paused_until = now + self._cfg.surroundings.pause_s
             self._lock.notify_all()
         self._count(outcome, sent.kind)
+
+    def _remember(
+        self, kind: Kind, now: float, outcome: str, detail: str | None, text: str | None
+    ) -> None:
+        """Add a snapshot sent to the history (lock held), at most ``history_size``."""
+        self._history.append(
+            {"kind": kind, "stamp": now, "outcome": outcome, "detail": detail, "text": text}
+        )
+        del self._history[: max(0, len(self._history) - self._cfg.surroundings.history_size)]
 
     def close(self) -> None:
         """Stop the thread and drop every subscription."""
@@ -584,7 +602,13 @@ class Surroundings:
         now = self.clock()
         with self._lock:
             shown = self._shown[1] if self._shown is not None else None
-        return {**self.state(), "described": {"shown": shown, "room": self.room(now)}}
+            history = [
+                {**{k: v for k, v in h.items() if k != "stamp"},
+                 "age_s": round(now - h["stamp"], ROUND_DIGITS)}
+                for h in reversed(self._history)
+            ]  # fmt: skip
+        described = {"shown": shown, "room": self.room(now)}
+        return {**self.state(), "described": described, "history": history}
 
     # ------------------------------------------------------------------- config
 
@@ -604,6 +628,7 @@ class Surroundings:
             self._attempt = self._pending = None
             self._shown = self._room = None
             self._jpeg, self._last, self._reference = None, None, None
+            self._history = []
             self._lock.notify_all()
 
     def _count(self, outcome: str, kind: Kind) -> None:
@@ -620,3 +645,15 @@ def _trust(cfg: RoboEmotConfig) -> tuple[str, str, str, str] | None:
     if route is None:
         return None
     return route.name, route.base_url, route.model, route.api_key
+
+
+def _failure(exc: Exception) -> str:
+    """Why a description failed, as a code (never the server's text): ``timeout``, ``empty``
+    (a blank reply, often a model that thought through its whole budget), ``http_<status>``
+    or ``error``."""
+    if isinstance(exc, EmptyDescription):
+        return EMPTY
+    if isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
+        return TIMEOUT
+    status = getattr(exc, "status_code", None)
+    return f"http_{status}" if isinstance(status, int) else ERROR

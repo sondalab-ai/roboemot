@@ -478,3 +478,55 @@ def test_a_429_stops_snapshots_until_the_next_day():
     assert rig.s.request("shown", "e1", "cup") == "daily_limit"
     rig.day = rig.day + dt.timedelta(days=1)
     assert rig.s.request("shown", "e1", "cup") is None
+
+
+# ---- the last snapshot's outcome and the history (owner, 2026-11-25)
+
+
+def test_the_last_snapshot_carries_its_outcome_and_a_failure_its_reason():
+    rig = Rig(router=FakeRouter(error=TimeoutError()))
+    rig.s._want_first = False
+    describe_room(rig)
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "timeout")
+    ok = Rig(router=FakeRouter("a kitchen"))
+    ok.s._want_first = False
+    describe_room(ok)
+    assert ok.s.state()["last"]["outcome"] == "described"
+
+
+def test_an_empty_reply_is_failed_empty():
+    rig = Rig(router=FakeRouter("   "))
+    rig.s._want_first = False
+    describe_room(rig)
+    assert (rig.s.state()["last"]["outcome"], rig.s.state()["last"]["detail"]) == (
+        "failed",
+        "empty",
+    )
+
+
+def test_the_history_lists_the_last_snapshots_newest_first_with_their_texts():
+    rig = Rig(cfg=config(history_size=2, room={"max_per_day": 0}), router=FakeRouter("a kitchen"))
+    rig.s._want_first = False
+    describe_room(rig)
+    rig.router.reply = "a study"
+    describe_room(rig)
+    rig.router.error = TimeoutError()
+    describe_room(rig)
+    history = rig.s.live()["history"]
+    assert [(h["outcome"], h["text"]) for h in history] == [
+        ("failed", None),
+        ("described", "a study"),
+    ]
+    assert all(h["kind"] == "room" and h["age_s"] >= 0 for h in history)
+
+
+def test_the_history_holds_no_text_in_the_state_and_is_dropped_when_the_switch_goes_off():
+    rig = Rig(router=FakeRouter("Marcello's desk"))
+    rig.s._want_first = False
+    describe_room(rig)
+    assert "Marcello" not in repr(rig.s.state())
+    assert rig.s.live()["history"][0]["text"] == "Marcello's desk"
+    rig.cfg = config(images=False)
+    rig.s.apply_config(rig.cfg)
+    assert rig.s.live()["history"] == []
