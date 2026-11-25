@@ -481,6 +481,7 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
         body_yaw=None,
     )
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
+        "attention",
         "circadian_motion",
         "dance_motion_map",
         "expression_map",
