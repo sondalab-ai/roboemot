@@ -145,27 +145,32 @@ function liveMotionCard(d) {
   return card(t("tab_live"), t("live_motion"), el("p", {}, badge(state.strings["live_motion_" + s] || s, tone)));
 }
 
-// Surroundings card (SPEC 8, Surroundings snapshots): the room picture the image route was last
-// sent (views joined left to right) and what it said. Codes, counts, view count, span, sizes and
+// Surroundings card (SPEC 8, Surroundings snapshots): the room picture last sent (views joined
+// left to right), the image route that described it (or last tried) and what it said; the image
+// routes in priority order with the ones skipped today and their reason code. Codes, counts, view count, span, sizes and
 // scores always; the description and the last picture only with the video preview on (the server
 // sends `described` then). The picture is fetched once per new picture (its view count, size and
 // score), kept as a blob URL; text is set as text, never parsed as markup.
 const liveSnap = { key: null, url: null };
-const LIVE_SURR_TONE = { on: "success", unsupported: "danger", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning", daily_limit: "warning" };
+const LIVE_SURR_TONE = { on: "success", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning", daily_limit: "warning" };
 
 function liveSurroundingsCard(d) {
   const s = d.surroundings;
   if (!s) return null;
   const parts = [el("p", {}, badge(liveWord("live_surr_state_", s.state), LIVE_SURR_TONE[s.state] || "info"),
     s.route ? " " + s.route : "")];
-  if (s.unsupported) parts.push(el("p", { class: "hint" }, t("live_surr_unsupported", { code: s.unsupported })));
+  if (s.routes && s.routes.length > 1) {
+    parts.push(liveRow(t("live_surr_routes"), s.routes.map(liveSurrRoute).join(", ")));
+  } else if (s.routes && s.routes.length === 1 && s.routes[0].skipped) {
+    parts.push(el("p", { class: "hint" }, liveSurrRoute(s.routes[0])));
+  }
   if (s.paused_s > 0) parts.push(el("p", { class: "hint" }, t("live_surr_paused", { n: num(s.paused_s, 0) })));
   if (s.last) {
     parts.push(liveRow(t("live_surr_last"), t("live_surr_last_value", {
       views: liveSurrViews(s.last), n: num(s.last.age_s, 0),
       kb: num(s.last.bytes / 1024, 1), score: num(s.last.sharpness, 0),
     })));
-    if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail)));
+    if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail, s.last.route)));
   } else {
     parts.push(el("p", { class: "hint" }, t("live_surr_none")));
   }
@@ -178,7 +183,8 @@ function liveSurroundingsCard(d) {
     parts.push(el("details", {}, el("summary", {}, t("live_surr_history", { n: s.history.length })),
       el("ol", {}, s.history.map((h) => el("li", {},
         liveSurrViews(h) + ", " + t("live_surr_ago", { n: num(h.age_s, 0) }) + ": ",
-        h.text || liveSurrOutcome(h.outcome, h.detail))))));
+        h.text || liveSurrOutcome(h.outcome, h.detail, h.route),
+        h.text && h.route ? " (" + t("live_surr_via", { route: h.route }) + ")" : "")))));
   }
   const node = card(t("tab_live"), t("live_surroundings"), parts);
   node.id = "live-surroundings-card";
@@ -190,10 +196,19 @@ function liveSurrViews(p) {
   return t("live_surr_views", { views: num(p.views, 0), span: num(p.span_deg, 0) });
 }
 
-// A picture's outcome in words, with the reason of a failure: "failed (timed out)".
-function liveSurrOutcome(outcome, detail) {
+// A picture's outcome in words, with the reason of a failure and the route: "failed (timed out),
+// via gemini".
+function liveSurrOutcome(outcome, detail, route) {
   const word = liveWord("live_surr_outcome_", outcome);
-  return detail ? word + " (" + liveWord("live_surr_detail_", detail) + ")" : word;
+  const text = detail ? word + " (" + liveWord("live_surr_detail_", detail) + ")" : word;
+  return route ? text + ", " + t("live_surr_via", { route }) : text;
+}
+
+// One image route's status: "gemini: skipped until tomorrow (http_429)", "claude: ready".
+function liveSurrRoute(r) {
+  if (r.skipped) return r.route + ": " + t("live_surr_route_skipped", { code: r.reason || "" });
+  if (r.paused_s > 0) return r.route + ": " + t("live_surr_route_paused", { n: num(r.paused_s, 0) });
+  return r.route + ": " + t("live_surr_route_ready");
 }
 
 function liveSnapshot(last) {

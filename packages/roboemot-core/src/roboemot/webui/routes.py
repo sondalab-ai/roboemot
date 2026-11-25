@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 
 from .. import paths
-from ..config.schema import LLMRoute, RoboEmotConfig, active_realtime_route
+from ..config.schema import LLMRoute, RoboEmotConfig, active_realtime_route, image_routes
 from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
@@ -152,7 +152,7 @@ class RouteChecker:
                     **(
                         {"session": session if r is active else None}
                         if r.kind == "realtime"
-                        else _images_fields(r, images)
+                        else _images_fields(r, image_routes(cfg), images)
                     ),
                 }
                 for r in cfg.llm_routes
@@ -442,15 +442,37 @@ def _nonzero(counts: dict[str, int] | None) -> dict[str, int]:
     return {k: v for k, v in (counts or {}).items() if v}
 
 
-def _images_fields(route: LLMRoute, status: dict[str, Any] | None) -> dict[str, Any]:
+def _images_fields(
+    route: LLMRoute, ranked: list[LLMRoute], status: dict[str, Any] | None
+) -> dict[str, Any]:
     """A chat route's "Sees images" switch and its state (SPEC 8, Surroundings snapshots):
-    ``off`` while the switch is off, else the service's state (``on``, ``unsupported``,
-    ``paused``, ``no_vision``) and the unsupported reason code. Codes only."""
+    ``off`` while the switch is off; ``skipped`` (with its reason code) while this route is
+    skipped today, ``paused`` while it is paused, else the service's state (``on``,
+    ``paused``, ``no_vision``, ``daily_limit``, ...). ``images_rank`` is its place among the
+    routes with images on (1 is tried first; the ``llm_routes`` order, owner decision
+    2026-11-25) and ``images_count`` their number. Codes only."""
     if not route.images:
-        return {"images": False, "images_state": "off", "images_reason": None}
-    state = (status or {}).get("state") or "on"
+        return {
+            "images": False,
+            "images_state": "off",
+            "images_reason": None,
+            "images_rank": None,
+            "images_count": len(ranked),
+        }
+    status = status or {}
+    own = next((r for r in status.get("routes") or [] if r.get("route") == route.name), {})
+    state = status.get("state") or "on"
+    if own.get("skipped"):
+        state = "skipped"
+    elif own.get("paused_s"):
+        state = "paused"
+    elif state == "off":
+        state = "on"
+    names = [r.name for r in ranked]
     return {
         "images": True,
-        "images_state": "on" if state == "off" else state,
-        "images_reason": (status or {}).get("unsupported"),
+        "images_state": state,
+        "images_reason": own.get("reason") if state == "skipped" else None,
+        "images_rank": names.index(route.name) + 1,
+        "images_count": len(names),
     }
