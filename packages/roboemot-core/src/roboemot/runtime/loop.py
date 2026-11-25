@@ -156,6 +156,7 @@ def _tick_until_stopped(
             episode_rate(governor, p.selector)  # follow a shown object
         alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
+            snap = host.surroundings
             ctx = scan_context(
                 now,
                 live,
@@ -165,6 +166,7 @@ def _tick_until_stopped(
                 circadian=host.circadian,
                 alone=alone,
                 music=calm,
+                picture_due=snap is not None and snap.picture_due(),
             )
             scan_tick(ctx, p.scan, p.loop, live, bus=host.bus)
         if host.soothe_runner is not None and host.speech_output is not None:

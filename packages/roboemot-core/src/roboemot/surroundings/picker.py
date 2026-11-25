@@ -1,11 +1,11 @@
-"""The snapshot picker (SPEC 8, Surroundings snapshots; design 2026-11-24, 5.3).
+"""The view picker (SPEC 8, Surroundings snapshots; designs 2026-11-24, 5.3; 2026-11-25).
 
-A frame taken while the head moves, or while a shown thing moves, is skipped with that reason.
-The other frames join a window of at most ``surroundings.candidates`` frames from
-``surroundings.window_s``; when the window closes the sharpest frame wins if it scores at least
-``surroundings.min_sharpness``, else the window clears (``too_blurry``) and the attempt goes on.
-At ``wait_s`` the attempt ends with its last skip reason. Not thread-safe: the vision thread
-offers frames, its owner reads ``result`` under its own lock.
+One picker per view of a photo sweep. A frame taken while the head moves is skipped. The other
+frames join a window of at most ``surroundings.candidates`` frames from ``surroundings.window_s``;
+when the window closes the sharpest frame wins if it scores at least
+``surroundings.min_sharpness``, else the window clears and the view goes on. The dwell bounds the
+view, not the picker: when it ends, ``best`` takes what the open window holds. Not thread-safe:
+the vision thread offers frames under its owner's lock.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Callable
 import numpy as np
 
 from ..config.schema import SurroundingsConfig
-from .types import Candidate, Skip
+from .types import Candidate
 
 SHARPNESS_SIDE_PX = 256  # the grey copy is scored at most this long, so a big crop costs little
 COLOUR_DIMS = 3  # HxWxC
@@ -44,39 +44,33 @@ def sharpness(image: np.ndarray) -> float:
 
 
 class Picker:
-    """One snapshot attempt. ``cfg`` gives the live surroundings settings, ``wait_s`` the
-    attempt's longest wait (``shown.wait_s`` or ``room.wait_s``), ``now`` its start."""
+    """The frames of one view. ``cfg`` gives the live surroundings settings."""
 
-    def __init__(self, cfg: Callable[[], SurroundingsConfig], wait_s: float, now: float) -> None:
-        self.cfg, self.wait_s, self.start = cfg, wait_s, now
+    def __init__(self, cfg: Callable[[], SurroundingsConfig]) -> None:
+        self.cfg = cfg
         self.window: list[Candidate] = []
-        self.last_skip: Skip | None = None
 
-    def offer(
-        self, image: np.ndarray | None, stamp: float, *, head_moving: bool, object_moving: bool
-    ) -> None:
-        """Offer one shaped frame (None: no frame could be shaped)."""
-        if image is None:
-            self.last_skip = "no_frame"
-        elif head_moving:
-            self.last_skip = "head_moving"
-        elif object_moving:
-            self.last_skip = "object_moving"
-        else:
+    def offer(self, image: np.ndarray, stamp: float, *, head_moving: bool) -> None:
+        """Offer one shrunk frame; skipped while the head moves."""
+        if not head_moving:
             self.window.append(Candidate(image, stamp, sharpness(image)))
 
-    def result(self, now: float) -> Candidate | Skip | None:
-        """The chosen frame, the reason the attempt ended without one, or None while it goes
-        on."""
+    def result(self, now: float) -> Candidate | None:
+        """The sharpest frame of a window that closed at ``now``, if it is sharp enough; None
+        while the window is open or when it closed with every frame blurred (it clears)."""
         cfg = self.cfg()
-        if self.window and (
-            len(self.window) >= cfg.candidates or now - self.window[0].stamp >= cfg.window_s
+        if not self.window or (
+            len(self.window) < cfg.candidates and now - self.window[0].stamp < cfg.window_s
         ):
-            best = max(self.window, key=lambda c: c.sharpness)
-            self.window = []
-            if best.sharpness >= cfg.min_sharpness:
-                return best
-            self.last_skip = "too_blurry"
-        if now - self.start >= self.wait_s:
-            return self.last_skip or "no_frame"
-        return None
+            return None
+        best = self.best()
+        self.window = []
+        return best
+
+    def best(self) -> Candidate | None:
+        """The sharpest frame of the open window at or above ``min_sharpness``, or None (the
+        window stays)."""
+        if not self.window:
+            return None
+        best = max(self.window, key=lambda c: c.sharpness)
+        return best if best.sharpness >= self.cfg().min_sharpness else None

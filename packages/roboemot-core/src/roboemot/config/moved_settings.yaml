@@ -60,6 +60,10 @@ dropped:
   privacy.debug_recording: no debug recording; no code read the opt-in (SPEC 12, 2026-11-16)
   tools.radio.touch_stop: no touch stop; it missed held heads and fired on the robot's own moves (SPEC 11, 2026-11-19)
   tools.radio.touch_stop_check_s: no touch stop (SPEC 11, 2026-11-19)
+  surroundings.hold_s: a photo sweep's dwell holds the head (SPEC 8, 2026-11-25)
+  surroundings.shown: no picture of a shown thing (SPEC 8, 2026-11-25)
+  surroundings.room.max_per_day: one kind of picture, one daily cap (SPEC 8, 2026-11-25)
+  surroundings.room.wait_s: a photo sweep's dwell bounds each view (SPEC 8, 2026-11-25)
 dropped_entries:
   appraisal.rules:
     person.known_child: one person.known event for everyone (SPEC 7, 2026-10-23)

@@ -1,27 +1,34 @@
-"""The surroundings service (SPEC 8, Surroundings snapshots; design 2026-11-24).
+"""The surroundings service (SPEC 8, Surroundings snapshots; designs 2026-11-24, 2026-11-25).
 
-The feature is on exactly while one route has ``images`` on. A trigger asks for a snapshot
-(``request``): a shown thing (the expressor, on a new shown look), the room (a wake from sleep or
-rest, the end of a scan sweep, a scene change against the last room snapshot with the head
-still). A request
-is refused with a reason code when the feature is off or cannot run (``no_vision``,
-``unsupported``, ``paused``, ``offline``, ``route_unavailable``), when the robot sleeps, rests or
-the quiet hours run (``asleep``), the radio plays (``music``), a room snapshot finds the
-conversation busy (``busy``) or a room snapshot came too soon (``interval``). A new shown request
-replaces an open attempt.
+The feature is on exactly while one route has ``images`` on. A room picture becomes due
+(``trigger``) at a wake from sleep, at the end of a rest and after a scene change; one is owed at
+start and at switch-on and retried, uncounted, about every ``room.check_interval_s`` until it
+passes. Every refusal check runs first: off, ``no_vision``, ``unsupported``, ``paused``,
+``daily_limit`` (the cap or a 429 today), ``offline``, ``route_unavailable``, the robot's
+``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is counted and
+nothing turns. While due, the service thread checks again every ``POLL_S``, uncounted, and
+``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
 
-An open attempt takes frames from the vision thread (``tap``): each is shrunk, its detected faces
-masked, a shown thing cropped, and offered to the ``Picker`` with the head and thing motion. The
-chosen frame is encoded once and handed to the service thread (``step``), which asks the image
-route for one line of text (``describe``). A reply that arrives after the switch went off or the
-route changed (the generation moved) is dropped. HTTP 400 or 415 marks the route unsupported until
-its base URL, model or key changes or the switch goes off and on; ``max_failures`` failures in a
-row pause the snapshots for ``pause_s``. The gate is checked again before a frame is chosen and
-before it is sent; going to sleep or rest drops the attempt, the chosen frame and the kept image.
+A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
+names one, the vision thread's frames (``tap``) go to that view's ``Picker``, and the face boxes
+of every face run on that view's frames are kept to mask that view only. At
+``world.scan_finished`` with ``photo`` the views are taken; when every planned view has a still,
+sharp frame and a face run, the service thread masks them, joins them left to right by
+descending azimuth (``tile``), encodes one JPEG and asks the image route for one line of text
+(``describe``). Otherwise nothing is sent (``views_missing``) and the picture stays due. Going to
+sleep or rest drops the views and the kept picture; at send time sleep, rest or the radio drop
+it (the picture stays due), a conversation does not. A reply that arrives after the switch went
+off or the route changed (the generation moved) is dropped. HTTP 400 or 415 marks the route
+unsupported until its base URL, model or key changes or the switch goes off and on;
+``max_failures`` failures in a row pause the pictures for ``pause_s``.
 
-Privacy (SPEC 12): frames, crops, JPEGs and texts stay in RAM. Logs, decision events and
+The scene check: with no picture due, the head still and ``min_interval_s`` past, about every
+``check_interval_s`` a frame is compared with the sent view within ``room.view_match_deg`` of
+the head's yaw; a changed share of ``room.changed_share`` is a trigger.
+
+Privacy (SPEC 12): frames, views, JPEGs and texts stay in RAM. Logs, decision events and
 ``state`` carry codes, counts, ages, sizes and scores; only ``live`` (the Live card) and the
-scene summary read the texts, and only ``jpeg`` the last image sent.
+scene summary read the texts, and only ``jpeg`` the last picture sent.
 """
 
 from __future__ import annotations
@@ -32,8 +39,8 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -49,81 +56,104 @@ from ..vision.track_stats import head_pose
 from ..vision.types import Box, Frame
 from ..world import FrameSpec
 from .describer import EmptyDescription, describe
-from .image import NoEncoder, crop, encode_jpeg, mask_faces, shrink
+from .image import NoEncoder, encode_jpeg, mask_faces, shrink, tile
 from .picker import Picker
-from .types import Candidate, Kind
+from .types import Candidate
 
 log = logging.getLogger(__name__)
 
 EVENT_KIND = "surroundings"  # the decision events' kind (roboemot.diag)
 OUTCOMES = REASONS[EVENT_KIND]  # every outcome code (roboemot.diag)
-OFF = "off"  # a request while no route has images on: neither counted nor an event
-DESCRIBING = "describing"  # the last snapshot's outcome while its request is open
+OFF = "off"  # a trigger while no route has images on: neither counted nor an event
+BUSY = "busy"  # the conversation is not idle: refuses a trigger, never a picture already swept
+VIEWS_MISSING = "views_missing"  # a photo sweep ended without a frame for every view
+DESCRIBING = "describing"  # the last picture's outcome while its request is open
 TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
 DAILY_LIMIT = "daily_limit"  # today's cap reached, or the provider said 429 today
 RESTING = "resting"
-POLL_S = 0.1  # how often the service thread looks for an attempt past its wait
+FULL_CIRCLE_DEG = 360.0
+POLL_S = 0.1  # how often the service thread checks a due picture again
 JOIN_TIMEOUT_S = 2.0
 ROUND_DIGITS = 3
 
 
 @dataclass
-class _Attempt:
-    kind: Kind
-    token: str
-    hint: str
+class _View:
+    """One view of the photo sweep being taken: its picker and the face boxes of every face
+    run on its own frames (in the shrunk frame's pixels)."""
+
+    azimuth_rad: float
     picker: Picker
-    generation: int
+    faces: list[Box] = field(default_factory=list)
+    runs: int = 0
+    chosen: Candidate | None = None
+
+    def frame(self) -> Candidate | None:
+        """The sharpest chosen frame, the open window's included; None without one."""
+        found = [c for c in (self.chosen, self.picker.best()) if c is not None]
+        return max(found, key=lambda c: c.sharpness, default=None)
 
 
-@dataclass
-class _Sent:
-    kind: Kind
-    token: str
-    hint: str
-    jpeg: bytes
+@dataclass(frozen=True)
+class _Shot:
+    azimuth_rad: float
+    image: np.ndarray = field(repr=False)
+    faces: tuple[Box, ...]
     sharpness: float
+
+
+@dataclass(frozen=True)
+class _Job:
+    shots: tuple[_Shot, ...]
     generation: int
 
 
 class Surroundings:
     """See the module docstring. ``cfg`` gives the configuration at start (``apply_config``
     keeps a copy up to date: the stack validates on every read), ``router`` the live router,
-    ``gate(kind)`` a reason code or None from the robot's state, ``speed(entry_id)`` a shown
-    thing's angular speed (deg/s) or None, ``vision`` whether frames and OpenCV are there,
-    ``frame_spec`` the head's dofs, ``encode`` the JPEG encoder (OpenCV's)."""
+    ``gate()`` a reason code or None from the robot's state, ``scan_view`` the view the head
+    dwells at (``ScanController.view``), ``views_planned`` the photo sweep's view count,
+    ``vision`` whether frames and OpenCV are there, ``frame_spec`` the head's dofs, ``encode``
+    the JPEG encoder (OpenCV's)."""
 
     def __init__(
         self,
         cfg: Callable[[], RoboEmotConfig],
         router: Callable[[], Any],
         *,
-        gate: Callable[[Kind], str | None],
-        speed: Callable[[str], float | None],
+        gate: Callable[[], str | None],
+        scan_view: Callable[[], tuple[int, float] | None],
+        views_planned: Callable[[], int],
         vision: bool,
         frame_spec: FrameSpec | None,
         clock: Callable[[], float] = time.monotonic,
         encode: Callable[[np.ndarray, int], bytes] = encode_jpeg,
         today: Callable[[], dt.date] = dt.date.today,
     ) -> None:
-        self.router, self.gate, self.speed, self.encode = router, gate, speed, encode
-        self.today = today
-        # describe requests sent today, all and room ones, and the day the provider said 429
-        self._day: dt.date | None = None
-        self._sent_all = self._sent_room = 0
-        self._limited_on: dt.date | None = None
+        self.router, self.gate, self.encode, self.today = router, gate, encode, today
+        self.scan_view, self.views_planned = scan_view, views_planned
         self.vision, self.frame_spec, self.clock = vision, frame_spec, clock
         self.events: EventSink = no_events
         self._cfg = cfg()
         self._trust = _trust(self._cfg)
         self._lock = threading.Condition()
-        self._attempt: _Attempt | None = None
-        self._pending: _Sent | None = None
-        self._shown: tuple[str, str] | None = None  # (token, text)
+        # describe requests sent today and the day the provider said 429
+        self._day: dt.date | None = None
+        self._sent = 0
+        self._limited_on: dt.date | None = None
+        self._due = False  # a trigger passed: a photo sweep is wanted
+        self._due_ok = False  # and the refusal checks still pass (the service thread's poll)
+        self._want_first = image_route(self._cfg) is not None  # owed at start and switch-on
+        self._first_tried = -math.inf
+        self._views: dict[int, _View] = {}
+        self._view_index: int | None = None
+        self._job: _Job | None = None
+        self._describing = False  # a job taken by the service thread is on its way
+        self._references: list[tuple[float, np.ndarray]] = []  # (azimuth, thumbnail) per view
         self._room: tuple[str, float] | None = None  # (text, stamp)
         self._jpeg: bytes | None = None
         self._last: dict[str, Any] | None = None
-        self._history: list[dict[str, Any]] = []  # the snapshots sent, oldest first (RAM only)
+        self._history: list[dict[str, Any]] = []  # the pictures sent, oldest first (RAM only)
         self._latency_s: float | None = None
         self._counts = dict.fromkeys(OUTCOMES, 0)
         self._unsupported: str | None = None
@@ -131,13 +161,9 @@ class Surroundings:
         self._paused_until = -math.inf
         self._last_room = -math.inf
         self._last_check = -math.inf
-        self._reference: np.ndarray | None = None
         self._generation = 0
         self._head = HeadStill()  # the vision thread's only
         self._rested = False
-        self._describing: str | None = None  # the token of the describe request in flight
-        # a first room snapshot is owed at start and at switch-on (owner, 2026-11-25)
-        self._want_first = image_route(self._cfg) is not None
         self._unsubscribe: list[Callable[[], None]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -145,20 +171,23 @@ class Surroundings:
     # ------------------------------------------------------------------ triggers
 
     def attach(self, bus: Bus) -> None:
-        """Subscribe the room triggers (``robot.awake``, leaving a rest, ``world.scan_finished``)
-        and the drops (``robot.asleep``, entering a rest)."""
+        """Subscribe the triggers (``robot.awake``, leaving a rest), the drops
+        (``robot.asleep``, entering a rest) and the end of a sweep (``world.scan_finished``)."""
         self._unsubscribe = [
-            bus.subscribe("robot.awake", lambda msg: self.request("room")),
+            bus.subscribe("robot.awake", lambda msg: self.trigger()),
             bus.subscribe("robot.asleep", lambda msg: self._sleep()),
             bus.subscribe("circadian.state", self._on_circadian),
-            bus.subscribe("world.scan_finished", lambda msg: self.request("room")),
+            bus.subscribe("world.scan_finished", self._on_scan_finished),
         ]
 
     def _sleep(self) -> None:
-        """The robot sleeps or rests: drop the open attempt, the chosen frame and the kept
-        snapshot, and ignore a reply in flight (its generation moves). The texts stay."""
+        """The robot sleeps or rests: drop the views, a picture not yet sent (it stays due)
+        and the kept picture, and ignore a reply in flight (its generation moves). The texts
+        stay."""
         with self._lock:
-            self._attempt = self._pending = None
+            if self._job is not None:
+                self._due = True
+            self._views, self._view_index, self._job = {}, None, None
             self._jpeg = None
             self._generation += 1
             self._lock.notify_all()
@@ -172,31 +201,32 @@ class Surroundings:
             self._sleep()
         elif self._rested:
             self._rested = False
-            self.request("room")
+            self.trigger()
 
-    def request(
-        self, kind: Kind, token: str = "", hint: str = "", count: bool = True
-    ) -> str | None:
-        """Open a snapshot attempt; None when it opened, else the reason code (also counted
-        and sent as a decision event, except ``off`` and with ``count`` false)."""
-        now = self.clock()
-        reason = self._refusal(kind, now)
+    def trigger(self, count: bool = True) -> str | None:
+        """Make a room picture due; None when it is due (or already on its way), else the
+        reason code (also counted and sent as a decision event, except ``off`` and with
+        ``count`` false)."""
+        with self._lock:
+            if self._due or self._job is not None or self._describing:
+                return None
+        reason = self._refusal(self.clock())
         if reason is None:
             with self._lock:
-                if kind == "room" and (
-                    self._attempt is not None
-                    or self._pending is not None
-                    or self._describing is not None
-                ):
-                    reason = "busy"
-                else:
-                    self._open(kind, token, hint, now)
-                    return None
+                self._due = self._due_ok = True
+                self._lock.notify_all()
+            return None
         if reason != OFF and count:
-            self._count(reason, kind)
+            self._count(reason)
         return reason
 
-    def _refusal(self, kind: Kind, now: float) -> str | None:
+    def picture_due(self) -> bool:
+        """Whether a picture is due and could be sent now (SPEC 5A: the scan's photo sweep).
+        Lock-held read only: the checks run on the service thread."""
+        with self._lock:
+            return self._due and self._due_ok
+
+    def _refusal(self, now: float) -> str | None:
         cfg = self._cfg
         route = image_route(cfg)
         if route is None:
@@ -208,7 +238,7 @@ class Surroundings:
                 return "unsupported"
             if now < self._paused_until:
                 return "paused"
-            if self._capped(kind):
+            if self._capped():
                 return DAILY_LIMIT
             last_room = self._last_room
         router = self.router()
@@ -216,175 +246,133 @@ class Surroundings:
             return "offline"
         if route.name not in {r.name for r in router.eligible()}:
             return "route_unavailable"
-        reason = self.gate(kind)
+        reason = self.gate()
         if reason is not None:
             return reason
-        if kind == "room" and now - last_room < cfg.surroundings.room.min_interval_s:
+        if now - last_room < cfg.surroundings.room.min_interval_s:
             return "interval"
         return None
 
-    def _capped(self, kind: Kind | None) -> bool:
+    def _capped(self) -> bool:
         """Whether today's cap is reached (lock held): the provider said 429 today, or
-        ``max_per_day`` (and for a room snapshot ``room.max_per_day``) requests went out;
-        ``kind`` None checks the overall cap only. A new day resets the counts."""
+        ``max_per_day`` requests went out. A new day resets the count."""
         today = self.today()
         if today != self._day:
-            self._day, self._sent_all, self._sent_room = today, 0, 0
-        s = self._cfg.surroundings
-        if self._limited_on == today or (s.max_per_day and self._sent_all >= s.max_per_day):
-            return True
-        return kind == "room" and bool(s.room.max_per_day) and self._sent_room >= s.room.max_per_day
-
-    def _open(self, kind: Kind, token: str, hint: str, now: float) -> None:
-        """Open an attempt (lock held); a shown attempt replaces any open attempt."""
-        s = self._cfg.surroundings
-        wait_s = s.shown.wait_s if kind == "shown" else s.room.wait_s
-        picker = Picker(lambda: self._cfg.surroundings, wait_s, now)
-        self._attempt = _Attempt(kind, token, hint, picker, self._generation)
-        if kind == "room":
-            self._last_room = now
-        elif self._shown is not None and self._shown[0] != token:
-            self._shown = None
-        self._lock.notify_all()
-
-    def cancel(self, token: str) -> None:
-        """Close the open shown attempt for ``token`` (its reaction was not queued): nothing is
-        sent for it."""
-        with self._lock:
-            if self._attempt is not None and self._attempt.token == token:
-                self._attempt = None
-                self._lock.notify_all()
-
-    def hold_until(self) -> float | None:
-        """When the head hold of the open attempt ends (its start plus ``surroundings.hold_s``),
-        None without an open attempt or with ``hold_s`` 0 (owner, 2026-11-25)."""
-        hold_s = self._cfg.surroundings.hold_s
-        with self._lock:
-            attempt = self._attempt
-        if attempt is None or hold_s <= 0:
-            return None
-        return attempt.picker.start + hold_s
-
-    def holding(self, now: float) -> bool:
-        """Whether the head should hold still at ``now``."""
-        until = self.hold_until()
-        return until is not None and now < until
+            self._day, self._sent = today, 0
+        cap = self._cfg.surroundings.max_per_day
+        return self._limited_on == today or bool(cap and self._sent >= cap)
 
     # ------------------------------------------------------------- vision thread
 
     def wanted(self) -> bool:
-        """Whether the vision thread should call ``tap``: an attempt is open, or the room's
-        scene check is due."""
+        """Whether the vision thread should call ``tap``: a due picture's view is being taken,
+        or the scene check is due."""
+        view = self.scan_view()
         now = self.clock()
         s = self._cfg.surroundings
         with self._lock:
-            if self._attempt is not None:
-                return True
+            if view is not None:
+                return self._due
             return (
-                image_route(self._cfg) is not None
+                not self._due
+                and self._job is None
+                and bool(self._references)
+                and image_route(self._cfg) is not None
                 and self.vision
-                and (self._reference is not None or self._want_first)
                 and self._unsupported is None
                 and now >= self._paused_until
                 and now - self._last_room >= s.room.min_interval_s
                 and now - self._last_check >= s.room.check_interval_s
             )
 
-    def tap(self, frame: Frame, faces: list[Box], shown: Box | None) -> None:
-        """One frame from the vision thread (SPEC 5): offer it to the open attempt, or run the
-        room's scene check."""
+    def tap(self, frame: Frame, faces: list[Box] | None) -> None:
+        """One frame from the vision thread (SPEC 5) with the boxes of this frame's face run
+        (None: no face run on it): offer it to the view the head dwells at, or run the scene
+        check."""
         cfg = self._cfg
-        s = cfg.surroundings
         pose = head_pose(frame.joint_state, self.frame_spec)
         if pose is not None:
             self._head.observe(
                 frame.stamp, pose, math.radians(cfg.vision.object_gate.head_still_deg)
             )
-        moving = pose is not None and self._head.moving(frame.stamp, s.settle_s)
+        moving = pose is not None and self._head.moving(frame.stamp, cfg.surroundings.settle_s)
+        view = self.scan_view()
+        if view is not None:
+            self._take(view, frame, faces, moving)
+        elif pose is not None and not moving:
+            self._check_scene(frame, faces, pose[0])
+
+    def _take(
+        self, view: tuple[int, float], frame: Frame, faces: list[Box] | None, moving: bool
+    ) -> None:
+        """Offer the frame to view ``view`` (index, azimuth); a view entered again starts
+        over."""
+        index, azimuth = view
+        small, boxes = shrink(frame.image, faces or [], self._cfg.surroundings.max_side_px)
+        if not moving and small is frame.image:
+            small = small.copy()  # kept past this frame: never the pipeline's buffer
         with self._lock:
-            attempt = self._attempt
-        if attempt is None:
-            self._check_scene(frame, faces, moving)
-            return
-        image, thing_moving = self._shape(attempt, frame, faces, shown)
-        with self._lock:
-            if self._attempt is not attempt:
+            if not self._due:
                 return
-            attempt.picker.offer(image, frame.stamp, head_moving=moving, object_moving=thing_moving)
-            outcome = self._settle(attempt, frame.stamp)
-        if outcome is not None:
-            self._count(outcome, attempt.kind)
+            entry = self._views.get(index)
+            if entry is None or self._view_index != index:
+                entry = self._views[index] = _View(azimuth, Picker(lambda: self._cfg.surroundings))
+                self._view_index = index
+            if faces is not None:
+                entry.runs += 1
+                entry.faces.extend(boxes)
+            entry.picker.offer(small, frame.stamp, head_moving=moving)
+            chosen = entry.picker.result(frame.stamp)
+            if chosen is not None and (
+                entry.chosen is None or chosen.sharpness > entry.chosen.sharpness
+            ):
+                entry.chosen = chosen
 
-    def _shape(
-        self, attempt: _Attempt, frame: Frame, faces: list[Box], shown: Box | None
-    ) -> tuple[np.ndarray | None, bool]:
-        """The frame as it would be sent (shrunk, faces masked, a shown thing cropped) and
-        whether the shown thing moves too fast."""
-        s = self._cfg.surroundings
-        if attempt.kind == "room":
-            small, boxes = shrink(frame.image, faces, s.max_side_px)
-            return mask_faces(small, boxes), False
-        if shown is None:
-            return None, False
-        small, boxes = shrink(frame.image, [*faces, shown], s.max_side_px)
-        image = crop(mask_faces(small, boxes[:-1]), boxes[-1], s.shown.margin)
-        speed = self.speed(attempt.token)
-        return image, speed is not None and speed > s.shown.max_speed_deg_s
-
-    def _settle(self, attempt: _Attempt, now: float) -> str | None:
-        """Close ``attempt`` when its picker decided (lock held): the chosen frame goes to the
-        service thread; a skip reason is returned for counting."""
-        result = attempt.picker.result(now)
-        if result is None:
-            return None
-        self._attempt = None
-        if not isinstance(result, Candidate):
-            return result
-        reason = self.gate(attempt.kind)  # the robot's state may have changed since the request
-        if reason is not None:
-            return reason
-        try:
-            jpeg = self.encode(result.image, self._cfg.surroundings.jpeg_quality)
-        except NoEncoder:
-            self.vision = False
-            return "no_vision"
-        if attempt.kind == "room":
-            self._reference = self._thumb(result.image)
-        self._pending = _Sent(
-            attempt.kind, attempt.token, attempt.hint, jpeg, result.sharpness, attempt.generation
-        )
-        self._lock.notify_all()
-        return None
+    def _on_scan_finished(self, msg: Message) -> None:
+        """``world.scan_finished`` (the motion loop's thread): take the views of a photo sweep
+        for the service thread when every planned view has a frame and a face run, else count
+        ``views_missing`` (the picture stays due). Any other sweep drops stray views."""
+        payload = msg.payload
+        photo = isinstance(payload, Mapping) and payload.get("photo") is True
+        planned = self.views_planned()
+        with self._lock:
+            views, self._views, self._view_index = self._views, {}, None
+            if not photo or not self._due:
+                return
+            shots = [s for i in range(planned) if (s := _shot(views.get(i))) is not None]
+            complete = planned > 0 and len(shots) == planned
+            if complete:
+                self._due = self._due_ok = False
+                self._job = _Job(tuple(shots), self._generation)
+                self._lock.notify_all()
+        if not complete:
+            self._count(VIEWS_MISSING)
 
     def _thumb(self, image: np.ndarray) -> np.ndarray | None:
         gate = self._cfg.vision.object_gate
         return thumbnail(image, gate.thumb_width_px, gate.thumb_height_px)
 
-    def _check_scene(self, frame: Frame, faces: list[Box], moving: bool) -> None:
-        """With the head still and the room check due: the first room snapshot still owed (at
-        start or switch-on; its refusals while the robot is busy are not counted, it tries again
-        at the next check), or a view that changed by ``room.changed_share`` since the last room
-        snapshot, asks for one."""
-        if moving or not self.wanted():
+    def _check_scene(self, frame: Frame, faces: list[Box] | None, yaw: float) -> None:
+        """With the head still and the check due: compare the frame with the sent view nearest
+        the head's ``yaw``, when it is within ``room.view_match_deg``; a changed share of
+        ``room.changed_share`` is a trigger."""
+        if not self.wanted():
             return
         s = self._cfg.surroundings
-        small, boxes = shrink(frame.image, faces, s.max_side_px)
-        thumb = self._thumb(mask_faces(small, boxes))
         with self._lock:
             self._last_check = self.clock()
-            reference, first = self._reference, self._want_first
-        if reference is None and first:
-            if self.request("room", count=False) is None:
-                with self._lock:
-                    self._want_first = False
+            references = self._references
+        near = min(references, key=lambda r: _gap(r[0], yaw), default=None)
+        if near is None or _gap(near[0], yaw) > math.radians(s.room.view_match_deg):
             return
-        if thumb is None:
+        small, boxes = shrink(frame.image, faces or [], s.max_side_px)
+        thumb = self._thumb(mask_faces(small, boxes))
+        if thumb is None or thumb.shape != near[1].shape:
             return
-        if reference is None or reference.shape != thumb.shape:
-            return
-        share = moved_share(thumb, reference, self._cfg.vision.object_gate.pixel_diff)
-        if share >= s.room.changed_share:
-            self.request("room")
+        if moved_share(thumb, near[1], self._cfg.vision.object_gate.pixel_diff) >= (
+            s.room.changed_share
+        ):
+            self.trigger()
 
     # ------------------------------------------------------------ service thread
 
@@ -400,7 +388,7 @@ class Surroundings:
     def _run(self) -> None:
         while not self._stop.is_set():
             with self._lock:
-                if self._pending is None:
+                if self._job is None:
                     self._lock.wait(POLL_S)
             try:
                 self.step()
@@ -408,46 +396,92 @@ class Surroundings:
                 log.warning("surroundings: step failed: %s", type(exc).__name__)
 
     def step(self) -> None:
-        """Close an attempt past its wait, then describe the chosen frame, if any."""
-        now = self.clock()
+        """Send a swept picture, if any; then check a due picture again, or retry the first
+        one owed."""
         with self._lock:
-            attempt = self._attempt
-            expired = self._settle(attempt, now) if attempt is not None else None
-            sent, self._pending = self._pending, None
-        if expired is not None and attempt is not None:
-            self._count(expired, attempt.kind)
-        if sent is not None:
-            self._describe(sent)
+            job, self._job = self._job, None
+            self._describing = job is not None
+        if job is not None:
+            try:
+                self._send(job)
+            finally:
+                with self._lock:
+                    self._describing = False
+                    self._lock.notify_all()
+        self._refresh(self.clock())
 
-    def _describe(self, sent: _Sent) -> None:
-        route = image_route(self._cfg)
-        reason = self.gate(sent.kind)  # checked again right before the image leaves
-        if reason is not None:
-            self._count(reason, sent.kind)
+    def _refresh(self, now: float) -> None:
+        with self._lock:
+            due, first = self._due, self._want_first
+            retry = now - self._first_tried >= self._cfg.surroundings.room.check_interval_s
+        if due:
+            ok = self._refusal(now) is None
+            with self._lock:
+                if self._due:
+                    self._due_ok = ok
+        elif first and retry:
+            with self._lock:
+                self._first_tried = now
+            if self.trigger(count=False) is None:
+                with self._lock:
+                    self._want_first = False
+
+    def _send(self, job: _Job) -> None:
+        reason = self.gate()  # checked again right before the picture leaves
+        if reason is not None and reason != BUSY:
+            self._count(reason)
+            with self._lock:
+                self._due = image_route(self._cfg) is not None
             return
+        try:
+            jpeg, references = self._compose(job)
+        except NoEncoder:
+            self.vision = False
+            self._count("no_vision")
+            return
+        self._describe(job, jpeg, references)
+
+    def _compose(self, job: _Job) -> tuple[bytes, list[tuple[float, np.ndarray]]]:
+        """The joined JPEG (views masked, left to right by descending azimuth: positive yaw
+        turns left) and the thumbnail of each view for the scene check."""
+        s = self._cfg.surroundings
+        shots = sorted(job.shots, key=lambda shot: shot.azimuth_rad, reverse=True)
+        masked = [mask_faces(shot.image, shot.faces) for shot in shots]
+        joined = tile(masked, s.room.separator_px, min(s.room.view_height_px, s.max_side_px))
+        jpeg = self.encode(joined, s.jpeg_quality)
+        references = [
+            (shot.azimuth_rad, thumb)
+            for shot, image in zip(shots, masked, strict=True)
+            if (thumb := self._thumb(image)) is not None
+        ]
+        return jpeg, references
+
+    def _describe(self, job: _Job, jpeg: bytes, references: list[tuple[float, np.ndarray]]) -> None:
+        cfg = self._cfg
+        route = image_route(cfg)
+        views = len(job.shots)
+        span = _span_deg([shot.azimuth_rad for shot in job.shots], cfg.world.camera_fov_h_deg)
         started = self.clock()
         text, unsupported = None, None
         with self._lock:
-            if route is None or sent.generation != self._generation:
+            if route is None or job.generation != self._generation:
                 return  # the switch went off, the route changed or the robot slept meanwhile
-            self._describing = sent.token
-            self._capped(None)  # rolls the day before counting
-            self._sent_all += 1
-            self._sent_room += sent.kind == "room"
-            self._jpeg = sent.jpeg
+            self._capped()  # rolls the day before counting
+            self._sent += 1
+            self._last_room = started
+            self._jpeg, self._references = jpeg, references
             self._last = {
-                "kind": sent.kind,
+                "views": views,
+                "span_deg": span,
                 "stamp": started,
-                "bytes": len(sent.jpeg),
-                "sharpness": round(sent.sharpness, ROUND_DIGITS),
+                "bytes": len(jpeg),
+                "sharpness": round(min(shot.sharpness for shot in job.shots), ROUND_DIGITS),
                 "outcome": DESCRIBING,
                 "detail": None,
             }
         detail: str | None = None
         try:
-            text = asyncio.run(
-                describe(self.router(), route, sent.kind, sent.jpeg, sent.hint, self._cfg)
-            )
+            text = asyncio.run(describe(self.router(), route, jpeg, views, span, cfg))
             outcome = "described"
         except ImagesUnsupported as exc:
             outcome, unsupported, detail = "unsupported", exc.code, exc.code
@@ -463,20 +497,15 @@ class Surroundings:
                 log.warning("surroundings: describe failed: %s", type(exc).__name__)
         now = self.clock()
         with self._lock:
-            self._describing = None
-            self._lock.notify_all()
-            if sent.generation != self._generation:
+            if job.generation != self._generation:
                 return  # the switch went off or the route changed meanwhile
             self._latency_s = now - started
             if self._last is not None:
                 self._last.update(outcome=outcome, detail=detail)
-            self._remember(sent.kind, now, outcome, detail, text)
+            self._remember(now, outcome, detail, text, views, span)
             if text is not None:
                 self._failures = 0
-                if sent.kind == "shown":
-                    self._shown = (sent.token, text)
-                else:
-                    self._room = (text, now)
+                self._room = (text, now)
             elif unsupported is not None:
                 self._unsupported = unsupported
             elif outcome == DAILY_LIMIT:
@@ -487,14 +516,21 @@ class Surroundings:
                     self._failures = 0
                     self._paused_until = now + self._cfg.surroundings.pause_s
             self._lock.notify_all()
-        self._count(outcome, sent.kind)
+        self._count(outcome)
 
     def _remember(
-        self, kind: Kind, now: float, outcome: str, detail: str | None, text: str | None
+        self, now: float, outcome: str, detail: str | None, text: str | None, views: int, span: int
     ) -> None:
-        """Add a snapshot sent to the history (lock held), at most ``history_size``."""
+        """Add a picture sent to the history (lock held), at most ``history_size``."""
         self._history.append(
-            {"kind": kind, "stamp": now, "outcome": outcome, "detail": detail, "text": text}
+            {
+                "stamp": now,
+                "views": views,
+                "span_deg": span,
+                "outcome": outcome,
+                "detail": detail,
+                "text": text,
+            }
         )
         del self._history[: max(0, len(self._history) - self._cfg.surroundings.history_size)]
 
@@ -511,33 +547,6 @@ class Surroundings:
 
     # ------------------------------------------------------------------ readers
 
-    def description(self, token: str) -> str | None:
-        """The shown thing's description for the look ``token``, None without one."""
-        with self._lock:
-            shown = self._shown
-        return shown[1] if shown is not None and shown[0] == token else None
-
-    def wait_description(self, token: str, timeout_s: float) -> str | None:
-        """``description(token)``, waiting at most ``timeout_s`` while an attempt, a chosen
-        frame or a describe request for ``token`` is still open; None once none is."""
-        deadline = self.clock() + max(0.0, timeout_s)
-        with self._lock:
-            while True:
-                if self._shown is not None and self._shown[0] == token:
-                    return self._shown[1]
-                left = deadline - self.clock()
-                if left <= 0 or not self._open_for(token):
-                    return None
-                self._lock.wait(min(left, POLL_S))
-
-    def _open_for(self, token: str) -> bool:
-        """Whether something for ``token`` is still on its way (lock held)."""
-        return (
-            (self._attempt is not None and self._attempt.token == token)
-            or (self._pending is not None and self._pending.token == token)
-            or self._describing == token
-        )
-
     def room(self, now: float) -> str | None:
         """The room description, None without one or past ``room.max_age_s``."""
         with self._lock:
@@ -547,12 +556,12 @@ class Surroundings:
         return room[0]
 
     def jpeg(self) -> bytes | None:
-        """The last snapshot sent (RAM only)."""
+        """The last picture sent (RAM only)."""
         with self._lock:
             return self._jpeg
 
     def state(self) -> dict[str, Any]:
-        """Codes, counts, ages, sizes and scores (SPEC 12A): no text, token or image."""
+        """Codes, counts, ages, sizes and scores (SPEC 12A): no text and no image."""
         now = self.clock()
         route = image_route(self._cfg)
         reach = self._reach(route)
@@ -565,7 +574,7 @@ class Surroundings:
                 code = "unsupported"
             elif now < self._paused_until:
                 code = "paused"
-            elif self._capped(None):
+            elif self._capped():
                 code = DAILY_LIMIT
             else:
                 code = reach or "on"
@@ -576,7 +585,8 @@ class Surroundings:
             return {
                 "state": code,
                 "route": route.name if route is not None else None,
-                "attempt": self._attempt.kind if self._attempt is not None else None,
+                "due": self._due,
+                "views": len(self._views),
                 "counts": dict(self._counts),
                 "last": last,
                 "latency_s": None
@@ -602,41 +612,64 @@ class Surroundings:
         """``state`` plus the texts (``described``), for the Live card only."""
         now = self.clock()
         with self._lock:
-            shown = self._shown[1] if self._shown is not None else None
             history = [
                 {**{k: v for k, v in h.items() if k != "stamp"},
                  "age_s": round(now - h["stamp"], ROUND_DIGITS)}
                 for h in reversed(self._history)
             ]  # fmt: skip
-        described = {"shown": shown, "room": self.room(now)}
-        return {**self.state(), "described": described, "history": history}
+        return {**self.state(), "described": {"room": self.room(now)}, "history": history}
 
     # ------------------------------------------------------------------- config
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """A stack subscriber: keep the copy. The switch going off, or the image route's base
-        URL, model or key changing, drops the attempt, the texts and the image, and ignores a
-        reply still in flight; a changed route also clears the unsupported mark and the pause."""
+        URL, model or key changing, drops the due picture, the views, the texts and the image,
+        and ignores a reply still in flight; a changed route also clears the unsupported mark
+        and the pause, and owes a first picture again when the switch is on."""
         trust = _trust(cfg)
         with self._lock:
             self._cfg = cfg
             if trust == self._trust:
                 return
             self._trust = trust
-            self._want_first = trust is not None  # switched on, or another route: a new room
+            self._want_first = trust is not None
+            self._first_tried = -math.inf
             self._unsupported, self._failures, self._paused_until = None, 0, -math.inf
             self._generation += 1
-            self._attempt = self._pending = None
-            self._shown = self._room = None
-            self._jpeg, self._last, self._reference = None, None, None
+            self._due = self._due_ok = False
+            self._views, self._view_index, self._job = {}, None, None
+            self._room = None
+            self._jpeg, self._last, self._references = None, None, []
             self._history = []
             self._lock.notify_all()
 
-    def _count(self, outcome: str, kind: Kind) -> None:
+    def _count(self, outcome: str) -> None:
         with self._lock:
             self._counts[outcome] = self._counts.get(outcome, 0) + 1
-        log.debug("surroundings: %s %s", kind, outcome)
-        self.events(EVENT_KIND, outcome, snapshot=kind)
+        log.debug("surroundings: %s", outcome)
+        self.events(EVENT_KIND, outcome)
+
+
+def _shot(view: _View | None) -> _Shot | None:
+    """The view's frame for the picture: None without a still, sharp frame or without a face
+    run on its own frames (a face could go out uncovered)."""
+    if view is None or view.runs == 0:
+        return None
+    frame = view.frame()
+    if frame is None:
+        return None
+    return _Shot(view.azimuth_rad, frame.image, tuple(view.faces), frame.sharpness)
+
+
+def _gap(a: float, b: float) -> float:
+    """The angle between two bearings (rad), wrapped: -179 and 179 degrees are 2 apart."""
+    return abs(math.remainder(a - b, 2 * math.pi))
+
+
+def _span_deg(azimuths: list[float], fov_h_deg: float) -> int:
+    """The span the views cover: their azimuth range plus one camera view, at most a circle."""
+    spread = math.degrees(max(azimuths) - min(azimuths))
+    return round(min(FULL_CIRCLE_DEG, spread + fov_h_deg))
 
 
 def _trust(cfg: RoboEmotConfig) -> tuple[str, str, str, str] | None:

@@ -262,11 +262,6 @@ class Tracker:
         self._tracks: list[Track] = []
         self.observer: TrackDiagnostics | None = None
 
-    def boxes(self, stamp: float) -> list[Box]:
-        """The boxes of every track, confirmed or not, matched within ``lost_s`` of ``stamp``:
-        what the tracker still holds as there (the surroundings face mask, SPEC 8)."""
-        return [t.box for t in self._tracks if stamp - t.last_stamp <= self.cfg.lost_s]
-
     @property
     def live(self) -> int:
         """How many tracks are alive now, tentative ones included (not yet expired)."""

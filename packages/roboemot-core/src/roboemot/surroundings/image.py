@@ -1,9 +1,10 @@
-"""Snapshot shaping (SPEC 8, Surroundings snapshots; design 2026-11-24, 5.4).
+"""Picture shaping (SPEC 8, Surroundings snapshots; designs 2026-11-24, 5.4; 2026-11-25).
 
-Order on the vision thread: ``shrink`` the frame to the sent size (boxes scaled with it),
-``mask_faces`` with every detected face box, ``crop`` around a shown thing. ``encode_jpeg``
-runs once, on the chosen frame. Every function returns a new array: the frame is shared with the
-vision pipeline and is never written. Nothing here logs an image (SPEC 12).
+On the vision thread each frame of a view is ``shrink``-ed to the sent size (boxes scaled with
+it). On the service thread each view's chosen frame gets ``mask_faces`` with that view's face
+boxes, the views are joined by ``tile`` and ``encode_jpeg`` runs once. Every function returns a
+new array (``shrink`` may return its input unchanged): the frame is shared with the vision
+pipeline and is never written. Nothing here logs an image (SPEC 12).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import numpy as np
 from ..vision.types import Box
 
 MASK_BGR = (128, 128, 128)  # flat grey over a detected face
+SEPARATOR_BGR = (0, 0, 0)  # the line between two views of the joined picture
 
 
 def opencv_available() -> bool:
@@ -73,14 +75,35 @@ def mask_faces(image: np.ndarray, faces: Sequence[Box]) -> np.ndarray:
     return out
 
 
-def crop(image: np.ndarray, box: Box, margin: float) -> np.ndarray:
-    """A copy of ``box`` grown by ``margin`` of its width and height on each side, clipped to
-    the image."""
-    x1, y1, x2, y2 = box
-    gx, gy = (x2 - x1) * margin, (y2 - y1) * margin
-    height, width = image.shape[:2]
-    a, b, c, d = _pixels((x1 - gx, y1 - gy, x2 + gx, y2 + gy), height, width)
-    return image[b:d, a:c].copy()
+def _to_height(image: np.ndarray, height: int) -> np.ndarray:
+    """``image`` scaled to ``height`` rows, its aspect kept (as is when already that high)."""
+    rows, cols = image.shape[:2]
+    if rows == height:
+        return image
+    width = max(1, round(cols * height / rows))
+    try:
+        import cv2
+
+        return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+    except ImportError:
+        ys = np.arange(height) * rows // height
+        xs = np.arange(width) * cols // width
+        return np.ascontiguousarray(image[ys][:, xs])
+
+
+def tile(views: Sequence[np.ndarray], separator_px: int, height_px: int) -> np.ndarray:
+    """One picture of ``views`` (BGR, at least one) joined left to right in the given order,
+    each scaled to one height, the smallest view's height capped at ``height_px`` (never
+    upscaled), with a ``separator_px`` wide ``SEPARATOR_BGR`` column between two views."""
+    height = min(height_px, *(v.shape[0] for v in views))
+    line = np.empty((height, separator_px, len(SEPARATOR_BGR)), np.uint8)
+    line[:] = SEPARATOR_BGR
+    parts: list[np.ndarray] = []
+    for view in views:
+        if parts:
+            parts.append(line)
+        parts.append(_to_height(view, height))
+    return np.concatenate(parts, axis=1)
 
 
 def encode_jpeg(image: np.ndarray, quality: int) -> bytes:

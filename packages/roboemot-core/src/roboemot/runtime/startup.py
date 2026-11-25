@@ -374,18 +374,19 @@ def start_announcer(host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup:
 def start_surroundings(
     host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
 ) -> None:
-    """Camera snapshots described as text (SPEC 8, Surroundings snapshots): built whether or
-    not a route has images on, so the switch works without a restart. The pipeline's snapshot
-    tap feeds it; the gate reads the robot's sleep, rest, quiet hours, radio and conversation.
-    Sets ``host.surroundings``."""
+    """Room pictures described as text (SPEC 8, Surroundings snapshots): built whether or not
+    a route has images on, so the switch works without a restart. The pipeline's picture tap
+    feeds it the views the scan names (``ScanController.view``, SPEC 5A); the gate reads the
+    robot's sleep, rest, quiet hours, radio and conversation. Sets ``host.surroundings``."""
     pipeline = p.perception.pipeline
+    scan = p.scan
 
-    def gate(kind: str) -> str | None:
+    def gate() -> str | None:
         if robot_resting(host, lambda: p.sleep.asleep):
             return "asleep"
         if media_on(host):
             return "music"
-        if kind == "room" and not conversation_idle(host, time.monotonic()):
+        if not conversation_idle(host, time.monotonic()):
             return "busy"
         return None
 
@@ -393,7 +394,8 @@ def start_surroundings(
         stack.effective,
         lambda: p.hub.router,
         gate=gate,
-        speed=lambda entry_id: p.selector.speed_dps(entry_id),
+        scan_view=scan.view if scan is not None else lambda: None,
+        views_planned=scan.views_planned if scan is not None else lambda: 0,
         vision=pipeline is not None and opencv_available(),
         frame_spec=pipeline.frame_spec if pipeline is not None else None,
     )

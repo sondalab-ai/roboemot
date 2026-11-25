@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
 RESTING = "resting"  # the circadian state of a rest
 OBJECTS = "objects"  # the governor stage of the object detector
+FULL_CIRCLE_DEG = 360.0
 
 
 def idle_command(
@@ -149,14 +150,18 @@ def scan_context(
     circadian: CircadianModel | None = None,
     alone: bool = False,
     music: bool = False,
+    picture_due: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
     quiet hours (SPEC 7A) from the local ``hour``, whether the robot is alone (SPEC 5A,
     ``AloneWatch``), whether the robot dances to room music (``music``, SPEC 7), the persona's
-    energy effects (``effects``, computed from the persona when the caller has not cached them)."""
+    energy effects (``effects``, computed from the persona when the caller has not cached them),
+    and whether a surroundings room picture is due (``picture_due``, SPEC 8) with the photo
+    sweep's wait, span and view dwell from ``cfg.surroundings``."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     engaged = selector.engaged or selector.episode_active  # a shown thing: no time limit
+    room = cfg.surroundings.room
     return ScanContext(
         now=now,
         engaged=engaged,
@@ -167,6 +172,10 @@ def scan_context(
         alone=alone,
         music=music,
         effects=effects if effects is not None else persona_effects(cfg.persona),
+        picture_due=picture_due,
+        picture_wait_s=room.sweep_wait_s,
+        picture_amplitude=room.span_deg / FULL_CIRCLE_DEG,
+        picture_dwell_s=cfg.surroundings.view_dwell_s,
     )
 
 

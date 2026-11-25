@@ -22,16 +22,8 @@ def test_defaults_match_the_design():
     # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s)
     assert (s.describe_max_tokens, s.describe_first_token_s) == (1024, 30.0)
     assert s.min_sharpness == 20.0
-    sh = s.shown
-    assert (sh.max_speed_deg_s, sh.margin, sh.wait_s, sh.max_chars) == (15, 0.25, 4, 80)
     r = s.room
-    assert (r.min_interval_s, r.changed_share, r.wait_s, r.max_chars, r.max_age_s) == (
-        300,
-        0.5,
-        10,
-        160,
-        3600,
-    )
+    assert (r.min_interval_s, r.changed_share, r.max_chars, r.max_age_s) == (300, 0.5, 160, 3600)
 
 
 def test_two_image_routes_are_rejected():
