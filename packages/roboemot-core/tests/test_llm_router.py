@@ -772,3 +772,35 @@ async def test_a_429_raises_rate_limited():
     with pytest.raises(RateLimited) as caught:
         await r.describe_image(route("eye", "limited.local"), "x", JPEG, 64, first_token_s=3.0)
     assert caught.value.code == "http_429" and len(srv.requests) == 1
+
+
+def _describer(chunks: list[dict]) -> tuple[Router, LLMRoute, list[dict]]:
+    """A router whose one route answers every describe request with ``chunks``."""
+    handler, bodies = _canned(chunks)
+    eye = route("eye", "lan.local")
+    r = Router(
+        [eye],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    return r, eye, bodies
+
+
+async def test_a_blank_describe_reply_cut_by_the_cap_raises_reply_cut():
+    from roboemot.llm.router import ReplyCut
+
+    r, eye, bodies = _describer([_reasoning("x" * 40), _ended(chunk(), "length")])
+    with pytest.raises(ReplyCut):
+        await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0)
+    assert len(bodies) == 1
+    assert not [k for k in bodies[0] if "reason" in k]  # no request field added (SPEC 8)
+
+
+async def test_a_blank_describe_reply_that_ended_normally_comes_back_blank():
+    r, eye, _ = _describer([_reasoning("x" * 40), _ended(chunk(" "), "stop")])
+    assert await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0) == " "
+
+
+async def test_a_describe_reply_with_text_cut_by_the_cap_keeps_its_text():
+    r, eye, _ = _describer([chunk("a desk and"), _ended(chunk(), "length")])
+    assert await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0) == "a desk and"

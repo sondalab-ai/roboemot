@@ -38,8 +38,11 @@ Fallback (owner decisions 2026-11-25): a route that answers 429 (``RateLimited``
 rest of the local day (``today``); one that is not usable (``NoRouteAvailable``: key missing,
 budget spent, unreachable) is passed over for this picture only. Either way the same JPEG goes
 at once to the next route, in the same ``_send``; only when every route refused does the
-picture stay due. Timeouts, empty replies and other errors stay on the route: ``max_failures``
-in a row pause that route for ``pause_s`` (the next picture goes to the next route). A route's
+picture stay due. An empty reply that ended at the token cap (``ReplyCut``, detail ``cut``)
+falls back the same way for this picture only: no skip and no failure on that route, since
+it is a budget problem, not a broken route. Timeouts, other empty replies and other errors
+stay on the route: ``max_failures`` in a row pause that route for ``pause_s`` (the next
+picture goes to the next route). A route's
 marks (skip, failures, pause) are bound to its base URL, model and key reference (the
 ``${secret:name}`` text, never the secret's value): a change clears them. ``max_per_day``
 counts the requests sent to every route together.
@@ -72,7 +75,7 @@ from ..bus import Bus, Message
 from ..circadian.model import CircadianState
 from ..config.schema import LLMRoute, RoboEmotConfig, image_routes
 from ..diag import REASONS, EventSink, no_events
-from ..llm.router import ImagesUnsupported, NoRouteAvailable, Offline, RateLimited
+from ..llm.router import ImagesUnsupported, NoRouteAvailable, Offline, RateLimited, ReplyCut
 from ..vision.scene_change import HeadStill, moved_share, thumbnail
 from ..vision.track_stats import head_pose
 from ..vision.types import Box, Frame
@@ -92,6 +95,7 @@ BUSY = "busy"  # the conversation is not idle: refuses a trigger, never a pictur
 VIEWS_MISSING = "views_missing"  # a photo sweep ended without a frame for every view
 DESCRIBING = "describing"  # the last picture's outcome while its request is open
 TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
+CUT = "cut"  # an empty reply that ended at the token cap: falls back, no mark on the route
 DAILY_LIMIT = "daily_limit"  # today's cap reached, or every image route skipped today
 UNSUPPORTED, ROUTE_UNAVAILABLE = "unsupported", "route_unavailable"
 STALE = "stale"  # a reply from a route changed during its request: dropped, never an outcome
@@ -527,10 +531,10 @@ class Surroundings:
 
     def _describe(self, job: _Job, jpeg: bytes, references: list[tuple[float, np.ndarray]]) -> None:
         """Send the JPEG to the first image route ready now; on a refusal (429, 400 or 415:
-        skipped for the day; not usable: passed over for this picture) send the same JPEG to
-        the next one. The picture's outcome is the last route's; it stays due unless
-        described. A reply from a route changed, removed or switched off during its own
-        request is dropped and the picture stays due."""
+        skipped for the day; not usable or an empty reply cut by the token cap: passed over
+        for this picture) send the same JPEG to the next one. The picture's outcome is the
+        last route's; it stays due unless described. A reply from a route changed, removed or
+        switched off during its own request is dropped and the picture stays due."""
         cfg = self._cfg
         views = len(job.shots)
         span = _span_deg([shot.azimuth_rad for shot in job.shots], cfg.world.camera_fov_h_deg)
@@ -598,7 +602,8 @@ class Surroundings:
         """One describe request to ``route``: (outcome, detail, text, refused). A 429, 400 or
         415 skips the route until the next local day; a ``NoRouteAvailable`` (key missing,
         budget spent, unreachable) only passes it over for this picture and sent nothing, so it
-        is not counted toward the cap; a failure counts toward the route's pause. The outcome
+        is not counted toward the cap; a ``ReplyCut`` (empty at the token cap) passes it over
+        for this picture with no mark; a failure counts toward the route's pause. The outcome
         is ``STALE`` when the route was changed, removed or switched off during the request; a
         reply whose generation moved (sleep, the feature off and on) sets no mark."""
         text, detail, refused = None, None, False
@@ -613,6 +618,8 @@ class Surroundings:
             outcome = "offline"
         except NoRouteAvailable:
             outcome, refused = ROUTE_UNAVAILABLE, True
+        except ReplyCut:
+            outcome, detail, refused = "failed", CUT, True
         except Exception as exc:
             outcome, detail = "failed", _failure(exc)
             if not isinstance(exc, EmptyDescription):
@@ -627,7 +634,9 @@ class Surroundings:
             if current is None or _trust(current) != _trust(route):
                 return STALE, None, None, False  # changed, removed or off: dropped, no mark
             mark = self._mark(current)
-            if refused and outcome != ROUTE_UNAVAILABLE:
+            if detail == CUT:
+                pass  # a budget problem, not a broken route: no skip, no failure
+            elif refused and outcome != ROUTE_UNAVAILABLE:
                 mark.skipped_on, mark.reason = self.today(), detail
             elif text is not None:
                 mark.failures = 0
@@ -860,8 +869,8 @@ def _trust(route: LLMRoute) -> tuple[str, str, str]:
 
 def _failure(exc: Exception) -> str:
     """Why a description failed, as a code (never the server's text): ``timeout``, ``empty``
-    (a blank reply, often a model that thought through its whole budget), ``http_<status>``
-    or ``error``."""
+    (a blank reply that did not end at the token cap; one that did is ``ReplyCut``),
+    ``http_<status>`` or ``error``."""
     if isinstance(exc, EmptyDescription):
         return EMPTY
     if isinstance(exc, TimeoutError | APITimeoutError):

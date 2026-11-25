@@ -12,7 +12,7 @@ import pytest
 from roboemot.bus import Bus
 from roboemot.circadian.model import CircadianState
 from roboemot.config.schema import LLMRoute, RoboEmotConfig, WorldScanConfig
-from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable, RateLimited
+from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable, RateLimited, ReplyCut
 from roboemot.manifest import Dof
 from roboemot.runtime.ticks import scan_tick
 from roboemot.surroundings.image import MASK_BGR
@@ -1226,6 +1226,41 @@ def test_a_reorder_keeps_the_room_the_history_and_the_marks():
         ("gemini_pictures", False),
         ("Claude", True),  # its skip for today survives the move
     ]
+
+
+# ---- an empty reply cut by the token cap (owner decision 2026-11-25)
+
+
+def test_an_empty_reply_cut_by_the_cap_sends_the_same_picture_to_the_next_route():
+    rig = Rig(cfg=two(max_failures=1), router=FakeRouter(errors={"free": ReplyCut("free")}))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.router.calls[0][2] == rig.router.calls[1][2]  # the same JPEG, no new sweep
+    assert rig.s.room(rig.clock.now) == "a living room"
+    assert rig.reasons() == ["described"]
+    free = rig.s.state()["routes"][0]
+    assert (free["skipped"], free["paused_s"]) == (False, 0)  # no skip, no failure
+    assert rig.s._marks["free"].failures == 0
+    assert rig.s.state()["route"] == "free"  # still tried first next time
+
+
+def test_an_empty_reply_cut_on_the_last_route_is_failed_cut_and_marks_nothing():
+    rig = Rig(cfg=config(max_failures=1), router=FakeRouter(error=ReplyCut("eye")))
+    rig.picture()
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "cut")
+    assert rig.s.state()["routes"][0]["paused_s"] == 0
+    rig.later()
+    assert rig.due()
+
+
+def test_an_empty_reply_that_ended_normally_stays_a_failure_and_does_not_fall_back():
+    rig = Rig(cfg=two(max_failures=1), router=FakeRouter("   "))
+    rig.picture()
+    assert rig.routes() == ["free"]
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "empty")
+    assert rig.s.state()["routes"][0]["paused_s"] > 0  # counted: max_failures 1 pauses it
 
 
 def test_history_and_last_carry_the_route_and_the_state_holds_no_text_or_key():

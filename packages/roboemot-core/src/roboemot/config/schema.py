@@ -6690,7 +6690,8 @@ class SurroundingsConfig(Strict):
     describe_max_tokens: int = param(
         4096,
         "Reply token cap of one description request; a model that thinks first spends part of "
-        "it on the thinking, so keep room (the text is cut to the description caps anyway)",
+        "it on the thinking, so keep room (the text is cut to the description caps anyway). A "
+        "blank reply cut by this cap goes to the next image route",
         ge=16,
         le=8192,
         advanced=True,

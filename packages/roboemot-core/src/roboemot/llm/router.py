@@ -114,7 +114,14 @@ class RateLimited(RuntimeError):
         self.code = code
 
 
+class ReplyCut(RuntimeError):
+    """A describe reply had no text and its stream ended at the token cap (``finish_reason``
+    ``length``): a model that thinks first spent the whole ``max_tokens`` on the thinking
+    (SPEC 8, Surroundings snapshots). Not a broken route: the caller may try the next one."""
+
+
 RATE_LIMITED = 429
+CUT_BY_CAP = "length"  # the OpenAI finish_reason of a reply that hit max_tokens
 IMAGE_REFUSED = (400, 415)  # the statuses that mean "no image input" on a describe request
 IMAGE_DATA_URL = "data:image/jpeg;base64,"
 
@@ -414,8 +421,9 @@ class Router:
         ``first_token_timeout_s``; the joined reply text. No fallback and no retry. Raises
         ``Offline`` while offline, ``NoRouteAvailable`` when the route's key is unavailable, it
         is unreachable or its budget is spent, ``RateLimited`` on HTTP 429, ``ImagesUnsupported``
-        on HTTP 400 or 415; other
-        errors propagate. The budget is charged as for any request, image bytes excluded."""
+        on HTTP 400 or 415, ``ReplyCut`` when the reply is blank and ended at the token cap; a
+        blank reply that ended otherwise comes back as it is; other errors propagate. The
+        budget is charged as for any request, image bytes excluded."""
         if route.kind != "chat":
             raise ValueError(f"route {route.name} is a {route.kind} route, not a chat route")
         if self.offline:
@@ -428,6 +436,7 @@ class Router:
             {"type": "image_url", "image_url": {"url": url}},
         ]
         parts: list[str] = []
+        finish: str | None = None
         try:
             async for ev in self._stream_route(
                 route,
@@ -438,13 +447,18 @@ class Router:
             ):
                 if isinstance(ev, TextDelta):
                     parts.append(ev.text)
+                elif isinstance(ev, Done):
+                    finish = ev.finish_reason
         except APIStatusError as exc:
             if exc.status_code == RATE_LIMITED:
                 raise RateLimited(f"http_{exc.status_code}") from None
             if exc.status_code in IMAGE_REFUSED:
                 raise ImagesUnsupported(f"http_{exc.status_code}") from None
             raise
-        return "".join(parts)
+        text = "".join(parts)
+        if not text.strip() and finish == CUT_BY_CAP:
+            raise ReplyCut(route.name)
+        return text
 
     async def _stream_route(
         self,
