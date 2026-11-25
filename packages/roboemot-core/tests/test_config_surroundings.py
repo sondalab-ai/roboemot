@@ -19,8 +19,9 @@ def test_defaults_match_the_design():
     assert (s.max_side_px, s.jpeg_quality) == (768, 80)
     assert (s.max_failures, s.pause_s) == (3, 600)
     # a model that thinks first spends its reply budget on it (gemini-3.5-flash on the robot,
-    # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s)
-    assert (s.describe_max_tokens, s.describe_first_token_s) == (1024, 30.0)
+    # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s;
+    # claude-haiku-5-5: empty under 1024, 313 to 901 completion tokens in a probe)
+    assert (s.describe_max_tokens, s.describe_first_token_s) == (4096, 30.0)
     assert s.image_route_order == []
     assert s.min_sharpness == 20.0
     r = s.room

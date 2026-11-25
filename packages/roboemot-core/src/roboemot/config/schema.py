@@ -6688,7 +6688,7 @@ class SurroundingsConfig(Strict):
         unit="s", ge=60, le=86400, advanced=True,
     )  # fmt: skip
     describe_max_tokens: int = param(
-        1024,
+        4096,
         "Reply token cap of one description request; a model that thinks first spends part of "
         "it on the thinking, so keep room (the text is cut to the description caps anyway)",
         ge=16,
