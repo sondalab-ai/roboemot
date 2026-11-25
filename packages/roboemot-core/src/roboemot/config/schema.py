@@ -6673,6 +6673,13 @@ class SurroundingsConfig(Strict):
     describe_max_tokens: int = param(
         120, "Reply token cap of one description request", ge=16, le=1024, advanced=True
     )
+    describe_first_token_s: float = param(
+        20.0,
+        "Longest wait for the first text of a description, in place of the image route's own "
+        "first_token_timeout_s: a picture and a model that thinks first take longer than a "
+        "spoken turn",
+        unit="s", ge=1, le=120,
+    )  # fmt: skip
     shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
 

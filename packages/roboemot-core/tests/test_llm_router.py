@@ -693,7 +693,9 @@ JPEG = b"\xff\xd8" + b"x" * 4000
 async def test_describe_image_sends_one_text_and_one_image_part():
     srv = Server()
     r = router(srv, [route("eye", "lan.local")])
-    text = await r.describe_image(route("eye", "lan.local"), "Describe it.", JPEG, 64)
+    text = await r.describe_image(
+        route("eye", "lan.local"), "Describe it.", JPEG, 64, first_token_s=3.0
+    )
     assert text == "Ciao Marcello!"
     body = srv.requests[0][1]
     assert body["stream"] is True and body["max_tokens"] == 64
@@ -714,7 +716,9 @@ async def test_a_400_raises_images_unsupported_and_is_not_retried():
     srv = Server()
     r = router(srv, [route("eye", "novision.local"), route("b", "lan.local")])
     with pytest.raises(ImagesUnsupported) as caught:
-        await r.describe_image(route("eye", "novision.local"), "Describe it.", JPEG, 64)
+        await r.describe_image(
+            route("eye", "novision.local"), "Describe it.", JPEG, 64, first_token_s=3.0
+        )
     assert caught.value.code == "http_400"
     assert len(srv.requests) == 1
 
@@ -725,14 +729,16 @@ async def test_a_415_raises_images_unsupported():
     srv = Server()
     r = router(srv, [route("eye", "unsupported.local")])
     with pytest.raises(ImagesUnsupported):
-        await r.describe_image(route("eye", "unsupported.local"), "Describe it.", JPEG, 64)
+        await r.describe_image(
+            route("eye", "unsupported.local"), "Describe it.", JPEG, 64, first_token_s=3.0
+        )
 
 
 async def test_describe_charges_the_budget_without_counting_image_bytes():
     srv = Server()
     eye = route("eye", "nousage.local")
     r = router(srv, [eye])
-    await r.describe_image(eye, "Describe it.", JPEG, 64)
+    await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0)
     assert r.used("eye") == (len("Describe it.") + len("a red mug")) // 4
 
 
@@ -741,5 +747,16 @@ async def test_describe_refuses_a_route_over_budget():
     eye = route("eye", "lan.local", daily_token_budget=0)
     r = router(srv, [eye])
     with pytest.raises(NoRouteAvailable):
-        await r.describe_image(eye, "Describe it.", JPEG, 64)
+        await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0)
     assert srv.requests == []
+
+
+async def test_describe_image_waits_its_own_first_token_time_not_the_routes():
+    srv = Server()
+    eye = route("eye", "slow.local")  # the route's own limit: 0.3 s; the server takes 1 s
+    r = router(srv, [eye])
+    assert (
+        await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0) == "Ciao Marcello!"
+    )
+    with pytest.raises(TimeoutError):
+        await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=0.2)

@@ -13,8 +13,9 @@ class FakeRouter:
     def __init__(self, reply: str) -> None:
         self.reply, self.calls = reply, []
 
-    async def describe_image(self, route, prompt, jpeg, max_tokens):
+    async def describe_image(self, route, prompt, jpeg, max_tokens, first_token_s):
         self.calls.append((route.name, prompt, jpeg, max_tokens))
+        self.first_token_s = first_token_s
         return self.reply
 
 
@@ -45,3 +46,11 @@ async def test_the_room_prompt_asks_to_leave_people_out():
     cfg = RoboEmotConfig(surroundings={"room": {"max_chars": 40}})
     assert await describe(r, ROUTE, "room", b"jpg", "", cfg) == "a living room"
     assert "people" in r.calls[0][1].lower()
+
+
+async def test_the_describe_request_takes_the_surroundings_first_token_time():
+    r = FakeRouter("a red mug")
+    cfg = RoboEmotConfig(surroundings={"describe_first_token_s": 25.0})
+    await describe(r, ROUTE, "room", b"jpg", "", cfg)
+    assert r.first_token_s == 25.0
+    assert RoboEmotConfig().surroundings.describe_first_token_s == 20.0

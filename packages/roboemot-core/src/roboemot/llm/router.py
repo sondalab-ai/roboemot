@@ -396,11 +396,12 @@ class Router:
             await events.aclose()
 
     async def describe_image(
-        self, route: LLMRoute, prompt: str, jpeg: bytes, max_tokens: int
+        self, route: LLMRoute, prompt: str, jpeg: bytes, max_tokens: int, first_token_s: float
     ) -> str:
         """Ask ``route`` once to describe one JPEG (SPEC 8, Surroundings snapshots): one user
         message with a ``text`` part and an ``image_url`` part (a ``data:`` URL), streamed,
-        ``max_tokens`` as given; the joined reply text. No fallback and no retry. Raises
+        ``max_tokens`` as given, ``first_token_s`` in place of the route's
+        ``first_token_timeout_s``; the joined reply text. No fallback and no retry. Raises
         ``Offline`` while offline, ``NoRouteAvailable`` when the route's key is unavailable, it
         is unreachable or its budget is spent, ``ImagesUnsupported`` on HTTP 400 or 415; other
         errors propagate. The budget is charged as for any request, image bytes excluded."""
@@ -418,7 +419,11 @@ class Router:
         parts: list[str] = []
         try:
             async for ev in self._stream_route(
-                route, [{"role": "user", "content": content}], None, max_tokens=max_tokens
+                route,
+                [{"role": "user", "content": content}],
+                None,
+                max_tokens=max_tokens,
+                first_token_s=first_token_s,
             ):
                 if isinstance(ev, TextDelta):
                     parts.append(ev.text)
@@ -435,6 +440,7 @@ class Router:
         tools: list[dict[str, Any]] | None,
         timing: FirstToken | None = None,
         max_tokens: int | None = None,
+        first_token_s: float | None = None,
     ) -> AsyncIterator[Event]:
         """Stream one route. ``first_token_timeout_s`` bounds the time from the request to the
         first real content (text or tool call; role-only chunks do not count);
@@ -467,7 +473,7 @@ class Router:
             create = client.chat.completions.create  # untimed: the first access imports lazily
             await _probe_platform_once()  # untimed too: the SDK's first request spawns processes
             started = loop.time()
-            deadline = started + route.first_token_timeout_s
+            deadline = started + (first_token_s or route.first_token_timeout_s)
             # asyncio.timeout, not wait_for: a barge-in's cancel is never swallowed on 3.11
             async with asyncio.timeout(max(0.0, deadline - loop.time())):
                 stream = await create(**kwargs)

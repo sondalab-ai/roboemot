@@ -1037,5 +1037,6 @@
  "Snapshots of the room in view": "Istantanee della stanza inquadrata",
  "Sees images: this chat route describes camera snapshots (a shown thing, the room) as short text for the scene summary. The snapshots leave the robot; at most one route (SPEC 8, 12)": "Vede immagini: questa route chat descrive le istantanee della camera (un oggetto mostrato, la stanza) con un breve testo per il riassunto della scena. Le istantanee escono dal robot; al massimo una route (SPEC 8, 12)",
  "SPEC 5, 8, 12: camera snapshots as text": "SPEC 5, 8, 12: istantanee della camera come testo",
- "How often the view is compared with the last room snapshot, once min_interval_s passed": "Ogni quanto la vista si confronta con l'ultima istantanea della stanza, passato min_interval_s"
+ "How often the view is compared with the last room snapshot, once min_interval_s passed": "Ogni quanto la vista si confronta con l'ultima istantanea della stanza, passato min_interval_s",
+ "Longest wait for the first text of a description, in place of the image route's own first_token_timeout_s: a picture and a model that thinks first take longer than a spoken turn": "Attesa massima per il primo testo di una descrizione, al posto del first_token_timeout_s della route immagini: un'immagine e un modello che ragiona prima impiegano più di un turno parlato"
 }

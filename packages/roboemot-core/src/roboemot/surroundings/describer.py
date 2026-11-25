@@ -28,7 +28,9 @@ async def describe(
     ``EmptyDescription`` on a blank reply; the router's errors propagate."""
     s = cfg.surroundings
     prompt = surroundings_prompt(kind).replace("{hint}", one_line(hint, s.shown.max_chars))
-    reply = await router.describe_image(route, prompt, jpeg, s.describe_max_tokens)
+    reply = await router.describe_image(
+        route, prompt, jpeg, s.describe_max_tokens, s.describe_first_token_s
+    )
     cap = s.shown.max_chars if kind == "shown" else s.room.max_chars
     text = one_line(reply, cap).strip()
     if not text:
