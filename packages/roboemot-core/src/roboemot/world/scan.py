@@ -35,7 +35,7 @@ import random
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from ..config.schema import WorldScanConfig
 from ..manifest import Dof
@@ -44,10 +44,19 @@ from ..persona import PersonaEffects
 from .sources import ScanPlanner, ScanWaypoint
 
 SOURCE = "scan"
-# a sweep ran to its end; payload {"photo": bool} (SPEC 8, Surroundings snapshots)
+# a sweep ran to its end; payload {"photo": bool, "sweep": int} (SPEC 8, Surroundings snapshots)
 SCAN_FINISHED = "world.scan_finished"
 SLEW_EPS = 1e-9
 Reason = Literal["idle", "wakeup", "unexplained", "picture"]
+
+
+class ScanView(NamedTuple):
+    """The waypoint a photo sweep dwells at: the sweep's id (one per photo sweep, so views of
+    a cancelled sweep never join the next), the coverage index and the base-frame azimuth."""
+
+    sweep: int
+    index: int
+    azimuth_rad: float
 
 
 @dataclass(frozen=True)
@@ -386,7 +395,8 @@ class ScanController:
         self._finished_sweep = False
         self._photo = False  # the running sweep is a photo sweep
         self._coverage = 0  # coverage waypoints of the current or last photo sweep (home excluded)
-        self._view: tuple[int, float] | None = None  # one attribute: read from the vision thread
+        self._view: ScanView | None = None  # one attribute: read from the vision thread
+        self._sweep = 0  # the id of the current or last photo sweep
         self.last_sweep_photo = False  # whether the sweep last reported finished was a photo one
 
     @property
@@ -411,15 +421,21 @@ class ScanController:
         """Whether a photo sweep is in progress."""
         return self._photo and self.runner.active
 
-    def view(self) -> tuple[int, float] | None:
-        """The index and base-frame azimuth of the coverage waypoint where the head dwells now
-        (from the pose's arrival until the dwell ends), only during a photo sweep; None while
-        travelling, on the glide home and outside a photo sweep. Safe from any thread."""
+    def view(self) -> ScanView | None:
+        """The sweep id, index and base-frame azimuth of the coverage waypoint where the head
+        dwells now (from the pose's arrival until the dwell ends), only during a photo sweep;
+        None while travelling, on the glide home and outside a photo sweep. Safe from any
+        thread."""
         return self._view
 
     def views_planned(self) -> int:
         """How many views the current (or last) photo sweep plans; 0 before any."""
         return self._coverage
+
+    @property
+    def sweep_id(self) -> int:
+        """The id of the current (or last) photo sweep; 0 before any."""
+        return self._sweep
 
     def tick(self, ctx: ScanContext, pose: Mapping[str, float], fov_h_rad: float) -> Command | None:
         """Advance one tick and return the scan command, or None when nothing should move.
@@ -430,7 +446,11 @@ class ScanController:
         """
         cmd = self._advance(ctx, pose, fov_h_rad)
         dwelling = self.runner.dwelling() if self._photo else None
-        self._view = dwelling if dwelling is not None and dwelling[0] < self._coverage else None
+        self._view = (
+            ScanView(self._sweep, *dwelling)
+            if dwelling is not None and dwelling[0] < self._coverage
+            else None
+        )
         return cmd
 
     def _advance(
@@ -480,6 +500,7 @@ class ScanController:
         self._photo = d.photo
         if d.photo:
             self._coverage = len(wps)
+            self._sweep += 1
         if not d.engaged:  # glide home at scan pace instead of snapping at the limiter's speed
             names = {n for wp in wps for n in wp.targets}
             home = {n: self.runner.dofs[n].home for n in names}

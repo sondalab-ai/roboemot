@@ -56,6 +56,7 @@ from ..vision.scene_change import HeadStill, moved_share, thumbnail
 from ..vision.track_stats import head_pose
 from ..vision.types import Box, Frame
 from ..world import FrameSpec
+from ..world.scan import ScanView
 from .describer import EmptyDescription, describe
 from .image import NoEncoder, encode_jpeg, mask_faces, shrink, tile
 from .picker import Picker
@@ -120,7 +121,7 @@ class Surroundings:
         router: Callable[[], Any],
         *,
         gate: Callable[[], str | None],
-        scan_view: Callable[[], tuple[int, float] | None],
+        scan_view: Callable[[], ScanView | None],
         views_planned: Callable[[], int],
         vision: bool,
         frame_spec: FrameSpec | None,
@@ -145,6 +146,7 @@ class Surroundings:
         self._first_tried = -math.inf
         self._views: dict[int, _View] = {}
         self._view_index: int | None = None
+        self._sweep: int | None = None  # the photo sweep the views belong to
         self._job: _Job | None = None
         self._describing = False  # a job taken by the service thread is on its way
         self._references: list[tuple[float, np.ndarray]] = []  # (azimuth, thumbnail) per view
@@ -300,12 +302,12 @@ class Surroundings:
         elif pose is not None and not moving:
             self._check_scene(frame, faces, pose[0])
 
-    def _take(
-        self, view: tuple[int, float], frame: Frame, faces: list[Box] | None, moving: bool
-    ) -> None:
+    def _take(self, view: ScanView, frame: Frame, faces: list[Box] | None, moving: bool) -> None:
         """Offer the frame to view ``view`` (index, azimuth) with its own face boxes; a frame
-        without a face run is never a candidate. A view entered again starts over."""
-        index, azimuth = view
+        without a face run is never a candidate. A view entered again, or the first view of
+        another photo sweep (one cancelled without a sleep event leaves its views), starts
+        over."""
+        sweep, index, azimuth = view
         small, boxes = shrink(frame.image, faces or [], self._cfg.surroundings.max_side_px)
         own = tuple(boxes) if faces is not None else None
         if not moving and own is not None and small is frame.image:
@@ -313,6 +315,8 @@ class Surroundings:
         with self._lock:
             if not self._due:
                 return
+            if sweep != self._sweep:
+                self._views, self._view_index, self._sweep = {}, None, sweep
             entry = self._views.get(index)
             if entry is None or self._view_index != index:
                 entry = self._views[index] = _View(azimuth, Picker(lambda: self._cfg.surroundings))
@@ -330,11 +334,15 @@ class Surroundings:
         ``views_missing`` (the picture stays due). Any other sweep drops stray views."""
         payload = msg.payload
         photo = isinstance(payload, Mapping) and payload.get("photo") is True
+        sweep = payload.get("sweep") if isinstance(payload, Mapping) else None
         planned = self.views_planned()
         with self._lock:
+            ours = sweep == self._sweep
             views, self._views, self._view_index = self._views, {}, None
             if not photo or not self._due:
                 return
+            if not ours:
+                views = {}
             shots = [s for i in range(planned) if (s := _shot(views.get(i))) is not None]
             complete = planned > 0 and len(shots) == planned
             if complete:

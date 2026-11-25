@@ -851,7 +851,7 @@ def test_view_is_the_dwelt_coverage_waypoint_and_never_the_home_return():
         seen.append(ctrl.view())
         t += 0.05
     views = [v for v in seen if v is not None]
-    assert {v for v in views} == {(0, 0.3), (1, -0.3)}
+    assert {(v.index, v.azimuth_rad) for v in views} == {(0, 0.3), (1, -0.3)}
     assert seen[0] is None  # travelling to the first waypoint
     last = max(i for i, v in enumerate(seen) if v is not None)
     assert last < len(seen) - 1  # the glide home is not a view
@@ -904,7 +904,7 @@ def test_scan_tick_hides_attention_during_a_photo_sweep_and_reports_photo():
     while not got and t < 400.0:
         scan_tick(pic_ctx(t, engaged=True), ctrl, loop, Cfg, bus=bus)
         t += 0.05
-    assert [m.payload for m in got] == [{"photo": True}]
+    assert [m.payload for m in got] == [{"photo": True, "sweep": 1}]
 
 
 def test_a_photo_sweep_covers_exactly_the_span_whatever_the_energy():
@@ -913,3 +913,34 @@ def test_a_photo_sweep_covers_exactly_the_span_whatever_the_energy():
         _, d = first_decision(ScanPolicy(CFG, random.Random(1)), 0.0, picture_due=True,
                               effects=effects, **PIC)  # fmt: skip
         assert d.photo and d.amplitude == 0.5
+
+
+def test_each_photo_sweep_has_its_own_id_in_its_views():
+    ctrl = photo_ctrl()
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    t = start_photo(ctrl, pose)
+    ids = set()
+    while ctrl.active:
+        cmd = ctrl.tick(pic_ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        if ctrl.view() is not None:
+            ids.add(ctrl.view().sweep)
+        t += 0.05
+    assert ids == {1}
+    t = start_photo_from(ctrl, pose, t)
+    while ctrl.view() is None and ctrl.active:
+        cmd = ctrl.tick(pic_ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        t += 0.05
+    assert ctrl.view().sweep == 2
+
+
+def start_photo_from(ctrl: ScanController, pose: dict, t: float) -> float:
+    while not ctrl.active:
+        cmd = ctrl.tick(pic_ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        t += 0.05
+    return t

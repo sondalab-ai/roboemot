@@ -16,6 +16,7 @@ from roboemot.surroundings.image import MASK_BGR
 from roboemot.surroundings.service import Surroundings
 from roboemot.vision import Frame
 from roboemot.world import FrameSpec
+from roboemot.world.scan import ScanView
 
 SPEC = FrameSpec(yaw_dofs=("head.yaw",), pitch_dofs=("head.pitch",))
 AZIMUTHS = (-90.0, -30.0, 30.0, 90.0)  # Reachy's planner at 180 degrees (design, facts)
@@ -61,8 +62,9 @@ class Scan:
     """The scan controller's seams: the dwelt view and the planned view count."""
 
     def __init__(self) -> None:
-        self.current: tuple[int, float] | None = None
+        self.current: ScanView | None = None
         self.planned = 0
+        self.sweep = 1  # the photo sweep's id
 
     def view(self):
         return self.current
@@ -119,13 +121,18 @@ class Rig:
         self.clock.now += 0.1
 
     def dwell(self, index: int, azimuth_deg: float, frames: int = 12, **kw) -> None:
-        self.scan.current = (index, math.radians(azimuth_deg))
+        self.at(index, math.radians(azimuth_deg))
         for _ in range(frames):
             self.frame(yaw_deg=azimuth_deg, **kw)
         self.scan.current = None
 
+    def at(self, index: int, azimuth_rad: float) -> None:
+        """The head dwells at view ``index`` of the current photo sweep."""
+        self.scan.current = ScanView(self.scan.sweep, index, azimuth_rad)
+
     def sweep(self, azimuths=AZIMUTHS, marks=None, faces=None, done: bool = True) -> None:
-        """A photo sweep over ``azimuths`` (in visit order); ``faces[i]`` the boxes of view i."""
+        """A new photo sweep over ``azimuths`` (in visit order); ``faces[i]`` view i's boxes."""
+        self.scan.sweep += 1
         self.scan.planned = len(azimuths)
         for i, az in enumerate(azimuths):
             mark = marks[i] if marks else 10 * (i + 1)
@@ -135,7 +142,8 @@ class Rig:
             self.finish()
 
     def finish(self, photo: bool = True) -> None:
-        self.bus.publish("world.scan_finished", {"photo": photo}, self.clock.now)
+        payload = {"photo": photo, "sweep": self.scan.sweep}
+        self.bus.publish("world.scan_finished", payload, self.clock.now)
         self.s.step()
 
     def due(self) -> bool:
@@ -282,7 +290,7 @@ def test_a_view_without_a_still_frame_is_missing():
     rig.s.trigger()
     rig.scan.planned = 1
     rig.frame(yaw_deg=0.0)  # the first pose only anchors the head
-    rig.scan.current = (0, 0.0)
+    rig.at(0, 0.0)
     for i in range(1, 13):
         rig.frame(yaw_deg=i * 5.0)  # the head never settles
     rig.scan.current = None
@@ -316,7 +324,7 @@ def test_a_still_frame_without_a_face_run_is_never_chosen():
     rig.s.trigger()
     rig.scan.planned = 1
     rig.frame(yaw_deg=0.0)  # the first pose only anchors the head
-    rig.scan.current = (0, 0.0)
+    rig.at(0, 0.0)
     for _ in range(8):
         rig.frame(image=board(11), faces=None)  # still, sharp, but no face run of its own
     rig.frame(image=board(22), faces=[])  # still, with its own face run
@@ -331,7 +339,7 @@ def test_a_chosen_frame_is_masked_with_its_own_boxes_only():
     rig.s.trigger()
     rig.scan.planned = 1
     rig.frame(yaw_deg=0.0)
-    rig.scan.current = (0, 0.0)
+    rig.at(0, 0.0)
     own, other = (0.0, 0.0, 40.0, 40.0), (100.0, 60.0, 140.0, 100.0)
     rig.frame(image=board(22), faces=[own])  # chosen (candidates=1): masked with its own box
     for _ in range(5):
@@ -342,6 +350,27 @@ def test_a_chosen_frame_is_masked_with_its_own_boxes_only():
     assert int(view[-1, -1, 0]) == 22
     assert (view[0:40, 0:40] == MASK_BGR).all()
     assert not (view[60:100, 100:140] == MASK_BGR).all()
+
+
+def test_views_of_a_sweep_cancelled_without_a_sleep_event_never_join_the_next():
+    rig = Rig()
+    rig.s.trigger()
+    rig.sweep(AZIMUTHS[:2], done=False)  # views 0 and 1, then cancelled (no event at all)
+    rig.scan.sweep += 1  # the next photo sweep
+    rig.scan.planned = 4
+    for i in (2, 3):
+        rig.dwell(i, AZIMUTHS[i])
+    rig.finish()
+    assert rig.router.calls == [] and "views_missing" in rig.reasons()
+
+
+def test_the_end_of_another_sweep_takes_no_views():
+    rig = Rig()
+    rig.s.trigger()
+    rig.sweep(done=False)
+    rig.bus.publish("world.scan_finished", {"photo": True, "sweep": rig.scan.sweep - 1}, 0.0)
+    rig.s.step()
+    assert rig.router.calls == []
 
 
 def test_a_normal_sweep_end_sends_nothing():

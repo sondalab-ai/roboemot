@@ -191,7 +191,7 @@ def scan_tick(
     the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
     sweep is dropped and idle motion carries on; the app keeps running. A sweep that ran to
-    its end publishes ``world.scan_finished`` on ``bus`` with ``{"photo": bool}`` (SPEC 8,
+    its end publishes ``world.scan_finished`` on ``bus`` with ``{"photo", "sweep"}`` (SPEC 8,
     Surroundings snapshots). A photo sweep is not cancelled by engagement, so the attention
     command stays hidden while it runs.
     """
@@ -206,7 +206,8 @@ def scan_tick(
         elif was_active:
             loop.clear(SCAN_SOURCE)
         if scan.take_finished_sweep() and bus is not None:
-            bus.publish(SCAN_FINISHED, {"photo": scan.last_sweep_photo}, ctx.now)
+            payload = {"photo": scan.last_sweep_photo, "sweep": scan.sweep_id}
+            bus.publish(SCAN_FINISHED, payload, ctx.now)
         return scan.active
     except Exception as exc:
         log.warning("scan: %s: %s", type(exc).__name__, exc)
