@@ -10,13 +10,13 @@ import math
 import numpy as np
 from roboemot.bus import Bus
 from roboemot.circadian.model import CircadianState
-from roboemot.config.schema import LLMRoute, RoboEmotConfig
+from roboemot.config.schema import LLMRoute, RoboEmotConfig, WorldScanConfig
 from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable
 from roboemot.surroundings.image import MASK_BGR
 from roboemot.surroundings.service import Surroundings
 from roboemot.vision import Frame
 from roboemot.world import FrameSpec
-from roboemot.world.scan import ScanView
+from roboemot.world.scan import ScanContext, ScanPolicy, ScanView
 
 SPEC = FrameSpec(yaw_dofs=("head.yaw",), pitch_dofs=("head.pitch",))
 AZIMUTHS = (-90.0, -30.0, 30.0, 90.0)  # Reachy's planner at 180 degrees (design, facts)
@@ -194,6 +194,85 @@ def test_the_first_picture_waits_for_a_quiet_moment_without_counting_refusals():
     rig.gate_reason = None
     rig.clock.now += rig.cfg.surroundings.room.check_interval_s
     assert rig.due()
+
+
+def test_the_first_picture_owed_is_marked_first():
+    rig = Rig(first=True)
+    assert rig.due() and rig.s.picture_first()
+
+
+def test_a_later_picture_is_not_marked_first():
+    rig = Rig()
+    rig.bus.publish("robot.awake", None, rig.clock.now)
+    assert rig.due() and not rig.s.picture_first()
+
+
+def test_a_wake_while_the_first_picture_is_owed_makes_that_first_one_due():
+    rig = Rig(gate="asleep", first=True)
+    assert not rig.due()  # the robot starts asleep: the first picture waits
+    rig.gate_reason = None
+    rig.bus.publish("robot.awake", None, rig.clock.now)
+    assert rig.due() and rig.s.picture_first()
+
+
+def test_the_first_picture_is_one_attempt():
+    rig = Rig(first=True)
+    assert rig.due()
+    rig.scan.planned = 4
+    for i, az in enumerate(AZIMUTHS[:3]):  # the last waypoint timed out
+        rig.dwell(i, az)
+    rig.finish()
+    assert "views_missing" in rig.reasons()
+    assert rig.due() and not rig.s.picture_first()
+
+
+def test_a_normal_sweep_end_keeps_the_first_attempt():
+    rig = Rig(first=True)
+    assert rig.due()
+    rig.finish(photo=False)
+    assert rig.due() and rig.s.picture_first()
+
+
+def test_switch_off_and_on_gives_the_first_attempt_again():
+    rig = Rig(first=True)
+    assert rig.due()
+    rig.scan.planned = 4
+    rig.finish()  # a photo sweep without views: the attempt is spent
+    assert not rig.s.picture_first()
+    on = rig.cfg
+    rig.cfg = config(images=False)
+    rig.s.apply_config(rig.cfg)
+    assert not rig.due() and not rig.s.picture_first()
+    rig.cfg = on
+    rig.s.apply_config(rig.cfg)
+    assert rig.due() and rig.s.picture_first()
+
+
+def test_after_the_first_attempt_an_engaged_robot_does_not_sweep_again():
+    """The service's readers fed to the scan policy, as the runtime loop does (SPEC 5A, 8)."""
+    rig = Rig(first=True)
+    policy = ScanPolicy(WorldScanConfig(), None)
+
+    def tick(now: float):
+        return policy.update(
+            ScanContext(
+                now=now,
+                engaged=True,
+                picture_due=rig.due(),
+                picture_first=rig.s.picture_first(),
+                picture_wait_s=rig.cfg.surroundings.room.sweep_wait_s,
+                picture_amplitude=0.5,
+            )
+        )
+
+    first = tick(0.0)
+    assert first is not None and first.photo and first.reason == "picture"
+    rig.scan.planned = 4
+    rig.finish()  # the photo sweep ended with every view missing
+    policy.finished()
+    assert rig.due()
+    wait = rig.cfg.surroundings.room.sweep_wait_s
+    assert all(tick(float(t)) is None for t in range(1, int(wait) * 3))
 
 
 def test_wake_and_the_end_of_a_rest_make_a_picture_due():

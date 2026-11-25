@@ -8,6 +8,10 @@ passes. Every refusal check runs first: off, ``no_vision``, ``unsupported``, ``p
 ``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is counted and
 nothing turns. While due, the service thread checks again every ``POLL_S``, uncounted, and
 ``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
+``picture_first`` marks the first picture owed (start, switch-on): its photo sweep starts at
+once, even while engaged or alone (owner, 2026-11-25). That is one attempt: the end of a photo
+sweep spends it, and a picture still due (``views_missing``) then waits under the scan's normal
+rules. A switch-off and on owes a new first picture with a fresh attempt.
 
 A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
 names one, the vision thread's frames (``tap``) go to that view's ``Picker``: only a still frame
@@ -142,6 +146,7 @@ class Surroundings:
         self._due = False  # a trigger passed: a photo sweep is wanted
         self._due_ok = False  # and the refusal checks still pass (the service thread's poll)
         self._want_first = image_route(self._cfg) is not None  # owed at start and switch-on
+        self._first = False  # the due picture is that first one and its bypass is unused
         self._first_tried = -math.inf
         self._views: dict[int, _View] = {}
         self._view_index: int | None = None
@@ -213,6 +218,8 @@ class Surroundings:
         if reason is None:
             with self._lock:
                 self._due = self._due_ok = True
+                # any trigger that passes while the first picture is owed makes that one due
+                self._first, self._want_first = self._want_first, False
                 self._lock.notify_all()
             return None
         if reason != OFF and count:
@@ -224,6 +231,16 @@ class Surroundings:
         Lock-held read only: the checks run on the service thread."""
         with self._lock:
             return self._due and self._due_ok
+
+    def picture_first(self) -> bool:
+        """Whether the due picture is the first one owed at start or switch-on and its photo
+        sweep has not run yet (SPEC 5A: it sweeps at once, even engaged or alone). The bypass is
+        spent when a photo sweep ends (``world.scan_finished``), not when it starts: the service
+        has no start signal, the end arrives in the same scan tick (the bus is synchronous) so
+        the next tick already sees it spent, and a photo sweep cancelled by sleep took no views,
+        so the first picture keeps its one attempt for after the wake."""
+        with self._lock:
+            return self._due and self._due_ok and self._first
 
     def _refusal(self, now: float) -> str | None:
         cfg = self._cfg
@@ -340,6 +357,7 @@ class Surroundings:
             views, self._views, self._view_index = self._views, {}, None
             if not photo or not self._due:
                 return
+            self._first = False  # one attempt: a view missing leaves it to the normal rules
             if not ours:
                 views = {}
             shots = [s for i in range(planned) if (s := _shot(views.get(i))) is not None]
@@ -425,9 +443,7 @@ class Surroundings:
         elif first and retry:
             with self._lock:
                 self._first_tried = now
-            if self.trigger(count=False) is None:
-                with self._lock:
-                    self._want_first = False
+            self.trigger(count=False)  # a pass makes the first picture due (``_first``)
 
     def _send(self, job: _Job) -> None:
         reason = self.gate()  # checked again right before the picture leaves
@@ -638,7 +654,7 @@ class Surroundings:
             if trust == self._trust:
                 return
             self._trust = trust
-            self._want_first = trust is not None
+            self._want_first, self._first = trust is not None, False
             self._first_tried = -math.inf
             self._unsupported, self._failures, self._paused_until = None, 0, -math.inf
             self._generation += 1

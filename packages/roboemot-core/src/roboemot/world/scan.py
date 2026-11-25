@@ -21,8 +21,12 @@
   ``picture_amplitude`` of the circle, whatever the energy says (owner, 2026-11-25), and at
   least ``picture_dwell_s`` at each waypoint. When no sweep
   starts within ``picture_wait_s`` of the picture becoming due, the policy starts one itself
-  (reason ``picture``). A photo sweep is fed at expression priority and only sleep, rest and quiet
-  hours cancel it; ``ScanController.view`` names the waypoint the head dwells at.
+  (reason ``picture``). The first picture owed at start or switch-on (``ScanContext.picture_first``)
+  starts its photo sweep at once, even while engaged or alone (owner, 2026-11-25); asleep, music
+  and a sweep already running still hold it. It is one attempt: once that sweep ended the
+  surroundings service clears the flag and a picture still due follows the rules above. A photo
+  sweep is fed at expression priority and only sleep, rest and quiet hours cancel it;
+  ``ScanController.view`` names the waypoint the head dwells at.
 
 Pace and amplitude come from the persona's energy effects (``idle_period_x``,
 ``motion_amplitude_x``).
@@ -75,6 +79,9 @@ class ScanContext:
     effects: PersonaEffects = PersonaEffects()
     picture_due: bool = False  # a surroundings picture is due (SPEC 8): sweeps are photo sweeps
     picture_wait_s: float = math.inf  # surroundings.room.sweep_wait_s
+    # the due picture is the first one owed at start or switch-on, its one attempt unused:
+    # it sweeps at once, even engaged or alone (owner, 2026-11-25)
+    picture_first: bool = False
     picture_amplitude: float = 0.0  # share of the circle: surroundings.room.span_deg / 360
     picture_dwell_s: float = 0.0  # surroundings.view_dwell_s
 
@@ -139,7 +146,9 @@ class ScanPolicy:
         self._photo = False
 
     def update(self, ctx: ScanContext) -> ScanDecision | None:
-        """The scan to start now, or None. At most one decision until ``finished`` is called."""
+        """The scan to start now, or None. At most one decision until ``finished`` is called.
+        The first picture owed (``picture_first``) skips the alone, engaged, object-hold and
+        ``picture_wait_s`` rules; only sleep, music and a running scan hold it."""
         if not ctx.picture_due:
             self._picture_since = None
         woke = self._was_asleep and not ctx.asleep
@@ -152,6 +161,8 @@ class ScanPolicy:
             self._next_at = None
             self._was_engaged = False
             return None
+        if ctx.picture_due and ctx.picture_first and not ctx.music:
+            return None if self._running else self._start(ctx, "picture")
         if ctx.alone or ctx.music:  # hold still; the idle clock restarts when this ends
             self._drop_pending()
             self._wake_pending = False

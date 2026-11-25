@@ -794,6 +794,45 @@ def test_after_a_photo_sweep_the_picture_waits_again():
     assert d2.reason == "picture" and t2 - (t + 1.0) == 5.0
 
 
+# the first picture owed at start or switch-on (owner, 2026-11-25)
+
+
+def test_the_first_picture_sweeps_at_once_while_engaged():
+    p = ScanPolicy(CFG, random.Random(1))
+    d = p.update(pic_ctx(0.0, engaged=True, picture_first=True))
+    assert d is not None and d.kind == "sweep" and d.reason == "picture" and d.photo
+
+
+def test_the_first_picture_sweeps_at_once_while_alone_or_held_by_an_object():
+    for kw in ({"alone": True}, {"object_target": "cat"}):
+        d = ScanPolicy(CFG, random.Random(1)).update(pic_ctx(0.0, picture_first=True, **kw))
+        assert d is not None and d.reason == "picture" and d.photo
+
+
+def test_the_first_picture_waits_while_asleep_or_with_music():
+    for kw in ({"circadian": "resting"}, {"quiet_hours": True}, {"music": True}):
+        p = ScanPolicy(CFG, random.Random(1))
+        ticks = (pic_ctx(float(t), engaged=True, picture_first=True, **kw) for t in range(20))
+        assert all(p.update(c) is None for c in ticks)
+
+
+def test_the_first_picture_needs_the_picture_due():
+    p = ScanPolicy(CFG, random.Random(1))
+    assert p.update(pic_ctx(0.0, due=False, engaged=True, picture_first=True)) is None
+
+
+def test_a_later_picture_does_not_sweep_while_engaged():
+    p = ScanPolicy(CFG, random.Random(1))
+    assert all(p.update(pic_ctx(float(t), engaged=True)) is None for t in range(20))
+
+
+def test_the_first_picture_starts_no_second_sweep_while_one_runs():
+    p = ScanPolicy(CFG, random.Random(1))
+    assert p.update(pic_ctx(0.0, engaged=True, picture_first=True)) is not None
+    ticks = (pic_ctx(float(t), engaged=True, picture_first=True) for t in range(1, 20))
+    assert all(p.update(c) is None for c in ticks)
+
+
 def photo_ctrl() -> ScanController:
     ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
     return ctrl
