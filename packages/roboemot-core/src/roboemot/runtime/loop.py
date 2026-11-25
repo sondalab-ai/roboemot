@@ -24,6 +24,7 @@ from .ticks import (
     episode_rate,
     feed_idle,
     interest_modulation,
+    photo_rate,
     scan_context,
     scan_tick,
     soothe_context,
@@ -76,6 +77,7 @@ def run_loop(
     finally:
         if p.perception.pipeline is not None:
             episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
+            photo_rate(p.perception.pipeline.governor, p.scan, awake=False)
 
 
 def _tick_until_stopped(
@@ -102,6 +104,7 @@ def _tick_until_stopped(
             p.selector.sleep(now)  # a shown-object episode ends (SPEC 5A)
             if p.perception.pipeline is not None:
                 episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
+                photo_rate(p.perception.pipeline.governor, p.scan, awake=False)
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
@@ -169,6 +172,8 @@ def _tick_until_stopped(
                 picture_due=snap is not None and snap.picture_due(),
             )
             scan_tick(ctx, p.scan, p.loop, live, bus=host.bus)
+        if p.perception.pipeline is not None:  # face runs for each view of a photo sweep
+            photo_rate(p.perception.pipeline.governor, p.scan)
         if host.soothe_runner is not None and host.speech_output is not None:
             soothe_tick(
                 host.soothe_runner,

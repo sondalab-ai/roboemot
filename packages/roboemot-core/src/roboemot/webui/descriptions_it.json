@@ -1041,5 +1041,6 @@
  "Height of each view in the joined room picture (never more than max_side_px)": "Altezza di ogni vista nell'immagine unita della stanza (mai più di max_side_px)",
  "Width of the line between two views in the joined room picture": "Larghezza della linea tra due viste nell'immagine unita della stanza",
  "Smallest dwell at each view of a photo sweep for a room picture; at least settle_s plus window_s": "Sosta minima a ogni vista di un giro di foto per un'immagine della stanza; almeno settle_s più window_s",
- "Span a photo sweep for a room picture covers, in front of the robot, whatever the energy trait says": "Ampiezza che copre un giro di foto per un'immagine della stanza, davanti al robot, qualunque cosa dica il tratto di energia"
+ "Span a photo sweep for a room picture covers, in front of the robot, whatever the energy trait says": "Ampiezza che copre un giro di foto per un'immagine della stanza, davanti al robot, qualunque cosa dica il tratto di energia",
+ "Face detection rate while a photo sweep for a room picture runs, so each view gets frames with their own face run (scaled like every rate; wins over detection_idle_hz)": "Frequenza del rilevamento dei volti durante un giro di foto per un'immagine della stanza, così ogni vista ha fotogrammi con il proprio rilevamento dei volti (scalata come ogni frequenza; vince su detection_idle_hz)"
 }

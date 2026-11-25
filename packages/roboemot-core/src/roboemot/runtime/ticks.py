@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
 RESTING = "resting"  # the circadian state of a rest
 OBJECTS = "objects"  # the governor stage of the object detector
+DETECTION = "detection"  # the governor stage of face detection
 FULL_CIRCLE_DEG = 360.0
 
 
@@ -264,6 +265,13 @@ def episode_rate(governor: Any, selector: AttentionSelector, *, awake: bool = Tr
     target = selector.target if on else None
     focus = None if target is None else (target.azimuth_rad, target.elevation_rad)
     governor.set_active(OBJECTS, on, focus)
+
+
+def photo_rate(governor: Any, scan: ScanController | None, *, awake: bool = True) -> None:
+    """Run face detection at ``vision.rates.detection_active_hz`` exactly while a photo sweep
+    runs (SPEC 5, 8: a view's frame needs its own face run), under the usual scales; derived on
+    every tick, so a sleep, a cancel or a stop leaves no stale rate."""
+    governor.set_active(DETECTION, awake and scan is not None and scan.photo)
 
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:

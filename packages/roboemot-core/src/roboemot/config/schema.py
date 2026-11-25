@@ -2382,6 +2382,14 @@ class VisionRates(Strict):
         ge=0.1,
         le=60,
     )
+    detection_active_hz: float = param(
+        8.0,
+        "Face detection rate while a photo sweep for a room picture runs, so each view gets "
+        "frames with their own face run (scaled like every rate; wins over detection_idle_hz)",
+        unit="Hz",
+        ge=0.1,
+        le=60,
+    )
     detection_idle_after_s: float = param(
         10.0,
         "Capture time with no face track (confirmed or tentative) before face detection drops "

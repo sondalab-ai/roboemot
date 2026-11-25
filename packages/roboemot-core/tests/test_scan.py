@@ -944,3 +944,33 @@ def start_photo_from(ctrl: ScanController, pose: dict, t: float) -> float:
             pose.update(cmd.targets)
         t += 0.05
     return t
+
+
+# ---- face detection at its active rate while a photo sweep runs (review 2026-11-25)
+
+
+def test_photo_rate_runs_face_detection_active_only_during_a_photo_sweep():
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.runtime.ticks import photo_rate
+    from roboemot.vision.governor import RateGovernor
+
+    rates = RoboEmotConfig(vision={"rates": {"detection_hz": 8.0, "detection_idle_hz": 2.0,
+                                             "detection_active_hz": 8.0}}).vision.rates  # fmt: skip
+    governor = RateGovernor(rates)
+    governor.set_idle("detection", True)  # no face in view: the idle rate
+    assert governor.period("detection") == pytest.approx(0.5)
+    ctrl = photo_ctrl()
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    photo_rate(governor, ctrl)
+    assert not governor.active("detection")
+    start_photo(ctrl, pose)
+    photo_rate(governor, ctrl)
+    assert governor.active("detection") and governor.period("detection") == pytest.approx(0.125)
+    photo_rate(governor, ctrl, awake=False)  # asleep: derived again, nothing stale
+    assert not governor.active("detection")
+    photo_rate(governor, ctrl)
+    ctrl.reset()
+    photo_rate(governor, ctrl)
+    assert not governor.active("detection")
+    photo_rate(governor, None)
+    assert not governor.active("detection")
