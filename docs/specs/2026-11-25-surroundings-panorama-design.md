@@ -3,7 +3,7 @@
 Date: 2026-11-25. Builds on `2026-11-24-surroundings-design.md`. SPEC sections: 8 (Surroundings
 snapshots), 5A (Scanning).
 
-> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415, or is not usable, is skipped until the next local day and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. SPEC 8, Surroundings snapshots (Fallback) is current.
+> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415 is skipped until the next local day, one that is not usable (key missing, budget spent, unreachable) is passed over for that picture only, and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. A route's skip is bound to its base URL, model and key reference (`${secret:name}`), never the secret's value; a reply from a route changed during its own request is dropped. SPEC 8, Surroundings snapshots (Fallback) is current.
 
 ## Intent
 
@@ -71,8 +71,8 @@ When the head turns (owner, 2026-11-25: "1 + 2"):
    left to right. Positive yaw turns left, so the order is descending azimuth. They are scaled to
    one height, joined with a separator, and encoded as one JPEG.
 5. **Send.** One request to the first image route ready (since 2026-11-25: the next one at once
-   when it refuses with 429, 400 or 415 or is not usable), prompt `surroundings_room` reworded for N views left to right with the
-   span in degrees. It asks for the layout: what is on the left, in the centre, on the right.
+   when it refuses with 429, 400 or 415 or is not usable), prompt `surroundings_room` reworded
+   for N views left to right with the span in degrees. It asks for the layout: what is on the left, in the centre, on the right.
 6. **A photo sweep always completes** (owner, 2026-11-25). A person who engages, a speaker hint,
    attention on an object, a glance or a conversation that starts do not cancel it. The scan
    holds the head for the whole sweep and the attention commands stay hidden until it ends. The

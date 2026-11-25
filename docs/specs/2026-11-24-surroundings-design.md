@@ -2,7 +2,7 @@
 
 > Superseded in part on 2026-11-25 by `2026-11-25-surroundings-panorama-design.md`: the room picture is a panorama from a photo sweep, and the shown-thing snapshot and the head hold are removed.
 >
-> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415, or is not usable, is skipped until the next local day and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. SPEC 8, Surroundings snapshots (Fallback) is current.
+> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415 is skipped until the next local day, one that is not usable (key missing, budget spent, unreachable) is passed over for that picture only, and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. A route's skip is bound to its base URL, model and key reference (`${secret:name}`), never the secret's value; a reply from a route changed during its own request is dropped. SPEC 8, Surroundings snapshots (Fallback) is current.
 
 Date: 2026-11-24. Status: waiting for owner approval (builder check done). SPEC sections touched: 5, 5A, 8
 (Robot expression, LLM router, Conversation state), 11A, 12, 12A.
@@ -111,7 +111,7 @@ Marked (owner) for owner decisions of 2026-11-24, (design) for calls made in thi
 - (design) The `images: true` route stays a normal chat route: it may also answer conversation
   turns in the routing order. The `images_unsupported` mark (5.6) stops only describe requests,
   never its chat use. Describe requests are not part of the chat fallback chain. Since
-  2026-11-25 a describe refused with 429, 400 or 415 (or a route not usable) goes at once to the
+  2026-11-25 a describe refused with 429, 400 or 415 (or a route not usable now) goes at once to the
   next image route; other failures are not retried on another route.
 - (design) A `locality: local` route may have the switch too. Its snapshots stay on the LAN; the
   Live tab and the logs treat it the same way.
@@ -204,8 +204,9 @@ on the robot (a builder task, section 7); until then it is low.
   Builder checks the real bodies of at least one OpenAI-compatible server that has no vision
   (LM Studio or llama.cpp with a text model) and one cloud model without vision, and lists them in
   the tests.
-- (design; since 2026-11-25 a 429 or a route not usable skips that route for the day and falls
-  back, and the pause is per route) Other errors (timeout, 5xx, 429, network down, budget spent): that snapshot is
+- (design; since 2026-11-25 a 429 skips that route for the day and a route not usable is passed
+  over for that picture; both fall back, and the pause is per route) Other errors (timeout, 5xx,
+  429, network down, budget spent): that snapshot is
   dropped with its reason; the next trigger tries again. After `surroundings.max_failures` in a row
   the feature pauses for `surroundings.pause_s`. Offline (the network monitor): no attempt.
 - (design) The route's `daily_token_budget` counts describe requests as it counts chat requests.
