@@ -1,4 +1,5 @@
-"""The describer: one request, one line of text (SPEC 8, Surroundings snapshots)."""
+"""The describer: one request for the joined room picture, one line of text (SPEC 8,
+Surroundings snapshots; design 2026-11-25)."""
 
 from __future__ import annotations
 
@@ -20,37 +21,32 @@ class FakeRouter:
 
 
 async def test_reply_is_one_line_and_capped():
-    cfg = RoboEmotConfig(surroundings={"shown": {"max_chars": 20}})
-    r = FakeRouter("a silver laptop\nwith   stickers on the lid and a dent")
-    text = await describe(r, ROUTE, "shown", b"jpg", "laptop", cfg)
-    assert text == "a silver laptop with"
+    cfg = RoboEmotConfig(surroundings={"room": {"max_chars": 40}})
+    r = FakeRouter("a living room\nwith   a couch on the left and a window on the right")
+    text = await describe(r, ROUTE, b"jpg", 4, 240, cfg)
+    assert text == "a living room with a couch on the left a"
     assert "\n" not in text
 
 
 async def test_blank_reply_raises_empty_description():
     with pytest.raises(EmptyDescription):
-        await describe(FakeRouter("  \n "), ROUTE, "room", b"jpg", "", RoboEmotConfig())
+        await describe(FakeRouter("  \n "), ROUTE, b"jpg", 4, 240, RoboEmotConfig())
 
 
-async def test_the_shown_prompt_carries_the_hint_and_the_token_cap():
-    r = FakeRouter("a red mug")
+async def test_the_prompt_states_views_order_and_span_and_leaves_people_out():
+    r = FakeRouter("a study")
     cfg = RoboEmotConfig(surroundings={"describe_max_tokens": 99})
-    await describe(r, ROUTE, "shown", b"jpg", "cup", cfg)
+    await describe(r, ROUTE, b"jpg", 4, 237, cfg)
     name, prompt, jpeg, max_tokens = r.calls[0]
-    assert "cup" in prompt and "{hint}" not in prompt
+    assert "4 " in prompt and "237 degrees" in prompt and "left to right" in prompt
+    assert "{" not in prompt
+    assert all(w in prompt for w in ("left", "centre", "right"))
+    assert "people" in prompt.lower()
     assert (name, jpeg, max_tokens) == ("eye", b"jpg", 99)
-
-
-async def test_the_room_prompt_asks_to_leave_people_out():
-    r = FakeRouter("a living room")
-    cfg = RoboEmotConfig(surroundings={"room": {"max_chars": 40}})
-    assert await describe(r, ROUTE, "room", b"jpg", "", cfg) == "a living room"
-    assert "people" in r.calls[0][1].lower()
 
 
 async def test_the_describe_request_takes_the_surroundings_first_token_time():
     r = FakeRouter("a red mug")
     cfg = RoboEmotConfig(surroundings={"describe_first_token_s": 25.0})
-    await describe(r, ROUTE, "room", b"jpg", "", cfg)
+    await describe(r, ROUTE, b"jpg", 3, 180, cfg)
     assert r.first_token_s == 25.0
-    assert RoboEmotConfig().surroundings.describe_first_token_s == 30.0

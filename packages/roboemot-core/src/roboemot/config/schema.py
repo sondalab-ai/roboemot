@@ -2382,6 +2382,14 @@ class VisionRates(Strict):
         ge=0.1,
         le=60,
     )
+    detection_active_hz: float = param(
+        8.0,
+        "Face detection rate while a photo sweep for a room picture runs, so each view gets "
+        "frames with their own face run (scaled like every rate; wins over detection_idle_hz)",
+        unit="Hz",
+        ge=0.1,
+        le=60,
+    )
     detection_idle_after_s: float = param(
         10.0,
         "Capture time with no face track (confirmed or tentative) before face detection drops "
@@ -6583,32 +6591,9 @@ def route_url_ok(url: str, schemes: tuple[str, ...] = ROUTE_SCHEMES) -> bool:
     return parsed.scheme in schemes and bool(parsed.host)
 
 
-class SurroundingsShownConfig(Strict):
-    """The snapshot of a thing a person shows the robot (design 2026-11-24, SPEC 8)."""
-
-    max_speed_deg_s: float = param(
-        15.0,
-        "A shown thing must move slower than this for its frame to be a snapshot candidate",
-        unit="deg/s", ge=1, le=180,
-    )  # fmt: skip
-    margin: float = param(
-        0.25,
-        "The crop around the shown thing grows by this share of its box on each side",
-        unit="share", ge=0, le=1, advanced=True,
-    )  # fmt: skip
-    wait_s: float = param(
-        4.0,
-        "Longest wait for a sharp frame and its description; the reaction then uses the "
-        "detector's category",
-        unit="s", ge=0.5, le=30,
-    )  # fmt: skip
-    max_chars: int = param(
-        80, "Cap on a shown thing's description", unit="chars", ge=20, le=300, advanced=True
-    )
-
-
 class SurroundingsRoomConfig(Strict):
-    """The snapshot of the room in view (design 2026-11-24, SPEC 8)."""
+    """The room picture: a panorama from a photo sweep (designs 2026-11-24, 2026-11-25; SPEC
+    8)."""
 
     min_interval_s: float = param(
         300.0,
@@ -6626,24 +6611,41 @@ class SurroundingsRoomConfig(Strict):
         "passed",
         unit="s", ge=1, le=60, advanced=True,
     )  # fmt: skip
-    wait_s: float = param(
-        10.0,
-        "Longest wait for a sharp frame of the room",
-        unit="s", ge=1, le=60, advanced=True,
-    )  # fmt: skip
     max_chars: int = param(
         160, "Cap on the room description", unit="chars", ge=40, le=400, advanced=True
     )
-    max_per_day: int = param(
-        5,
-        "At most this many of the day's snapshots are of the room, so shown things keep their "
-        "share. 0: no cap of its own",
-        ge=0, le=1000,
-    )  # fmt: skip
     max_age_s: float = param(
         3600.0,
         "A room description older than this is dropped from the scene summary",
         unit="s", ge=60, le=86400,
+    )  # fmt: skip
+    span_deg: float = param(
+        180.0,
+        "Span a photo sweep for a room picture covers, in front of the robot, whatever the "
+        "energy trait says",
+        unit="deg", ge=60, le=360,
+    )  # fmt: skip
+    sweep_wait_s: float = param(
+        60.0,
+        "Wait for a normal look-around once a room picture is due; then the robot starts its "
+        "own",
+        unit="s", ge=0, le=3600,
+    )  # fmt: skip
+    view_match_deg: float = param(
+        10.0,
+        "The head must point within this of a view of the last room picture for the scene "
+        "check to compare with it",
+        unit="deg", ge=1, le=90, advanced=True,
+    )  # fmt: skip
+    view_height_px: int = param(
+        384,
+        "Height of each view in the joined room picture (never more than max_side_px)",
+        unit="px", ge=128, le=1600, advanced=True,
+    )  # fmt: skip
+    separator_px: int = param(
+        4,
+        "Width of the line between two views in the joined room picture",
+        unit="px", ge=1, le=32, advanced=True,
     )  # fmt: skip
 
 
@@ -6655,12 +6657,6 @@ class SurroundingsConfig(Strict):
         0.5,
         "The head must be still this long before a frame is a snapshot candidate",
         unit="s", ge=0.1, le=5, advanced=True,
-    )  # fmt: skip
-    hold_s: float = param(
-        2.0,
-        "The head and body hold still this long when a snapshot starts, so a sharp frame comes "
-        "soon; reflexes and safety still move them. 0 does not hold",
-        unit="s", ge=0, le=10, advanced=True,
     )  # fmt: skip
     window_s: float = param(
         1.0,
@@ -6717,8 +6713,22 @@ class SurroundingsConfig(Strict):
         "description (RAM only). 0: none",
         ge=0, le=50, advanced=True,
     )  # fmt: skip
-    shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
+    view_dwell_s: float = param(
+        1.5,
+        "Smallest dwell at each view of a photo sweep for a room picture; at least settle_s "
+        "plus window_s",
+        unit="s", ge=0.3, le=10,
+    )  # fmt: skip
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
+
+    @model_validator(mode="after")
+    def _view_dwell_fits_the_picker(self) -> SurroundingsConfig:
+        if self.view_dwell_s < self.settle_s + self.window_s:
+            raise ValueError(
+                "surroundings.view_dwell_s must be at least settle_s + window_s: the sharpest "
+                "still frame of a view is chosen within its dwell"
+            )
+        return self
 
 
 class LLMRoute(Strict):

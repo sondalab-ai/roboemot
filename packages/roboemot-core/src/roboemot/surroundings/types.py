@@ -1,22 +1,21 @@
-"""Shared types of the surroundings snapshots (SPEC 8, Surroundings snapshots)."""
+"""Shared types of the surroundings pictures (SPEC 8, Surroundings snapshots)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, get_args
 
 import numpy as np
 
-Kind = Literal["shown", "room"]
-Skip = Literal["head_moving", "object_moving", "too_blurry", "no_frame"]
-SKIPS: tuple[str, ...] = get_args(Skip)
+from ..vision.types import Box
 
 
 @dataclass(frozen=True)
 class Candidate:
-    """A still frame, already shaped (faces masked, cropped), with its sharpness score. The
-    image stays in RAM and is never logged (SPEC 12)."""
+    """A still frame of one view, shrunk to the sent size, with its sharpness score and the
+    face boxes of its own face run (in its pixels), which mask it. The image stays in RAM and
+    is never logged (SPEC 12)."""
 
     image: np.ndarray = field(repr=False)
     stamp: float
     sharpness: float
+    faces: tuple[Box, ...] = ()

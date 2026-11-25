@@ -483,8 +483,8 @@ def test_the_governor_runs_objects_at_the_active_rate_under_the_ceiling():
     assert gov.period("objects") == pytest.approx(1 / 0.5)  # still scaled
     gov.set_active("objects", False)
     assert gov.period("objects") == pytest.approx(1 / 0.1)
-    gov.set_active("detection", True)  # no detection_active_hz: no effect
-    assert not gov.active("detection")
+    gov.set_active("embedding", True)  # no embedding_active_hz: no effect
+    assert not gov.active("embedding")
 
 
 def test_the_episode_rate_lasts_as_long_as_the_episode():

@@ -116,13 +116,10 @@ REASONS: dict[str, tuple[str, ...]] = {
     # one answered, every one failed and the robot apologised, or every one failed and a chat
     # route answered
     "reply": ("retry", "recovered", "gave_up", "backup"),
-    # a surroundings snapshot ended or was refused (SPEC 8, Surroundings snapshots)
+    # a surroundings room picture ended or was refused (SPEC 8, Surroundings snapshots)
     "surroundings": (
         "described",
-        "head_moving",
-        "object_moving",
-        "too_blurry",
-        "no_frame",
+        "views_missing",
         "unsupported",
         "failed",
         "paused",
@@ -213,7 +210,6 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "counter": ("resets", "input_resets", "pending_call_resets"),
     "code": SERVER_CODES,
     "situation": SITUATIONS,
-    "snapshot": ("shown", "room"),
     "yaw_deg": NUMBER,
     "limit_deg": NUMBER,
     "limit": NUMBER,

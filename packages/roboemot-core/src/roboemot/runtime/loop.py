@@ -15,7 +15,6 @@ from roboemot.vision import CIRCADIAN, CONVERSATION, LOAD
 from .assembly import Pipeline
 from .host import RuntimeHost
 from .ticks import (
-    SnapshotHold,
     attention_tick,
     circadian_vision_scale,
     company,
@@ -25,6 +24,7 @@ from .ticks import (
     episode_rate,
     feed_idle,
     interest_modulation,
+    photo_rate,
     scan_context,
     scan_tick,
     soothe_context,
@@ -77,6 +77,7 @@ def run_loop(
     finally:
         if p.perception.pipeline is not None:
             episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
+            photo_rate(p.perception.pipeline.governor, p.scan, awake=False)
 
 
 def _tick_until_stopped(
@@ -88,7 +89,6 @@ def _tick_until_stopped(
     stop_event: threading.Event,
 ) -> None:
     fx_for, fx = None, None
-    hold = SnapshotHold()  # the surroundings head hold (SPEC 8)
     pacer = TickPacer(time.monotonic())
     while not stop_event.is_set():
         now = time.monotonic()
@@ -104,6 +104,7 @@ def _tick_until_stopped(
             p.selector.sleep(now)  # a shown-object episode ends (SPEC 5A)
             if p.perception.pipeline is not None:
                 episode_rate(p.perception.pipeline.governor, p.selector, awake=False)
+                photo_rate(p.perception.pipeline.governor, p.scan, awake=False)
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
@@ -129,8 +130,6 @@ def _tick_until_stopped(
             ),
             live.dance.calm_switch_hold_s if calm else 0.0,
         )
-        snap = host.surroundings
-        hold.tick(now, snap.hold_until() if snap is not None else None, p.loop, p.gaze.names())
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
                 now, p.conv_speaker()
@@ -160,6 +159,7 @@ def _tick_until_stopped(
             episode_rate(governor, p.selector)  # follow a shown object
         alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
+            snap = host.surroundings
             ctx = scan_context(
                 now,
                 live,
@@ -169,8 +169,11 @@ def _tick_until_stopped(
                 circadian=host.circadian,
                 alone=alone,
                 music=calm,
+                picture_due=snap is not None and snap.picture_due(),
             )
             scan_tick(ctx, p.scan, p.loop, live, bus=host.bus)
+        if p.perception.pipeline is not None:  # face runs for each view of a photo sweep
+            photo_rate(p.perception.pipeline.governor, p.scan)
         if host.soothe_runner is not None and host.speech_output is not None:
             soothe_tick(
                 host.soothe_runner,

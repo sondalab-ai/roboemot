@@ -151,10 +151,10 @@ def _instruction(stem: str) -> str:
     return text
 
 
-def surroundings_prompt(kind: str) -> str:
-    """The describe request's English instruction for a ``shown`` or ``room`` snapshot
-    (``prompts/surroundings_<kind>.en.txt``, SPEC 8, Surroundings snapshots)."""
-    return _instruction(f"surroundings_{kind}")
+def surroundings_prompt() -> str:
+    """The describe request's English instruction for a room picture, with ``{views}`` and
+    ``{span}`` to fill (``prompts/surroundings_room.en.txt``, SPEC 8, Surroundings snapshots)."""
+    return _instruction("surroundings_room")
 
 
 def skip_prompt() -> str:

@@ -13,6 +13,8 @@ A stage with an ``<stage>_active_hz`` field may be made active (``set_active``):
 that rate instead of ``<stage>_hz``, under the same scales. Attention does this for ``objects``
 while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it, and
 passes the target's base-frame bearing (``focus``) so the pipeline knows which track is shown.
+The main loop does it for ``detection`` while a photo sweep runs (SPEC 8), so each view gets
+frames with their own face run.
 The object ceiling ``objects_max_hz`` holds by construction: the config rejects ``objects_hz`` or
 ``objects_active_hz`` above it, and every scale is at most 1.
 

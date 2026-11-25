@@ -533,3 +533,48 @@ def test_web_keys_lose_the_touch_stop(caplog):
         out, _ = settings_module._migrated(keys, "overrides-file")
     assert out == {}
     assert "no longer acceptable" not in caplog.text
+
+
+# ------------------------- design 2026-11-25: the surroundings panorama replaces the shown kind
+
+SURROUNDINGS_PATHS = (
+    "surroundings.hold_s",
+    "surroundings.shown",
+    "surroundings.room.max_per_day",
+    "surroundings.room.wait_s",
+)
+
+
+def test_the_removed_surroundings_settings_are_dropped_not_live():
+    assert all(not schema_has(p) for p in SURROUNDINGS_PATHS)
+    assert set(SURROUNDINGS_PATHS) <= set(DROPPED_SETTINGS)
+
+
+def test_an_app_config_with_the_old_surroundings_settings_loads_and_logs_each_path(
+    tmp_path, caplog
+):
+    app = tmp_path / "app.yaml"
+    app.write_text(
+        "surroundings:\n  hold_s: 2.0\n  max_per_day: 9\n"
+        "  shown: {max_speed_deg_s: 15.0, margin: 0.25, wait_s: 4.0, max_chars: 80}\n"
+        "  room: {max_per_day: 5, wait_s: 10.0, max_chars: 200}\n"
+    )
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    assert (cfg.surroundings.max_per_day, cfg.surroundings.room.max_chars) == (9, 200)
+    for path in SURROUNDINGS_PATHS:
+        assert caplog.text.count(f"setting {path} ignored") == 1, path
+
+
+def test_web_keys_lose_the_old_surroundings_settings(caplog):
+    keys = {
+        "surroundings.hold_s": 2.0,
+        "surroundings.shown.wait_s": 4.0,
+        "surroundings.room.max_per_day": 5,
+        "surroundings.room.wait_s": 10.0,
+        "surroundings.room.max_chars": 200,
+    }
+    with caplog.at_level("WARNING"):
+        out, _ = settings_module._migrated(keys, "overrides-file")
+    assert out == {"surroundings.room.max_chars": 200}
+    assert "no longer acceptable" not in caplog.text

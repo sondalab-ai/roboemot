@@ -328,7 +328,7 @@ def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slo
         runner=SimpleNamespace(engine=None, on_event=lambda *a: None),
         perception=SimpleNamespace(registry=None, pipeline=None),
         sleep=SimpleNamespace(asleep=False),
-        hub=None, network=None, realtime_provider=None, selector=None, world=None,
+        hub=None, network=None, realtime_provider=None, selector=None, world=None, scan=None,
         value_cap=None, conv_speaker=None, names=None, tracker=SimpleNamespace(active=None),
         echo_cancelled=False,
     )  # fmt: skip
@@ -342,7 +342,7 @@ def test_an_item_due_at_start_is_announced_even_when_the_conversation_starts_slo
     assert host.scheduler is not None and host.scheduler.get(item.id) is None  # fired once
 
 
-def test_start_surroundings_wires_the_snapshot_tap_and_follows_the_switch():
+def test_start_surroundings_wires_the_picture_tap_and_the_scan_and_follows_the_switch():
     from roboemot.bus import Bus
     from roboemot.runtime.startup import start_surroundings
 
@@ -351,7 +351,7 @@ def test_start_surroundings_wires_the_snapshot_tap_and_follows_the_switch():
     p = SimpleNamespace(
         perception=SimpleNamespace(pipeline=pipeline),
         hub=SimpleNamespace(router=router),
-        selector=SimpleNamespace(speed_dps=lambda entry_id: None),
+        scan=SimpleNamespace(view=lambda: (0, 0.5), views_planned=lambda: 4),
         sleep=SimpleNamespace(asleep=False),
     )
     stack = ConfigStack()
@@ -362,6 +362,7 @@ def test_start_surroundings_wires_the_snapshot_tap_and_follows_the_switch():
         s = host.surroundings
         assert s is not None
         assert pipeline.snapshot_tap == s.tap and pipeline.snapshot_wanted == s.wanted
+        assert s.scan_view() == (0, 0.5) and s.views_planned() == 4  # the scan's view seams
         assert s.state()["state"] == "off"
         route = {"name": "eye", "base_url": "https://api.example.com/v1", "model": "m"}
         stack.set("llm_routes", [{**route, "images": True}], layer="app", admin=True)

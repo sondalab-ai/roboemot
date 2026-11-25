@@ -16,6 +16,13 @@
   app hides that attention command while it does (SPEC 10).
   An engaged glance is the one exception: it is fed at expression priority for
   ``glance_hold_s`` so it can show over the idle-tier attention command.
+- Photo sweeps (SPEC 5A, 8; design 2026-11-25): while a surroundings picture is due
+  (``ScanContext.picture_due``), any sweep that starts is a photo sweep: exactly
+  ``picture_amplitude`` of the circle, whatever the energy says (owner, 2026-11-25), and at
+  least ``picture_dwell_s`` at each waypoint. When no sweep
+  starts within ``picture_wait_s`` of the picture becoming due, the policy starts one itself
+  (reason ``picture``). A photo sweep is fed at expression priority and only sleep, rest and quiet
+  hours cancel it; ``ScanController.view`` names the waypoint the head dwells at.
 
 Pace and amplitude come from the persona's energy effects (``idle_period_x``,
 ``motion_amplitude_x``).
@@ -28,7 +35,7 @@ import random
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from ..config.schema import WorldScanConfig
 from ..manifest import Dof
@@ -37,9 +44,20 @@ from ..persona import PersonaEffects
 from .sources import ScanPlanner, ScanWaypoint
 
 SOURCE = "scan"
-SCAN_FINISHED = "world.scan_finished"  # a sweep ran to its end (SPEC 8, Surroundings snapshots)
+# a sweep ran to its end; payload {"photo": bool, "sweep": int} (SPEC 8, Surroundings snapshots)
+SCAN_FINISHED = "world.scan_finished"
 SLEW_EPS = 1e-9
-Reason = Literal["idle", "wakeup", "unexplained"]
+FULL_CIRCLE_DEG = 360.0  # a photo sweep's span is a share of it (surroundings.room.span_deg)
+Reason = Literal["idle", "wakeup", "unexplained", "picture"]
+
+
+class ScanView(NamedTuple):
+    """The waypoint a photo sweep dwells at: the sweep's id (one per photo sweep, so views of
+    a cancelled sweep never join the next), the coverage index and the base-frame azimuth."""
+
+    sweep: int
+    index: int
+    azimuth_rad: float
 
 
 @dataclass(frozen=True)
@@ -55,6 +73,10 @@ class ScanContext:
     alone: bool = False  # no face and no sound for world.scan.alone_after_s (AloneWatch)
     music: bool = False  # the robot dances to room music: hold the scans (SPEC 7, Dance motion)
     effects: PersonaEffects = PersonaEffects()
+    picture_due: bool = False  # a surroundings picture is due (SPEC 8): sweeps are photo sweeps
+    picture_wait_s: float = math.inf  # surroundings.room.sweep_wait_s
+    picture_amplitude: float = 0.0  # share of the circle: surroundings.room.span_deg / 360
+    picture_dwell_s: float = 0.0  # surroundings.view_dwell_s
 
     @property
     def asleep(self) -> bool:
@@ -74,6 +96,7 @@ class ScanDecision:
     azimuth_rad: float = 0.0
     elevation_rad: float = 0.0
     engaged: bool = False  # a glance made while engaged with a person
+    photo: bool = False  # a photo sweep for the surroundings picture (SPEC 8)
 
 
 class ScanPolicy:
@@ -92,6 +115,8 @@ class ScanPolicy:
         self._glanced_while_engaged = False
         self._last_glance = -math.inf
         self._due_since: float | None = None
+        self._picture_since: float | None = None  # when the picture became due (not running)
+        self._photo = False  # the running decision is a photo sweep
 
     def note_unexplained(self, azimuth_rad: float, elevation_rad: float, stamp: float) -> None:
         """Remember the newest bearing no entry explains (``ObserveResult.unexplained_bearing``).
@@ -103,13 +128,20 @@ class ScanPolicy:
             self._pending = (azimuth_rad, elevation_rad, stamp)
 
     def finished(self) -> None:
-        """The decided scan ended (done or cancelled); the idle clock restarts at the next tick."""
+        """The decided scan ended (done or cancelled); the idle clock restarts at the next tick.
+        After a photo sweep the picture's wait starts again too, so a picture still due (a view
+        was missing) never starts sweeps back to back."""
         self._running = False
         self._next_at = None
         self._due_since = None
+        if self._photo:
+            self._picture_since = None
+        self._photo = False
 
     def update(self, ctx: ScanContext) -> ScanDecision | None:
         """The scan to start now, or None. At most one decision until ``finished`` is called."""
+        if not ctx.picture_due:
+            self._picture_since = None
         woke = self._was_asleep and not ctx.asleep
         self._was_asleep = ctx.asleep
         if woke:
@@ -139,10 +171,14 @@ class ScanPolicy:
                 self._lost_delay(ctx) if self._was_engaged else self._interval(ctx)
             )
             self._was_engaged = False
+        if ctx.picture_due and self._picture_since is None:
+            self._picture_since = ctx.now
         if self._held_by_object(ctx):
             return None
         if self._wake_pending:
             return self._start(ctx, "wakeup")
+        if self._picture_ready(ctx):
+            return self._start(ctx, "picture")
         glance = self._glance(ctx, engaged=False)
         if glance is not None:
             return glance
@@ -162,6 +198,7 @@ class ScanPolicy:
             return False
         due = (
             self._wake_pending
+            or self._picture_ready(ctx)
             or self._glance_ready(ctx)
             or (self._next_at is not None and ctx.now >= self._next_at)
         )
@@ -170,6 +207,11 @@ class ScanPolicy:
         if self._due_since is None:
             self._due_since = ctx.now
         return ctx.now - self._due_since < ctx.object_max_hold_s
+
+    def _picture_ready(self, ctx: ScanContext) -> bool:
+        """Whether the picture has been due for ``picture_wait_s`` with no sweep started."""
+        since = self._picture_since
+        return ctx.picture_due and since is not None and ctx.now - since >= ctx.picture_wait_s
 
     def _glance_ready(self, ctx: ScanContext) -> bool:
         with self._lock:
@@ -200,7 +242,12 @@ class ScanPolicy:
         self._drop_pending()  # the sweep passes every bearing anyway
         pace = self._pace(ctx)
         amplitude = min(1.0, max(self.cfg.min_amplitude, ctx.effects.motion_amplitude_x))
-        return ScanDecision("sweep", reason, amplitude, pace, self.cfg.dwell_s / pace)
+        dwell_s = self.cfg.dwell_s / pace
+        self._photo = ctx.picture_due
+        if self._photo:
+            amplitude = min(1.0, ctx.picture_amplitude)
+            dwell_s = max(dwell_s, ctx.picture_dwell_s)
+        return ScanDecision("sweep", reason, amplitude, pace, dwell_s, photo=self._photo)
 
     def _engaged_glance(self, ctx: ScanContext) -> ScanDecision | None:
         if self._glanced_while_engaged:
@@ -271,6 +318,13 @@ class SweepRunner:
         self._last = now
         self._arrived_at = self._slew_done_at = None
 
+    def dwelling(self) -> tuple[int, float] | None:
+        """The index and azimuth of the waypoint the pose has reached and is dwelling at, None
+        while travelling or with no sweep."""
+        if not self.active or self._arrived_at is None:
+            return None
+        return self._i, self._wps[self._i].azimuth_rad
+
     def cancel(self) -> None:
         """Abandon the sweep."""
         self._wps, self._i, self._cur = [], 0, {}
@@ -340,6 +394,11 @@ class ScanController:
         self._engaged_glance = False
         self._kind: str | None = None  # the running decision's kind
         self._finished_sweep = False
+        self._photo = False  # the running sweep is a photo sweep
+        self._coverage = 0  # coverage waypoints of the current or last photo sweep (home excluded)
+        self._view: ScanView | None = None  # one attribute: read from the vision thread
+        self._sweep = 0  # the id of the current or last photo sweep
+        self.last_sweep_photo = False  # whether the sweep last reported finished was a photo one
 
     @property
     def active(self) -> bool:
@@ -355,18 +414,53 @@ class ScanController:
         self.runner.cancel()
         self.policy.finished()
         self._engaged_glance = False
+        self._photo = False
+        self._view = None
+
+    @property
+    def photo(self) -> bool:
+        """Whether a photo sweep is in progress."""
+        return self._photo and self.runner.active
+
+    def view(self) -> ScanView | None:
+        """The sweep id, index and base-frame azimuth of the coverage waypoint where the head
+        dwells now (from the pose's arrival until the dwell ends), only during a photo sweep;
+        None while travelling, on the glide home and outside a photo sweep. Safe from any
+        thread."""
+        return self._view
+
+    def views_planned(self) -> int:
+        """How many views the current (or last) photo sweep plans; 0 before any."""
+        return self._coverage
+
+    @property
+    def sweep_id(self) -> int:
+        """The id of the current (or last) photo sweep; 0 before any."""
+        return self._sweep
 
     def tick(self, ctx: ScanContext, pose: Mapping[str, float], fov_h_rad: float) -> Command | None:
         """Advance one tick and return the scan command, or None when nothing should move.
 
         The caller feeds a command and clears ``SOURCE`` on None. A running sweep is cancelled
         when the robot falls asleep, is left alone or engages with a person (attention takes the
-        head).
+        head). A photo sweep always completes: only sleep, rest and quiet hours cancel it.
         """
-        still = ctx.asleep or ctx.alone or ctx.music
-        if self.runner.active and (still or (ctx.engaged and not self._engaged_glance)):
+        cmd = self._advance(ctx, pose, fov_h_rad)
+        dwelling = self.runner.dwelling() if self._photo else None
+        self._view = (
+            ScanView(self._sweep, *dwelling)
+            if dwelling is not None and dwelling[0] < self._coverage
+            else None
+        )
+        return cmd
+
+    def _advance(
+        self, ctx: ScanContext, pose: Mapping[str, float], fov_h_rad: float
+    ) -> Command | None:
+        if self.runner.active and self._cancelled(ctx):
             self.runner.cancel()
             self.policy.finished()
+            self._photo = False
         decision = self.policy.update(ctx)
         if decision is not None:
             self._begin(ctx, decision, pose, fov_h_rad)
@@ -377,7 +471,16 @@ class ScanController:
             self.policy.finished()
             self._engaged_glance = False
             self._finished_sweep = self._kind == "sweep"
+            self.last_sweep_photo = self._finished_sweep and self._photo
+            self._photo = False
         return cmd
+
+    def _cancelled(self, ctx: ScanContext) -> bool:
+        """Whether the running sweep or glance stops this tick."""
+        if self._photo:
+            return ctx.asleep
+        still = ctx.asleep or ctx.alone or ctx.music
+        return still or (ctx.engaged and not self._engaged_glance)
 
     def take_finished_sweep(self) -> bool:
         """Whether a sweep ran to its end since the last call (a cancelled sweep and a glance
@@ -395,11 +498,15 @@ class ScanController:
         if not wps:
             self.policy.finished()
             return
+        self._photo = d.photo
+        if d.photo:
+            self._coverage = len(wps)
+            self._sweep += 1
         if not d.engaged:  # glide home at scan pace instead of snapping at the limiter's speed
             names = {n for wp in wps for n in wp.targets}
             home = {n: self.runner.dofs[n].home for n in names}
             wps = [*wps, ScanWaypoint(0.0, home, 0.0)]
         self._engaged_glance = d.engaged
         self._kind = d.kind
-        priority = Priority.EXPRESSION if d.engaged else Priority.IDLE
+        priority = Priority.EXPRESSION if d.engaged or d.photo else Priority.IDLE
         self.runner.start(ctx.now, pose, wps, pace_x=d.pace_x, priority=priority)

@@ -221,8 +221,9 @@ CHANNEL_ORDER = "BGR"
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
 LightTap = Callable[[np.ndarray], object]
-# the surroundings snapshot tap (SPEC 8): the frame, the fresh face boxes, the shown track's box
-SnapshotTap = Callable[[Frame, list[Box], Box | None], object]
+# the surroundings picture tap (SPEC 8): the frame and the boxes of its own face run (None: none
+# ran on this frame)
+SnapshotTap = Callable[[Frame, list[Box] | None], object]
 
 
 @dataclass
@@ -412,7 +413,6 @@ class VisionPipeline:
         self.snapshot_tap: SnapshotTap | None = None
         self.snapshot_wanted: Callable[[], bool] = lambda: False
         self._face_found: tuple[float, list[Box]] = (-math.inf, [])  # last face run: every box
-        self._shown_detected: int | None = None  # the shown track of the last object run
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
         self.face_embedder = face_embedder
@@ -511,8 +511,6 @@ class VisionPipeline:
             pose = head_pose(frame.joint_state, self.frame_spec)
             self.object_gate.observe(stamp, pose)
             episode = self.governor.active("objects")
-            if not episode:
-                self._shown_detected = None  # no look: no shown track
             reason = None
             if self.governor.allow("objects", stamp):
                 reason = self.object_gate.decide(
@@ -543,36 +541,26 @@ class VisionPipeline:
             log.warning("light tap failed: %s", type(exc).__name__)
 
     def _tap_snapshot(self, frame: Frame) -> None:
-        """Hand the frame, the fresh face boxes and the shown track's box to the surroundings
-        snapshot tap (SPEC 8, Surroundings snapshots), only while it wants a frame: idle, the cost
-        is one call. A failure is logged by type and never costs the frame (SPEC 12: no data)."""
+        """Hand the frame and its own face boxes to the surroundings picture tap (SPEC 8,
+        Surroundings snapshots), only while it wants a frame: idle, the cost is one call. A
+        failure is logged by type and never costs the frame (SPEC 12: no data)."""
         if self.snapshot_tap is None:
             return
         try:
             if self.snapshot_wanted():
-                self.snapshot_tap(frame, self._snapshot_faces(frame.stamp), self._shown_box())
+                self.snapshot_tap(frame, self._snapshot_faces(frame.stamp))
         except Exception as exc:
             log.warning("snapshot tap failed: %s", type(exc).__name__)
 
-    def _snapshot_faces(self, stamp: float) -> list[Box]:
-        """Every face the robot detected that may still be in view, to mask before a snapshot
-        leaves (SPEC 8, Surroundings snapshots): each box of the last face run (unconfirmed and
-        below ``face_min_px`` too) while it is within the tracker's ``lost_s``, and each face
-        track, confirmed or not, matched within ``lost_s``."""
+    def _snapshot_faces(self, stamp: float) -> list[Box] | None:
+        """The faces to mask in the frame at ``stamp`` (SPEC 8, Surroundings snapshots): every
+        box of this frame's face run (unconfirmed and below ``face_min_px`` too) and each face
+        track, confirmed or not, matched within the tracker's ``lost_s``; None when no face run
+        ran on this frame, so the frame is never sent (security review 2026-11-25)."""
         found_at, found = self._face_found
-        lost_s = self.face_tracker.cfg.lost_s
-        recent = found if stamp - found_at <= lost_s else []
-        return [*recent, *self.face_tracker.boxes(stamp)]
-
-    def _shown_box(self) -> Box | None:
-        """The box of the shown thing: the track the single-object follow holds, else the
-        shown track of the last object run during a look; None without one."""
-        target = self.follower.target
-        if target is None:
-            target = self._shown_detected
-        if target is None:
+        if found_at != stamp:
             return None
-        return next((t.box for t in self._object_visible if t.track_id == target), None)
+        return [*found, *self.face_tracker.boxes(stamp)]
 
     def _watch_motion(self, frame: Frame) -> None:
         """Hand the frame to the nap's motion watch (SPEC 7A) and publish a confirmed change.
@@ -1254,7 +1242,6 @@ class VisionPipeline:
         if consumers is not None:
             self._follow_records(consumers.records)
         shown = self._shown_track(result.visible, frame, camera) if episode else None
-        self._shown_detected = shown
         # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
         # and new tracks are not starved by old ones.
         for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):

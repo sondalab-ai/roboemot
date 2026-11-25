@@ -1,1 +1,1 @@
-Describe this place in at most 25 words: the kind of room, the main things in it and the light. Do not describe people. Plain text only.
+These are {views} photos taken by a robot turning its head, joined side by side from left to right and covering about {span} degrees of the place around it. Describe the place in at most 30 words: the kind of room, what is on the left, in the centre and on the right, and the light. Do not describe people. Plain text only.

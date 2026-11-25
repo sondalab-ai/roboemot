@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -21,13 +21,14 @@ from roboemot.soothe import SootheRunner
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.speech import SpeechOutput
 from roboemot.world import ScanContext, ScanController, WorldModel, camera_in_view
-from roboemot.world.scan import SCAN_FINISHED
+from roboemot.world.scan import FULL_CIRCLE_DEG, SCAN_FINISHED
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
 RESTING = "resting"  # the circadian state of a rest
 OBJECTS = "objects"  # the governor stage of the object detector
+DETECTION = "detection"  # the governor stage of face detection
 
 
 def idle_command(
@@ -149,14 +150,18 @@ def scan_context(
     circadian: CircadianModel | None = None,
     alone: bool = False,
     music: bool = False,
+    picture_due: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
     quiet hours (SPEC 7A) from the local ``hour``, whether the robot is alone (SPEC 5A,
     ``AloneWatch``), whether the robot dances to room music (``music``, SPEC 7), the persona's
-    energy effects (``effects``, computed from the persona when the caller has not cached them)."""
+    energy effects (``effects``, computed from the persona when the caller has not cached them),
+    and whether a surroundings room picture is due (``picture_due``, SPEC 8) with the photo
+    sweep's wait, span and view dwell from ``cfg.surroundings``."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     engaged = selector.engaged or selector.episode_active  # a shown thing: no time limit
+    room = cfg.surroundings.room
     return ScanContext(
         now=now,
         engaged=engaged,
@@ -167,6 +172,10 @@ def scan_context(
         alone=alone,
         music=music,
         effects=effects if effects is not None else persona_effects(cfg.persona),
+        picture_due=picture_due,
+        picture_wait_s=room.sweep_wait_s,
+        picture_amplitude=room.span_deg / FULL_CIRCLE_DEG,
+        picture_dwell_s=cfg.surroundings.view_dwell_s,
     )
 
 
@@ -182,20 +191,23 @@ def scan_tick(
     the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
     sweep is dropped and idle motion carries on; the app keeps running. A sweep that ran to
-    its end publishes ``world.scan_finished`` on ``bus`` (SPEC 8, Surroundings snapshots).
+    its end publishes ``world.scan_finished`` on ``bus`` with ``{"photo", "sweep"}`` (SPEC 8,
+    Surroundings snapshots). A photo sweep is not cancelled by engagement, so the attention
+    command stays hidden while it runs.
     """
     try:
         was_active = scan.active
         fov = math.radians(cfg.world.camera_fov_h_deg)
         cmd = scan.tick(ctx, loop.pose(), fov)
         if cmd is not None:
-            if not ctx.engaged:
+            if not ctx.engaged or scan.photo:  # a photo sweep hides attention to its end
                 loop.clear(ATTENTION_SOURCE)
             loop.feed(cmd)
         elif was_active:
             loop.clear(SCAN_SOURCE)
         if scan.take_finished_sweep() and bus is not None:
-            bus.publish(SCAN_FINISHED, None, ctx.now)
+            payload = {"photo": scan.last_sweep_photo, "sweep": scan.sweep_id}
+            bus.publish(SCAN_FINISHED, payload, ctx.now)
         return scan.active
     except Exception as exc:
         log.warning("scan: %s: %s", type(exc).__name__, exc)
@@ -254,6 +266,13 @@ def episode_rate(governor: Any, selector: AttentionSelector, *, awake: bool = Tr
     governor.set_active(OBJECTS, on, focus)
 
 
+def photo_rate(governor: Any, scan: ScanController | None, *, awake: bool = True) -> None:
+    """Run face detection at ``vision.rates.detection_active_hz`` exactly while a photo sweep
+    runs (SPEC 5, 8: a view's frame needs its own face run), under the usual scales; derived on
+    every tick, so a sleep, a cancel or a stop leaves no stale rate."""
+    governor.set_active(DETECTION, awake and scan is not None and scan.photo)
+
+
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     """The vision rate multiplier of the circadian state (SPEC 7A): the running model's state,
     or ``awake`` while no model is attached (circadian disabled)."""
@@ -274,33 +293,6 @@ def room_quiet(host: Any, now: float) -> bool:
         return False
     listener = host.voice_listener
     return listener is None or not listener.voice_active()
-
-
-HOLD_SOURCE = "snapshot_hold"  # the motion source of the surroundings head hold
-
-
-class SnapshotHold:
-    """The head hold of a surroundings snapshot (SPEC 8, Surroundings snapshots; owner
-    2026-11-25): while ``until`` (the hold's end) is set and not past, the gaze ``dofs`` stay at
-    the pose they had when the hold began, fed at ``EXPRESSION`` so gaze, breathing and sweeps
-    (``IDLE``) yield and reflexes and safety still win; the command expires at ``until`` on its
-    own. When the hold ends the source is cleared once and the gaze takes the head back."""
-
-    def __init__(self) -> None:
-        self._pose: dict[str, float] | None = None
-
-    def tick(self, now: float, until: float | None, loop: Any, dofs: Iterable[str]) -> bool:
-        """One step; True while the hold runs."""
-        if until is None or now >= until:
-            if self._pose is not None:
-                loop.clear(HOLD_SOURCE)
-                self._pose = None
-            return False
-        if self._pose is None:
-            pose = loop.pose()
-            self._pose = {n: pose[n] for n in dofs if n in pose}
-        loop.feed(Command(HOLD_SOURCE, Priority.EXPRESSION, dict(self._pose), now, expires=until))
-        return True
 
 
 def robot_resting(host: Any, asleep: Callable[[], bool]) -> bool:
