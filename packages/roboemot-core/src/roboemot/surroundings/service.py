@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from openai import APIStatusError, APITimeoutError
 
 from ..bus import Bus, Message
 from ..circadian.model import CircadianState
@@ -653,7 +654,8 @@ def _failure(exc: Exception) -> str:
     or ``error``."""
     if isinstance(exc, EmptyDescription):
         return EMPTY
-    if isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
+    if isinstance(exc, TimeoutError | APITimeoutError):
         return TIMEOUT
-    status = getattr(exc, "status_code", None)
-    return f"http_{status}" if isinstance(status, int) else ERROR
+    if isinstance(exc, APIStatusError):
+        return f"http_{exc.status_code}"
+    return ERROR

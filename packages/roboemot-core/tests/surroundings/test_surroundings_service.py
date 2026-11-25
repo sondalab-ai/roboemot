@@ -530,3 +530,15 @@ def test_the_history_holds_no_text_in_the_state_and_is_dropped_when_the_switch_g
     rig.cfg = config(images=False)
     rig.s.apply_config(rig.cfg)
     assert rig.s.live()["history"] == []
+
+
+def test_an_http_error_is_failed_with_its_status():
+    import httpx
+    from openai import APIStatusError
+
+    request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+    error = APIStatusError("busy", response=httpx.Response(503, request=request), body=None)
+    rig = Rig(router=FakeRouter(error=error))
+    rig.s._want_first = False
+    describe_room(rig)
+    assert rig.s.state()["last"]["detail"] == "http_503"
