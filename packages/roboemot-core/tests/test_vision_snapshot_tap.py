@@ -1,6 +1,6 @@
 """The vision pipeline's picture tap (SPEC 8, Surroundings snapshots; design 2026-11-25): called
-with the frame and the boxes of its own face run (None when none ran on it), only while a
-picture is wanted."""
+with the frame and, when a face run ran on it, its boxes and the face tracks held within lost_s
+(None when no face run ran on it), only while a picture is wanted."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_a_failing_tap_does_not_stop_the_pipeline_and_logs_no_data(tmp_path, cap
     assert "secret pixel data" not in caplog.text
 
 
-# ---- every face of the frame's own run is masked (review C1), never one of another frame
+# ---- every face the robot detected is masked (review C1)
 
 
 def faces_seen(tmp_path, script, frames, dt=0.25):
@@ -79,10 +79,9 @@ def test_a_face_below_the_tracking_size_is_masked(tmp_path):
     assert covers(got[0], small)
 
 
-def test_a_box_of_an_earlier_frame_is_never_given(tmp_path):
+def test_a_face_the_run_missed_stays_masked_while_its_track_is_held(tmp_path):
     got = faces_seen(tmp_path, lambda i: [Detection(FACE, 0.95)] if i < 3 else [], 4)
-    assert covers(got[2], FACE)
-    assert got[3] is not None and not covers(got[3], FACE)  # the head may have turned since
+    assert got[3] is not None and covers(got[3], FACE)  # the track, within lost_s
 
 
 def test_a_frame_without_a_face_run_gives_none(tmp_path):

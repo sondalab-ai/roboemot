@@ -297,22 +297,51 @@ def test_a_view_without_a_face_run_is_missing():
     assert rig.router.calls == [] and "views_missing" in rig.reasons()
 
 
-def test_faces_of_one_view_never_mask_another_and_mask_their_own_frames():
+def test_faces_of_one_view_never_mask_another():
     rig = Rig()
     rig.s.trigger()
     face = (0.0, 0.0, 40.0, 40.0)
-    rig.scan.planned = 2
-    rig.scan.current = (0, math.radians(30.0))
-    rig.frame(yaw_deg=30.0, faces=[face])  # found on an early frame of view 0 only
-    for _ in range(11):
-        rig.frame(yaw_deg=30.0, faces=[])
-    rig.scan.current = None
-    rig.dwell(1, -30.0, faces=[])
-    rig.finish()
+    rig.sweep((30.0, -30.0), faces=[[face], []])
     sep = rig.cfg.surroundings.room.separator_px
     left, right = view_at(rig.encoded[0], 0, sep), view_at(rig.encoded[0], 1, sep)
-    assert (left[0:40, 0:40] == MASK_BGR).all()  # the chosen later frame is masked too
+    assert (left[0:40, 0:40] == MASK_BGR).all()
     assert not (right[0:40, 0:40] == MASK_BGR).all()  # the box never crosses to view 1
+
+
+# ---- security review 2026-11-25: a frame is chosen only with its own face run
+
+
+def test_a_still_frame_without_a_face_run_is_never_chosen():
+    rig = Rig()
+    rig.s.trigger()
+    rig.scan.planned = 1
+    rig.frame(yaw_deg=0.0)  # the first pose only anchors the head
+    rig.scan.current = (0, 0.0)
+    for _ in range(8):
+        rig.frame(image=board(11), faces=None)  # still, sharp, but no face run of its own
+    rig.frame(image=board(22), faces=[])  # still, with its own face run
+    rig.scan.current = None
+    rig.finish()
+    assert len(rig.encoded) == 1
+    assert int(view_at(rig.encoded[0], 0, 0)[-1, -1, 0]) == 22
+
+
+def test_a_chosen_frame_is_masked_with_its_own_boxes_only():
+    rig = Rig()
+    rig.s.trigger()
+    rig.scan.planned = 1
+    rig.frame(yaw_deg=0.0)
+    rig.scan.current = (0, 0.0)
+    own, other = (0.0, 0.0, 40.0, 40.0), (100.0, 60.0, 140.0, 100.0)
+    rig.frame(image=board(22), faces=[own])  # chosen (candidates=1): masked with its own box
+    for _ in range(5):
+        rig.frame(image=board(33), faces=[other])  # later frames: their boxes stay theirs
+    rig.scan.current = None
+    rig.finish()
+    view = view_at(rig.encoded[0], 0, 0)
+    assert int(view[-1, -1, 0]) == 22
+    assert (view[0:40, 0:40] == MASK_BGR).all()
+    assert not (view[60:100, 100:140] == MASK_BGR).all()
 
 
 def test_a_normal_sweep_end_sends_nothing():

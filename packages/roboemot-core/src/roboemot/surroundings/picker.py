@@ -1,6 +1,7 @@
 """The view picker (SPEC 8, Surroundings snapshots; designs 2026-11-24, 5.3; 2026-11-25).
 
-One picker per view of a photo sweep. A frame taken while the head moves is skipped. The other
+One picker per view of a photo sweep. A frame taken while the head moves, or without a face run
+of its own (a face on it could not be masked), is skipped. The other
 frames join a window of at most ``surroundings.candidates`` frames from ``surroundings.window_s``;
 when the window closes the sharpest frame wins if it scores at least
 ``surroundings.min_sharpness``, else the window clears and the view goes on. The dwell bounds the
@@ -16,6 +17,7 @@ from collections.abc import Callable
 import numpy as np
 
 from ..config.schema import SurroundingsConfig
+from ..vision.types import Box
 from .types import Candidate
 
 SHARPNESS_SIDE_PX = 256  # the grey copy is scored at most this long, so a big crop costs little
@@ -50,10 +52,18 @@ class Picker:
         self.cfg = cfg
         self.window: list[Candidate] = []
 
-    def offer(self, image: np.ndarray, stamp: float, *, head_moving: bool) -> None:
-        """Offer one shrunk frame; skipped while the head moves."""
-        if not head_moving:
-            self.window.append(Candidate(image, stamp, sharpness(image)))
+    def offer(
+        self,
+        image: np.ndarray,
+        stamp: float,
+        *,
+        head_moving: bool,
+        faces: tuple[Box, ...] | None = (),
+    ) -> None:
+        """Offer one shrunk frame with its own face boxes (None: no face run on it); skipped
+        while the head moves or without a face run."""
+        if not head_moving and faces is not None:
+            self.window.append(Candidate(image, stamp, sharpness(image), faces))
 
     def result(self, now: float) -> Candidate | None:
         """The sharpest frame of a window that closed at ``now``, if it is sharp enough; None

@@ -554,13 +554,13 @@ class VisionPipeline:
 
     def _snapshot_faces(self, stamp: float) -> list[Box] | None:
         """The faces to mask in the frame at ``stamp`` (SPEC 8, Surroundings snapshots): every
-        box of this frame's face run (unconfirmed and below ``face_min_px`` too) and the face
-        tracks it matched; None when no face run ran on this frame. A box from an earlier frame
-        is never given: the head may have turned since (design 2026-11-25)."""
+        box of this frame's face run (unconfirmed and below ``face_min_px`` too) and each face
+        track, confirmed or not, matched within the tracker's ``lost_s``; None when no face run
+        ran on this frame, so the frame is never sent (security review 2026-11-25)."""
         found_at, found = self._face_found
         if found_at != stamp:
             return None
-        return [*found, *(t.box for t in self._visible if t.last_stamp == stamp)]
+        return [*found, *self.face_tracker.boxes(stamp)]
 
     def _watch_motion(self, frame: Frame) -> None:
         """Hand the frame to the nap's motion watch (SPEC 7A) and publish a confirmed change.

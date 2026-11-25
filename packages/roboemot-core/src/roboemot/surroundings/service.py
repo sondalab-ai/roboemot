@@ -10,10 +10,10 @@ nothing turns. While due, the service thread checks again every ``POLL_S``, unco
 ``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
 
 A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
-names one, the vision thread's frames (``tap``) go to that view's ``Picker``, and the face boxes
-of every face run on that view's frames are kept to mask that view only. At
+names one, the vision thread's frames (``tap``) go to that view's ``Picker``: only a still frame
+with its own face run is a candidate, and it is masked with that run's boxes only. At
 ``world.scan_finished`` with ``photo`` the views are taken; when every planned view has a still,
-sharp frame and a face run, the service thread masks them, joins them left to right by
+sharp frame, the service thread masks them, joins them left to right by
 descending azimuth (``tile``), encodes one JPEG and asks the image route for one line of text
 (``describe``). Otherwise nothing is sent (``views_missing``) and the picture stays due. Going to
 sleep or rest drops the views and the kept picture; at send time sleep, rest or the radio drop
@@ -79,13 +79,10 @@ ROUND_DIGITS = 3
 
 @dataclass
 class _View:
-    """One view of the photo sweep being taken: its picker and the face boxes of every face
-    run on its own frames (in the shrunk frame's pixels)."""
+    """One view of the photo sweep being taken: its picker and the sharpest frame chosen."""
 
     azimuth_rad: float
     picker: Picker
-    faces: list[Box] = field(default_factory=list)
-    runs: int = 0
     chosen: Candidate | None = None
 
     def frame(self) -> Candidate | None:
@@ -305,11 +302,12 @@ class Surroundings:
     def _take(
         self, view: tuple[int, float], frame: Frame, faces: list[Box] | None, moving: bool
     ) -> None:
-        """Offer the frame to view ``view`` (index, azimuth); a view entered again starts
-        over."""
+        """Offer the frame to view ``view`` (index, azimuth) with its own face boxes; a frame
+        without a face run is never a candidate. A view entered again starts over."""
         index, azimuth = view
         small, boxes = shrink(frame.image, faces or [], self._cfg.surroundings.max_side_px)
-        if not moving and small is frame.image:
+        own = tuple(boxes) if faces is not None else None
+        if not moving and own is not None and small is frame.image:
             small = small.copy()  # kept past this frame: never the pipeline's buffer
         with self._lock:
             if not self._due:
@@ -318,10 +316,7 @@ class Surroundings:
             if entry is None or self._view_index != index:
                 entry = self._views[index] = _View(azimuth, Picker(lambda: self._cfg.surroundings))
                 self._view_index = index
-            if faces is not None:
-                entry.runs += 1
-                entry.faces.extend(boxes)
-            entry.picker.offer(small, frame.stamp, head_moving=moving)
+            entry.picker.offer(small, frame.stamp, head_moving=moving, faces=own)
             chosen = entry.picker.result(frame.stamp)
             if chosen is not None and (
                 entry.chosen is None or chosen.sharpness > entry.chosen.sharpness
@@ -330,7 +325,7 @@ class Surroundings:
 
     def _on_scan_finished(self, msg: Message) -> None:
         """``world.scan_finished`` (the motion loop's thread): take the views of a photo sweep
-        for the service thread when every planned view has a frame and a face run, else count
+        for the service thread when every planned view has a frame, else count
         ``views_missing`` (the picture stays due). Any other sweep drops stray views."""
         payload = msg.payload
         photo = isinstance(payload, Mapping) and payload.get("photo") is True
@@ -651,14 +646,12 @@ class Surroundings:
 
 
 def _shot(view: _View | None) -> _Shot | None:
-    """The view's frame for the picture: None without a still, sharp frame or without a face
-    run on its own frames (a face could go out uncovered)."""
-    if view is None or view.runs == 0:
-        return None
-    frame = view.frame()
+    """The view's frame for the picture, with its own face boxes: None without a still, sharp
+    frame that had a face run of its own."""
+    frame = view.frame() if view is not None else None
     if frame is None:
         return None
-    return _Shot(view.azimuth_rad, frame.image, tuple(view.faces), frame.sharpness)
+    return _Shot(view.azimuth_rad, frame.image, frame.faces, frame.sharpness)
 
 
 def _gap(a: float, b: float) -> float:
