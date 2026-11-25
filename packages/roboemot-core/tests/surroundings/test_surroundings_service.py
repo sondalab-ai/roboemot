@@ -981,3 +981,6 @@ def test_history_and_last_carry_the_route_and_the_state_holds_no_text_or_key():
     assert rig.s.live()["history"][0]["route"] == "paid"
     state = repr(rig.s.state())
     assert "sk-" not in state and "study" not in state and "Marcello" not in state
+    shape = rig.s.state()  # the roboemot.surroundings report section (SPEC 12A)
+    assert "unsupported" not in shape
+    assert [set(r) for r in shape["routes"]] == [{"route", "skipped", "reason", "paused_s"}] * 2
