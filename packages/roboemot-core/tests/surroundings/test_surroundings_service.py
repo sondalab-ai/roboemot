@@ -149,9 +149,9 @@ def test_leaving_a_rest_requests_a_room_snapshot():
     bus = Bus()
     rig.s.attach(bus)
     bus.publish("circadian.state", circadian("resting", "quiet_hours"), rig.clock.now)
-    assert not rig.s.wanted()
+    assert rig.s.state()["attempt"] is None
     bus.publish("circadian.state", circadian("awake"), rig.clock.now)
-    assert rig.s.wanted()
+    assert rig.s.state()["attempt"] == "room"
 
 
 def test_scan_finished_requests_a_room_snapshot():
@@ -367,3 +367,36 @@ def test_the_state_shows_offline_and_route_unavailable():
     assert rig.s.state()["state"] == "route_unavailable"
     rig.router.usable = True
     assert rig.s.state()["state"] == "on"
+
+
+# ---- a first room snapshot at switch-on and at start (owner, 2026-11-25)
+
+
+def test_start_with_the_switch_on_takes_a_first_room_snapshot():
+    rig = Rig(router=FakeRouter("a study with a desk"))
+    rig.settle()
+    rig.s.step()
+    assert rig.s.room(rig.clock.now) == "a study with a desk"
+
+
+def test_switch_on_waits_for_a_quiet_moment_without_counting_refusals():
+    rig = Rig(cfg=config(images=False), router=FakeRouter("a kitchen"))
+    rig.cfg = config()
+    rig.s.apply_config(rig.cfg)
+    rig.gate_reason = "busy"
+    rig.settle(frames=int(rig.cfg.surroundings.room.check_interval_s / 0.1) * 3)
+    rig.s.step()
+    assert rig.router.calls == [] and rig.reasons() == []
+    rig.gate_reason = None
+    rig.settle(frames=int(rig.cfg.surroundings.room.check_interval_s / 0.1) + 2)
+    rig.s.step()
+    assert rig.s.room(rig.clock.now) == "a kitchen"
+
+
+def test_the_first_room_snapshot_is_taken_once():
+    rig = Rig()
+    rig.settle()
+    rig.s.step()
+    rig.settle(frames=int(rig.cfg.surroundings.room.check_interval_s / 0.1) + 2)
+    rig.s.step()
+    assert len(rig.router.calls) == 1

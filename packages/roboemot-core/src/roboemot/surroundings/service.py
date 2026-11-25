@@ -124,6 +124,8 @@ class Surroundings:
         self._head = HeadStill()  # the vision thread's only
         self._rested = False
         self._describing: str | None = None  # the token of the describe request in flight
+        # a first room snapshot is owed at start and at switch-on (owner, 2026-11-25)
+        self._want_first = image_route(self._cfg) is not None
         self._unsubscribe: list[Callable[[], None]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -160,9 +162,11 @@ class Surroundings:
             self._rested = False
             self.request("room")
 
-    def request(self, kind: Kind, token: str = "", hint: str = "") -> str | None:
+    def request(
+        self, kind: Kind, token: str = "", hint: str = "", count: bool = True
+    ) -> str | None:
         """Open a snapshot attempt; None when it opened, else the reason code (also counted
-        and sent as a decision event, except ``off``)."""
+        and sent as a decision event, except ``off`` and with ``count`` false)."""
         now = self.clock()
         reason = self._refusal(kind, now)
         if reason is None:
@@ -176,7 +180,7 @@ class Surroundings:
                 else:
                     self._open(kind, token, hint, now)
                     return None
-        if reason != OFF:
+        if reason != OFF and count:
             self._count(reason, kind)
         return reason
 
@@ -238,7 +242,7 @@ class Surroundings:
             return (
                 image_route(self._cfg) is not None
                 and self.vision
-                and self._reference is not None
+                and (self._reference is not None or self._want_first)
                 and self._unsupported is None
                 and now >= self._paused_until
                 and now - self._last_room >= s.room.min_interval_s
@@ -316,8 +320,10 @@ class Surroundings:
         return thumbnail(image, gate.thumb_width_px, gate.thumb_height_px)
 
     def _check_scene(self, frame: Frame, faces: list[Box], moving: bool) -> None:
-        """With the head still and the room check due: a view that changed by
-        ``room.changed_share`` since the last room snapshot asks for one."""
+        """With the head still and the room check due: the first room snapshot still owed (at
+        start or switch-on; its refusals while the robot is busy are not counted, it tries again
+        at the next check), or a view that changed by ``room.changed_share`` since the last room
+        snapshot, asks for one."""
         if moving or not self.wanted():
             return
         s = self._cfg.surroundings
@@ -325,7 +331,12 @@ class Surroundings:
         thumb = self._thumb(mask_faces(small, boxes))
         with self._lock:
             self._last_check = self.clock()
-            reference = self._reference
+            reference, first = self._reference, self._want_first
+        if reference is None and first:
+            if self.request("room", count=False) is None:
+                with self._lock:
+                    self._want_first = False
+            return
         if thumb is None:
             return
         if reference is None or reference.shape != thumb.shape:
@@ -541,6 +552,7 @@ class Surroundings:
             if trust == self._trust:
                 return
             self._trust = trust
+            self._want_first = trust is not None  # switched on, or another route: a new room
             self._unsupported, self._failures, self._paused_until = None, 0, -math.inf
             self._generation += 1
             self._attempt = self._pending = None
