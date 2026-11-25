@@ -6652,7 +6652,7 @@ class SurroundingsRoomConfig(Strict):
 class SurroundingsConfig(Strict):
     """Camera snapshots described as text by the routes with images on (design 2026-11-24;
     SPEC 5, 8, 12). The feature is on while at least one llm_routes entry has images: true;
-    their order in llm_routes is their priority (owner decision 2026-11-25)."""
+    ``image_route_order`` sets their priority (``image_routes``, owner decision 2026-11-25)."""
 
     settle_s: float = param(
         0.5,
@@ -6688,9 +6688,10 @@ class SurroundingsConfig(Strict):
         unit="s", ge=60, le=86400, advanced=True,
     )  # fmt: skip
     describe_max_tokens: int = param(
-        1024,
+        4096,
         "Reply token cap of one description request; a model that thinks first spends part of "
-        "it on the thinking, so keep room (the text is cut to the description caps anyway)",
+        "it on the thinking, so keep room (the text is cut to the description caps anyway). A "
+        "blank reply cut by this cap goes to the next image route",
         ge=16,
         le=8192,
         advanced=True,
@@ -6720,7 +6721,20 @@ class SurroundingsConfig(Strict):
         "plus window_s",
         unit="s", ge=0.3, le=10,
     )  # fmt: skip
+    image_route_order: list[str] = param(
+        [],
+        "Priority of the routes with Sees images on, by route name: the first is tried first. "
+        "Routes not named here follow in llm_routes order; a name of no such route is ignored",
+        advanced=True,
+    )
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
+
+    @field_validator("image_route_order")
+    @classmethod
+    def _distinct_route_names(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("surroundings.image_route_order: duplicate route name")
+        return v
 
     @model_validator(mode="after")
     def _view_dwell_fits_the_picker(self) -> SurroundingsConfig:
@@ -6818,7 +6832,8 @@ class LLMRoute(Strict):
         False,
         "Sees images: this chat route describes camera snapshots (a shown thing, the room) as "
         "short text for the scene summary. The snapshots leave the robot. With several such "
-        "routes the first in the list is tried first, the next when it refuses (SPEC 8, 12)",
+        "routes their priority (surroundings.image_route_order, moved on the Routes tab) says "
+        "which is tried first, the next when it refuses (SPEC 8, 12)",
         opt_in=True,
     )
 
@@ -6856,10 +6871,13 @@ class LLMRoute(Strict):
 
 
 def image_routes(cfg: RoboEmotConfig) -> list[LLMRoute]:
-    """The ``llm_routes`` entries with ``images: true``, in list order: their priority for room
-    pictures (owner decision 2026-11-25). The surroundings feature is on while the list is not
-    empty (design 2026-11-24)."""
-    return [r for r in cfg.llm_routes if r.images]
+    """The ``llm_routes`` entries with ``images: true`` in their priority for room pictures
+    (owner decisions 2026-11-25): those ``surroundings.image_route_order`` names, in its order,
+    then the others in ``llm_routes`` order; a name of no such route is ignored. The
+    surroundings feature is on while the list is not empty (design 2026-11-24)."""
+    seeing = [r for r in cfg.llm_routes if r.images]
+    rank = {name: i for i, name in enumerate(cfg.surroundings.image_route_order)}
+    return sorted(seeing, key=lambda r: rank.get(r.name, len(rank)))
 
 
 def active_realtime_route(cfg: RoboEmotConfig) -> LLMRoute | None:

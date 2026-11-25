@@ -1504,3 +1504,98 @@ def test_the_web_ui_cannot_turn_the_reflexes_on():
     stack = ConfigStack(app={"reflexes": {"enabled": False}})
     with pytest.raises(GuardrailError):
         SettingsEditor(stack).change("reflexes.enabled", True)
+
+
+# ---- the image route order (SPEC 8, Surroundings snapshots; owner decision 2026-11-25)
+
+IMAGE_ROUTES = [
+    ROUTE | {"name": "Claude", "images": True},
+    ROUTE | {"name": "gemini_pictures", "images": True},
+]
+
+
+def test_the_image_route_order_survives_a_restart(tmp_path):
+    from roboemot.config.schema import image_routes
+
+    stack = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    order = [{"path": "surroundings.image_route_order", "value": ["gemini_pictures", "Claude"]}]
+    assert editor.change_many(order)["changed"]
+    names = [r.name for r in image_routes(stack.effective())]
+    assert names == ["gemini_pictures", "Claude"]
+    fresh = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert [r.name for r in image_routes(fresh.effective())] == ["gemini_pictures", "Claude"]
+
+
+def test_the_image_route_order_refuses_a_name_of_no_chat_route(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    with pytest.raises(ValidationError):
+        editor.change("surroundings.image_route_order", ["ghost", "Claude"])
+    assert stack.effective().surroundings.image_route_order == []
+
+
+def test_the_order_of_routes_added_from_the_page_survives_a_restart(tmp_path):
+    """The robot's path: both routes added on the runtime layer (the paid one first), Sees
+    images turned on with a batch, then the order saved; a restart replays all of it."""
+    from roboemot.config.schema import image_routes
+
+    def fresh_stack():
+        return make_stack(tmp_path, llm_routes=[ROUTE])
+
+    stack = fresh_stack()
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    for name in ("Claude", "gemini_pictures"):
+        editor.add_route({**ROUTE, "name": name})
+    editor.change_many(
+        [
+            {"path": "llm_routes.Claude.images", "value": True},
+            {"path": "llm_routes.gemini_pictures.images", "value": True},
+        ]
+    )
+    assert [r.name for r in image_routes(stack.effective())] == ["Claude", "gemini_pictures"]
+    order = ["gemini_pictures", "Claude"]
+    editor.change_many([{"path": "surroundings.image_route_order", "value": order}])
+    restarted = fresh_stack()
+    SettingsEditor(restarted, store=tmp_path / FILE).restore()
+    assert [r.name for r in image_routes(restarted.effective())] == order
+
+
+def test_removing_a_route_prunes_it_from_the_image_route_order(tmp_path):
+    """A removed route's name never stays in the order: the Settings row offers only existing
+    chat routes, so its next save would fail (SPEC 8, Surroundings snapshots)."""
+    stack = make_stack(tmp_path, llm_routes=[ROUTE])
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    for name in ("Claude", "gemini_pictures"):
+        editor.add_route({**ROUTE, "name": name})
+    order = ["gemini_pictures", "Claude", "lan"]
+    editor.change_many([{"path": "surroundings.image_route_order", "value": order}])
+    editor.remove_entry("llm_routes.gemini_pictures")
+    assert stack.effective().surroundings.image_route_order == ["Claude", "lan"]
+    saved = editor.change("surroundings.image_route_order", ["lan", "Claude"])
+    assert saved["changed"]
+    restarted = make_stack(tmp_path, llm_routes=[ROUTE])
+    SettingsEditor(restarted, store=tmp_path / FILE).restore()
+    assert restarted.effective().surroundings.image_route_order == ["lan", "Claude"]
+    assert [r.name for r in restarted.effective().llm_routes] == ["lan", "Claude"]
+
+
+def test_removing_a_route_the_order_does_not_name_writes_no_order(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[ROUTE])
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.add_route({**ROUTE, "name": "spare"})
+    editor.remove_entry("llm_routes.spare")
+    stored = json.loads((tmp_path / FILE).read_text())["overrides"]
+    assert "surroundings.image_route_order" not in stored
+
+
+def test_removing_a_route_prunes_the_order_after_a_restart_too(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[ROUTE])
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.add_route({**ROUTE, "name": "gone"})
+    editor.change_many([{"path": "surroundings.image_route_order", "value": ["gone", "lan"]}])
+    editor.remove_entry("llm_routes.gone")
+    restarted = make_stack(tmp_path, llm_routes=[ROUTE])
+    SettingsEditor(restarted, store=tmp_path / FILE).restore()
+    assert restarted.effective().surroundings.image_route_order == ["lan"]

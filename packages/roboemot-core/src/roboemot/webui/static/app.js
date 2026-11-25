@@ -1271,11 +1271,12 @@ function checkReason(c) {
 
 // The "Sees images" switch of a chat route (SPEC 8, Surroundings snapshots): turning it on asks
 // for the PIN after saying what leaves the robot; turning it off takes the PIN too. A cancelled
-// dialog puts the switch back. Several routes may have it on: their order in the list is their
-// priority (owner decision 2026-11-25), shown as "Priority n of m"; a route that refuses (429,
-// 400, 415, unusable) is skipped until the next day. The state line shows codes only
-// (`images_state`, `images_reason`).
-function imagesSwitch(r) {
+// dialog puts the switch back. Several routes may have it on: their priority (owner decisions
+// 2026-11-25) is shown as "Priority n of m" with "Move up" / "Move down" (`imagesOrder`); a
+// route that refuses (429, 400, 415, unusable) is skipped until the next day. The state line
+// shows codes only (`images_state`, `images_reason`). `order` holds `ranked` (the image routes'
+// names by priority), `stored` (the saved order) and `chat` (every chat route's name).
+function imagesSwitch(r, order) {
   const id = "route-" + r.name + "-images";
   const box = el("input", { type: "checkbox", id, role: "switch" });
   box.checked = !!r.images;
@@ -1290,9 +1291,44 @@ function imagesSwitch(r) {
   }));
   const state = r.images
     ? [el("p", { class: "hint", id: id + "-state" }, t("route_images_state_" + r.images_state) + (r.images_reason ? " (" + r.images_reason + ")" : "")),
-      ...(r.images_count > 1 ? [el("p", { class: "hint", id: id + "-rank" }, t("route_images_rank", { n: r.images_rank, total: r.images_count }))] : [])]
+      ...(r.images_count > 1 ? [el("p", { class: "hint", id: id + "-rank" }, t("route_images_rank", { n: r.images_rank, total: r.images_count })),
+        imagesOrder(r, order.ranked, order.stored, order.chat)] : [])]
     : [];
   return [el("p", {}, el("label", { for: id }, box, " " + t("route_images"))), ...state];
+}
+
+// The order to store after a move: the stored order (`stored`) keeps every chat route's name
+// in its place (an image route switched off keeps its slot for when it is on again), a name of
+// no chat route (`chat`) is dropped, the image routes not listed yet are appended, and the image
+// routes' slots take their new order (`moved`).
+function mergedImageOrder(stored, moved, chat) {
+  const full = stored.filter((n) => chat.includes(n));
+  for (const n of moved) if (!full.includes(n)) full.push(n);
+  const next = moved.slice();
+  return full.map((n) => (moved.includes(n) ? next.shift() : n));
+}
+
+// "Move up" / "Move down" of an image route: swaps it with its neighbour in `ranked` (the image
+// routes' names by priority) and saves the merged order (`mergedImageOrder`) as
+// `surroundings.image_route_order` behind the PIN. Only the order changes, so no privacy approval
+// is asked. Up is disabled on the first, down on the last.
+function imagesOrder(r, ranked, stored, chat) {
+  const at = ranked.indexOf(r.name);
+  const move = (step) => guarded(async () => {
+    const order = ranked.slice();
+    [order[at], order[at + step]] = [order[at + step], order[at]];
+    const where = { name: r.name, n: at + step + 1, total: order.length };
+    const changes = [{ path: "surroundings.image_route_order", value: mergedImageOrder(stored, order, chat) }];
+    const result = await pinnedCall(t("route_images_order_message", where), t("route_images_order_confirm"),
+      (pin) => api("POST", "/api/settings/batch", { changes, pin }), null, t("route_images_order_title", { name: r.name }));
+    if (!result) return;
+    notice(t("route_images_moved", where));
+    await routesView();
+  });
+  const id = "route-" + r.name + "-images-";
+  return el("div", { class: "row" },
+    button(t("route_images_up"), "plain", () => move(-1), { attrs: { id: id + "up", disabled: at <= 0, "aria-label": rowName(t("route_images_up"), r.name) } }),
+    button(t("route_images_down"), "plain", () => move(1), { attrs: { id: id + "down", disabled: at < 0 || at >= ranked.length - 1, "aria-label": rowName(t("route_images_down"), r.name) } }));
 }
 
 async function routesView() {
@@ -1335,6 +1371,11 @@ async function routesView() {
       el("ul", {}, report.checks.map(verdict)),
       ...realtimeFacts(report));
   };
+  const order = {
+    ranked: data.routes.filter((r) => r.images).sort((a, b) => a.images_rank - b.images_rank).map((r) => r.name),
+    stored: data.image_route_order || [],
+    chat: data.routes.filter((r) => r.kind !== "realtime").map((r) => r.name),
+  };
   const cards = data.routes.map((r) => {
     const box = el("div", { role: "status" });
     if (r.running) box.append(el("p", { class: "hint" }, t("route_running")));
@@ -1364,7 +1405,7 @@ async function routesView() {
         (r.protocol && r.protocol !== ROUTE_PROTOCOL_DEFAULT ? ", " + t("route_protocol_" + r.protocol) : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
-      r.kind === "realtime" ? [] : imagesSwitch(r),
+      r.kind === "realtime" ? [] : imagesSwitch(r, order),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, sessionFacts(r.session), edit), r.running);
     routeCard.dataset.row = r.name;
     return routeCard;

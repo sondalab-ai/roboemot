@@ -131,6 +131,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "route_unavailable",
         "no_vision",
         "daily_limit",
+        "cut",  # one per reply cut by the token cap, beside the picture's own outcome
     ),
     # a reaction of the robot in its own words ended (SPEC 8, Robot expression): its outcome
     "expression": (

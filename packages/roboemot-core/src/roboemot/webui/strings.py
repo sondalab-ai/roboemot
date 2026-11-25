@@ -251,6 +251,7 @@ EN: dict[str, str] = {
     "live_ev_reply_gave_up": "Reply lost: apologizing",
     "live_ev_reply_backup": "Reply lost: the backup chat answered",
     "live_ev_surroundings_described": "Room picture described",
+    "live_ev_surroundings_cut": "An image route's reply ran out of tokens, the next was tried",
     "live_ev_surroundings_views_missing": "No room picture, a view had no still frame",
     "live_ev_surroundings_unsupported": "An image route refused the picture (400 or 415)",
     "live_ev_surroundings_failed": "Room picture description failed",
@@ -284,9 +285,18 @@ EN: dict[str, str] = {
     "route_images_state_daily_limit": "Today's snapshot limit is reached; they resume tomorrow",
     "route_images_state_route_unavailable": "Route unavailable (key, budget or reachability)",
     "route_images_rank": (
-        "Priority {n} of {total}: room pictures go to the first route in this list that is "
+        "Priority {n} of {total}: room pictures go to the first route by priority that is "
         "usable and has not refused today"
     ),
+    "route_images_up": "Move up",
+    "route_images_down": "Move down",
+    "route_images_order_title": "Image route priority: {name}",
+    "route_images_order_message": (
+        "{name} moves to priority {n} of {total}. Only the order changes: the routes, their "
+        "endpoints and models stay as they are."
+    ),
+    "route_images_order_confirm": "Move",
+    "route_images_moved": "{name} is now priority {n} of {total}.",
     "live_surroundings": "Surroundings",
     "live_surr_state_on": "Snapshots on",
     "live_surr_state_off": "Snapshots off",
@@ -319,6 +329,8 @@ EN: dict[str, str] = {
     "live_surr_outcome_route_unavailable": "route unavailable",
     "live_surr_detail_timeout": "timed out",
     "live_surr_detail_empty": "empty reply",
+    "live_surr_detail_cut": "empty reply: the token cap ran out",
+    "live_surr_cut": "cut by the token cap: {routes}",
     "live_surr_detail_error": "error",
     "live_surr_history": "Last {n} room pictures",
     "live_surr_ago": "{n} s ago",
@@ -1739,6 +1751,9 @@ IT: dict[str, str] = {
     "live_ev_reply_gave_up": "Risposta persa: mi scuso",
     "live_ev_reply_backup": "Risposta persa: ha risposto la chat di riserva",
     "live_ev_surroundings_described": "Immagine della stanza descritta",
+    "live_ev_surroundings_cut": (
+        "La risposta di una route immagini ha finito i token, si prova la successiva"
+    ),
     "live_ev_surroundings_views_missing": "Niente immagine della stanza, vista senza fotogramma",
     "live_ev_surroundings_unsupported": "Una route immagini ha rifiutato l'immagine (400 o 415)",
     "live_ev_surroundings_failed": "Descrizione dell'immagine della stanza fallita",
@@ -1773,9 +1788,18 @@ IT: dict[str, str] = {
     "route_images_state_daily_limit": "Limite di istantanee di oggi raggiunto; riprendono domani",
     "route_images_state_route_unavailable": "Route non disponibile (chiave, budget o rete)",
     "route_images_rank": (
-        "Priorità {n} di {total}: le immagini della stanza vanno alla prima route di questa "
-        "lista disponibile e che oggi non ha rifiutato"
+        "Priorità {n} di {total}: le immagini della stanza vanno alla prima route per "
+        "priorità disponibile e che oggi non ha rifiutato"
     ),
+    "route_images_up": "Sposta su",
+    "route_images_down": "Sposta giù",
+    "route_images_order_title": "Priorità delle route per le immagini: {name}",
+    "route_images_order_message": (
+        "{name} passa a priorità {n} di {total}. Cambia solo l'ordine: le route, i loro "
+        "indirizzi e modelli restano come sono."
+    ),
+    "route_images_order_confirm": "Sposta",
+    "route_images_moved": "{name} ora ha priorità {n} di {total}.",
     "live_surroundings": "Ambiente",
     "live_surr_state_on": "Istantanee attive",
     "live_surr_state_off": "Istantanee spente",
@@ -1808,6 +1832,8 @@ IT: dict[str, str] = {
     "live_surr_outcome_route_unavailable": "route non disponibile",
     "live_surr_detail_timeout": "tempo scaduto",
     "live_surr_detail_empty": "risposta vuota",
+    "live_surr_detail_cut": "risposta vuota: finito il limite di token",
+    "live_surr_cut": "tagliata dal limite di token: {routes}",
     "live_surr_detail_error": "errore",
     "live_surr_history": "Ultime {n} immagini della stanza",
     "live_surr_ago": "{n} s fa",

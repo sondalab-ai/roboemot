@@ -1511,7 +1511,8 @@ class WebApi:
         (only the runtime layer holds the route, so the page may remove it), and the host
         suffixes the realtime session provider declares (``realtime_key_hosts``), the presets
         of the add card (``presets``: id, label, fields, secret name; none whose route exists)
-        and the range of a route's ``connect_timeout_s``."""
+        and the range of a route's ``connect_timeout_s``, plus the stored
+        ``image_route_order`` that the page's "Move up" / "Move down" merge into (SPEC 8)."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
         hosts = self.settings.realtime_key_hosts() if self.settings else []
@@ -1524,6 +1525,7 @@ class WebApi:
                 "voices": {p: list(names) for p, names in KNOWN_VOICES.items()},
                 "presets": presets,
                 "connect_timeout_s": {"min": CONNECT_TIMEOUT_MIN_S, "max": CONNECT_TIMEOUT_MAX_S},
+                "image_route_order": list(self.config.surroundings.image_route_order),
             },
         )
 

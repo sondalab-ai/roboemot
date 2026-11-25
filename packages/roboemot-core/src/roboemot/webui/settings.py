@@ -111,6 +111,7 @@ RESTORE_SOURCE = "webui:restore"
 FILE_VERSION = 1
 MAX_FILE_BYTES = 1_000_000  # bounds what a damaged or hostile file can make the app read
 FILE_MODE = 0o600
+IMAGE_ORDER = "surroundings.image_route_order"  # pruned when a route is removed (SPEC 8)
 GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
 # keyed by language: a new key must be one the voice stack supports
@@ -856,6 +857,7 @@ class SettingsEditor:
                 del self._acks[stored]
             if box_path == "llm_routes":
                 self._keys.pop(name, None)
+                self._prune_image_order(name, source)
             result = {
                 "path": path,
                 "changed": True,
@@ -864,6 +866,20 @@ class SettingsEditor:
                 "persisted": self._persist(),
             }
             return self._applied(result, before)
+
+    def _prune_image_order(self, name: str, source: str) -> None:
+        """Drop a removed route's ``name`` from ``surroundings.image_route_order`` (lock held;
+        SPEC 8, Surroundings snapshots): the Settings row offers only existing chat routes, so
+        a stale name would make its next save fail. Nothing is written when it is not there;
+        the caller persists."""
+        order = self.stack.effective().surroundings.image_route_order
+        if name not in order:
+            return
+        kept = [n for n in order if n != name]
+        self.stack.set(
+            IMAGE_ORDER, kept, source=source, admin=True, layer="runtime", refuse=REFUSED_CHECKS
+        )
+        self._remember(okey(self.stack.merged_tree(), IMAGE_ORDER), kept)
 
     # ------------------------------------------------------------------ route keys (SPEC 8, 11A)
 

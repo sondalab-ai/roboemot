@@ -19,8 +19,10 @@ def test_defaults_match_the_design():
     assert (s.max_side_px, s.jpeg_quality) == (768, 80)
     assert (s.max_failures, s.pause_s) == (3, 600)
     # a model that thinks first spends its reply budget on it (gemini-3.5-flash on the robot,
-    # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s)
-    assert (s.describe_max_tokens, s.describe_first_token_s) == (1024, 30.0)
+    # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s;
+    # claude-haiku-5-5: empty under 1024, 313 to 901 completion tokens in a probe)
+    assert (s.describe_max_tokens, s.describe_first_token_s) == (4096, 30.0)
+    assert s.image_route_order == []
     assert s.min_sharpness == 20.0
     r = s.room
     assert (r.min_interval_s, r.changed_share, r.max_chars, r.max_age_s) == (300, 0.5, 160, 3600)
@@ -29,6 +31,34 @@ def test_defaults_match_the_design():
 def test_two_image_routes_load_in_list_order():
     cfg = RoboEmotConfig(llm_routes=[chat("b", images=True), chat("x"), chat("a", images=True)])
     assert [r.name for r in image_routes(cfg)] == ["b", "a"]  # their priority (2026-11-25)
+
+
+def test_the_image_route_order_comes_before_the_list_order():
+    """The robot's case (2026-11-25): a paid route before the free one in llm_routes; the order
+    field puts the free one first."""
+    routes = [chat("Claude", images=True), chat("gemini_pictures", images=True)]
+    cfg = RoboEmotConfig(
+        llm_routes=routes, surroundings={"image_route_order": ["gemini_pictures", "Claude"]}
+    )
+    assert [r.name for r in image_routes(cfg)] == ["gemini_pictures", "Claude"]
+
+
+def test_routes_the_order_does_not_name_follow_in_list_order_and_unknown_names_are_ignored():
+    routes = [chat("a", images=True), chat("x"), chat("b", images=True), chat("c", images=True)]
+    cfg = RoboEmotConfig(llm_routes=routes, surroundings={"image_route_order": ["gone", "c", "x"]})
+    assert [r.name for r in image_routes(cfg)] == ["c", "a", "b"]
+
+
+def test_the_image_route_order_refuses_a_name_twice():
+    with pytest.raises(ValidationError, match="duplicate route name"):
+        RoboEmotConfig(surroundings={"image_route_order": ["a", "a"]})
+
+
+def test_changing_the_image_route_order_needs_no_approval():
+    routes = [chat("a", images=True), chat("b", images=True)]
+    approved = RoboEmotConfig(llm_routes=routes)
+    moved = RoboEmotConfig(llm_routes=routes, surroundings={"image_route_order": ["b", "a"]})
+    assert not [v for v in violations(approved, moved) if v.kind == "privacy"]
 
 
 def test_a_realtime_route_cannot_see_images():

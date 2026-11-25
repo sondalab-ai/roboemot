@@ -12,7 +12,7 @@ import pytest
 from roboemot.bus import Bus
 from roboemot.circadian.model import CircadianState
 from roboemot.config.schema import LLMRoute, RoboEmotConfig, WorldScanConfig
-from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable, RateLimited
+from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable, RateLimited, ReplyCut
 from roboemot.manifest import Dof
 from roboemot.runtime.ticks import scan_tick
 from roboemot.surroundings.image import MASK_BGR
@@ -1196,6 +1196,146 @@ def test_adding_reordering_or_removing_image_routes_keeps_the_room_and_history()
     assert rig.s._want_first  # off to on: a first picture is owed
     rig.later()
     assert rig.due()
+
+
+# ---- the image route order (owner decision 2026-11-25)
+
+
+def robot_routes(**surroundings) -> RoboEmotConfig:
+    """The robot's case: the paid route before the free one in llm_routes."""
+    return config(routes=[eye("Claude"), eye("gemini_pictures")], **surroundings)
+
+
+def test_the_picture_goes_first_to_the_route_the_order_puts_first():
+    rig = Rig(cfg=robot_routes(image_route_order=["gemini_pictures", "Claude"]))
+    rig.picture()
+    assert rig.routes() == ["gemini_pictures"]
+    assert [r["route"] for r in rig.s.state()["routes"]] == ["gemini_pictures", "Claude"]
+
+
+def test_a_reorder_keeps_the_room_the_history_and_the_marks():
+    router = FakeRouter("a kitchen", errors={"Claude": RateLimited("http_429")})
+    rig = Rig(cfg=robot_routes(), router=router)
+    rig.picture()
+    assert rig.routes() == ["Claude", "gemini_pictures"]
+    rig.apply(robot_routes(image_route_order=["gemini_pictures", "Claude"]))
+    assert rig.s.room(rig.clock.now) == "a kitchen" and len(rig.s.live()["history"]) == 1
+    assert not rig.s._want_first  # no new first picture owed
+    routes = rig.s.state()["routes"]
+    assert [(r["route"], r["skipped"]) for r in routes] == [
+        ("gemini_pictures", False),
+        ("Claude", True),  # its skip for today survives the move
+    ]
+
+
+# ---- an empty reply cut by the token cap (owner decision 2026-11-25)
+
+
+def test_an_empty_reply_cut_by_the_cap_sends_the_same_picture_to_the_next_route():
+    rig = Rig(cfg=two(max_failures=1), router=FakeRouter(errors={"free": ReplyCut("free")}))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.router.calls[0][2] == rig.router.calls[1][2]  # the same JPEG, no new sweep
+    assert rig.s.room(rig.clock.now) == "a living room"
+    assert rig.reasons() == ["cut", "described"]  # the cut is counted beside the outcome
+    counts = rig.s.state()["counts"]
+    assert (counts["cut"], counts["described"], counts["failed"]) == (1, 1, 0)
+    assert rig.s.state()["last"]["cut"] == ["free"]
+    assert rig.s.live()["history"][0]["cut"] == ["free"]
+    free = rig.s.state()["routes"][0]
+    assert (free["skipped"], free["paused_s"]) == (False, 0)  # no skip, no failure
+    assert rig.s._marks["free"].failures == 0
+    assert rig.s.state()["route"] == "free"  # still tried first next time
+
+
+def test_an_empty_reply_cut_on_the_last_route_is_failed_cut_and_marks_nothing():
+    rig = Rig(cfg=config(max_failures=1), router=FakeRouter(error=ReplyCut("eye")))
+    rig.picture()
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "cut")
+    assert rig.s.state()["routes"][0]["paused_s"] == 0
+    rig.later()
+    assert rig.due()
+
+
+def test_a_picture_without_a_cut_names_none():
+    rig = Rig(cfg=two())
+    rig.picture()
+    assert rig.s.state()["last"]["cut"] == [] and rig.s.live()["history"][0]["cut"] == []
+    assert rig.s.state()["counts"]["cut"] == 0
+
+
+def test_every_route_cut_names_them_all_and_counts_each():
+    rig = Rig(cfg=two(), router=FakeRouter(error=ReplyCut("x")))
+    rig.picture()
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"], last["cut"]) == ("failed", "cut", ["free", "paid"])
+    assert rig.reasons() == ["cut", "cut", "failed"]
+
+
+def test_a_cut_request_counts_toward_max_per_day_and_the_cap_stops_the_fallback():
+    rig = Rig(cfg=two(max_per_day=1), router=FakeRouter(errors={"free": ReplyCut("free")}))
+    rig.picture()
+    assert rig.routes() == ["free"]  # the cut request was the day's one request
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "cut")
+    assert rig.s.state()["state"] == "daily_limit"
+    rig.later()
+    assert not rig.due()  # held by the cap until the next day
+    rig.day = rig.day + dt.timedelta(days=1)
+    rig.s.trigger()
+    assert rig.due()
+
+
+@pytest.mark.parametrize("change", sorted(CHANGES))
+def test_a_cut_from_a_route_changed_during_its_request_is_dropped(change):
+    rig = Rig(cfg=two(max_failures=1))
+    rig.s.trigger()
+    rig.sweep(done=False)
+    changed = config(routes=CHANGES[change])
+
+    class Change(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(changed)
+            raise ReplyCut(route.name)
+
+    rig.router = Change()
+    rig.finish()
+    assert rig.routes() == ["free"]  # dropped: no fallback for this picture
+    assert rig.s.live()["history"] == [] and rig.s.state()["last"] is None
+    assert all(not r["skipped"] and r["paused_s"] == 0 for r in rig.s.state()["routes"])
+    assert rig.reasons() == []  # neither the cut nor an outcome is counted
+
+
+def test_a_cut_after_the_feature_went_off_and_on_is_dropped():
+    rig = Rig(cfg=two(max_failures=1))
+    rig.s.trigger()
+    rig.sweep(done=False)
+
+    class OffAndOn(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(two(max_failures=1, history_size=0))
+            rig.apply(config(images=False))
+            rig.apply(two(max_failures=1))
+            raise ReplyCut(route.name)
+
+    rig.router = OffAndOn()
+    rig.finish()
+    assert rig.routes() == ["free"]
+    assert rig.s.state()["last"] is None and rig.s.live()["history"] == []
+    assert all(r["paused_s"] == 0 for r in rig.s.state()["routes"])
+    assert rig.s.state()["counts"]["cut"] == 0
+
+
+def test_an_empty_reply_that_ended_normally_stays_a_failure_and_does_not_fall_back():
+    rig = Rig(cfg=two(max_failures=1), router=FakeRouter("   "))
+    rig.picture()
+    assert rig.routes() == ["free"]
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"]) == ("failed", "empty")
+    assert rig.s.state()["routes"][0]["paused_s"] > 0  # counted: max_failures 1 pauses it
 
 
 def test_history_and_last_carry_the_route_and_the_state_holds_no_text_or_key():

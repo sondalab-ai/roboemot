@@ -3,6 +3,8 @@
 > Superseded in part on 2026-11-25 by `2026-11-25-surroundings-panorama-design.md`: the room picture is a panorama from a photo sweep, and the shown-thing snapshot and the head hold are removed.
 >
 > Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415 is skipped until the next local day, one that is not usable (key missing, budget spent, unreachable) is passed over for that picture only, and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. A route's skip is bound to its base URL, model and key reference (`${secret:name}`), never the secret's value; a reply from a route changed during its own request is dropped. SPEC 8, Surroundings snapshots (Fallback) is current.
+>
+> Changed later on 2026-11-25 (owner decisions): the image routes' priority is `surroundings.image_route_order` (route names; the others follow in `llm_routes` order), set with "Move up" / "Move down" on the Routes tab; `surroundings.describe_max_tokens` is 4096 (was 1024); an empty reply that ended at the token cap (`finish_reason: length`) falls back to the next image route for that picture with no mark on the route (detail `cut`). SPEC 8, Surroundings snapshots is current.
 
 Date: 2026-11-24. Status: waiting for owner approval (builder check done). SPEC sections touched: 5, 5A, 8
 (Robot expression, LLM router, Conversation state), 11A, 12, 12A.
