@@ -769,8 +769,8 @@ test("a beating pulse replaces the beat card on each poll (the resync), and only
 
 const SURROUNDINGS = {
   state: "on", route: "eye", due: false, views: 0, counts: { described: 2, views_missing: 1 },
-  last: { views: 4, span_deg: 237, age_s: 3, bytes: 20480, sharpness: 88 }, latency_s: 1.2,
-  unsupported: null, paused_s: 0,
+  last: { views: 4, span_deg: 237, age_s: 3, bytes: 20480, sharpness: 88, route: "eye" }, latency_s: 1.2,
+  routes: [{ route: "eye", skipped: false, reason: null, paused_s: 0 }], paused_s: 0,
 };
 
 const SURR_STRINGS = {
@@ -778,7 +778,10 @@ const SURR_STRINGS = {
     language: "en",
     strings: {
       ...STRINGS,
-      live_surr_unsupported: "The image route refused the image ({code}).",
+      live_surr_routes: "Image routes",
+      live_surr_route_ready: "ready",
+      live_surr_route_skipped: "skipped until tomorrow ({code})",
+      live_surr_via: "via {route}",
       live_surr_last_value: "{views}, {n} s ago, {kb} KB, sharpness {score}",
       live_surr_views: "{views} views over {span}°",
     },
@@ -821,18 +824,30 @@ test("surroundings: with video on the card shows the description and the last pi
   assert.ok(card.querySelector("img").getAttribute("src").startsWith("blob:"));
 });
 
-test("surroundings: an unsupported route shows its reason", async (t) => {
-  const s = { ...SURROUNDINGS, state: "unsupported", unsupported: "http_400" };
+test("surroundings: a route skipped today shows its reason", async (t) => {
+  const routes = [{ route: "eye", skipped: true, reason: "http_400", paused_s: 0 }];
+  const s = { ...SURROUNDINGS, state: "daily_limit", route: null, routes };
   const page = await livePage(t, { ...SURR_STRINGS, "GET /api/live/state": { ...STATE, surroundings: s } });
   await openLive(page);
-  assert.ok(surroundingsCard(page).textContent.includes("http_400"));
+  assert.ok(surroundingsCard(page).textContent.includes("eye: skipped until tomorrow (http_400)"));
+});
+
+test("surroundings: several image routes are listed in priority order with their status", async (t) => {
+  const routes = [
+    { route: "gemini", skipped: true, reason: "http_429", paused_s: 0 },
+    { route: "claude", skipped: false, reason: null, paused_s: 0 },
+  ];
+  const s = { ...SURROUNDINGS, route: "claude", routes };
+  const page = await livePage(t, { ...SURR_STRINGS, "GET /api/live/state": { ...STATE, surroundings: s } });
+  await openLive(page);
+  assert.ok(surroundingsCard(page).textContent.includes("gemini: skipped until tomorrow (http_429), claude: ready"));
 });
 
 test("surroundings: the card shows the last outcome and the history, text as text", async (t) => {
-  const last = { views: 4, span_deg: 237, age_s: 4, bytes: 9000, sharpness: 300, outcome: "failed", detail: "timeout" };
+  const last = { views: 4, span_deg: 237, age_s: 4, bytes: 9000, sharpness: 300, outcome: "failed", detail: "timeout", route: "gemini" };
   const history = [
-    { views: 4, span_deg: 237, age_s: 4, outcome: "failed", detail: "timeout", text: null },
-    { views: 5, span_deg: 300, age_s: 90, outcome: "described", detail: null, text: "a <i>study</i>, desk centre" },
+    { views: 4, span_deg: 237, age_s: 4, outcome: "failed", detail: "timeout", route: "gemini", text: null },
+    { views: 5, span_deg: 300, age_s: 90, outcome: "described", detail: null, route: "claude", text: "a <i>study</i>, desk centre" },
   ];
   const s = { ...SURROUNDINGS, last, history, described: { room: null } };
   const page = await livePage(t, {
@@ -845,7 +860,8 @@ test("surroundings: the card shows the last outcome and the history, text as tex
   });
   await openLive(page);
   const card = surroundingsCard(page);
-  assert.ok(card.textContent.includes("failed (timed out)"), "the outcome with its reason");
+  assert.ok(card.textContent.includes("failed (timed out), via gemini"), "the outcome with its reason and route");
+  assert.ok(card.textContent.includes("desk centre (via claude)"), "the route that described it");
   assert.ok(card.textContent.includes("Last 2 room pictures"));
   assert.ok(card.textContent.includes("5 views over 300°"), "each picture's views and span");
   assert.ok(card.textContent.includes("a <i>study</i>, desk centre") && card.querySelector("i") === null);

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from roboemot.config.schema import LLMRoute, RoboEmotConfig, image_route
+from roboemot.config.schema import LLMRoute, RoboEmotConfig, image_routes
 from roboemot.config.stack import violations
 from roboemot.llm.prompt import system_tokens_worst_case
 
@@ -26,9 +26,9 @@ def test_defaults_match_the_design():
     assert (r.min_interval_s, r.changed_share, r.max_chars, r.max_age_s) == (300, 0.5, 160, 3600)
 
 
-def test_two_image_routes_are_rejected():
-    with pytest.raises(ValidationError, match="at most one route may have images on"):
-        RoboEmotConfig(llm_routes=[chat("a", images=True), chat("b", images=True)])
+def test_two_image_routes_load_in_list_order():
+    cfg = RoboEmotConfig(llm_routes=[chat("b", images=True), chat("x"), chat("a", images=True)])
+    assert [r.name for r in image_routes(cfg)] == ["b", "a"]  # their priority (2026-11-25)
 
 
 def test_a_realtime_route_cannot_see_images():
@@ -36,10 +36,8 @@ def test_a_realtime_route_cannot_see_images():
         chat("rt", kind="realtime", images=True)
 
 
-def test_image_route_returns_the_one_route_or_none():
-    assert image_route(RoboEmotConfig(llm_routes=[chat("a")])) is None
-    cfg = RoboEmotConfig(llm_routes=[chat("a"), chat("b", images=True)])
-    assert image_route(cfg).name == "b"
+def test_image_routes_is_empty_without_a_route_with_images_on():
+    assert image_routes(RoboEmotConfig(llm_routes=[chat("a")])) == []
 
 
 def test_images_is_a_privacy_opt_in():
@@ -87,6 +85,12 @@ def test_moving_the_switch_to_another_route_needs_approval():
     found = [v for v in violations(approved, swapped) if v.kind == "privacy"]
     assert {v.path for v in found} == {"llm_routes.b.images"}
     assert "image" in {v.check for v in found}  # bound to b's endpoint and model
+
+
+def test_reordering_image_routes_needs_no_approval():
+    approved = RoboEmotConfig(llm_routes=[chat("a", images=True), chat("b", images=True)])
+    reordered = RoboEmotConfig(llm_routes=[chat("b", images=True), chat("a", images=True)])
+    assert not [v for v in violations(approved, reordered) if v.kind == "privacy"]
 
 
 def test_an_unchanged_image_route_needs_nothing():

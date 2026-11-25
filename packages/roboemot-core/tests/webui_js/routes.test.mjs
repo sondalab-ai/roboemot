@@ -756,10 +756,10 @@ test("route edit: a chat route sends no connect timeout", async () => {
 const chatRow = (name, extra = {}) => ({
   name, model: "m", endpoint: "api.example.com", base_url: "https://api.example.com/v1",
   locality: "cloud", kind: "chat", key: "none", running: false, secret: null, last_check: null,
-  removable: true, images: false, images_state: "off", images_reason: null, ...extra,
+  removable: true, images: false, images_state: "off", images_reason: null, images_rank: null, images_count: 0, ...extra,
 });
 
-test("images: switching on posts one batch that turns the other route off first", async () => {
+test("images: switching on posts one batch for that route only; another image route stays on", async () => {
   const page = await routesPage({
     "GET /api/routes": { routes: [chatRow("a", { images: true, images_state: "on" }), chatRow("b")] },
     "POST /api/settings/batch": { changed: true, results: {} },
@@ -771,10 +771,7 @@ test("images: switching on posts one batch that turns the other route off first"
   await settle();
   await answerPin(page);
   assert.deepEqual(posts(page, "/api/settings/batch")[0].body, {
-    changes: [
-      { path: "llm_routes.a.images", value: false },
-      { path: "llm_routes.b.images", value: true },
-    ],
+    changes: [{ path: "llm_routes.b.images", value: true }],
     pin: PIN,
   });
   noTrace(page, PIN);
@@ -800,9 +797,25 @@ test("images: the switch is absent on a realtime card", async () => {
   assert.equal(page.document.querySelector("#route-rt-images"), null);
 });
 
-test("images: an unsupported state shows its reason", async () => {
-  const row = chatRow("a", { images: true, images_state: "unsupported", images_reason: "http_400" });
+test("images: a route skipped today shows its reason", async () => {
+  const row = chatRow("a", { images: true, images_state: "skipped", images_reason: "http_400", images_rank: 1, images_count: 1 });
   const page = await routesPage({ "GET /api/routes": { routes: [row] } });
   const hint = page.document.querySelector("#route-a-images-state");
   assert.ok(hint.textContent.includes("http_400"));
+  assert.equal(page.document.querySelector("#route-a-images-rank"), null, "no priority with one image route");
+});
+
+test("images: with several image routes each shows its priority", async () => {
+  const page = await routesPage({
+    "GET /api/routes": { routes: [
+      chatRow("free", { images: true, images_state: "on", images_rank: 1, images_count: 2 }),
+      chatRow("text", { images_count: 2 }),
+      chatRow("paid", { images: true, images_state: "on", images_rank: 2, images_count: 2 }),
+    ] },
+    "GET /api/strings": { language: "en", strings: { ...STRINGS.strings, route_images_rank: "Priority {n} of {total}" } },
+  });
+  const rank = (name) => page.document.querySelector("#route-" + name + "-images-rank");
+  assert.equal(rank("free").textContent, "Priority 1 of 2");
+  assert.equal(rank("text"), null);
+  assert.equal(rank("paid").textContent, "Priority 2 of 2");
 });

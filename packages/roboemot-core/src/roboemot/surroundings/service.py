@@ -1,32 +1,47 @@
 """The surroundings service (SPEC 8, Surroundings snapshots; designs 2026-11-24, 2026-11-25).
 
-The feature is on exactly while one route has ``images`` on. A room picture becomes due
-(``trigger``) at a wake from sleep, at the end of a rest and after a scene change; one is owed at
-start and at switch-on and retried, uncounted, about every ``room.check_interval_s`` until it
-passes. Every refusal check runs first: off, ``no_vision``, ``unsupported``, ``paused``,
-``daily_limit`` (the cap or a 429 today), ``offline``, ``route_unavailable``, the robot's
-``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is counted and
-nothing turns. While due, the service thread checks again every ``POLL_S``, uncounted, and
-``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
+The feature is on while at least one route has ``images`` on; their order in ``llm_routes`` is
+their priority (``image_routes``, owner decision 2026-11-25). A room picture becomes due
+(``trigger``) at a wake from sleep, at the end of a rest and after a scene change; one is owed
+at start and when the feature goes from off to on, and retried, uncounted, about every
+``room.check_interval_s`` until it passes. Every refusal check runs first: off, ``no_vision``,
+``daily_limit`` (every image route skipped today), ``paused`` (every route left is paused),
+``daily_limit`` (the cap), ``offline``, ``route_unavailable`` (no route left is usable now), the
+robot's ``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is
+counted and nothing turns. While due, the service thread checks again every ``POLL_S``,
+uncounted, and ``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
 ``picture_state`` also says whether the due picture is the first one that became due after
-start or switch-on: its photo sweep starts at once, even while engaged or alone (owner,
-2026-11-25). The scan policy keeps that one attempt; the end of a photo sweep that took views
-for it clears the mark, and a picture still due (``views_missing``) then waits under the scan's
-normal rules. A switch-off and on owes a new first picture with a fresh attempt.
+start or after the feature went from off to on: its photo sweep starts at once, even while
+engaged or alone (owner, 2026-11-25). The scan policy keeps that one attempt; the end of a
+photo sweep that took views for it clears the mark, and a picture still due
+(``views_missing``) then waits under the scan's normal rules. The feature going off and on
+owes a new first picture with a fresh attempt; adding, removing or reordering image routes
+does not.
 
 A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
 names one, the vision thread's frames (``tap``) go to that view's ``Picker``: only a still frame
 with its own face run is a candidate, and it is masked with that run's boxes only. At
 ``world.scan_finished`` with ``photo`` the views are taken; when every planned view has a still,
-sharp frame, the service thread masks them, joins them left to right by
-descending azimuth (``tile``), encodes one JPEG and asks the image route for one line of text
-(``describe``). Otherwise nothing is sent (``views_missing``) and the picture stays due. Going to
-sleep or rest drops the views and the kept picture; at send time sleep, rest or the radio drop
-it (the picture stays due), a conversation does not. A picture whose description failed (any
-outcome but ``described``) stays due; the refusal checks hold it until one could go out. A reply
-that arrives after the switch went off or the route changed (the generation moved) is dropped.
-HTTP 400 or 415 marks the route unsupported until its base URL, model or key changes or the
-switch goes off and on; ``max_failures`` failures in a row pause the pictures for ``pause_s``.
+sharp frame, the service thread masks them, joins them left to right by descending azimuth
+(``tile``), encodes one JPEG and asks the first image route not skipped today and not paused for
+one line of text (``describe``). Otherwise nothing is sent (``views_missing``) and the picture
+stays due. Going to sleep or rest drops the views and the kept picture; at send time sleep, rest
+or the radio drop it (the picture stays due), a conversation does not. A picture whose
+description failed (any outcome but ``described``) stays due; the refusal checks hold it until
+one could go out. A reply that arrives after the feature went off or the robot slept (the
+generation moved), or from a route whose base URL, model or key reference changed, or that was
+removed or switched off, during its own request, is dropped and sets no mark.
+
+Fallback (owner decisions 2026-11-25): a route that answers 429 (``RateLimited``), 400 or 415
+(``ImagesUnsupported``; Anthropic says "credit balance too low" with 400) is skipped for the
+rest of the local day (``today``); one that is not usable (``NoRouteAvailable``: key missing,
+budget spent, unreachable) is passed over for this picture only. Either way the same JPEG goes
+at once to the next route, in the same ``_send``; only when every route refused does the
+picture stay due. Timeouts, empty replies and other errors stay on the route: ``max_failures``
+in a row pause that route for ``pause_s`` (the next picture goes to the next route). A route's
+marks (skip, failures, pause) are bound to its base URL, model and key reference (the
+``${secret:name}`` text, never the secret's value): a change clears them. ``max_per_day``
+counts the requests sent to every route together.
 
 The scene check: with no picture due, the head still and ``min_interval_s`` past, about every
 ``check_interval_s`` a frame is compared with the sent view within ``room.view_match_deg`` of
@@ -54,7 +69,7 @@ from openai import APIStatusError, APITimeoutError
 
 from ..bus import Bus, Message
 from ..circadian.model import CircadianState
-from ..config.schema import RoboEmotConfig, image_route
+from ..config.schema import LLMRoute, RoboEmotConfig, image_routes
 from ..diag import REASONS, EventSink, no_events
 from ..llm.router import ImagesUnsupported, NoRouteAvailable, Offline, RateLimited
 from ..vision.scene_change import HeadStill, moved_share, thumbnail
@@ -76,7 +91,9 @@ BUSY = "busy"  # the conversation is not idle: refuses a trigger, never a pictur
 VIEWS_MISSING = "views_missing"  # a photo sweep ended without a frame for every view
 DESCRIBING = "describing"  # the last picture's outcome while its request is open
 TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
-DAILY_LIMIT = "daily_limit"  # today's cap reached, or the provider said 429 today
+DAILY_LIMIT = "daily_limit"  # today's cap reached, or every image route skipped today
+UNSUPPORTED, ROUTE_UNAVAILABLE = "unsupported", "route_unavailable"
+STALE = "stale"  # a reply from a route changed during its request: dropped, never an outcome
 RESTING = "resting"
 POLL_S = 0.1  # how often the service thread checks a due picture again
 JOIN_TIMEOUT_S = 2.0
@@ -111,6 +128,18 @@ class _Job:
     generation: int
 
 
+@dataclass
+class _Mark:
+    """One image route's marks, bound to its base URL, model and key (``trust``): the day it
+    was skipped and why (a code), the failures in a row and the end of its pause."""
+
+    trust: tuple[str, str, str] = field(repr=False)  # holds the key reference: never printed
+    skipped_on: dt.date | None = None
+    reason: str | None = None
+    failures: int = 0
+    paused_until: float = -math.inf
+
+
 class Surroundings:
     """See the module docstring. ``cfg`` gives the configuration at start (``apply_config``
     keeps a copy up to date: the stack validates on every read), ``router`` the live router,
@@ -138,15 +167,14 @@ class Surroundings:
         self.vision, self.frame_spec, self.clock = vision, frame_spec, clock
         self.events: EventSink = no_events
         self._cfg = cfg()
-        self._trust = _trust(self._cfg)
+        self._on = bool(image_routes(self._cfg))
         self._lock = threading.Condition()
-        # describe requests sent today and the day the provider said 429
         self._day: dt.date | None = None
-        self._sent = 0
-        self._limited_on: dt.date | None = None
+        self._sent = 0  # describe requests sent today, every route together
+        self._marks: dict[str, _Mark] = {}  # per image route name
         self._due = False  # a trigger passed: a photo sweep is wanted
         self._due_ok = False  # and the refusal checks still pass (the service thread's poll)
-        self._want_first = image_route(self._cfg) is not None  # owed at start and switch-on
+        self._want_first = self._on  # owed at start and when the feature goes on
         self._first = False  # the due picture is that first one and its bypass is unused
         self._first_tried = -math.inf
         self._views: dict[int, _View] = {}
@@ -161,9 +189,6 @@ class Surroundings:
         self._history: list[dict[str, Any]] = []  # the pictures sent, oldest first (RAM only)
         self._latency_s: float | None = None
         self._counts = dict.fromkeys(OUTCOMES, 0)
-        self._unsupported: str | None = None
-        self._failures = 0
-        self._paused_until = -math.inf
         self._last_room = -math.inf
         self._last_check = -math.inf
         self._generation = 0
@@ -236,33 +261,27 @@ class Surroundings:
     def picture_state(self) -> tuple[bool, bool]:
         """``(due, first)`` in one lock-held read for the scan context (SPEC 5A). ``due``: a
         picture is due and could be sent now (``picture_due``). ``first``: the due picture is
-        the first one that became due after start or switch-on; it stays true while the picture
-        is due until a photo sweep with views for it ends, so a refusal that comes and goes never
-        resets the scan policy's one attempt (the policy keeps it: a sweep with no plan, a failed
-        one or one cancelled by sleep never reaches ``world.scan_finished``)."""
+        the first one that became due after start or the feature going on; it stays true while
+        the picture is due until a photo sweep with views for it ends, so a refusal that comes
+        and goes never resets the scan policy's one attempt (the policy keeps it: a sweep with no
+        plan, a failed one or one cancelled by sleep never reaches ``world.scan_finished``)."""
         with self._lock:
             return self._due and self._due_ok, self._due and self._first
 
     def _refusal(self, now: float) -> str | None:
         cfg = self._cfg
-        route = image_route(cfg)
-        if route is None:
+        with self._lock:
+            code, ready = self._routes_state(now)
+            last_room = self._last_room
+        if code == OFF:
             return OFF
         if not self.vision:
             return "no_vision"
-        with self._lock:
-            if self._unsupported is not None:
-                return "unsupported"
-            if now < self._paused_until:
-                return "paused"
-            if self._capped():
-                return DAILY_LIMIT
-            last_room = self._last_room
-        router = self.router()
-        if router.offline:
-            return "offline"
-        if route.name not in {r.name for r in router.eligible()}:
-            return "route_unavailable"
+        if code is not None:
+            return code
+        code = self._reach(ready)
+        if code is not None:
+            return code
         reason = self.gate()
         if reason is not None:
             return reason
@@ -271,13 +290,43 @@ class Surroundings:
         return None
 
     def _capped(self) -> bool:
-        """Whether today's cap is reached (lock held): the provider said 429 today, or
-        ``max_per_day`` requests went out. A new day resets the count."""
+        """Whether ``max_per_day`` requests went out today, every route together (lock held).
+        A new day resets the count."""
         today = self.today()
         if today != self._day:
             self._day, self._sent = today, 0
         cap = self._cfg.surroundings.max_per_day
-        return self._limited_on == today or bool(cap and self._sent >= cap)
+        return bool(cap and self._sent >= cap)
+
+    def _mark(self, route: LLMRoute) -> _Mark:
+        """The route's marks (lock held): new ones when its base URL, model or key changed."""
+        trust = _trust(route)
+        mark = self._marks.get(route.name)
+        if mark is None or mark.trust != trust:
+            mark = self._marks[route.name] = _Mark(trust)
+        return mark
+
+    def _skipped(self, route: LLMRoute) -> str | None:
+        """Why the route is skipped today (a code), None when it is not (lock held)."""
+        mark = self._mark(route)
+        return mark.reason if mark.skipped_on == self.today() else None
+
+    def _routes_state(self, now: float) -> tuple[str | None, list[LLMRoute]]:
+        """The image routes a picture may go to now, in priority order: not skipped today and
+        not paused (lock held); with a code when there is none (``off``, ``daily_limit``: every
+        route skipped today, ``paused``) or the cap is reached (``daily_limit``)."""
+        routes = image_routes(self._cfg)
+        if not routes:
+            return OFF, []
+        open_ = [r for r in routes if self._skipped(r) is None]
+        if not open_:
+            return DAILY_LIMIT, []
+        ready = [r for r in open_ if now >= self._mark(r).paused_until]
+        if not ready:
+            return "paused", []
+        if self._capped():
+            return DAILY_LIMIT, ready
+        return None, ready
 
     # ------------------------------------------------------------- vision thread
 
@@ -294,10 +343,8 @@ class Surroundings:
                 not self._due
                 and self._job is None
                 and bool(self._references)
-                and image_route(self._cfg) is not None
                 and self.vision
-                and self._unsupported is None
-                and now >= self._paused_until
+                and bool(self._routes_state(now)[1])
                 and now - self._last_room >= s.room.min_interval_s
                 and now - self._last_check >= s.room.check_interval_s
             )
@@ -452,7 +499,7 @@ class Surroundings:
         if reason is not None and reason != BUSY:
             self._count(reason)
             with self._lock:
-                self._due = image_route(self._cfg) is not None
+                self._due = self._on
             return
         try:
             jpeg, references = self._compose(job)
@@ -478,72 +525,166 @@ class Surroundings:
         return jpeg, references
 
     def _describe(self, job: _Job, jpeg: bytes, references: list[tuple[float, np.ndarray]]) -> None:
+        """Send the JPEG to the first image route ready now; on a refusal (429, 400 or 415:
+        skipped for the day; not usable: passed over for this picture) send the same JPEG to
+        the next one. The picture's outcome is the last route's; it stays due unless
+        described. A reply from a route changed, removed or switched off during its own
+        request is dropped and the picture stays due."""
         cfg = self._cfg
-        route = image_route(cfg)
         views = len(job.shots)
         span = _span_deg([shot.azimuth_rad for shot in job.shots], cfg.world.camera_fov_h_deg)
-        started = self.clock()
-        text, unsupported = None, None
-        with self._lock:
-            if route is None or job.generation != self._generation:
-                return  # the switch went off, the route changed or the robot slept meanwhile
-            self._capped()  # rolls the day before counting
-            self._sent += 1
-            self._last_room = started
-            self._jpeg, self._references = jpeg, references
-            self._last = {
-                "views": views,
-                "span_deg": span,
-                "stamp": started,
-                "bytes": len(jpeg),
-                "sharpness": round(min(shot.sharpness for shot in job.shots), ROUND_DIGITS),
-                "outcome": DESCRIBING,
-                "detail": None,
-            }
+        tried: set[str] = set()
+        outcome: str | None = None
         detail: str | None = None
+        text: str | None = None
+        code: str | None = None
+        started = self.clock()
+        while True:
+            with self._lock:
+                if job.generation != self._generation:
+                    return  # the feature went off or the robot slept meanwhile
+                code, ready = self._routes_state(self.clock())
+                left = [r for r in ready if r.name not in tried]
+                route = left[0] if code is None and left else None
+                if route is not None:
+                    tried.add(route.name)
+                    self._sent += 1
+                    self._open(route, started, jpeg, references, views, span, job)
+            if route is None:
+                break
+            outcome, detail, text, refused = self._attempt(route, jpeg, views, span, cfg, job)
+            if outcome == STALE:
+                self._drop(job)
+                return
+            if not refused:
+                break
+        if outcome is None:  # nothing went out: the routes were refused since the last check
+            with self._lock:
+                if job.generation == self._generation:
+                    self._due, self._due_ok = True, False
+            self._count(code or DAILY_LIMIT)
+            return
+        self._close(job, outcome, detail, text, views, span, started)
+
+    def _open(
+        self,
+        route: LLMRoute,
+        started: float,
+        jpeg: bytes,
+        references: list[tuple[float, np.ndarray]],
+        views: int,
+        span: int,
+        job: _Job,
+    ) -> None:
+        """Record a request going out to ``route`` (lock held): the kept picture, its
+        references and ``_last`` with the route's name."""
+        self._last_room = started
+        self._jpeg, self._references = jpeg, references
+        self._last = {
+            "views": views,
+            "span_deg": span,
+            "stamp": started,
+            "bytes": len(jpeg),
+            "sharpness": round(min(shot.sharpness for shot in job.shots), ROUND_DIGITS),
+            "outcome": DESCRIBING,
+            "detail": None,
+            "route": route.name,
+        }
+
+    def _attempt(
+        self, route: LLMRoute, jpeg: bytes, views: int, span: int, cfg: RoboEmotConfig, job: _Job
+    ) -> tuple[str, str | None, str | None, bool]:
+        """One describe request to ``route``: (outcome, detail, text, refused). A 429, 400 or
+        415 skips the route until the next local day; a ``NoRouteAvailable`` (key missing,
+        budget spent, unreachable) only passes it over for this picture and sent nothing, so it
+        is not counted toward the cap; a failure counts toward the route's pause. The outcome
+        is ``STALE`` when the route was changed, removed or switched off during the request; a
+        reply whose generation moved (sleep, the feature off and on) sets no mark."""
+        text, detail, refused = None, None, False
         try:
             text = asyncio.run(describe(self.router(), route, jpeg, views, span, cfg))
             outcome = "described"
         except ImagesUnsupported as exc:
-            outcome, unsupported, detail = "unsupported", exc.code, exc.code
+            outcome, detail, refused = UNSUPPORTED, exc.code, True
         except RateLimited as exc:
-            outcome, detail = DAILY_LIMIT, exc.code
+            outcome, detail, refused = DAILY_LIMIT, exc.code, True
         except Offline:
             outcome = "offline"
         except NoRouteAvailable:
-            outcome = "route_unavailable"
+            outcome, refused = ROUTE_UNAVAILABLE, True
         except Exception as exc:
             outcome, detail = "failed", _failure(exc)
             if not isinstance(exc, EmptyDescription):
                 log.warning("surroundings: describe failed: %s", type(exc).__name__)
         now = self.clock()
         with self._lock:
+            if outcome in ("offline", ROUTE_UNAVAILABLE):
+                self._sent = max(0, self._sent - 1)  # nothing left the robot
             if job.generation != self._generation:
-                return  # the switch went off or the route changed meanwhile
+                return outcome, detail, text, refused  # a stale reply: no mark
+            current = next((r for r in image_routes(self._cfg) if r.name == route.name), None)
+            if current is None or _trust(current) != _trust(route):
+                return STALE, None, None, False  # changed, removed or off: dropped, no mark
+            mark = self._mark(current)
+            if refused and outcome != ROUTE_UNAVAILABLE:
+                mark.skipped_on, mark.reason = self.today(), detail
+            elif text is not None:
+                mark.failures = 0
+            elif outcome == "failed":
+                mark.failures += 1
+                if mark.failures >= self._cfg.surroundings.max_failures:
+                    mark.failures = 0
+                    mark.paused_until = now + self._cfg.surroundings.pause_s
+        return outcome, detail, text, refused
+
+    def _drop(self, job: _Job) -> None:
+        """Drop a reply from a route changed during its own request: no text, no history and
+        no count; the kept picture and ``_last`` go, and the picture stays due."""
+        with self._lock:
+            if job.generation != self._generation:
+                return
+            self._jpeg, self._last = None, None
+            self._due, self._due_ok = True, False
+            self._lock.notify_all()
+
+    def _close(
+        self,
+        job: _Job,
+        outcome: str,
+        detail: str | None,
+        text: str | None,
+        views: int,
+        span: int,
+        started: float,
+    ) -> None:
+        """Record the picture's outcome: the last route's (``_last``, the history, the count);
+        a described picture is no longer due, any other stays due."""
+        now = self.clock()
+        with self._lock:
+            if job.generation != self._generation:
+                return  # the feature went off or the robot slept meanwhile
+            route = self._last["route"] if self._last is not None else None
             self._latency_s = now - started
             if self._last is not None:
                 self._last.update(outcome=outcome, detail=detail)
-            self._remember(now, outcome, detail, text, views, span)
-            # a failed picture stays due: the refusal checks (interval, pause, cap, 429 today,
-            # unsupported) hold the head until one could go out again
+            self._remember(now, outcome, detail, text, views, span, route)
+            # a failed picture stays due: the refusal checks (interval, pause, cap, routes
+            # skipped today) hold the head until one could go out again
             self._due, self._due_ok = text is None, False
             if text is not None:
-                self._failures = 0
                 self._room = (text, now)
-            elif unsupported is not None:
-                self._unsupported = unsupported
-            elif outcome == DAILY_LIMIT:
-                self._limited_on = self.today()
-            elif outcome == "failed":
-                self._failures += 1
-                if self._failures >= self._cfg.surroundings.max_failures:
-                    self._failures = 0
-                    self._paused_until = now + self._cfg.surroundings.pause_s
             self._lock.notify_all()
         self._count(outcome)
 
     def _remember(
-        self, now: float, outcome: str, detail: str | None, text: str | None, views: int, span: int
+        self,
+        now: float,
+        outcome: str,
+        detail: str | None,
+        text: str | None,
+        views: int,
+        span: int,
+        route: str | None,
     ) -> None:
         """Add a picture sent to the history (lock held), at most ``history_size``."""
         self._history.append(
@@ -553,6 +694,7 @@ class Surroundings:
                 "span_deg": span,
                 "outcome": outcome,
                 "detail": detail,
+                "route": route,
                 "text": text,
             }
         )
@@ -585,30 +727,37 @@ class Surroundings:
             return self._jpeg
 
     def state(self) -> dict[str, Any]:
-        """Codes, counts, ages, sizes and scores (SPEC 12A): no text and no image."""
+        """Codes, counts, ages, sizes and scores (SPEC 12A): no text, no image and no key.
+        ``route`` is the route the next picture goes to; ``routes`` lists every image route in
+        priority order with whether it is skipped today, its reason code and its pause."""
         now = self.clock()
-        route = image_route(self._cfg)
-        reach = self._reach(route)
         with self._lock:
-            if route is None:
-                code = OFF
+            code, ready = self._routes_state(now)
+        reach = self._reach(ready) if code is None else None
+        with self._lock:
+            if code == OFF:
+                state = OFF
             elif not self.vision:
-                code = "no_vision"
-            elif self._unsupported is not None:
-                code = "unsupported"
-            elif now < self._paused_until:
-                code = "paused"
-            elif self._capped():
-                code = DAILY_LIMIT
+                state = "no_vision"
             else:
-                code = reach or "on"
+                state = code or reach or "on"
+            routes = [
+                {
+                    "route": r.name,
+                    "skipped": (reason := self._skipped(r)) is not None,
+                    "reason": reason,
+                    "paused_s": round(max(0.0, self._mark(r).paused_until - now), ROUND_DIGITS),
+                }
+                for r in image_routes(self._cfg)
+            ]
             last = None
             if self._last is not None:
                 last = {k: v for k, v in self._last.items() if k != "stamp"}
                 last["age_s"] = round(now - self._last["stamp"], ROUND_DIGITS)
             return {
-                "state": code,
-                "route": route.name if route is not None else None,
+                "state": state,
+                "route": ready[0].name if ready else None,
+                "routes": routes,
                 "due": self._due,
                 "views": len(self._views),
                 "counts": dict(self._counts),
@@ -616,20 +765,22 @@ class Surroundings:
                 "latency_s": None
                 if self._latency_s is None
                 else round(self._latency_s, ROUND_DIGITS),
-                "unsupported": self._unsupported,
-                "paused_s": round(max(0.0, self._paused_until - now), ROUND_DIGITS),
+                "paused_s": min((r["paused_s"] for r in routes), default=0.0)
+                if state == "paused"
+                else 0.0,
             }
 
-    def _reach(self, route: Any) -> str | None:
-        """``offline`` or ``route_unavailable`` (key missing, budget spent, unreachable) for
-        the image route now, None when a request could go out."""
-        if route is None:
+    def _reach(self, ready: list[LLMRoute]) -> str | None:
+        """``offline``, or ``route_unavailable`` when none of the ``ready`` routes is usable now
+        (key missing, budget spent, unreachable); None when a request could go out."""
+        if not ready:
             return None
         router = self.router()
         if router.offline:
             return "offline"
-        if route.name not in {r.name for r in router.eligible()}:
-            return "route_unavailable"
+        eligible = {r.name for r in router.eligible()}
+        if not any(r.name in eligible for r in ready):
+            return ROUTE_UNAVAILABLE
         return None
 
     def live(self) -> dict[str, Any]:
@@ -646,19 +797,23 @@ class Surroundings:
     # ------------------------------------------------------------------- config
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
-        """A stack subscriber: keep the copy. The switch going off, or the image route's base
-        URL, model or key changing, drops the due picture, the views, the texts and the image,
-        and ignores a reply still in flight; a changed route also clears the unsupported mark
-        and the pause, and owes a first picture again when the switch is on."""
-        trust = _trust(cfg)
+        """A stack subscriber: keep the copy. Adding, removing or reordering image routes keeps
+        the texts, the history and the references (owner decision 2026-11-25); a route's own
+        marks clear when its base URL, model or key changes (``_mark``). The feature going off
+        drops the due picture, the views, the texts and the image and ignores a reply still in
+        flight; going on owes a first picture."""
+        routes = image_routes(cfg)
+        on = bool(routes)
+        names = {r.name for r in routes}
         with self._lock:
             self._cfg = cfg
-            if trust == self._trust:
+            self._marks = {n: m for n, m in self._marks.items() if n in names}
+            if on == self._on:
                 return
-            self._trust = trust
-            self._want_first, self._first = trust is not None, False
+            self._on = on
+            self._want_first, self._first = on, False
             self._first_tried = -math.inf
-            self._unsupported, self._failures, self._paused_until = None, 0, -math.inf
+            self._marks = {}
             self._generation += 1
             self._due = self._due_ok = False
             self._views, self._view_index, self._job = {}, None, None
@@ -695,13 +850,11 @@ def _span_deg(azimuths: list[float], fov_h_deg: float) -> int:
     return round(min(FULL_CIRCLE_DEG, spread + fov_h_deg))
 
 
-def _trust(cfg: RoboEmotConfig) -> tuple[str, str, str, str] | None:
-    """What the unsupported mark and the kept texts are bound to: the image route's name, base
-    URL, model and key reference."""
-    route = image_route(cfg)
-    if route is None:
-        return None
-    return route.name, route.base_url, route.model, route.api_key
+def _trust(route: LLMRoute) -> tuple[str, str, str]:
+    """What a route's marks are bound to: its base URL, model and key reference (the
+    configured text, e.g. ``${secret:name}``; a secret's value is never read or fingerprinted,
+    so a new value under the same name keeps the marks)."""
+    return route.base_url, route.model, route.api_key
 
 
 def _failure(exc: Exception) -> str:

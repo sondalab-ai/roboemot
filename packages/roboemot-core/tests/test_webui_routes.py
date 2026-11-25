@@ -100,6 +100,8 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "images": False,
             "images_state": "off",
             "images_reason": None,
+            "images_rank": None,
+            "images_count": 0,
             "key": "literal",
             "running": False,
             "secret": None,
@@ -353,18 +355,38 @@ def test_a_cloud_route_check_without_a_name_source_keeps_owner_text_out(tmp_path
 def test_route_row_reports_images_and_state(tmp_path):
     store = tmp_path / "route_checks.json"
     on = make_cfg(route=ROUTE | {"images": True})
-    status = {"state": "unsupported", "unsupported": "http_400"}
+    status = {
+        "state": "daily_limit",
+        "routes": [{"route": "lan", "skipped": True, "reason": "http_400", "paused_s": 0.0}],
+    }
     row = RouteChecker(lambda: on, store, images_status=lambda: status).list_routes()[0]
     assert (row["images"], row["images_state"], row["images_reason"]) == (
         True,
-        "unsupported",
+        "skipped",
         "http_400",
     )
-    status = {"state": "on", "unsupported": None}
+    assert (row["images_rank"], row["images_count"]) == (1, 1)
+    status = {"state": "on", "routes": [{"route": "lan", "skipped": False, "paused_s": 0.0}]}
     row = RouteChecker(lambda: on, store, images_status=lambda: status).list_routes()[0]
     assert (row["images_state"], row["images_reason"]) == ("on", None)
+    status = {"state": "on", "routes": [{"route": "lan", "skipped": False, "paused_s": 12.0}]}
+    row = RouteChecker(lambda: on, store, images_status=lambda: status).list_routes()[0]
+    assert row["images_state"] == "paused"
     off = RouteChecker(lambda: make_cfg(), store, images_status=lambda: status).list_routes()[0]
     assert (off["images"], off["images_state"], off["images_reason"]) == (False, "off", None)
+
+
+def test_image_routes_are_ranked_in_list_order(tmp_path):
+    first = ROUTE | {"name": "free", "images": True}
+    plain = ROUTE | {"name": "text"}
+    second = ROUTE | {"name": "paid", "images": True}
+    cfg = RoboEmotConfig(llm_routes=[first, plain, second])
+    rows = RouteChecker(lambda: cfg, tmp_path / "c.json").list_routes()
+    assert [(r["name"], r["images_rank"], r["images_count"]) for r in rows] == [
+        ("free", 1, 2),
+        ("text", None, 2),
+        ("paid", 2, 2),
+    ]
 
 
 def test_a_realtime_row_has_no_images_fields(tmp_path):

@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..config.schema import RegisterParams, RoboEmotConfig, image_route
+from ..config.schema import RegisterParams, RoboEmotConfig, image_routes
 from ..skill_packs.library import SkillPack
 from ..skill_packs.prompt import active_block, catalogue_block
 
@@ -363,7 +363,7 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
         system_prompt(cfg, register, language=language, robot_name=name, extra_names=extras)
     )
     conv = cfg.conversation
-    room = cfg.surroundings.room.max_chars + len(ROOM_LABEL) if image_route(cfg) else 0
+    room = cfg.surroundings.room.max_chars + len(ROOM_LABEL) if image_routes(cfg) else 0
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars + room
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS
 

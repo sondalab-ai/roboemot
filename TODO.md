@@ -264,7 +264,8 @@ later decision needs no new measure.
 - [ ] A fallback image route on the home network (owner, 2026-11-25). When the cloud image
       route hits its daily cap (`surroundings.max_per_day`) or answers HTTP 429, describe the
       snapshots with a second, LAN route that has a vision model (LM Studio or Ollama with
-      Qwen-VL or LLaVA on the owner's computer), so pictures stay on the home network. Needs: a
-      second image switch (a "fallback" role beside "Sees images"), the approval binding of
-      `image_violations` for it, and the detector names as the last step when that machine is
-      off. Today the robot falls back to the detector names only.
+      Qwen-VL or LLaVA on the owner's computer), so pictures stay on the home network. Since
+      2026-11-25 several routes may have "Sees images" on, in list order, and a 429, 400, 415 or
+      unusable route falls back to the next one (cloud to cloud works today). Left: the shared
+      `max_per_day` also caps a LAN route (a per-route or cloud-only cap), and checking a real
+      LAN vision server's error bodies.
