@@ -42,6 +42,7 @@ async def test_the_prompt_states_views_order_and_span_and_leaves_people_out():
     assert "{" not in prompt
     assert all(w in prompt for w in ("left", "centre", "right"))
     assert "people" in prompt.lower()
+    assert "overlap" in prompt and "one thing" in prompt  # no double count at a view's edge
     assert (name, jpeg, max_tokens) == ("eye", b"jpg", 99)
 
 
