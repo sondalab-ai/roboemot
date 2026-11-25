@@ -237,6 +237,19 @@ def test_the_first_picture_due_is_marked_first():
     assert rig.due() and rig.s.picture_state() == (True, True)
 
 
+def test_adding_or_reordering_image_routes_keeps_the_first_mark_and_owes_no_new_one():
+    rig = Rig(first=True)
+    assert rig.due() and rig.s.picture_state() == (True, True)
+    rig.apply(config(routes=[eye(), eye("paid")]))
+    rig.apply(config(routes=[eye("paid"), eye()]))
+    assert rig.due() and rig.s.picture_state() == (True, True)  # the same first picture
+    rig.sweep()
+    assert rig.s.picture_state() == (False, False)
+    rig.apply(config(routes=[eye()]))
+    rig.later()
+    assert not rig.due() and not rig.s._want_first  # no new first picture owed
+
+
 def test_a_later_picture_is_not_marked_first():
     rig = Rig()
     rig.bus.publish("robot.awake", None, rig.clock.now)
