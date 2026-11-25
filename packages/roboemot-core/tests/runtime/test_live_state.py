@@ -478,12 +478,14 @@ class FakeSurroundings:
         self._jpeg = jpeg
 
     def state(self):
-        return {"state": "on", "route": "eye", "attempt": None, "counts": {"described": 1},
-                "last": {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5},
+        return {"state": "on", "route": "eye", "due": False, "views": 0,
+                "counts": {"described": 1},
+                "last": {"views": 4, "span_deg": 237, "age_s": 2.0, "bytes": 1234,
+                         "sharpness": 88.5},
                 "latency_s": 1.2, "unsupported": None, "paused_s": 0.0}  # fmt: skip
 
     def live(self):
-        return {**self.state(), "described": {"shown": "a silver laptop", "room": "a study"}}
+        return {**self.state(), "described": {"room": "a study"}}
 
     def jpeg(self):
         return self._jpeg
@@ -500,7 +502,13 @@ def host_with(surroundings):
 def test_surroundings_block_shape():
     block = live(host=host_with(FakeSurroundings())).state()["surroundings"]
     assert block["state"] == "on" and block["route"] == "eye"
-    assert block["last"] == {"kind": "shown", "age_s": 2.0, "bytes": 1234, "sharpness": 88.5}
+    assert block["last"] == {
+        "views": 4,
+        "span_deg": 237,
+        "age_s": 2.0,
+        "bytes": 1234,
+        "sharpness": 88.5,
+    }
     assert "described" not in block
     assert live().state()["surroundings"] is None  # no service
 
@@ -509,7 +517,7 @@ def test_surroundings_text_only_with_video_on():
     state = live(host=host_with(FakeSurroundings()), config=cfg(video=True))
     state.surroundings_jpeg("10.0.0.7")  # a page that shows the snapshot is a video viewer
     block = state.state()["surroundings"]
-    assert block["described"] == {"shown": "a silver laptop", "room": "a study"}
+    assert block["described"] == {"room": "a study"}
 
 
 def test_surroundings_text_needs_a_registered_viewer_and_an_awake_robot():

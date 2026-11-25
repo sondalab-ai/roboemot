@@ -268,9 +268,10 @@ EN: dict[str, str] = {
     "route_images_on": "Turn on",
     "route_images_off": "Turn off",
     "route_images_on_message": (
-        "Camera snapshots will leave the robot and go to {name}: a thing someone shows, and the "
-        "room now and then. Detected faces are covered; a face the camera misses is not. Check "
-        "the provider's terms: some bar users under 18. Only text comes back."
+        "Room pictures will leave the robot and go to {name}: now and then the robot looks "
+        "around and sends a few camera views of the room joined as one picture. Detected faces "
+        "are covered; a face the camera misses is not. Check the provider's terms: some bar "
+        "users under 18. Only text comes back."
     ),
     "route_images_off_message": "{name} stops receiving camera snapshots.",
     "route_images_state_on": "Snapshots are on",
@@ -292,11 +293,11 @@ EN: dict[str, str] = {
     "live_surr_unsupported": "The image route refused the image ({code}).",
     "live_surr_paused": "Paused for {n} s after repeated failures.",
     "live_surr_last": "Last sent",
-    "live_surr_last_value": "{kind}, {n} s ago, {kb} KB, sharpness {score}",
+    "live_surr_last_value": "{views}, {n} s ago, {kb} KB, sharpness {score}",
+    "live_surr_views": "{views} views over {span}°",
     "live_surr_none": "Nothing sent yet.",
-    "live_surr_shown": "Shown thing",
     "live_surr_room": "Room",
-    "live_surr_image_alt": "The last snapshot sent to the image route",
+    "live_surr_image_alt": "The last room picture sent to the image route, views left to right",
     "live_surr_outcome": "Outcome",
     "live_surr_outcome_describing": "waiting for the description",
     "live_surr_outcome_described": "described",
@@ -308,11 +309,9 @@ EN: dict[str, str] = {
     "live_surr_detail_timeout": "timed out",
     "live_surr_detail_empty": "empty reply",
     "live_surr_detail_error": "error",
-    "live_surr_history": "Last {n} snapshots",
+    "live_surr_history": "Last {n} room pictures",
     "live_surr_ago": "{n} s ago",
-    "live_surr_loading": "Loading the snapshot…",
-    "live_snap_shown": "a shown thing",
-    "live_snap_room": "the room",
+    "live_surr_loading": "Loading the picture…",
     "live_ev_expression_spoken": "Reacted in its own words: {situation}",
     "live_ev_expression_gesture_only_music": "Music playing: a gesture only ({situation})",
     "live_ev_expression_dropped_stale": "Reaction dropped, too late: {situation}",
@@ -1746,10 +1745,10 @@ IT: dict[str, str] = {
     "route_images_on": "Attiva",
     "route_images_off": "Disattiva",
     "route_images_on_message": (
-        "Le istantanee della camera usciranno dal robot verso {name}: un oggetto che qualcuno "
-        "mostra e, ogni tanto, la stanza. I volti rilevati sono coperti; un volto che la camera "
-        "non vede no. Controlla i termini del fornitore: alcuni escludono i minori di 18 anni. "
-        "Torna solo testo."
+        "Le immagini della stanza usciranno dal robot verso {name}: ogni tanto il robot si "
+        "guarda intorno e invia alcune viste della camera unite in un'unica immagine. I volti "
+        "rilevati sono coperti; un volto che la camera non vede no. Controlla i termini del "
+        "fornitore: alcuni escludono i minori di 18 anni. Torna solo testo."
     ),
     "route_images_off_message": "{name} non riceve più istantanee della camera.",
     "route_images_state_on": "Istantanee attive",
@@ -1771,11 +1770,11 @@ IT: dict[str, str] = {
     "live_surr_unsupported": "La route immagini ha rifiutato l'immagine ({code}).",
     "live_surr_paused": "In pausa per {n} s dopo errori ripetuti.",
     "live_surr_last": "Ultima inviata",
-    "live_surr_last_value": "{kind}, {n} s fa, {kb} KB, nitidezza {score}",
+    "live_surr_last_value": "{views}, {n} s fa, {kb} KB, nitidezza {score}",
+    "live_surr_views": "{views} viste su {span}°",
     "live_surr_none": "Ancora nulla inviato.",
-    "live_surr_shown": "Oggetto mostrato",
     "live_surr_room": "Stanza",
-    "live_surr_image_alt": "L'ultima istantanea inviata alla route immagini",
+    "live_surr_image_alt": "L'ultima immagine della stanza inviata, viste da sinistra a destra",
     "live_surr_outcome": "Esito",
     "live_surr_outcome_describing": "in attesa della descrizione",
     "live_surr_outcome_described": "descritta",
@@ -1787,11 +1786,9 @@ IT: dict[str, str] = {
     "live_surr_detail_timeout": "tempo scaduto",
     "live_surr_detail_empty": "risposta vuota",
     "live_surr_detail_error": "errore",
-    "live_surr_history": "Ultime {n} istantanee",
+    "live_surr_history": "Ultime {n} immagini della stanza",
     "live_surr_ago": "{n} s fa",
-    "live_surr_loading": "Caricamento dell'istantanea…",
-    "live_snap_shown": "un oggetto mostrato",
-    "live_snap_room": "la stanza",
+    "live_surr_loading": "Caricamento dell'immagine…",
     "live_ev_expression_spoken": "Ha reagito con parole sue: {situation}",
     "live_ev_expression_gesture_only_music": (
         "Musica in corso: solo un gesto, nessuna parola ({situation})"

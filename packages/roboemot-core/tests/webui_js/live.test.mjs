@@ -768,8 +768,8 @@ test("a beating pulse replaces the beat card on each poll (the resync), and only
 // ---- the Surroundings card (SPEC 8, Surroundings snapshots)
 
 const SURROUNDINGS = {
-  state: "on", route: "eye", attempt: null, counts: { described: 2, too_blurry: 1 },
-  last: { kind: "shown", age_s: 3, bytes: 20480, sharpness: 88 }, latency_s: 1.2,
+  state: "on", route: "eye", due: false, views: 0, counts: { described: 2, views_missing: 1 },
+  last: { views: 4, span_deg: 237, age_s: 3, bytes: 20480, sharpness: 88 }, latency_s: 1.2,
   unsupported: null, paused_s: 0,
 };
 
@@ -779,7 +779,8 @@ const SURR_STRINGS = {
     strings: {
       ...STRINGS,
       live_surr_unsupported: "The image route refused the image ({code}).",
-      live_surr_last_value: "{kind}, {n} s ago, {kb} KB, sharpness {score}",
+      live_surr_last_value: "{views}, {n} s ago, {kb} KB, sharpness {score}",
+      live_surr_views: "{views} views over {span}°",
     },
   },
 };
@@ -793,18 +794,18 @@ test("surroundings: no card without the service", async (t) => {
   assert.equal(surroundingsCard(page), undefined);
 });
 
-test("surroundings: the card shows the state, the last snapshot and the counts, no image with video off", async (t) => {
+test("surroundings: the card shows the state, the last picture's views and span and the counts, no image with video off", async (t) => {
   const page = await livePage(t, { ...SURR_STRINGS, "GET /api/live/state": { ...STATE, surroundings: SURROUNDINGS } });
   await openLive(page);
   const card = surroundingsCard(page);
   assert.ok(card, "card drawn");
-  for (const expected of ["eye", "88", "too_blurry"]) assert.ok(card.textContent.includes(expected), expected);
+  for (const expected of ["eye", "88", "views_missing", "4 views over 237°"]) assert.ok(card.textContent.includes(expected), expected);
   assert.equal(card.querySelector("img"), null);
   assert.equal(page.calls.filter((c) => c.path === "/api/live/surroundings.jpg").length, 0);
 });
 
-test("surroundings: with video on the card shows the descriptions and the last snapshot once", async (t) => {
-  const described = { shown: "a silver <b>laptop</b>", room: "a study" };
+test("surroundings: with video on the card shows the description and the last picture once", async (t) => {
+  const described = { room: "a study with a <b>desk</b>" };
   const page = await livePage(t, {
     "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: 333 }, surroundings: { ...SURROUNDINGS, described } },
     "GET /api/live/surroundings.jpg": () => reply(200, {}, { "Content-Type": "image/jpeg" }),
@@ -814,9 +815,8 @@ test("surroundings: with video on the card shows the descriptions and the last s
   await pollsReach(page, 3);
   await settle();
   const card = surroundingsCard(page);
-  assert.ok(card.textContent.includes("a silver <b>laptop</b>"), "the text is shown as text");
+  assert.ok(card.textContent.includes("a study with a <b>desk</b>"), "the text is shown as text");
   assert.equal(card.querySelector("b"), null, "never parsed as markup");
-  assert.ok(card.textContent.includes("a study"));
   assert.equal(page.calls.filter((c) => c.path === "/api/live/surroundings.jpg").length, 1);
   assert.ok(card.querySelector("img").getAttribute("src").startsWith("blob:"));
 });
@@ -829,16 +829,16 @@ test("surroundings: an unsupported route shows its reason", async (t) => {
 });
 
 test("surroundings: the card shows the last outcome and the history, text as text", async (t) => {
-  const last = { kind: "room", age_s: 4, bytes: 9000, sharpness: 300, outcome: "failed", detail: "timeout" };
+  const last = { views: 4, span_deg: 237, age_s: 4, bytes: 9000, sharpness: 300, outcome: "failed", detail: "timeout" };
   const history = [
-    { kind: "room", age_s: 4, outcome: "failed", detail: "timeout", text: null },
-    { kind: "shown", age_s: 90, outcome: "described", detail: null, text: "a <i>silver</i> laptop" },
+    { views: 4, span_deg: 237, age_s: 4, outcome: "failed", detail: "timeout", text: null },
+    { views: 5, span_deg: 300, age_s: 90, outcome: "described", detail: null, text: "a <i>study</i>, desk centre" },
   ];
-  const s = { ...SURROUNDINGS, last, history, described: { shown: null, room: null } };
+  const s = { ...SURROUNDINGS, last, history, described: { room: null } };
   const page = await livePage(t, {
     "GET /api/strings": { language: "en", strings: { ...SURR_STRINGS["GET /api/strings"].strings,
       live_surr_outcome_failed: "failed", live_surr_detail_timeout: "timed out",
-      live_surr_history: "Last {n} snapshots" } },
+      live_surr_history: "Last {n} room pictures" } },
     "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: 333 }, surroundings: s },
     "GET /api/live/surroundings.jpg": () => reply(200, {}, { "Content-Type": "image/jpeg" }),
     "GET /api/live/frame.jpg": reply(503, { error: "video_no_frame" }),
@@ -846,6 +846,7 @@ test("surroundings: the card shows the last outcome and the history, text as tex
   await openLive(page);
   const card = surroundingsCard(page);
   assert.ok(card.textContent.includes("failed (timed out)"), "the outcome with its reason");
-  assert.ok(card.textContent.includes("Last 2 snapshots"));
-  assert.ok(card.textContent.includes("a <i>silver</i> laptop") && card.querySelector("i") === null);
+  assert.ok(card.textContent.includes("Last 2 room pictures"));
+  assert.ok(card.textContent.includes("5 views over 300°"), "each picture's views and span");
+  assert.ok(card.textContent.includes("a <i>study</i>, desk centre") && card.querySelector("i") === null);
 });

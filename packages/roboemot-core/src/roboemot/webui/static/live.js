@@ -145,10 +145,11 @@ function liveMotionCard(d) {
   return card(t("tab_live"), t("live_motion"), el("p", {}, badge(state.strings["live_motion_" + s] || s, tone)));
 }
 
-// Surroundings card (SPEC 8, Surroundings snapshots): what the image route was last sent and said.
-// Codes, sizes and scores always; the descriptions and the last snapshot only with the video
-// preview on (the server sends `described` then). The snapshot is fetched once per new snapshot
-// (its kind, size and score), kept as a blob URL; text is set as text, never parsed as markup.
+// Surroundings card (SPEC 8, Surroundings snapshots): the room picture the image route was last
+// sent (views joined left to right) and what it said. Codes, counts, view count, span, sizes and
+// scores always; the description and the last picture only with the video preview on (the server
+// sends `described` then). The picture is fetched once per new picture (its view count, size and
+// score), kept as a blob URL; text is set as text, never parsed as markup.
 const liveSnap = { key: null, url: null };
 const LIVE_SURR_TONE = { on: "success", unsupported: "danger", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning", daily_limit: "warning" };
 
@@ -161,7 +162,7 @@ function liveSurroundingsCard(d) {
   if (s.paused_s > 0) parts.push(el("p", { class: "hint" }, t("live_surr_paused", { n: num(s.paused_s, 0) })));
   if (s.last) {
     parts.push(liveRow(t("live_surr_last"), t("live_surr_last_value", {
-      kind: liveWord("live_snap_", s.last.kind), n: num(s.last.age_s, 0),
+      views: liveSurrViews(s.last), n: num(s.last.age_s, 0),
       kb: num(s.last.bytes / 1024, 1), score: num(s.last.sharpness, 0),
     })));
     if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail)));
@@ -169,7 +170,6 @@ function liveSurroundingsCard(d) {
     parts.push(el("p", { class: "hint" }, t("live_surr_none")));
   }
   const said = s.described;
-  if (said && said.shown) parts.push(liveRow(t("live_surr_shown"), said.shown));
   if (said && said.room) parts.push(liveRow(t("live_surr_room"), said.room));
   const counts = Object.entries(s.counts || {}).filter(([, n]) => n > 0);
   if (counts.length) parts.push(el("p", { class: "hint" }, counts.map(([k, n]) => k + " " + n).join(", ")));
@@ -177,7 +177,7 @@ function liveSurroundingsCard(d) {
   if (s.history && s.history.length) {
     parts.push(el("details", {}, el("summary", {}, t("live_surr_history", { n: s.history.length })),
       el("ol", {}, s.history.map((h) => el("li", {},
-        liveWord("live_snap_", h.kind) + ", " + t("live_surr_ago", { n: num(h.age_s, 0) }) + ": ",
+        liveSurrViews(h) + ", " + t("live_surr_ago", { n: num(h.age_s, 0) }) + ": ",
         h.text || liveSurrOutcome(h.outcome, h.detail))))));
   }
   const node = card(t("tab_live"), t("live_surroundings"), parts);
@@ -185,14 +185,19 @@ function liveSurroundingsCard(d) {
   return node;
 }
 
-// A snapshot's outcome in words, with the reason of a failure: "failed (timed out)".
+// A picture's view count and span: "4 views over 237°".
+function liveSurrViews(p) {
+  return t("live_surr_views", { views: num(p.views, 0), span: num(p.span_deg, 0) });
+}
+
+// A picture's outcome in words, with the reason of a failure: "failed (timed out)".
 function liveSurrOutcome(outcome, detail) {
   const word = liveWord("live_surr_outcome_", outcome);
   return detail ? word + " (" + liveWord("live_surr_detail_", detail) + ")" : word;
 }
 
 function liveSnapshot(last) {
-  const key = last.kind + ":" + last.bytes + ":" + last.sharpness;
+  const key = last.views + ":" + last.bytes + ":" + last.sharpness;
   if (liveSnap.key !== key) { liveSnap.key = key; liveFetchSnapshot(key); }
   return liveSnap.url
     ? el("img", { src: liveSnap.url, alt: t("live_surr_image_alt"), class: "live-video" })
@@ -449,7 +454,6 @@ function liveEventText(ev) {
   if (ev.conversation !== undefined) extra.conversation = liveWord("live_conv_", ev.conversation);
   if (ev.kind === "session" && ev.reason === "reset") extra.why = liveWord("live_reset_", ev.why);
   if (ev.voice !== undefined) extra.voice = liveWord("live_voice_", ev.voice);
-  if (ev.snapshot !== undefined) extra.snapshot = liveWord("live_snap_", ev.snapshot);
   const { heard, ...codes } = ev;
   let text = liveSentence(key, codes, extra);
   if (ev.kind === "turn" && ev.failure) text += "; " + liveSentence("live_fail_" + ev.failure, codes);

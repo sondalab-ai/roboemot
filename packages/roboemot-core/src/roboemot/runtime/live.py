@@ -350,7 +350,7 @@ class LiveState:
         return service.state()
 
     def surroundings_jpeg(self, client: str) -> tuple[bytes | None, str | None]:
-        """The last snapshot sent to the image route for ``client`` (an IP), or
+        """The last room picture sent to the image route for ``client`` (an IP), or
         ``(None, code)``: ``live_disabled``, ``video_off``, ``video_asleep``,
         ``surroundings_off`` (no service) or ``surroundings_none`` (nothing sent yet, or dropped).
         Serving it counts ``client`` as a video viewer, so the banner shows. From RAM; nothing is
