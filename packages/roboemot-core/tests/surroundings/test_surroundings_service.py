@@ -8,6 +8,7 @@ import logging
 import math
 
 import numpy as np
+import pytest
 from roboemot.bus import Bus
 from roboemot.circadian.model import CircadianState
 from roboemot.config.schema import LLMRoute, RoboEmotConfig
@@ -539,16 +540,19 @@ def test_max_failures_pauses_for_pause_s():
     assert rig.due()  # the failed picture is still owed
 
 
-def test_a_route_error_at_send_time_is_counted_as_unavailable_and_skips_it_today():
+def test_a_route_error_at_send_time_is_counted_as_unavailable_and_never_skips_it():
     rig = Rig(router=FakeRouter(error=NoRouteAvailable("eye")))
     rig.picture()
     assert "route_unavailable" in rig.reasons()
-    assert rig.s.state()["routes"][0]["reason"] == "route_unavailable"
-    rig.later()
-    assert not rig.due()
+    assert rig.s.state()["routes"][0] == {
+        "route": "eye",
+        "skipped": False,
+        "reason": None,
+        "paused_s": 0.0,
+    }  # passed over for that picture only (owner decision 2026-11-25)
     rig.router.error = None
-    rig.day = rig.day + dt.timedelta(days=1)
-    assert rig.due()
+    rig.later()
+    assert rig.due()  # the same day: usable again, so the picture goes out
 
 
 def test_switch_off_mid_request_drops_reply_and_jpeg():
@@ -829,10 +833,108 @@ def test_the_cap_stops_the_fallback_mid_picture():
 
 def test_an_unusable_route_at_send_time_sends_nothing_and_falls_back():
     errors = {"free": NoRouteAvailable("free")}
-    rig = Rig(cfg=two(max_per_day=1), router=FakeRouter(errors=errors))
+    rig = Rig(cfg=two(max_per_day=2), router=FakeRouter(errors=errors))
     rig.picture()
     assert rig.routes() == ["free", "paid"]  # free raised before sending: not counted
     assert rig.s.room(rig.clock.now) == "a living room"
+    assert rig.s._sent == 1  # the fallback counts once
+    assert not rig.s.state()["routes"][0]["skipped"]  # this picture only
+    rig.router.errors = {}
+    rig.later()
+    rig.s.trigger()
+    rig.sweep()
+    assert rig.routes()[2:] == ["free"]  # the next picture tries it first again
+    rig.later()
+    assert rig.s.trigger() == "daily_limit"  # two requests left the robot: the cap
+
+
+def test_a_paused_route_is_passed_over_and_the_next_picture_goes_to_the_next():
+    rig = Rig(cfg=two(max_failures=1), router=FakeRouter(errors={"free": TimeoutError()}))
+    rig.picture()
+    assert rig.routes() == ["free"]
+    routes = rig.s.state()["routes"]
+    assert routes[0]["paused_s"] > 0 and routes[1]["paused_s"] == 0
+    assert rig.s.state()["route"] == "paid"
+    rig.later()
+    assert rig.due()
+    rig.sweep()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.s.room(rig.clock.now) == "a living room"
+
+
+CHANGES = {
+    "model": [eye("free", model="m2"), eye("paid")],
+    "key_reference": [eye("free", api_key="${secret:other}"), eye("paid")],
+    "switched_off": [eye("free", images=False), eye("paid")],
+    "removed": [eye("paid")],
+}
+
+
+@pytest.mark.parametrize("change", sorted(CHANGES))
+def test_a_reply_from_a_route_changed_during_its_request_is_dropped(change):
+    rig = Rig(cfg=two())
+    rig.s.trigger()
+    rig.sweep(done=False)
+    changed = config(routes=CHANGES[change])
+
+    class Change(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(changed)
+            raise RateLimited("http_429")
+
+    rig.router = Change()
+    rig.finish()
+    assert rig.routes() == ["free"]  # dropped: no fallback for this picture
+    assert rig.s.room(rig.clock.now) is None and rig.s.live()["history"] == []
+    assert rig.s.jpeg() is None and rig.s.state()["last"] is None
+    assert all(not r["skipped"] for r in rig.s.state()["routes"])  # no mark
+    assert rig.reasons() == []
+    rig.later()
+    assert rig.due()  # the picture stays due
+
+
+def test_a_text_reply_from_a_changed_route_is_dropped():
+    rig = Rig(cfg=two())
+    rig.s.trigger()
+    rig.sweep(done=False)
+
+    class Change(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(config(routes=[eye("free", model="m2"), eye("paid")]))
+            return "a kitchen"
+
+    rig.router = Change()
+    rig.finish()
+    assert rig.s.room(rig.clock.now) is None
+
+
+@pytest.mark.parametrize("error", [RateLimited("http_429"), TimeoutError()], ids=["429", "timeout"])
+def test_a_stale_reply_after_off_and_on_sets_no_mark(error):
+    rig = Rig(cfg=two(max_failures=1))
+
+    class OffOn(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(config(routes=[eye("free", images=False), eye("paid", images=False)]))
+            rig.apply(two(max_failures=1))
+            raise error
+
+    rig.router = OffOn()
+    rig.s.trigger()
+    rig.sweep()
+    assert rig.routes() == ["free"]
+    routes = rig.s.state()["routes"]
+    assert all(not r["skipped"] and r["paused_s"] == 0 for r in routes)
+
+
+def test_marks_of_routes_no_longer_seeing_images_are_pruned():
+    rig = Rig(cfg=two(), router=FakeRouter(errors={"free": RateLimited("http_429")}))
+    rig.picture()
+    assert set(rig.s._marks) == {"free", "paid"}
+    rig.apply(config(routes=[eye("paid")]))
+    assert set(rig.s._marks) == {"paid"}
 
 
 def test_a_route_turned_off_mid_request_never_gets_the_picture():

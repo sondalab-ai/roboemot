@@ -22,16 +22,19 @@ stays due. Going to sleep or rest drops the views and the kept picture; at send 
 or the radio drop it (the picture stays due), a conversation does not. A picture whose
 description failed (any outcome but ``described``) stays due; the refusal checks hold it until
 one could go out. A reply that arrives after the feature went off or the robot slept (the
-generation moved) is dropped.
+generation moved), or from a route whose base URL, model or key reference changed, or that was
+removed or switched off, during its own request, is dropped and sets no mark.
 
-Fallback (owner decision 2026-11-25): a route that answers 429 (``RateLimited``), 400 or 415
-(``ImagesUnsupported``; Anthropic says "credit balance too low" with 400) or is not usable
-(``NoRouteAvailable``) is skipped for the rest of the local day (``today``), and the same JPEG
-goes at once to the next route, in the same ``_send``; only when every route refused does the
+Fallback (owner decisions 2026-11-25): a route that answers 429 (``RateLimited``), 400 or 415
+(``ImagesUnsupported``; Anthropic says "credit balance too low" with 400) is skipped for the
+rest of the local day (``today``); one that is not usable (``NoRouteAvailable``: key missing,
+budget spent, unreachable) is passed over for this picture only. Either way the same JPEG goes
+at once to the next route, in the same ``_send``; only when every route refused does the
 picture stay due. Timeouts, empty replies and other errors stay on the route: ``max_failures``
 in a row pause that route for ``pause_s`` (the next picture goes to the next route). A route's
-marks (skip, failures, pause) are bound to its base URL, model and key: a change clears them.
-``max_per_day`` counts the requests sent to every route together.
+marks (skip, failures, pause) are bound to its base URL, model and key reference (the
+``${secret:name}`` text, never the secret's value): a change clears them. ``max_per_day``
+counts the requests sent to every route together.
 
 The scene check: with no picture due, the head still and ``min_interval_s`` past, about every
 ``check_interval_s`` a frame is compared with the sent view within ``room.view_match_deg`` of
@@ -83,6 +86,7 @@ DESCRIBING = "describing"  # the last picture's outcome while its request is ope
 TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
 DAILY_LIMIT = "daily_limit"  # today's cap reached, or every image route skipped today
 UNSUPPORTED, ROUTE_UNAVAILABLE = "unsupported", "route_unavailable"
+STALE = "stale"  # a reply from a route changed during its request: dropped, never an outcome
 RESTING = "resting"
 POLL_S = 0.1  # how often the service thread checks a due picture again
 JOIN_TIMEOUT_S = 2.0
@@ -501,9 +505,11 @@ class Surroundings:
         return jpeg, references
 
     def _describe(self, job: _Job, jpeg: bytes, references: list[tuple[float, np.ndarray]]) -> None:
-        """Send the JPEG to the first image route ready now; on a refusal (429, 400 or 415,
-        not usable) skip that route for the day and send the same JPEG to the next one. The
-        picture's outcome is the last route's; it stays due unless described."""
+        """Send the JPEG to the first image route ready now; on a refusal (429, 400 or 415:
+        skipped for the day; not usable: passed over for this picture) send the same JPEG to
+        the next one. The picture's outcome is the last route's; it stays due unless
+        described. A reply from a route changed, removed or switched off during its own
+        request is dropped and the picture stays due."""
         cfg = self._cfg
         views = len(job.shots)
         span = _span_deg([shot.azimuth_rad for shot in job.shots], cfg.world.camera_fov_h_deg)
@@ -526,7 +532,10 @@ class Surroundings:
                     self._open(route, started, jpeg, references, views, span, job)
             if route is None:
                 break
-            outcome, detail, text, refused = self._attempt(route, jpeg, views, span, cfg)
+            outcome, detail, text, refused = self._attempt(route, jpeg, views, span, cfg, job)
+            if outcome == STALE:
+                self._drop(job)
+                return
             if not refused:
                 break
         if outcome is None:  # nothing went out: the routes were refused since the last check
@@ -563,11 +572,14 @@ class Surroundings:
         }
 
     def _attempt(
-        self, route: LLMRoute, jpeg: bytes, views: int, span: int, cfg: RoboEmotConfig
+        self, route: LLMRoute, jpeg: bytes, views: int, span: int, cfg: RoboEmotConfig, job: _Job
     ) -> tuple[str, str | None, str | None, bool]:
-        """One describe request to ``route``: (outcome, detail, text, refused). A refusal (429,
-        400 or 415, not usable) skips the route for the day; a failure counts toward its
-        pause. A ``NoRouteAvailable`` sent nothing, so it is not counted toward the cap."""
+        """One describe request to ``route``: (outcome, detail, text, refused). A 429, 400 or
+        415 skips the route until the next local day; a ``NoRouteAvailable`` (key missing,
+        budget spent, unreachable) only passes it over for this picture and sent nothing, so it
+        is not counted toward the cap; a failure counts toward the route's pause. The outcome
+        is ``STALE`` when the route was changed, removed or switched off during the request; a
+        reply whose generation moved (sleep, the feature off and on) sets no mark."""
         text, detail, refused = None, None, False
         try:
             text = asyncio.run(describe(self.router(), route, jpeg, views, span, cfg))
@@ -588,12 +600,14 @@ class Surroundings:
         with self._lock:
             if outcome in ("offline", ROUTE_UNAVAILABLE):
                 self._sent = max(0, self._sent - 1)  # nothing left the robot
+            if job.generation != self._generation:
+                return outcome, detail, text, refused  # a stale reply: no mark
             current = next((r for r in image_routes(self._cfg) if r.name == route.name), None)
             if current is None or _trust(current) != _trust(route):
-                return outcome, detail, text, refused  # turned off or changed: no mark
+                return STALE, None, None, False  # changed, removed or off: dropped, no mark
             mark = self._mark(current)
-            if refused:
-                mark.skipped_on, mark.reason = self.today(), detail or outcome
+            if refused and outcome != ROUTE_UNAVAILABLE:
+                mark.skipped_on, mark.reason = self.today(), detail
             elif text is not None:
                 mark.failures = 0
             elif outcome == "failed":
@@ -602,6 +616,16 @@ class Surroundings:
                     mark.failures = 0
                     mark.paused_until = now + self._cfg.surroundings.pause_s
         return outcome, detail, text, refused
+
+    def _drop(self, job: _Job) -> None:
+        """Drop a reply from a route changed during its own request: no text, no history and
+        no count; the kept picture and ``_last`` go, and the picture stays due."""
+        with self._lock:
+            if job.generation != self._generation:
+                return
+            self._jpeg, self._last = None, None
+            self._due, self._due_ok = True, False
+            self._lock.notify_all()
 
     def _close(
         self,
@@ -758,9 +782,12 @@ class Surroundings:
         marks clear when its base URL, model or key changes (``_mark``). The feature going off
         drops the due picture, the views, the texts and the image and ignores a reply still in
         flight; going on owes a first picture."""
-        on = bool(image_routes(cfg))
+        routes = image_routes(cfg)
+        on = bool(routes)
+        names = {r.name for r in routes}
         with self._lock:
             self._cfg = cfg
+            self._marks = {n: m for n, m in self._marks.items() if n in names}
             if on == self._on:
                 return
             self._on = on
@@ -803,7 +830,9 @@ def _span_deg(azimuths: list[float], fov_h_deg: float) -> int:
 
 
 def _trust(route: LLMRoute) -> tuple[str, str, str]:
-    """What a route's marks are bound to: its base URL, model and key reference."""
+    """What a route's marks are bound to: its base URL, model and key reference (the
+    configured text, e.g. ``${secret:name}``; a secret's value is never read or fingerprinted,
+    so a new value under the same name keeps the marks)."""
     return route.base_url, route.model, route.api_key
 
 
