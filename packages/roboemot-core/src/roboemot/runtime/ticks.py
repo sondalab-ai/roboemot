@@ -21,7 +21,7 @@ from roboemot.soothe import SootheRunner
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.speech import SpeechOutput
 from roboemot.world import ScanContext, ScanController, WorldModel, camera_in_view
-from roboemot.world.scan import SCAN_FINISHED
+from roboemot.world.scan import FULL_CIRCLE_DEG, SCAN_FINISHED
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 log = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ ADDITIVE_IDLE = "idle-additive"
 RESTING = "resting"  # the circadian state of a rest
 OBJECTS = "objects"  # the governor stage of the object detector
 DETECTION = "detection"  # the governor stage of face detection
-FULL_CIRCLE_DEG = 360.0
 
 
 def idle_command(

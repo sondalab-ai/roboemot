@@ -210,7 +210,6 @@ FIELDS: dict[str, tuple[str, ...] | str] = {
     "counter": ("resets", "input_resets", "pending_call_resets"),
     "code": SERVER_CODES,
     "situation": SITUATIONS,
-    "snapshot": ("shown", "room"),
     "yaw_deg": NUMBER,
     "limit_deg": NUMBER,
     "limit": NUMBER,

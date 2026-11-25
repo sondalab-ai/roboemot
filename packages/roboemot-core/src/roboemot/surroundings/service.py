@@ -56,7 +56,7 @@ from ..vision.scene_change import HeadStill, moved_share, thumbnail
 from ..vision.track_stats import head_pose
 from ..vision.types import Box, Frame
 from ..world import FrameSpec
-from ..world.scan import ScanView
+from ..world.scan import FULL_CIRCLE_DEG, ScanView
 from .describer import EmptyDescription, describe
 from .image import NoEncoder, encode_jpeg, mask_faces, shrink, tile
 from .picker import Picker
@@ -73,7 +73,6 @@ DESCRIBING = "describing"  # the last picture's outcome while its request is ope
 TIMEOUT, EMPTY, ERROR = "timeout", "empty", "error"  # why a description failed
 DAILY_LIMIT = "daily_limit"  # today's cap reached, or the provider said 429 today
 RESTING = "resting"
-FULL_CIRCLE_DEG = 360.0
 POLL_S = 0.1  # how often the service thread checks a due picture again
 JOIN_TIMEOUT_S = 2.0
 ROUND_DIGITS = 3

@@ -47,6 +47,7 @@ SOURCE = "scan"
 # a sweep ran to its end; payload {"photo": bool, "sweep": int} (SPEC 8, Surroundings snapshots)
 SCAN_FINISHED = "world.scan_finished"
 SLEW_EPS = 1e-9
+FULL_CIRCLE_DEG = 360.0  # a photo sweep's span is a share of it (surroundings.room.span_deg)
 Reason = Literal["idle", "wakeup", "unexplained", "picture"]
 
 
