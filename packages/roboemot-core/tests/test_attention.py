@@ -681,3 +681,60 @@ def test_habituation_zero_keeps_a_still_face():
     sel = AttentionSelector(AttentionConfig(habituation_s=0))
     assert sel.update(0.0, [entry("p1")]).entry_id == "p1"
     assert sel.update(10 * HAB, [entry("p1", seen=10 * HAB)]).entry_id == "p1"
+
+
+# ---- the body follows the head (owner, 2026-11-25: Reachy's rods limit a twisted neck)
+
+FOLLOW = AttentionConfig(body_follow="head", head_yaw_comfort_deg=20.0, body_recenter_dps=20.0)
+
+
+def test_with_body_follow_head_the_body_settles_under_the_head(reachy):
+    comfort = math.radians(FOLLOW.head_yaw_comfort_deg)
+    p = look_at(
+        15 * DEG, 0.0, GAZE, reachy.dofs, reachy.constraints, comfort_rad=comfort,
+        body_now=0.0, body_follow="head",
+    )  # fmt: skip
+    assert p["body_yaw"] == pytest.approx(15 * DEG)  # under the head, not home
+    home = look_at(
+        15 * DEG, 0.0, GAZE, reachy.dofs, reachy.constraints, comfort_rad=comfort, body_now=0.0
+    )
+    assert home["body_yaw"] == pytest.approx(0.0)  # the default keeps today's home drift
+
+
+def test_the_body_catches_up_with_the_head_and_the_neck_straightens(reachy):
+    g = GazeController(FOLLOW, GAZE, reachy.dofs, reachy.constraints)
+    t, dt = 0.0, 0.05
+    start = {"head.yaw": 60 * DEG, "head.pitch": 0.0, "body_yaw": 40 * DEG}
+    g.step(t, target(60.0, 0.0), start)
+    body = [40 * DEG]
+    for _ in range(80):
+        t += dt
+        body.append(g.step(t, target(60.0, 0.0, now=t)).targets["body_yaw"])
+    cap = math.radians(FOLLOW.body_recenter_dps) * dt
+    steps = [b - a for a, b in zip(body, body[1:], strict=False)]
+    assert all(-1e-9 <= s <= cap + 1e-9 for s in steps)
+    assert body[-1] == pytest.approx(60 * DEG, abs=0.5 * DEG)  # twist near 0 after 4 s
+
+
+def test_the_manifest_may_set_the_body_follow_keys_and_nothing_else_under_attention():
+    from roboemot.config import ConfigStack
+    from roboemot.config.stack import ConfigError
+
+    stack = ConfigStack()
+    keys = {"body_follow": "head", "head_yaw_comfort_deg": 20, "body_recenter_dps": 20}
+    stack.set_manifest_behaviour({"attention": keys}, [], body_yaw="body_yaw")
+    a = stack.effective().attention
+    assert (a.body_follow, a.head_yaw_comfort_deg, a.body_recenter_dps) == ("head", 20, 20)
+    with pytest.raises(ConfigError, match="attention may set"):
+        stack.set_manifest_behaviour({"attention": {"stale_s": 1}}, [], body_yaw="body_yaw")
+
+
+def test_reachy_ships_body_follow_head():
+    import yaml
+
+    behaviour = yaml.safe_load(REACHY.read_text())["behaviour"]
+    assert behaviour["attention"] == {
+        "body_follow": "head",
+        "head_yaw_comfort_deg": 20,
+        "body_recenter_dps": 20,
+    }

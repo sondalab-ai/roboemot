@@ -81,6 +81,15 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     keywords:
       it: {name_aliases: [reati]}
       en: {name_aliases: [riyadh she]}
+  # Body follows head (SPEC 5A, 10; owner 2026-11-25): the head sits on a Stewart platform whose
+  # rods leave less pitch and roll range the more the head is twisted from the body (up to the
+  # 65 deg yaw_delta), so the body settles under the head and the neck straightens. A smaller
+  # comfort band turns the body sooner; 20 deg/s lets it catch up in a couple of seconds.
+  # Only these three keys may sit under `attention` in a manifest.
+  attention:
+    body_follow: head
+    head_yaw_comfort_deg: 20
+    body_recenter_dps: 20
   # Loop rates (SPEC 11A): the arbiter streams `set_target` at 50 Hz over the daemon websocket
   # (the library default is 100 Hz); the app's behaviour tick keeps its 20 Hz default.
   # Only these two rates may sit under `motion` in a manifest.

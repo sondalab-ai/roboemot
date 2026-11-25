@@ -2283,6 +2283,13 @@ class AttentionConfig(Strict):
         le=720,
         advanced=True,
     )
+    body_follow: Literal["home", "head"] = param(
+        "home",
+        "Where the body drifts while the head is within the comfort band: home (back to its "
+        "front) or head (under the head, so the neck straightens: for a robot whose head range "
+        "shrinks when twisted)",
+        advanced=True,
+    )
     head_yaw_comfort_deg: float = param(
         45.0,
         "Head yaw offset from the body beyond which the body turns too",

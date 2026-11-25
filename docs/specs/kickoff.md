@@ -383,6 +383,8 @@ The manifest's `behaviour.dance_motion_map` binds the dance motion's roles (sect
 
 The manifest's `behaviour.motion` may set the loop rates of its hardware and nothing else: `arbiter.loop_hz` (Reachy Mini: 50 Hz, the rate of `set_target` over the daemon websocket) and `app_tick_hz`. Limits, blending and priorities stay with the schema, the presets and the owner; any other `motion` key is refused at load. The app reads both from the merged configuration (SPEC 11A): the motion loop takes `motion.arbiter.loop_hz` and the app's main loop waits `1 / motion.app_tick_hz` per tick.
 
+The manifest's `behaviour.attention` may set how its body follows its head and nothing else: `body_follow` (`home`: within the comfort band the body drifts back to its front, the library default; `head`: it drifts under the head so the neck straightens), `head_yaw_comfort_deg` and `body_recenter_dps`. That is the robot's mechanics: targets, priorities and timings stay with the schema and the owner; any other `attention` key is refused at load. Reachy Mini sets `head`, 20° and 20°/s (owner, 2026-11-25): its head sits on a Stewart platform whose rods leave less pitch and roll range the more the head is twisted from the body, and with the default the neck stayed twisted up to 45° beside a person.
+
 The manifest schema gains `pose_groups`, `constraints` and `dynamics` for robots, like Reachy Mini, whose SDK exposes Cartesian poses instead of individual joints. `null` dynamics values are placeholders: section 12 rejects a manifest without limits, so they must be filled with values measured in M0 before release.
 
 ## 5. Vision neural net

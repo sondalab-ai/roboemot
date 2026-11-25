@@ -716,8 +716,11 @@ MANIFEST_BEHAVIOUR_KEYS = frozenset(
         "voice",
         "motion",
         "persona",
+        "attention",
     }
 )  # what a robot manifest may set
+# how the body follows the head: the robot's mechanics (Reachy's rods), not a behaviour choice
+MANIFEST_ATTENTION_KEYS = frozenset({"body_follow", "head_yaw_comfort_deg", "body_recenter_dps"})
 MANIFEST_PERSONA_KEYS = frozenset({"body_prompt"})  # the robot's body, as the LLM is told it
 # Prompt text a manifest may set without the admin: the manifest is product data, like the library
 # defaults, and describes its own hardware. Owner changes above it still need the admin.
@@ -780,6 +783,23 @@ def _name_chars_ceiling() -> int:
     configuration can allow."""
     meta = VoiceConfig.model_fields["name_max_chars"].metadata
     return max(m.le for m in meta if hasattr(m, "le"))
+
+
+def check_manifest_attention(attention: Any) -> None:
+    """A manifest may set how its body follows its head (``MANIFEST_ATTENTION_KEYS``) and
+    nothing else under ``attention``: that is the robot's mechanics; targets, priorities and
+    timings stay with the schema and the owner."""
+    if attention is None:
+        return
+    if not isinstance(attention, dict) or set(attention) - MANIFEST_ATTENTION_KEYS:
+        extra = (
+            sorted(set(attention) - MANIFEST_ATTENTION_KEYS)
+            if isinstance(attention, dict)
+            else attention
+        )
+        raise ConfigError(
+            f"manifest behaviour attention may set {sorted(MANIFEST_ATTENTION_KEYS)}, not {extra}"
+        )
 
 
 def check_manifest_motion(motion: Any) -> None:
@@ -1255,6 +1275,7 @@ class ConfigStack:
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
             check_manifest_motion(behaviour.get("motion"))
+            check_manifest_attention(behaviour.get("attention"))
             check_manifest_persona(behaviour.get("persona"))
             saved = self.manifest, self.channels, self.clips, self.body_yaw
             self.manifest, self.channels = behaviour, frozenset(channels)

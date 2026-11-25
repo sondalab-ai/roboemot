@@ -11,8 +11,10 @@ only by the excess. Limits come from the manifest; the commands still go through
 and the safety limiter, which own speed and acceleration. Which dofs are the gaze dofs is data
 (``GazeMap``) supplied by the robot plugin.
 
-Body recentring: while the head is within the comfort band, the body drifts back towards its
-home at ``body_recenter_dps`` (never so far that the head leaves the band). Straight behind
+Body recentring: while the head is within the comfort band, the body drifts at
+``body_recenter_dps`` back towards its home (``body_follow: home``, never so far that the head
+leaves the band) or under the head (``body_follow: head``: the neck straightens, for a robot
+whose head range shrinks when twisted; owner 2026-11-25). Straight behind
 (``rear_band_deg`` around +-180 degrees) the gaze keeps the side it is on, so a bearing
 jittering across the seam does not swing the head or body through 360 degrees.
 
@@ -68,12 +70,15 @@ def look_at(
     comfort_rad: float,
     margin_rad: float = 0.0,
     body_now: float = 0.0,
+    body_follow: str = "home",
 ) -> dict[str, float]:
     """Dof targets that point the head at a base-frame bearing, within the manifest limits.
 
     ``body_now`` is the body yaw the split starts from. Within ``comfort_rad`` of it the body
-    target is the point of the comfort band nearest to the body's home (a recentring drift);
-    beyond it the body turns by the excess. Targets beyond reach are clamped, never wrapped.
+    target is, with ``body_follow`` ``home``, the point of the comfort band nearest to the body's
+    home (a recentring drift), and with ``head``, the head's own yaw (the body settles under the
+    head and the neck straightens); beyond it the body turns by the excess. Targets beyond reach
+    are clamped, never wrapped.
     """
     head, pitch = dofs[gaze.head_yaw], dofs[gaze.head_pitch]
     out = {gaze.head_pitch: _clamp(-elevation_rad, pitch.min, pitch.max)}
@@ -87,6 +92,8 @@ def look_at(
     offset = yaw - body_now
     if abs(offset) > comfort:
         target_body = yaw - math.copysign(comfort, offset)
+    elif body_follow == "head":
+        target_body = yaw
     else:
         target_body = _clamp(body.home, yaw - comfort, yaw + comfort)
     out[gaze.head_yaw] = yaw
@@ -161,6 +168,7 @@ class GazeController:
                 comfort_rad=comfort,
                 margin_rad=self.margin_rad,
                 body_now=body_now,
+                body_follow=self.cfg.body_follow,
             )
             reach = yaw_reach(self.gaze, self.constraints, self.margin_rad)
             self._recentering = self.gaze.body_yaw is not None and abs(
