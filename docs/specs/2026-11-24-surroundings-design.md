@@ -1,6 +1,8 @@
 # Surroundings: camera snapshots described as text (design)
 
 > Superseded in part on 2026-11-25 by `2026-11-25-surroundings-panorama-design.md`: the room picture is a panorama from a photo sweep, and the shown-thing snapshot and the head hold are removed.
+>
+> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415, or is not usable, is skipped until the next local day and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. SPEC 8, Surroundings snapshots (Fallback) is current.
 
 Date: 2026-11-24. Status: waiting for owner approval (builder check done). SPEC sections touched: 5, 5A, 8
 (Robot expression, LLM router, Conversation state), 11A, 12, 12A.
@@ -95,10 +97,11 @@ Marked (owner) for owner decisions of 2026-11-24, (design) for calls made in thi
 ### 5.1 The switch
 
 - (owner) A new route field `llm_routes[].images` (bool, default false), shown on the route card in
-  the Routes tab as "Sees images". The feature is on exactly when one available route has it on.
+  the Routes tab as "Sees images". The feature is on while at least one route has it on
+  (2026-11-25; was: exactly one).
   There is no second flag.
-- (design) At most one route has `images: true`. Turning it on for a route turns it off on any
-  other route in the same write. Config validation rejects two.
+- (design, replaced 2026-11-25) ~~At most one route has `images: true`.~~ Several routes may;
+  their list order is their priority, and turning one on leaves the others on.
 - (design) The switch exists on `kind: chat` routes only. A describe is one request and one reply;
   the realtime wire has no such call. To use Gemini, add a chat route on Google's
   OpenAI-compatible endpoint. The owner checks this call while reading.
@@ -107,8 +110,9 @@ Marked (owner) for owner decisions of 2026-11-24, (design) for calls made in thi
   needs no PIN (it tightens).
 - (design) The `images: true` route stays a normal chat route: it may also answer conversation
   turns in the routing order. The `images_unsupported` mark (5.6) stops only describe requests,
-  never its chat use. Describe requests are not part of the fallback chain: a describe that fails
-  is not retried on another route.
+  never its chat use. Describe requests are not part of the chat fallback chain. Since
+  2026-11-25 a describe refused with 429, 400 or 415 (or a route not usable) goes at once to the
+  next image route; other failures are not retried on another route.
 - (design) A `locality: local` route may have the switch too. Its snapshots stay on the LAN; the
   Live tab and the logs treat it the same way.
 
@@ -191,15 +195,17 @@ on the robot (a builder task, section 7); until then it is low.
 
 ### 5.6 Failures
 
-- (owner) A model that refuses images: the route is marked `images_unsupported` in RAM. The robot
-  stops sending snapshots. The route card and the Live tab show the reason. The mark clears when one of
+- (owner, replaced 2026-11-25: a 400 or 415 now skips the route for the local day only, since
+  Anthropic answers "credit balance too low" with 400) A model that refuses images: the route is
+  marked `images_unsupported` in RAM. The robot stops sending snapshots. The route card and the Live tab show the reason. The mark clears when one of
   that route's own fields changes (model, base URL, key) or the owner turns the switch off and on.
   A reload that leaves the route unchanged keeps the mark. No retry loop.
 - (design) What counts as "refuses images": an HTTP 400 or 415 on a request with an image part.
   Builder checks the real bodies of at least one OpenAI-compatible server that has no vision
   (LM Studio or llama.cpp with a text model) and one cloud model without vision, and lists them in
   the tests.
-- (design) Other errors (timeout, 5xx, 429, network down, budget spent): that snapshot is
+- (design; since 2026-11-25 a 429 or a route not usable skips that route for the day and falls
+  back, and the pause is per route) Other errors (timeout, 5xx, 429, network down, budget spent): that snapshot is
   dropped with its reason; the next trigger tries again. After `surroundings.max_failures` in a row
   the feature pauses for `surroundings.pause_s`. Offline (the network monitor): no attempt.
 - (design) The route's `daily_token_budget` counts describe requests as it counts chat requests.

@@ -3,6 +3,8 @@
 Date: 2026-11-25. Builds on `2026-11-24-surroundings-design.md`. SPEC sections: 8 (Surroundings
 snapshots), 5A (Scanning).
 
+> Changed on 2026-11-25 (owner decision): several chat routes may have `images: true`; their order in `llm_routes` is their priority. A route that answers 429, 400 or 415, or is not usable, is skipped until the next local day and the same picture goes at once to the next one; there is no permanent `images_unsupported` mark. SPEC 8, Surroundings snapshots (Fallback) is current.
+
 ## Intent
 
 On the robot, a room snapshot was one frame taken wherever the head pointed. On 2026-11-25 it was a
@@ -51,8 +53,9 @@ When the head turns (owner, 2026-11-25: "1 + 2"):
 ### Flow
 
 1. **Due.** These triggers make a room picture due: start, switch-on, the end of a rest, and a
-   scene change. Every refusal check runs first: off, vision missing, unsupported, paused, daily
-   cap, provider limit, offline, route unavailable, asleep, music, busy, interval. A refused
+   scene change. Every refusal check runs first: off, vision missing, every image route skipped
+   today, every route left paused, daily cap, offline, no route left usable, asleep, music, busy,
+   interval (since 2026-11-25). A refused
    trigger is counted as today, and nothing turns.
 2. **Sweep.** `ScanContext` gets a field `picture_due: bool` and `ScanPolicy` stays pure. The
    policy starts a sweep with reason `picture` when the field has been true for
@@ -67,7 +70,8 @@ When the head turns (owner, 2026-11-25: "1 + 2"):
 4. **Compose.** At the sweep's end (`world.scan_finished`), the views are sorted by azimuth,
    left to right. Positive yaw turns left, so the order is descending azimuth. They are scaled to
    one height, joined with a separator, and encoded as one JPEG.
-5. **Send.** One request, prompt `surroundings_room` reworded for N views left to right with the
+5. **Send.** One request to the first image route ready (since 2026-11-25: the next one at once
+   when it refuses with 429, 400 or 415 or is not usable), prompt `surroundings_room` reworded for N views left to right with the
    span in degrees. It asks for the layout: what is on the left, in the centre, on the right.
 6. **A photo sweep always completes** (owner, 2026-11-25). A person who engages, a speaker hint,
    attention on an object, a glance or a conversation that starts do not cancel it. The scan
