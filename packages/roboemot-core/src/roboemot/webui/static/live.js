@@ -171,7 +171,7 @@ function liveSurroundingsCard(d) {
       views: liveSurrViews(s.last), n: num(s.last.age_s, 0),
       kb: num(s.last.bytes / 1024, 1), score: num(s.last.sharpness, 0),
     })));
-    if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail, s.last.route)));
+    if (s.last.outcome) parts.push(liveRow(t("live_surr_outcome"), liveSurrOutcome(s.last.outcome, s.last.detail, s.last.route) + liveSurrCut(s.last.cut)));
   } else {
     parts.push(el("p", { class: "hint" }, t("live_surr_none")));
   }
@@ -185,7 +185,7 @@ function liveSurroundingsCard(d) {
       el("ol", {}, s.history.map((h) => el("li", {},
         liveSurrViews(h) + ", " + t("live_surr_ago", { n: num(h.age_s, 0) }) + ": ",
         h.text || liveSurrOutcome(h.outcome, h.detail, h.route),
-        h.text && h.route ? " (" + t("live_surr_via", { route: h.route }) + ")" : "")))));
+        h.text && h.route ? " (" + t("live_surr_via", { route: h.route }) + ")" : "", liveSurrCut(h.cut))))));
   }
   const node = card(t("tab_live"), t("live_surroundings"), parts);
   node.id = "live-surroundings-card";
@@ -203,6 +203,12 @@ function liveSurrOutcome(outcome, detail, route) {
   const word = liveWord("live_surr_outcome_", outcome);
   const text = detail ? word + " (" + liveWord("live_surr_detail_", detail) + ")" : word;
   return route ? text + ", " + t("live_surr_via", { route }) : text;
+}
+
+// The routes whose reply was cut by the token cap for a picture, as a clause: "; cut by the
+// token cap: Claude". Empty without one (or from a server before the field).
+function liveSurrCut(cut) {
+  return cut && cut.length ? "; " + t("live_surr_cut", { routes: cut.join(", ") }) : "";
 }
 
 // One image route's status: "gemini: skipped until tomorrow (http_429)", "claude: ready".

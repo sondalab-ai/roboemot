@@ -251,6 +251,7 @@ EN: dict[str, str] = {
     "live_ev_reply_gave_up": "Reply lost: apologizing",
     "live_ev_reply_backup": "Reply lost: the backup chat answered",
     "live_ev_surroundings_described": "Room picture described",
+    "live_ev_surroundings_cut": "An image route's reply ran out of tokens, the next was tried",
     "live_ev_surroundings_views_missing": "No room picture, a view had no still frame",
     "live_ev_surroundings_unsupported": "An image route refused the picture (400 or 415)",
     "live_ev_surroundings_failed": "Room picture description failed",
@@ -329,6 +330,7 @@ EN: dict[str, str] = {
     "live_surr_detail_timeout": "timed out",
     "live_surr_detail_empty": "empty reply",
     "live_surr_detail_cut": "empty reply: the token cap ran out",
+    "live_surr_cut": "cut by the token cap: {routes}",
     "live_surr_detail_error": "error",
     "live_surr_history": "Last {n} room pictures",
     "live_surr_ago": "{n} s ago",
@@ -1749,6 +1751,9 @@ IT: dict[str, str] = {
     "live_ev_reply_gave_up": "Risposta persa: mi scuso",
     "live_ev_reply_backup": "Risposta persa: ha risposto la chat di riserva",
     "live_ev_surroundings_described": "Immagine della stanza descritta",
+    "live_ev_surroundings_cut": (
+        "La risposta di una route immagini ha finito i token, si prova la successiva"
+    ),
     "live_ev_surroundings_views_missing": "Niente immagine della stanza, vista senza fotogramma",
     "live_ev_surroundings_unsupported": "Una route immagini ha rifiutato l'immagine (400 o 415)",
     "live_ev_surroundings_failed": "Descrizione dell'immagine della stanza fallita",
@@ -1828,6 +1833,7 @@ IT: dict[str, str] = {
     "live_surr_detail_timeout": "tempo scaduto",
     "live_surr_detail_empty": "risposta vuota",
     "live_surr_detail_cut": "risposta vuota: finito il limite di token",
+    "live_surr_cut": "tagliata dal limite di token: {routes}",
     "live_surr_detail_error": "errore",
     "live_surr_history": "Ultime {n} immagini della stanza",
     "live_surr_ago": "{n} s fa",

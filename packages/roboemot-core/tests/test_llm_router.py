@@ -804,3 +804,11 @@ async def test_a_blank_describe_reply_that_ended_normally_comes_back_blank():
 async def test_a_describe_reply_with_text_cut_by_the_cap_keeps_its_text():
     r, eye, _ = _describer([chunk("a desk and"), _ended(chunk(), "length")])
     assert await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0) == "a desk and"
+
+
+async def test_a_whitespace_only_describe_reply_cut_by_the_cap_is_a_cut():
+    from roboemot.llm.router import ReplyCut
+
+    r, eye, _ = _describer([chunk(" \n "), _ended(chunk(), "length")])
+    with pytest.raises(ReplyCut):
+        await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=3.0)

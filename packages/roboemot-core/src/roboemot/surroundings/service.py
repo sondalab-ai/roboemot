@@ -2,22 +2,21 @@
 
 The feature is on while at least one route has ``images`` on; ``image_routes`` gives their
 priority (``surroundings.image_route_order``, then ``llm_routes`` order; owner decisions
-2026-11-25). A room picture becomes due
-(``trigger``) at a wake from sleep, at the end of a rest and after a scene change; one is owed
-at start and when the feature goes from off to on, and retried, uncounted, about every
-``room.check_interval_s`` until it passes. Every refusal check runs first: off, ``no_vision``,
-``daily_limit`` (every image route skipped today), ``paused`` (every route left is paused),
-``daily_limit`` (the cap), ``offline``, ``route_unavailable`` (no route left is usable now), the
-robot's ``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is
-counted and nothing turns. While due, the service thread checks again every ``POLL_S``,
-uncounted, and ``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
-``picture_state`` also says whether the due picture is the first one that became due after
-start or after the feature went from off to on: its photo sweep starts at once, even while
-engaged or alone (owner, 2026-11-25). The scan policy keeps that one attempt; the end of a
-photo sweep that took views for it clears the mark, and a picture still due
-(``views_missing``) then waits under the scan's normal rules. The feature going off and on
-owes a new first picture with a fresh attempt; adding, removing or reordering image routes
-does not.
+2026-11-25). A room picture becomes due (``trigger``) at a wake from sleep, at the end of a rest
+and after a scene change; one is owed at start and when the feature goes from off to on, and
+retried, uncounted, about every ``room.check_interval_s`` until it passes. Every refusal check
+runs first: off, ``no_vision``, ``daily_limit`` (every image route skipped today), ``paused``
+(every route left is paused), ``daily_limit`` (the cap), ``offline``, ``route_unavailable`` (no
+route left is usable now), the robot's ``gate`` (``asleep``, ``music``, ``busy``) and
+``interval``. A refused trigger is counted and nothing turns. While due, the service thread
+checks again every ``POLL_S``, uncounted, and ``picture_due`` (read by the scan context, SPEC
+5A) is true only while they pass. ``picture_state`` also says whether the due picture is the
+first one that became due after start or after the feature went from off to on: its photo sweep
+starts at once, even while engaged or alone (owner, 2026-11-25). The scan policy keeps that one
+attempt; the end of a photo sweep that took views for it clears the mark, and a picture still
+due (``views_missing``) then waits under the scan's normal rules. The feature going off and on
+owes a new first picture with a fresh attempt; adding, removing or reordering image routes does
+not.
 
 A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
 names one, the vision thread's frames (``tap``) go to that view's ``Picker``: only a still frame
@@ -37,15 +36,15 @@ Fallback (owner decisions 2026-11-25): a route that answers 429 (``RateLimited``
 (``ImagesUnsupported``; Anthropic says "credit balance too low" with 400) is skipped for the
 rest of the local day (``today``); one that is not usable (``NoRouteAvailable``: key missing,
 budget spent, unreachable) is passed over for this picture only. Either way the same JPEG goes
-at once to the next route, in the same ``_send``; only when every route refused does the
-picture stay due. An empty reply that ended at the token cap (``ReplyCut``, detail ``cut``)
-falls back the same way for this picture only: no skip and no failure on that route, since
-it is a budget problem, not a broken route. Timeouts, other empty replies and other errors
-stay on the route: ``max_failures`` in a row pause that route for ``pause_s`` (the next
-picture goes to the next route). A route's
-marks (skip, failures, pause) are bound to its base URL, model and key reference (the
-``${secret:name}`` text, never the secret's value): a change clears them. ``max_per_day``
-counts the requests sent to every route together.
+at once to the next route, in the same ``_send``; only when every route refused does the picture
+stay due. An empty reply that ended at the token cap (``ReplyCut``, detail ``cut``) falls back
+the same way for this picture only: no skip and no failure on that route, since it is a budget
+problem, not a broken route. Each cut is counted (``cut``, a decision event) and the picture's
+``_last`` and history entry name the routes cut for it. Timeouts, other empty replies and other
+errors stay on the route: ``max_failures`` in a row pause that route for ``pause_s`` (the next
+picture goes to the next route). A route's marks (skip, failures, pause) are bound to its base
+URL, model and key reference (the ``${secret:name}`` text, never the secret's value): a change
+clears them. ``max_per_day`` counts the requests sent to every route together.
 
 The scene check: with no picture due, the head still and ``min_interval_s`` past, about every
 ``check_interval_s`` a frame is compared with the sent view within ``room.view_match_deg`` of
@@ -539,6 +538,7 @@ class Surroundings:
         views = len(job.shots)
         span = _span_deg([shot.azimuth_rad for shot in job.shots], cfg.world.camera_fov_h_deg)
         tried: set[str] = set()
+        cut: list[str] = []  # the routes whose reply was cut by the token cap, for this picture
         outcome: str | None = None
         detail: str | None = None
         text: str | None = None
@@ -554,13 +554,15 @@ class Surroundings:
                 if route is not None:
                     tried.add(route.name)
                     self._sent += 1
-                    self._open(route, started, jpeg, references, views, span, job)
+                    self._open(route, started, jpeg, references, views, span, job, cut)
             if route is None:
                 break
             outcome, detail, text, refused = self._attempt(route, jpeg, views, span, cfg, job)
             if outcome == STALE:
                 self._drop(job)
                 return
+            if detail == CUT and self._cut(job, route, cut):
+                self._count(CUT)
             if not refused:
                 break
         if outcome is None:  # nothing went out: the routes were refused since the last check
@@ -569,7 +571,19 @@ class Surroundings:
                     self._due, self._due_ok = True, False
             self._count(code or DAILY_LIMIT)
             return
-        self._close(job, outcome, detail, text, views, span, started)
+        self._close(job, outcome, detail, text, views, span, started, cut)
+
+    def _cut(self, job: _Job, route: LLMRoute, cut: list[str]) -> bool:
+        """Note ``route`` as cut for this picture (its name in ``cut`` and ``_last``); False
+        when the generation moved meanwhile (sleep, the feature off and on): nothing is noted
+        or counted then."""
+        with self._lock:
+            if job.generation != self._generation:
+                return False
+            cut.append(route.name)
+            if self._last is not None:
+                self._last["cut"] = list(cut)
+            return True
 
     def _open(
         self,
@@ -580,9 +594,10 @@ class Surroundings:
         views: int,
         span: int,
         job: _Job,
+        cut: list[str],
     ) -> None:
         """Record a request going out to ``route`` (lock held): the kept picture, its
-        references and ``_last`` with the route's name."""
+        references and ``_last`` with the route's name and the routes cut so far (``cut``)."""
         self._last_room = started
         self._jpeg, self._references = jpeg, references
         self._last = {
@@ -594,6 +609,7 @@ class Surroundings:
             "outcome": DESCRIBING,
             "detail": None,
             "route": route.name,
+            "cut": list(cut),
         }
 
     def _attempt(
@@ -634,13 +650,11 @@ class Surroundings:
             if current is None or _trust(current) != _trust(route):
                 return STALE, None, None, False  # changed, removed or off: dropped, no mark
             mark = self._mark(current)
-            if detail == CUT:
-                pass  # a budget problem, not a broken route: no skip, no failure
-            elif refused and outcome != ROUTE_UNAVAILABLE:
+            if outcome in (UNSUPPORTED, DAILY_LIMIT):  # a 400, 415 or 429: skipped today
                 mark.skipped_on, mark.reason = self.today(), detail
             elif text is not None:
                 mark.failures = 0
-            elif outcome == "failed":
+            elif outcome == "failed" and detail != CUT:  # a cut is a budget problem: no mark
                 mark.failures += 1
                 if mark.failures >= self._cfg.surroundings.max_failures:
                     mark.failures = 0
@@ -666,9 +680,11 @@ class Surroundings:
         views: int,
         span: int,
         started: float,
+        cut: list[str],
     ) -> None:
-        """Record the picture's outcome: the last route's (``_last``, the history, the count);
-        a described picture is no longer due, any other stays due."""
+        """Record the picture's outcome: the last route's (``_last``, the history, the count),
+        with the routes cut for it (``cut``); a described picture is no longer due, any other
+        stays due."""
         now = self.clock()
         with self._lock:
             if job.generation != self._generation:
@@ -677,7 +693,7 @@ class Surroundings:
             self._latency_s = now - started
             if self._last is not None:
                 self._last.update(outcome=outcome, detail=detail)
-            self._remember(now, outcome, detail, text, views, span, route)
+            self._remember(now, outcome, detail, text, views, span, route, cut)
             # a failed picture stays due: the refusal checks (interval, pause, cap, routes
             # skipped today) hold the head until one could go out again
             self._due, self._due_ok = text is None, False
@@ -695,8 +711,10 @@ class Surroundings:
         views: int,
         span: int,
         route: str | None,
+        cut: list[str],
     ) -> None:
-        """Add a picture sent to the history (lock held), at most ``history_size``."""
+        """Add a picture sent to the history (lock held), at most ``history_size``, with the
+        routes whose reply was cut for it (names only)."""
         self._history.append(
             {
                 "stamp": now,
@@ -705,6 +723,7 @@ class Surroundings:
                 "outcome": outcome,
                 "detail": detail,
                 "route": route,
+                "cut": list(cut),
                 "text": text,
             }
         )

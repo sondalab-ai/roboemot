@@ -866,3 +866,25 @@ test("surroundings: the card shows the last outcome and the history, text as tex
   assert.ok(card.textContent.includes("5 views over 300°"), "each picture's views and span");
   assert.ok(card.textContent.includes("a <i>study</i>, desk centre") && card.querySelector("i") === null);
 });
+
+test("surroundings: the routes cut by the token cap show on the last picture and in the history", async (t) => {
+  const last = { views: 4, span_deg: 180, age_s: 2, bytes: 9000, sharpness: 300, outcome: "described", detail: null, route: "gemini", cut: ["claude"] };
+  const history = [
+    { views: 4, span_deg: 180, age_s: 2, outcome: "described", detail: null, route: "gemini", cut: ["claude"], text: "a desk" },
+    { views: 4, span_deg: 180, age_s: 90, outcome: "described", detail: null, route: "gemini", cut: [], text: "a sofa" },
+  ];
+  const s = { ...SURROUNDINGS, last, history, described: { room: "a desk" } };
+  const page = await livePage(t, {
+    "GET /api/strings": { language: "en", strings: { ...SURR_STRINGS["GET /api/strings"].strings,
+      live_surr_outcome_described: "described", live_surr_cut: "cut by the token cap: {routes}",
+      live_surr_history: "Last {n} room pictures" } },
+    "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: 333 }, surroundings: s },
+    "GET /api/live/surroundings.jpg": () => reply(200, {}, { "Content-Type": "image/jpeg" }),
+    "GET /api/live/frame.jpg": reply(503, { error: "video_no_frame" }),
+  });
+  await openLive(page);
+  const text = surroundingsCard(page).textContent;
+  assert.ok(text.includes("described, via gemini; cut by the token cap: claude"), "the last picture names the cut route");
+  assert.ok(text.includes("a desk (via gemini); cut by the token cap: claude"), "and its history entry");
+  assert.ok(!text.includes("a sofa (via gemini); cut"), "a picture with no cut says nothing");
+});
