@@ -70,6 +70,7 @@ class SpeakerHint:
     entry_id: str | None = None
     azimuth_rad: float | None = None
     elevation_rad: float = 0.0
+    snap: bool = True  # False: the bearing stands as given, never matched to a person (look away)
 
     def __post_init__(self) -> None:
         if self.entry_id is None and self.azimuth_rad is None:
@@ -464,8 +465,8 @@ class AttentionSelector:
         return [(cat, pools[cat]) for cat in self.cfg.priority_order]
 
     def _speaker(self, now: float, fresh: Sequence[Entry], by_id: dict[str, Entry]) -> list[_Cand]:
-        """The hinted speaker: its entry, else the nearest entry within the gate, else the bare
-        bearing."""
+        """The hinted speaker: its entry, else the nearest person within the gate (a hint that
+        does not ``snap`` skips it), else the bare bearing."""
         h = self._hint
         if h is None or now - h.stamp > self.cfg.speaker_hold_s:
             return []
@@ -473,6 +474,8 @@ class AttentionSelector:
             return _cands([by_id[h.entry_id]])
         if h.azimuth_rad is None:
             return []
+        if not h.snap:
+            return [_Cand(SPEAKER_KEY, "unknown", h.azimuth_rad, h.elevation_rad, None)]
         gate = math.radians(self.cfg.speaker_match_deg)
         scored = [
             (angular_distance(h.azimuth_rad, h.elevation_rad, e.azimuth_rad, e.elevation_rad), e)

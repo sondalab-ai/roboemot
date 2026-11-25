@@ -368,7 +368,8 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
     assert env.look_at("marta") and env.look_at("animal") and selector._hint.entry_id == animal
     assert not env.look_at("object") and not env.look_at("Mallory")
     assert env.look_at("away") and selector._hint.entry_id is None
-    assert abs(selector._hint.azimuth_rad) >= cfg.attention.speaker_match_deg * 3.14159 / 180
+    assert abs(selector._hint.azimuth_rad) >= cfg.conversation.look_away_deg * 3.14159 / 180 - 1e-6
+    assert selector._hint.snap is False  # away never snaps back to the person
     now[0] = 10.0 + cfg.attention.stale_s + 1  # everything went stale
     assert env.look_names() == [] and not env.look_at("person")
 
