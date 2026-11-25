@@ -159,7 +159,8 @@ def scan_context(
     energy effects (``effects``, computed from the persona when the caller has not cached them),
     and whether a surroundings room picture is due (``picture_due``, SPEC 8) with the photo
     sweep's wait, span and view dwell from ``cfg.surroundings``; ``picture_first`` when that
-    picture is the first one owed at start or switch-on, which sweeps at once (SPEC 5A)."""
+    picture is the first one that became due after start or switch-on, which sweeps at once
+    (SPEC 5A)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     engaged = selector.engaged or selector.episode_active  # a shown thing: no time limit

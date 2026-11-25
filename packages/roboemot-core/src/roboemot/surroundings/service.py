@@ -8,10 +8,11 @@ passes. Every refusal check runs first: off, ``no_vision``, ``unsupported``, ``p
 ``gate`` (``asleep``, ``music``, ``busy``) and ``interval``. A refused trigger is counted and
 nothing turns. While due, the service thread checks again every ``POLL_S``, uncounted, and
 ``picture_due`` (read by the scan context, SPEC 5A) is true only while they pass.
-``picture_first`` marks the first picture owed (start, switch-on): its photo sweep starts at
-once, even while engaged or alone (owner, 2026-11-25). That is one attempt: the end of a photo
-sweep spends it, and a picture still due (``views_missing``) then waits under the scan's normal
-rules. A switch-off and on owes a new first picture with a fresh attempt.
+``picture_state`` also says whether the due picture is the first one that became due after
+start or switch-on: its photo sweep starts at once, even while engaged or alone (owner,
+2026-11-25). The scan policy keeps that one attempt; the end of a photo sweep that took views
+for it clears the mark, and a picture still due (``views_missing``) then waits under the scan's
+normal rules. A switch-off and on owes a new first picture with a fresh attempt.
 
 A photo sweep (``world.scan.ScanController``) then dwells at each view. While ``scan_view``
 names one, the vision thread's frames (``tap``) go to that view's ``Picker``: only a still frame
@@ -232,15 +233,15 @@ class Surroundings:
         with self._lock:
             return self._due and self._due_ok
 
-    def picture_first(self) -> bool:
-        """Whether the due picture is the first one owed at start or switch-on and its photo
-        sweep has not run yet (SPEC 5A: it sweeps at once, even engaged or alone). The bypass is
-        spent when a photo sweep ends (``world.scan_finished``), not when it starts: the service
-        has no start signal, the end arrives in the same scan tick (the bus is synchronous) so
-        the next tick already sees it spent, and a photo sweep cancelled by sleep took no views,
-        so the first picture keeps its one attempt for after the wake."""
+    def picture_state(self) -> tuple[bool, bool]:
+        """``(due, first)`` in one lock-held read for the scan context (SPEC 5A). ``due``: a
+        picture is due and could be sent now (``picture_due``). ``first``: the due picture is
+        the first one that became due after start or switch-on; it stays true while the picture
+        is due until a photo sweep with views for it ends, so a refusal that comes and goes never
+        resets the scan policy's one attempt (the policy keeps it: a sweep with no plan, a failed
+        one or one cancelled by sleep never reaches ``world.scan_finished``)."""
         with self._lock:
-            return self._due and self._due_ok and self._first
+            return self._due and self._due_ok, self._due and self._first
 
     def _refusal(self, now: float) -> str | None:
         cfg = self._cfg
@@ -357,9 +358,10 @@ class Surroundings:
             views, self._views, self._view_index = self._views, {}, None
             if not photo or not self._due:
                 return
-            self._first = False  # one attempt: a view missing leaves it to the normal rules
             if not ours:
                 views = {}
+            else:  # its sweep ran: a picture still due waits under the normal rules
+                self._first = False
             shots = [s for i in range(planned) if (s := _shot(views.get(i))) is not None]
             complete = planned > 0 and len(shots) == planned
             if complete:
@@ -660,6 +662,7 @@ class Surroundings:
             self._generation += 1
             self._due = self._due_ok = False
             self._views, self._view_index, self._job = {}, None, None
+            self._sweep = None  # a photo sweep still running is not the new first picture's
             self._room = None
             self._jpeg, self._last, self._references = None, None, []
             self._history = []

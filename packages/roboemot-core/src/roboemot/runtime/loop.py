@@ -160,6 +160,7 @@ def _tick_until_stopped(
         alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
             snap = host.surroundings
+            due, first = snap.picture_state() if snap is not None else (False, False)
             ctx = scan_context(
                 now,
                 live,
@@ -169,8 +170,8 @@ def _tick_until_stopped(
                 circadian=host.circadian,
                 alone=alone,
                 music=calm,
-                picture_due=snap is not None and snap.picture_due(),
-                picture_first=snap is not None and snap.picture_first(),
+                picture_due=due,
+                picture_first=first,
             )
             scan_tick(ctx, p.scan, p.loop, live, bus=host.bus)
         if p.perception.pipeline is not None:  # face runs for each view of a photo sweep

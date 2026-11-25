@@ -21,10 +21,11 @@
   ``picture_amplitude`` of the circle, whatever the energy says (owner, 2026-11-25), and at
   least ``picture_dwell_s`` at each waypoint. When no sweep
   starts within ``picture_wait_s`` of the picture becoming due, the policy starts one itself
-  (reason ``picture``). The first picture owed at start or switch-on (``ScanContext.picture_first``)
-  starts its photo sweep at once, even while engaged or alone (owner, 2026-11-25); asleep, music
-  and a sweep already running still hold it. It is one attempt: once that sweep ended the
-  surroundings service clears the flag and a picture still due follows the rules above. A photo
+  (reason ``picture``). The first picture that becomes due after start or switch-on
+  (``ScanContext.picture_first``) starts its photo sweep at once, even while engaged or alone
+  (owner, 2026-11-25); asleep, music and a scan already running still hold it. It is one attempt,
+  kept by the policy: once that sweep started, a picture still due follows the rules above,
+  unless sleep cancelled it (it took no views, so the attempt comes back for the wake). A photo
   sweep is fed at expression priority and only sleep, rest and quiet hours cancel it;
   ``ScanController.view`` names the waypoint the head dwells at.
 
@@ -79,8 +80,9 @@ class ScanContext:
     effects: PersonaEffects = PersonaEffects()
     picture_due: bool = False  # a surroundings picture is due (SPEC 8): sweeps are photo sweeps
     picture_wait_s: float = math.inf  # surroundings.room.sweep_wait_s
-    # the due picture is the first one owed at start or switch-on, its one attempt unused:
-    # it sweeps at once, even engaged or alone (owner, 2026-11-25)
+    # the due picture is the first one that became due after start or switch-on: its first
+    # photo sweep starts at once, even engaged or alone (owner, 2026-11-25; one attempt, the
+    # policy keeps it)
     picture_first: bool = False
     picture_amplitude: float = 0.0  # share of the circle: surroundings.room.span_deg / 360
     picture_dwell_s: float = 0.0  # surroundings.view_dwell_s
@@ -124,6 +126,8 @@ class ScanPolicy:
         self._due_since: float | None = None
         self._picture_since: float | None = None  # when the picture became due (not running)
         self._photo = False  # the running decision is a photo sweep
+        self._first_spent = False  # the first picture's one photo sweep has started
+        self._first_running = False  # the running decision is that photo sweep
 
     def note_unexplained(self, azimuth_rad: float, elevation_rad: float, stamp: float) -> None:
         """Remember the newest bearing no entry explains (``ObserveResult.unexplained_bearing``).
@@ -134,10 +138,15 @@ class ScanPolicy:
         with self._lock:
             self._pending = (azimuth_rad, elevation_rad, stamp)
 
-    def finished(self) -> None:
+    def finished(self, asleep: bool = False) -> None:
         """The decided scan ended (done or cancelled); the idle clock restarts at the next tick.
         After a photo sweep the picture's wait starts again too, so a picture still due (a view
-        was missing) never starts sweeps back to back."""
+        was missing) never starts sweeps back to back. ``asleep``: it was cancelled because the
+        robot fell asleep; the first picture's photo sweep then gets its attempt back for after
+        the wake (it took no views)."""
+        if asleep and self._first_running:
+            self._first_spent = False
+        self._first_running = False
         self._running = False
         self._next_at = None
         self._due_since = None
@@ -147,10 +156,18 @@ class ScanPolicy:
 
     def update(self, ctx: ScanContext) -> ScanDecision | None:
         """The scan to start now, or None. At most one decision until ``finished`` is called.
-        The first picture owed (``picture_first``) skips the alone, engaged, object-hold and
-        ``picture_wait_s`` rules; only sleep, music and a running scan hold it."""
+
+        The first picture that becomes due after start or switch-on (``picture_first``) skips
+        the alone, engaged and object-hold rules and the ``picture_wait_s`` wait
+        (``_picture_since``); only sleep, music and a running scan hold it. The policy owns its
+        one attempt: the first photo sweep that starts for it spends it (``_start``), whether or
+        not that sweep then plans waypoints, fails or ends with a view missing; a cancel by sleep
+        gives it back (``finished(asleep=True)``), and it is reset when ``picture_first`` goes
+        false (a new first picture then gets a fresh one)."""
         if not ctx.picture_due:
             self._picture_since = None
+        if not ctx.picture_first:
+            self._first_spent = False
         woke = self._was_asleep and not ctx.asleep
         self._was_asleep = ctx.asleep
         if woke:
@@ -161,8 +178,10 @@ class ScanPolicy:
             self._next_at = None
             self._was_engaged = False
             return None
-        if ctx.picture_due and ctx.picture_first and not ctx.music:
-            return None if self._running else self._start(ctx, "picture")
+        if ctx.picture_due and ctx.picture_first and not self._first_spent and not ctx.music:
+            if self._running:  # a sweep or a glance already moves the head
+                return None
+            return self._start(ctx, "picture")
         if ctx.alone or ctx.music:  # hold still; the idle clock restarts when this ends
             self._drop_pending()
             self._wake_pending = False
@@ -255,6 +274,8 @@ class ScanPolicy:
         amplitude = min(1.0, max(self.cfg.min_amplitude, ctx.effects.motion_amplitude_x))
         dwell_s = self.cfg.dwell_s / pace
         self._photo = ctx.picture_due
+        if self._photo and ctx.picture_first:  # the first picture's one attempt
+            self._first_spent = self._first_running = True
         if self._photo:
             amplitude = min(1.0, ctx.picture_amplitude)
             dwell_s = max(dwell_s, ctx.picture_dwell_s)
@@ -470,7 +491,7 @@ class ScanController:
     ) -> Command | None:
         if self.runner.active and self._cancelled(ctx):
             self.runner.cancel()
-            self.policy.finished()
+            self.policy.finished(asleep=ctx.asleep)
             self._photo = False
         decision = self.policy.update(ctx)
         if decision is not None:
