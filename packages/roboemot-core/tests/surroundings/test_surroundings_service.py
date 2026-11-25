@@ -38,7 +38,7 @@ class FakeRouter:
     def eligible(self):
         return [eye()] if self.usable else []
 
-    async def describe_image(self, route, prompt, jpeg, max_tokens):
+    async def describe_image(self, route, prompt, jpeg, max_tokens, first_token_s):
         self.calls.append((route.name, prompt, jpeg))
         if self.error is not None:
             raise self.error
@@ -283,7 +283,7 @@ def test_switch_off_mid_request_drops_reply_and_jpeg():
     rig.settle(shown=THING)
 
     class TurnOff(FakeRouter):
-        async def describe_image(inner, route, prompt, jpeg, max_tokens):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
             rig.cfg = config(images=False)
             rig.s.apply_config(rig.cfg)
             return "a silver laptop"
