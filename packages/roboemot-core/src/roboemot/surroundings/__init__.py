@@ -1,2 +1,2 @@
-"""Camera snapshots described as text by the route with images on (design 2026-11-24;
-SPEC 8, Surroundings snapshots)."""
+"""Camera snapshots described as text by the routes with images on, in priority order
+(designs 2026-11-24, 2026-11-25; SPEC 8, Surroundings snapshots)."""

@@ -375,7 +375,7 @@ def start_surroundings(
     host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
 ) -> None:
     """Room pictures described as text (SPEC 8, Surroundings snapshots): built whether or not
-    a route has images on, so the switch works without a restart. The pipeline's picture tap
+    any route has images on, so the switch works without a restart. The pipeline's picture tap
     feeds it the views the scan names (``ScanController.view``, SPEC 5A); the gate reads the
     robot's sleep, rest, quiet hours, radio and conversation. Sets ``host.surroundings``."""
     pipeline = p.perception.pipeline

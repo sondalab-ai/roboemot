@@ -6650,8 +6650,9 @@ class SurroundingsRoomConfig(Strict):
 
 
 class SurroundingsConfig(Strict):
-    """Camera snapshots described as text by the route with images on (design 2026-11-24;
-    SPEC 5, 8, 12). The feature is on exactly when one llm_routes entry has images: true."""
+    """Camera snapshots described as text by the routes with images on (design 2026-11-24;
+    SPEC 5, 8, 12). The feature is on while at least one llm_routes entry has images: true;
+    their order in llm_routes is their priority (owner decision 2026-11-25)."""
 
     settle_s: float = param(
         0.5,
@@ -6816,8 +6817,8 @@ class LLMRoute(Strict):
     images: bool = param(
         False,
         "Sees images: this chat route describes camera snapshots (a shown thing, the room) as "
-        "short text for the scene summary. The snapshots leave the robot; at most one route "
-        "(SPEC 8, 12)",
+        "short text for the scene summary. The snapshots leave the robot. With several such "
+        "routes the first in the list is tried first, the next when it refuses (SPEC 8, 12)",
         opt_in=True,
     )
 
@@ -6854,10 +6855,11 @@ class LLMRoute(Strict):
         return self
 
 
-def image_route(cfg: RoboEmotConfig) -> LLMRoute | None:
-    """The ``llm_routes`` entry with ``images: true``, or None: the surroundings feature is on
-    exactly when it exists (design 2026-11-24). The load checks allow at most one."""
-    return next((r for r in cfg.llm_routes if r.images), None)
+def image_routes(cfg: RoboEmotConfig) -> list[LLMRoute]:
+    """The ``llm_routes`` entries with ``images: true``, in list order: their priority for room
+    pictures (owner decision 2026-11-25). The surroundings feature is on while the list is not
+    empty (design 2026-11-24)."""
+    return [r for r in cfg.llm_routes if r.images]
 
 
 def active_realtime_route(cfg: RoboEmotConfig) -> LLMRoute | None:
@@ -8168,12 +8170,6 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
-            return self
-
-        @model_validator(mode="after")
-        def _one_image_route(self) -> RoboEmotConfig:
-            if sum(r.images for r in self.llm_routes) > 1:
-                raise ValueError("llm_routes: at most one route may have images on")
             return self
 
         @model_validator(mode="after")

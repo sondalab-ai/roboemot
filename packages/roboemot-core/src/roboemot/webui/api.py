@@ -994,7 +994,7 @@ class WebApi:
         return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")
 
     def _live_surroundings(self, req: Request) -> Response:
-        """The last snapshot the robot sent to the image route (SPEC 8, Surroundings snapshots;
+        """The last snapshot the robot sent to an image route (SPEC 8, Surroundings snapshots;
         12), or a JSON error with no picture: ``live_disabled``, ``video_off``,
         ``surroundings_off``, ``surroundings_none`` (404), ``video_asleep`` (503). Same-origin
         only, like the preview, and it counts the client as a video viewer (the banner); from

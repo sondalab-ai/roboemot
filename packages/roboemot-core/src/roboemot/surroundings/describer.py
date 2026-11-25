@@ -2,10 +2,10 @@
 2026-11-24, 5.4; 2026-11-25).
 
 The fixed English prompt of ``llm/prompts/surroundings_room.en.txt`` with the view count and the
-span, the JPEG and ``surroundings.describe_max_tokens`` go to the image route through
-``Router.describe_image``; the reply comes back on one line, cut to ``room.max_chars`` like a
-registry name. No names, no history, no persona: the request holds nothing about the people the
-robot knows.
+span, the JPEG and ``surroundings.describe_max_tokens`` go to one image route (the service
+picks it and falls back to the next) through ``Router.describe_image``; the reply comes back on
+one line, cut to ``room.max_chars`` like a registry name. No names, no history, no persona: the
+request holds nothing about the people the robot knows.
 """
 
 from __future__ import annotations

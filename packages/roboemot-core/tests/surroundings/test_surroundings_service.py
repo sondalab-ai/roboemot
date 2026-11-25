@@ -11,7 +11,7 @@ import numpy as np
 from roboemot.bus import Bus
 from roboemot.circadian.model import CircadianState
 from roboemot.config.schema import LLMRoute, RoboEmotConfig
-from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable
+from roboemot.llm.router import ImagesUnsupported, NoRouteAvailable, RateLimited
 from roboemot.surroundings.image import MASK_BGR
 from roboemot.surroundings.service import Surroundings
 from roboemot.vision import Frame
@@ -23,30 +23,46 @@ AZIMUTHS = (-90.0, -30.0, 30.0, 90.0)  # Reachy's planner at 180 degrees (design
 H, W = 120, 160  # each view: small enough to be neither shrunk nor scaled in the tile
 
 
-def eye(**kw) -> LLMRoute:
-    return LLMRoute(name="eye", base_url="https://api.example.com/v1", model="m", images=True, **kw)
+def eye(name: str = "eye", **kw) -> LLMRoute:
+    kw.setdefault("images", True)
+    kw.setdefault("model", "m")
+    return LLMRoute(name=name, base_url="https://api.example.com/v1", **kw)
 
 
-def config(images: bool = True, **surroundings) -> RoboEmotConfig:
+def config(images: bool = True, routes=None, **surroundings) -> RoboEmotConfig:
     surroundings.setdefault("min_sharpness", 0.0)
     surroundings.setdefault("candidates", 1)
-    route = eye() if images else eye().model_copy(update={"images": False})
-    return RoboEmotConfig(llm_routes=[route], surroundings=surroundings)
+    if routes is None:
+        routes = [eye(images=images)]
+    return RoboEmotConfig(llm_routes=routes, surroundings=surroundings)
+
+
+def two(**surroundings) -> RoboEmotConfig:
+    """Two image routes: ``free`` first, ``paid`` second."""
+    return config(routes=[eye("free"), eye("paid")], **surroundings)
 
 
 class FakeRouter:
-    def __init__(self, reply="a living room", error=None) -> None:
+    """``error`` fails every route; ``errors`` maps a route name to its own error. ``usable``
+    false (or a name in ``unusable``) leaves a route out of ``eligible``."""
+
+    def __init__(self, reply="a living room", error=None, errors=None) -> None:
         self.reply, self.error, self.calls = reply, error, []
+        self.errors: dict[str, BaseException] = dict(errors or {})
         self.offline = False
         self.usable = True
+        self.unusable: set[str] = set()
+        self.cfg: RoboEmotConfig | None = None  # the rig's config, for eligible
 
     def eligible(self):
-        return [eye()] if self.usable else []
+        routes = self.cfg.llm_routes if self.cfg is not None else [eye()]
+        return [r for r in routes if self.usable and r.name not in self.unusable]
 
     async def describe_image(self, route, prompt, jpeg, max_tokens, first_token_s):
         self.calls.append((route.name, prompt, jpeg))
-        if self.error is not None:
-            raise self.error
+        error = self.errors.get(route.name, self.error)
+        if error is not None:
+            raise error
         return self.reply
 
 
@@ -98,7 +114,7 @@ class Rig:
 
         self.s = Surroundings(
             lambda: self.cfg,
-            lambda: self.router,
+            self._router,
             gate=lambda: self.gate_reason,
             scan_view=self.scan.view,
             views_planned=self.scan.views_planned,
@@ -113,6 +129,18 @@ class Rig:
         self.s.attach(self.bus)
         if not first:
             self.s._want_first = False
+
+    def _router(self) -> FakeRouter:
+        self.router.cfg = self.cfg
+        return self.router
+
+    def apply(self, cfg: RoboEmotConfig) -> None:
+        self.cfg = cfg
+        self.s.apply_config(cfg)
+
+    def routes(self) -> list[str]:
+        """The route of each describe request, in order."""
+        return [name for name, _, _ in self.router.calls]
 
     def frame(self, image=None, yaw_deg: float = 0.0, faces=()):
         img = board() if image is None else image
@@ -471,21 +499,33 @@ def test_room_text_expires_after_max_age():
     assert rig.s.room(later) is None
 
 
-def test_unsupported_stops_pictures_until_the_route_changes():
+def test_a_400_skips_the_only_route_for_the_day_not_forever():
     rig = Rig(router=FakeRouter(error=ImagesUnsupported("http_400")))
     rig.picture()
-    assert rig.s.state()["state"] == "unsupported"
-    assert rig.s.state()["unsupported"] == "http_400"
+    assert "unsupported" in rig.reasons()
+    state = rig.s.state()
+    assert state["state"] == "daily_limit"  # every image route is skipped today
+    assert state["routes"] == [
+        {"route": "eye", "skipped": True, "reason": "http_400", "paused_s": 0.0}
+    ]
     rig.later()
-    assert not rig.due()  # owed, but never sent to a route that refuses images
+    assert not rig.due()  # owed, but not sent again today
     rig.s.apply_config(rig.cfg)  # an unrelated reload keeps the mark
-    assert not rig.due() and rig.s.state()["state"] == "unsupported"
-    rig.cfg = RoboEmotConfig(
-        llm_routes=[eye().model_copy(update={"model": "m2"})],
-        surroundings=rig.cfg.surroundings,
-    )
-    rig.s.apply_config(rig.cfg)
-    assert rig.due()  # another model: a first picture is owed again
+    assert not rig.due()
+    rig.router.error = None
+    rig.day = rig.day + dt.timedelta(days=1)
+    assert rig.due()  # a top-up works the next day
+    rig.sweep()
+    assert rig.s.room(rig.clock.now) == "a living room"
+
+
+def test_a_change_of_the_routes_model_clears_its_skip_at_once():
+    rig = Rig(router=FakeRouter(error=ImagesUnsupported("http_415")))
+    rig.picture()
+    rig.later()
+    assert not rig.due()
+    rig.apply(config(routes=[eye(model="m2")]))
+    assert rig.due()
 
 
 def test_max_failures_pauses_for_pause_s():
@@ -499,10 +539,16 @@ def test_max_failures_pauses_for_pause_s():
     assert rig.due()  # the failed picture is still owed
 
 
-def test_a_route_error_at_send_time_is_counted_as_unavailable():
+def test_a_route_error_at_send_time_is_counted_as_unavailable_and_skips_it_today():
     rig = Rig(router=FakeRouter(error=NoRouteAvailable("eye")))
     rig.picture()
     assert "route_unavailable" in rig.reasons()
+    assert rig.s.state()["routes"][0]["reason"] == "route_unavailable"
+    rig.later()
+    assert not rig.due()
+    rig.router.error = None
+    rig.day = rig.day + dt.timedelta(days=1)
+    assert rig.due()
 
 
 def test_switch_off_mid_request_drops_reply_and_jpeg():
@@ -584,7 +630,7 @@ def test_a_429_stops_pictures_until_the_next_day():
 
 
 def test_a_failed_describe_leaves_the_picture_due_after_the_interval():
-    for error in (TimeoutError(), NoRouteAvailable("eye"), RuntimeError("boom")):
+    for error in (TimeoutError(), RuntimeError("boom")):
         rig = Rig(router=FakeRouter(error=error))
         rig.picture()
         assert len(rig.router.calls) == 1
@@ -688,3 +734,148 @@ def test_an_http_error_is_failed_with_its_status():
     rig = Rig(router=FakeRouter(error=error))
     rig.picture()
     assert rig.s.state()["last"]["detail"] == "http_503"
+
+
+# ---- several image routes: priority and fallback (owner decision 2026-11-25)
+
+
+def test_a_429_sends_the_same_picture_to_the_next_route_and_skips_the_first_today():
+    rig = Rig(cfg=two(), router=FakeRouter(errors={"free": RateLimited("http_429")}))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.router.calls[0][2] == rig.router.calls[1][2]  # the same JPEG, no new sweep
+    assert rig.s.room(rig.clock.now) == "a living room"
+    assert rig.reasons() == ["described"]
+    state = rig.s.state()
+    assert state["state"] == "on" and state["route"] == "paid"
+    assert [(r["route"], r["skipped"], r["reason"]) for r in state["routes"]] == [
+        ("free", True, "http_429"),
+        ("paid", False, None),
+    ]
+    rig.later()
+    rig.s.trigger()
+    rig.sweep()
+    assert rig.routes()[2:] == ["paid"]  # the first stays skipped for the rest of the day
+    rig.later()
+    rig.day = rig.day + dt.timedelta(days=1)
+    rig.router.errors = {}
+    rig.s.trigger()
+    rig.sweep()
+    assert rig.routes()[3:] == ["free"]  # used again the next day
+
+
+def test_a_400_falls_back_and_the_route_is_used_again_the_next_day():
+    rig = Rig(cfg=two(), router=FakeRouter(errors={"free": ImagesUnsupported("http_400")}))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.s.state()["routes"][0]["reason"] == "http_400"
+    rig.later()
+    rig.day = rig.day + dt.timedelta(days=1)
+    rig.router.errors = {}
+    rig.s.trigger()
+    rig.sweep()
+    assert rig.routes()[2:] == ["free"]  # not unsupported forever: a top-up works
+
+
+def test_a_timeout_stays_on_the_route_and_counts_a_failure_there():
+    rig = Rig(cfg=two(max_failures=2), router=FakeRouter(errors={"free": TimeoutError()}))
+    rig.picture()
+    assert rig.routes() == ["free"]  # no fallback on a timeout
+    assert rig.s.state()["last"]["detail"] == "timeout"
+    assert rig.s.room(rig.clock.now) is None
+    rig.later()
+    assert rig.due()
+    rig.sweep()
+    assert rig.routes() == ["free", "free"]
+    routes = rig.s.state()["routes"]
+    assert routes[0]["paused_s"] > 0 and routes[1]["paused_s"] == 0  # paused per route
+    rig.later()
+    assert rig.due() and rig.s.state()["state"] == "on"
+    rig.sweep()
+    assert rig.routes()[2:] == ["paid"]  # the paused route's next picture goes to the next
+
+
+def test_every_route_refusing_leaves_the_picture_due_with_the_last_outcome():
+    errors = {"free": RateLimited("http_429"), "paid": ImagesUnsupported("http_400")}
+    rig = Rig(cfg=two(), router=FakeRouter(errors=errors))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    assert rig.reasons() == ["unsupported"]  # one outcome per picture: the last route's
+    last = rig.s.state()["last"]
+    assert (last["outcome"], last["detail"], last["route"]) == ("unsupported", "http_400", "paid")
+    assert rig.s.state()["state"] == "daily_limit"
+    rig.later()
+    assert not rig.due()  # still owed; the head does not turn for it today
+    rig.router.errors = {}
+    rig.day = rig.day + dt.timedelta(days=1)
+    assert rig.due()
+
+
+def test_the_daily_cap_counts_the_requests_to_every_route():
+    rig = Rig(cfg=two(max_per_day=2), router=FakeRouter(errors={"free": RateLimited("http_429")}))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]
+    rig.later()
+    assert rig.s.trigger() == "daily_limit"
+
+
+def test_the_cap_stops_the_fallback_mid_picture():
+    errors = {"free": RateLimited("http_429")}
+    rig = Rig(cfg=two(max_per_day=1), router=FakeRouter(errors=errors))
+    rig.picture()
+    assert rig.routes() == ["free"]
+    assert rig.s.state()["last"]["outcome"] == "daily_limit"
+
+
+def test_an_unusable_route_at_send_time_sends_nothing_and_falls_back():
+    errors = {"free": NoRouteAvailable("free")}
+    rig = Rig(cfg=two(max_per_day=1), router=FakeRouter(errors=errors))
+    rig.picture()
+    assert rig.routes() == ["free", "paid"]  # free raised before sending: not counted
+    assert rig.s.room(rig.clock.now) == "a living room"
+
+
+def test_a_route_turned_off_mid_request_never_gets_the_picture():
+    rig = Rig(cfg=two())
+    rig.s.trigger()
+    rig.sweep(done=False)
+
+    class TurnOffPaid(FakeRouter):
+        async def describe_image(inner, route, prompt, jpeg, max_tokens, first_token_s):
+            inner.calls.append((route.name, prompt, jpeg))
+            rig.apply(config(routes=[eye("free"), eye("paid", images=False)]))
+            raise RateLimited("http_429")
+
+    rig.router = TurnOffPaid()
+    rig.finish()
+    assert rig.routes() == ["free"]
+    assert rig.s.state()["last"]["outcome"] == "daily_limit"
+
+
+def test_adding_reordering_or_removing_image_routes_keeps_the_room_and_history():
+    rig = Rig(router=FakeRouter("a kitchen"))
+    rig.picture()
+    rig.apply(config(routes=[eye(), eye("paid")]))
+    assert rig.s.room(rig.clock.now) == "a kitchen" and len(rig.s.live()["history"]) == 1
+    assert not rig.s._want_first  # no new first picture owed
+    rig.apply(config(routes=[eye("paid"), eye()]))
+    rig.apply(config(routes=[eye("paid"), eye(images=False)]))
+    assert rig.s.room(rig.clock.now) == "a kitchen" and len(rig.s.live()["history"]) == 1
+    assert rig.s.state()["route"] == "paid"
+    rig.apply(config(routes=[eye("paid", images=False), eye(images=False)]))
+    assert rig.s.room(rig.clock.now) is None and rig.s.live()["history"] == []
+    rig.apply(config(routes=[eye("paid"), eye(images=False)]))
+    assert rig.s._want_first  # off to on: a first picture is owed
+    rig.later()
+    assert rig.due()
+
+
+def test_history_and_last_carry_the_route_and_the_state_holds_no_text_or_key():
+    routes = [eye("free", api_key="sk-free-secret"), eye("paid", api_key="sk-paid-secret")]
+    router = FakeRouter("Marcello's study", errors={"free": RateLimited("http_429")})
+    rig = Rig(cfg=config(routes=routes), router=router)
+    rig.picture()
+    assert rig.s.state()["last"]["route"] == "paid"
+    assert rig.s.live()["history"][0]["route"] == "paid"
+    state = repr(rig.s.state())
+    assert "sk-" not in state and "study" not in state and "Marcello" not in state
