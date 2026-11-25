@@ -133,6 +133,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "interval",
         "route_unavailable",
         "no_vision",
+        "daily_limit",
     ),
     # a reaction of the robot in its own words ended (SPEC 8, Robot expression): its outcome
     "expression": (

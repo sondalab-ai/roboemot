@@ -27,6 +27,7 @@ scene summary read the texts, and only ``jpeg`` the last image sent.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import math
 import threading
@@ -41,7 +42,7 @@ from ..bus import Bus, Message
 from ..circadian.model import CircadianState
 from ..config.schema import RoboEmotConfig, image_route
 from ..diag import REASONS, EventSink, no_events
-from ..llm.router import ImagesUnsupported, NoRouteAvailable, Offline
+from ..llm.router import ImagesUnsupported, NoRouteAvailable, Offline, RateLimited
 from ..vision.scene_change import HeadStill, moved_share, thumbnail
 from ..vision.track_stats import head_pose
 from ..vision.types import Box, Frame
@@ -56,6 +57,7 @@ log = logging.getLogger(__name__)
 EVENT_KIND = "surroundings"  # the decision events' kind (roboemot.diag)
 OUTCOMES = REASONS[EVENT_KIND]  # every outcome code (roboemot.diag)
 OFF = "off"  # a request while no route has images on: neither counted nor an event
+DAILY_LIMIT = "daily_limit"  # today's cap reached, or the provider said 429 today
 RESTING = "resting"
 POLL_S = 0.1  # how often the service thread looks for an attempt past its wait
 JOIN_TIMEOUT_S = 2.0
@@ -99,8 +101,14 @@ class Surroundings:
         frame_spec: FrameSpec | None,
         clock: Callable[[], float] = time.monotonic,
         encode: Callable[[np.ndarray, int], bytes] = encode_jpeg,
+        today: Callable[[], dt.date] = dt.date.today,
     ) -> None:
         self.router, self.gate, self.speed, self.encode = router, gate, speed, encode
+        self.today = today
+        # describe requests sent today, all and room ones, and the day the provider said 429
+        self._day: dt.date | None = None
+        self._sent_all = self._sent_room = 0
+        self._limited_on: dt.date | None = None
         self.vision, self.frame_spec, self.clock = vision, frame_spec, clock
         self.events: EventSink = no_events
         self._cfg = cfg()
@@ -124,6 +132,8 @@ class Surroundings:
         self._head = HeadStill()  # the vision thread's only
         self._rested = False
         self._describing: str | None = None  # the token of the describe request in flight
+        # a first room snapshot is owed at start and at switch-on (owner, 2026-11-25)
+        self._want_first = image_route(self._cfg) is not None
         self._unsubscribe: list[Callable[[], None]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -160,9 +170,11 @@ class Surroundings:
             self._rested = False
             self.request("room")
 
-    def request(self, kind: Kind, token: str = "", hint: str = "") -> str | None:
+    def request(
+        self, kind: Kind, token: str = "", hint: str = "", count: bool = True
+    ) -> str | None:
         """Open a snapshot attempt; None when it opened, else the reason code (also counted
-        and sent as a decision event, except ``off``)."""
+        and sent as a decision event, except ``off`` and with ``count`` false)."""
         now = self.clock()
         reason = self._refusal(kind, now)
         if reason is None:
@@ -176,7 +188,7 @@ class Surroundings:
                 else:
                     self._open(kind, token, hint, now)
                     return None
-        if reason != OFF:
+        if reason != OFF and count:
             self._count(reason, kind)
         return reason
 
@@ -192,6 +204,8 @@ class Surroundings:
                 return "unsupported"
             if now < self._paused_until:
                 return "paused"
+            if self._capped(kind):
+                return DAILY_LIMIT
             last_room = self._last_room
         router = self.router()
         if router.offline:
@@ -204,6 +218,18 @@ class Surroundings:
         if kind == "room" and now - last_room < cfg.surroundings.room.min_interval_s:
             return "interval"
         return None
+
+    def _capped(self, kind: Kind | None) -> bool:
+        """Whether today's cap is reached (lock held): the provider said 429 today, or
+        ``max_per_day`` (and for a room snapshot ``room.max_per_day``) requests went out;
+        ``kind`` None checks the overall cap only. A new day resets the counts."""
+        today = self.today()
+        if today != self._day:
+            self._day, self._sent_all, self._sent_room = today, 0, 0
+        s = self._cfg.surroundings
+        if self._limited_on == today or (s.max_per_day and self._sent_all >= s.max_per_day):
+            return True
+        return kind == "room" and bool(s.room.max_per_day) and self._sent_room >= s.room.max_per_day
 
     def _open(self, kind: Kind, token: str, hint: str, now: float) -> None:
         """Open an attempt (lock held); a shown attempt replaces any open attempt."""
@@ -225,6 +251,21 @@ class Surroundings:
                 self._attempt = None
                 self._lock.notify_all()
 
+    def hold_until(self) -> float | None:
+        """When the head hold of the open attempt ends (its start plus ``surroundings.hold_s``),
+        None without an open attempt or with ``hold_s`` 0 (owner, 2026-11-25)."""
+        hold_s = self._cfg.surroundings.hold_s
+        with self._lock:
+            attempt = self._attempt
+        if attempt is None or hold_s <= 0:
+            return None
+        return attempt.picker.start + hold_s
+
+    def holding(self, now: float) -> bool:
+        """Whether the head should hold still at ``now``."""
+        until = self.hold_until()
+        return until is not None and now < until
+
     # ------------------------------------------------------------- vision thread
 
     def wanted(self) -> bool:
@@ -238,7 +279,7 @@ class Surroundings:
             return (
                 image_route(self._cfg) is not None
                 and self.vision
-                and self._reference is not None
+                and (self._reference is not None or self._want_first)
                 and self._unsupported is None
                 and now >= self._paused_until
                 and now - self._last_room >= s.room.min_interval_s
@@ -316,8 +357,10 @@ class Surroundings:
         return thumbnail(image, gate.thumb_width_px, gate.thumb_height_px)
 
     def _check_scene(self, frame: Frame, faces: list[Box], moving: bool) -> None:
-        """With the head still and the room check due: a view that changed by
-        ``room.changed_share`` since the last room snapshot asks for one."""
+        """With the head still and the room check due: the first room snapshot still owed (at
+        start or switch-on; its refusals while the robot is busy are not counted, it tries again
+        at the next check), or a view that changed by ``room.changed_share`` since the last room
+        snapshot, asks for one."""
         if moving or not self.wanted():
             return
         s = self._cfg.surroundings
@@ -325,7 +368,12 @@ class Surroundings:
         thumb = self._thumb(mask_faces(small, boxes))
         with self._lock:
             self._last_check = self.clock()
-            reference = self._reference
+            reference, first = self._reference, self._want_first
+        if reference is None and first:
+            if self.request("room", count=False) is None:
+                with self._lock:
+                    self._want_first = False
+            return
         if thumb is None:
             return
         if reference is None or reference.shape != thumb.shape:
@@ -379,6 +427,9 @@ class Surroundings:
             if route is None or sent.generation != self._generation:
                 return  # the switch went off, the route changed or the robot slept meanwhile
             self._describing = sent.token
+            self._capped(None)  # rolls the day before counting
+            self._sent_all += 1
+            self._sent_room += sent.kind == "room"
             self._jpeg = sent.jpeg
             self._last = {
                 "kind": sent.kind,
@@ -393,6 +444,8 @@ class Surroundings:
             outcome = "described"
         except ImagesUnsupported as exc:
             outcome, unsupported = "unsupported", exc.code
+        except RateLimited:
+            outcome = DAILY_LIMIT
         except Offline:
             outcome = "offline"
         except NoRouteAvailable:
@@ -416,6 +469,8 @@ class Surroundings:
                     self._room = (text, now)
             elif unsupported is not None:
                 self._unsupported = unsupported
+            elif outcome == DAILY_LIMIT:
+                self._limited_on = self.today()
             elif outcome == "failed":
                 self._failures += 1
                 if self._failures >= self._cfg.surroundings.max_failures:
@@ -491,6 +546,8 @@ class Surroundings:
                 code = "unsupported"
             elif now < self._paused_until:
                 code = "paused"
+            elif self._capped(None):
+                code = DAILY_LIMIT
             else:
                 code = reach or "on"
             last = None
@@ -541,6 +598,7 @@ class Surroundings:
             if trust == self._trust:
                 return
             self._trust = trust
+            self._want_first = trust is not None  # switched on, or another route: a new room
             self._unsupported, self._failures, self._paused_until = None, 0, -math.inf
             self._generation += 1
             self._attempt = self._pending = None

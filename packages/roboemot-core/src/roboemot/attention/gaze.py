@@ -119,6 +119,10 @@ class GazeController:
         self._side = 0.0
         self._recentering = False
 
+    def names(self) -> list[str]:
+        """The dofs the gaze moves (head yaw and pitch, body yaw when the robot has one)."""
+        return self._names(self.gaze)
+
     @staticmethod
     def _names(gaze: GazeMap) -> list[str]:
         return [gaze.head_yaw, gaze.head_pitch] + ([gaze.body_yaw] if gaze.body_yaw else [])

@@ -17,7 +17,10 @@ def test_defaults_match_the_design():
     s = RoboEmotConfig().surroundings
     assert (s.settle_s, s.window_s, s.candidates) == (0.5, 1.0, 5)
     assert (s.max_side_px, s.jpeg_quality) == (768, 80)
-    assert (s.max_failures, s.pause_s, s.describe_max_tokens) == (3, 600, 120)
+    assert (s.max_failures, s.pause_s) == (3, 600)
+    # a model that thinks first spends its reply budget on it (gemini-3.5-flash on the robot,
+    # 2026-11-25: finish=length with 120 tokens, cut or empty text, answers up to 9.6 s)
+    assert (s.describe_max_tokens, s.describe_first_token_s) == (1024, 30.0)
     assert s.min_sharpness == 20.0
     sh = s.shown
     assert (sh.max_speed_deg_s, sh.margin, sh.wait_s, sh.max_chars) == (15, 0.25, 4, 80)

@@ -6626,6 +6626,12 @@ class SurroundingsRoomConfig(Strict):
     max_chars: int = param(
         160, "Cap on the room description", unit="chars", ge=40, le=400, advanced=True
     )
+    max_per_day: int = param(
+        5,
+        "At most this many of the day's snapshots are of the room, so shown things keep their "
+        "share. 0: no cap of its own",
+        ge=0, le=1000,
+    )  # fmt: skip
     max_age_s: float = param(
         3600.0,
         "A room description older than this is dropped from the scene summary",
@@ -6641,6 +6647,12 @@ class SurroundingsConfig(Strict):
         0.5,
         "The head must be still this long before a frame is a snapshot candidate",
         unit="s", ge=0.1, le=5, advanced=True,
+    )  # fmt: skip
+    hold_s: float = param(
+        2.0,
+        "The head and body hold still this long when a snapshot starts, so a sharp frame comes "
+        "soon; reflexes and safety still move them. 0 does not hold",
+        unit="s", ge=0, le=10, advanced=True,
     )  # fmt: skip
     window_s: float = param(
         1.0,
@@ -6671,14 +6683,25 @@ class SurroundingsConfig(Strict):
         unit="s", ge=60, le=86400, advanced=True,
     )  # fmt: skip
     describe_max_tokens: int = param(
-        120, "Reply token cap of one description request", ge=16, le=1024, advanced=True
+        1024,
+        "Reply token cap of one description request; a model that thinks first spends part of "
+        "it on the thinking, so keep room (the text is cut to the description caps anyway)",
+        ge=16,
+        le=8192,
+        advanced=True,
     )
     describe_first_token_s: float = param(
-        20.0,
+        30.0,
         "Longest wait for the first text of a description, in place of the image route's own "
         "first_token_timeout_s: a picture and a model that thinks first take longer than a "
         "spoken turn",
         unit="s", ge=1, le=120,
+    )  # fmt: skip
+    max_per_day: int = param(
+        15,
+        "At most this many snapshots are described per day (the provider's free tier may allow "
+        "about 20 requests a day, and each route Check uses a few). 0: no cap",
+        ge=0, le=1000,
     )  # fmt: skip
     shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
