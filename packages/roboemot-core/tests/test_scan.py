@@ -760,7 +760,7 @@ def test_a_normal_sweep_becomes_a_photo_sweep_while_a_picture_is_due():
     low = PersonaEffects(motion_amplitude_x=0.1, idle_period_x=0.5)
     t, d = first_decision(p, 0.0, picture_due=True, effects=low, **{**PIC, "picture_wait_s": 1e9})
     assert d.reason == "idle" and d.photo
-    assert d.amplitude == 0.5  # the span floor, whatever the energy says
+    assert d.amplitude == 0.5  # the span, whatever the energy says
     assert d.dwell_s == 1.5  # the view dwell floor (the normal dwell is 0.5 s at pace 2)
 
 
@@ -905,3 +905,11 @@ def test_scan_tick_hides_attention_during_a_photo_sweep_and_reports_photo():
         scan_tick(pic_ctx(t, engaged=True), ctrl, loop, Cfg, bus=bus)
         t += 0.05
     assert [m.payload for m in got] == [{"photo": True}]
+
+
+def test_a_photo_sweep_covers_exactly_the_span_whatever_the_energy():
+    """Owner, 2026-11-25: the picture is the front span_deg, never the energy's full circle."""
+    for effects in (PersonaEffects(), persona_effects(PersonaConfig(traits={"energy": 1.0}))):
+        _, d = first_decision(ScanPolicy(CFG, random.Random(1)), 0.0, picture_due=True,
+                              effects=effects, **PIC)  # fmt: skip
+        assert d.photo and d.amplitude == 0.5

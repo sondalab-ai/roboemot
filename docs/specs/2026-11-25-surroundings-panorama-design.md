@@ -12,7 +12,7 @@ the room, never for one shown object.
 
 ## Goals
 
-- A room picture covers at least 180° in front of the robot.
+- A room picture covers exactly 180° in front of the robot (owner, 2026-11-25).
 - One room picture costs one request, as today.
 - Room pictures come from views taken while the head is still.
 
@@ -58,7 +58,7 @@ When the head turns (owner, 2026-11-25: "1 + 2"):
    policy starts a sweep with reason `picture` when the field has been true for
    `sweep_wait_s` and no sweep runs. Its normal rules apply: no sweep while engaged, alone,
    asleep or during music. A sweep that starts while a picture is due is a photo sweep:
-   - its amplitude is at least `surroundings.room.span_deg / 360`, whatever the energy trait says;
+   - its amplitude is exactly `surroundings.room.span_deg / 360`, whatever the energy trait says (owner, 2026-11-25);
    - its dwell is at least `surroundings.view_dwell_s`.
 3. **Views.** `ScanController` exposes the waypoint where the head dwells now: the waypoint's
    azimuth from the moment the pose arrives until the dwell ends. The sweep's home return

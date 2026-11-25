@@ -6613,7 +6613,8 @@ class SurroundingsRoomConfig(Strict):
     )  # fmt: skip
     span_deg: float = param(
         180.0,
-        "Smallest span a photo sweep for a room picture covers, in front of the robot",
+        "Span a photo sweep for a room picture covers, in front of the robot, whatever the "
+        "energy trait says",
         unit="deg", ge=60, le=360,
     )  # fmt: skip
     sweep_wait_s: float = param(

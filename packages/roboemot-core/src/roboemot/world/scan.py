@@ -17,8 +17,9 @@
   An engaged glance is the one exception: it is fed at expression priority for
   ``glance_hold_s`` so it can show over the idle-tier attention command.
 - Photo sweeps (SPEC 5A, 8; design 2026-11-25): while a surroundings picture is due
-  (``ScanContext.picture_due``), any sweep that starts is a photo sweep: at least
-  ``picture_amplitude`` of the circle and ``picture_dwell_s`` at each waypoint. When no sweep
+  (``ScanContext.picture_due``), any sweep that starts is a photo sweep: exactly
+  ``picture_amplitude`` of the circle, whatever the energy says (owner, 2026-11-25), and at
+  least ``picture_dwell_s`` at each waypoint. When no sweep
   starts within ``picture_wait_s`` of the picture becoming due, the policy starts one itself
   (reason ``picture``). A photo sweep is fed at expression priority and only sleep, rest and quiet
   hours cancel it; ``ScanController.view`` names the waypoint the head dwells at.
@@ -234,7 +235,7 @@ class ScanPolicy:
         dwell_s = self.cfg.dwell_s / pace
         self._photo = ctx.picture_due
         if self._photo:
-            amplitude = min(1.0, max(amplitude, ctx.picture_amplitude))
+            amplitude = min(1.0, ctx.picture_amplitude)
             dwell_s = max(dwell_s, ctx.picture_dwell_s)
         return ScanDecision("sweep", reason, amplitude, pace, dwell_s, photo=self._photo)
 
