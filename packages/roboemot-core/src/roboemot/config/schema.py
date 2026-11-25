@@ -6711,6 +6711,12 @@ class SurroundingsConfig(Strict):
         "about 20 requests a day, and each route Check uses a few). 0: no cap",
         ge=0, le=1000,
     )  # fmt: skip
+    history_size: int = param(
+        10,
+        "How many of the last snapshots sent the Live card lists, with their outcome and "
+        "description (RAM only). 0: none",
+        ge=0, le=50, advanced=True,
+    )  # fmt: skip
     shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
 

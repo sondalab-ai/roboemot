@@ -827,3 +827,25 @@ test("surroundings: an unsupported route shows its reason", async (t) => {
   await openLive(page);
   assert.ok(surroundingsCard(page).textContent.includes("http_400"));
 });
+
+test("surroundings: the card shows the last outcome and the history, text as text", async (t) => {
+  const last = { kind: "room", age_s: 4, bytes: 9000, sharpness: 300, outcome: "failed", detail: "timeout" };
+  const history = [
+    { kind: "room", age_s: 4, outcome: "failed", detail: "timeout", text: null },
+    { kind: "shown", age_s: 90, outcome: "described", detail: null, text: "a <i>silver</i> laptop" },
+  ];
+  const s = { ...SURROUNDINGS, last, history, described: { shown: null, room: null } };
+  const page = await livePage(t, {
+    "GET /api/strings": { language: "en", strings: { ...SURR_STRINGS["GET /api/strings"].strings,
+      live_surr_outcome_failed: "failed", live_surr_detail_timeout: "timed out",
+      live_surr_history: "Last {n} snapshots" } },
+    "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: 333 }, surroundings: s },
+    "GET /api/live/surroundings.jpg": () => reply(200, {}, { "Content-Type": "image/jpeg" }),
+    "GET /api/live/frame.jpg": reply(503, { error: "video_no_frame" }),
+  });
+  await openLive(page);
+  const card = surroundingsCard(page);
+  assert.ok(card.textContent.includes("failed (timed out)"), "the outcome with its reason");
+  assert.ok(card.textContent.includes("Last 2 snapshots"));
+  assert.ok(card.textContent.includes("a <i>silver</i> laptop") && card.querySelector("i") === null);
+});
