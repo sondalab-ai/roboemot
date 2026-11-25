@@ -1,5 +1,7 @@
 # Surroundings: camera snapshots described as text (design)
 
+> Superseded in part on 2026-11-25 by `2026-11-25-surroundings-panorama-design.md`: the room picture is a panorama from a photo sweep, and the shown-thing snapshot and the head hold are removed.
+
 Date: 2026-11-24. Status: waiting for owner approval (builder check done). SPEC sections touched: 5, 5A, 8
 (Robot expression, LLM router, Conversation state), 11A, 12, 12A.
 

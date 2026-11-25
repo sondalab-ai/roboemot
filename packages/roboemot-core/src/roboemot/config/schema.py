@@ -6645,6 +6645,33 @@ class SurroundingsRoomConfig(Strict):
         "A room description older than this is dropped from the scene summary",
         unit="s", ge=60, le=86400,
     )  # fmt: skip
+    span_deg: float = param(
+        180.0,
+        "Smallest span a photo sweep for a room picture covers, in front of the robot",
+        unit="deg", ge=60, le=360,
+    )  # fmt: skip
+    sweep_wait_s: float = param(
+        60.0,
+        "Wait for a normal look-around once a room picture is due; then the robot starts its "
+        "own",
+        unit="s", ge=0, le=3600,
+    )  # fmt: skip
+    view_match_deg: float = param(
+        10.0,
+        "The head must point within this of a view of the last room picture for the scene "
+        "check to compare with it",
+        unit="deg", ge=1, le=90, advanced=True,
+    )  # fmt: skip
+    view_height_px: int = param(
+        384,
+        "Height of each view in the joined room picture (never more than max_side_px)",
+        unit="px", ge=128, le=1600, advanced=True,
+    )  # fmt: skip
+    separator_px: int = param(
+        4,
+        "Width of the line between two views in the joined room picture",
+        unit="px", ge=1, le=32, advanced=True,
+    )  # fmt: skip
 
 
 class SurroundingsConfig(Strict):
@@ -6717,8 +6744,23 @@ class SurroundingsConfig(Strict):
         "description (RAM only). 0: none",
         ge=0, le=50, advanced=True,
     )  # fmt: skip
+    view_dwell_s: float = param(
+        1.5,
+        "Smallest dwell at each view of a photo sweep for a room picture; at least settle_s "
+        "plus window_s",
+        unit="s", ge=0.3, le=10,
+    )  # fmt: skip
     shown: SurroundingsShownConfig = param({}, "Snapshots of a thing a person shows")
     room: SurroundingsRoomConfig = param({}, "Snapshots of the room in view")
+
+    @model_validator(mode="after")
+    def _view_dwell_fits_the_picker(self) -> SurroundingsConfig:
+        if self.view_dwell_s < self.settle_s + self.window_s:
+            raise ValueError(
+                "surroundings.view_dwell_s must be at least settle_s + window_s: the sharpest "
+                "still frame of a view is chosen within its dwell"
+            )
+        return self
 
 
 class LLMRoute(Strict):
