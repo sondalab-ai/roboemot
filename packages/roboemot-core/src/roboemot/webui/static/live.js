@@ -147,10 +147,11 @@ function liveMotionCard(d) {
 
 // Surroundings card (SPEC 8, Surroundings snapshots): the room picture last sent (views joined
 // left to right), the image route that described it (or last tried) and what it said; the image
-// routes in priority order with the ones skipped today and their reason code. Codes, counts, view count, span, sizes and
-// scores always; the description and the last picture only with the video preview on (the server
-// sends `described` then). The picture is fetched once per new picture (its view count, size and
-// score), kept as a blob URL; text is set as text, never parsed as markup.
+// routes in priority order with the ones skipped until tomorrow (a 429, 400 or 415) and their
+// reason code. Codes, counts, view count, span, sizes and scores always; the description and the
+// last picture only with the video preview on (the server sends `described` then). The picture
+// is fetched once per new picture (its view count, size and score), kept as a blob URL; text is
+// set as text, never parsed as markup.
 const liveSnap = { key: null, url: null };
 const LIVE_SURR_TONE = { on: "success", paused: "warning", no_vision: "warning", offline: "danger", route_unavailable: "warning", daily_limit: "warning" };
 

@@ -277,15 +277,15 @@ EN: dict[str, str] = {
     ),
     "route_images_off_message": "{name} stops receiving camera snapshots.",
     "route_images_state_on": "Snapshots are on",
-    "route_images_state_skipped": "Skipped until tomorrow: it refused today",
+    "route_images_state_skipped": "Skipped until tomorrow: it answered 429, 400 or 415 today",
     "route_images_state_paused": "Snapshots paused after repeated failures",
     "route_images_state_no_vision": "No camera or image encoder on this robot",
     "route_images_state_offline": "Offline: no snapshot can leave now",
     "route_images_state_daily_limit": "Today's snapshot limit is reached; they resume tomorrow",
     "route_images_state_route_unavailable": "Route unavailable (key, budget or reachability)",
     "route_images_rank": (
-        "Priority {n} of {total}: room pictures go to the first route in this list that has not "
-        "refused today"
+        "Priority {n} of {total}: room pictures go to the first route in this list that is "
+        "usable and has not refused today"
     ),
     "live_surroundings": "Surroundings",
     "live_surr_state_on": "Snapshots on",
@@ -294,7 +294,7 @@ EN: dict[str, str] = {
     "live_surr_state_no_vision": "No camera",
     "live_surr_state_offline": "Offline",
     "live_surr_state_route_unavailable": "Route unavailable",
-    "live_surr_state_daily_limit": "Today's limit reached",
+    "live_surr_state_daily_limit": "Today's cap reached or every image route refused today",
     "live_surr_routes": "Image routes",
     "live_surr_route_ready": "ready",
     "live_surr_route_skipped": "skipped until tomorrow ({code})",
@@ -311,8 +311,10 @@ EN: dict[str, str] = {
     "live_surr_outcome_describing": "waiting for the description",
     "live_surr_outcome_described": "described",
     "live_surr_outcome_failed": "failed",
-    "live_surr_outcome_unsupported": "the model refused the image",
-    "live_surr_outcome_daily_limit": "today's limit reached",
+    "live_surr_outcome_unsupported": "the route refused the picture (HTTP 400 or 415)",
+    "live_surr_outcome_daily_limit": (
+        "today's limit: the daily cap is reached or the route answered 429"
+    ),
     "live_surr_outcome_offline": "offline",
     "live_surr_outcome_route_unavailable": "route unavailable",
     "live_surr_detail_timeout": "timed out",
@@ -1764,7 +1766,7 @@ IT: dict[str, str] = {
     ),
     "route_images_off_message": "{name} non riceve più istantanee della camera.",
     "route_images_state_on": "Istantanee attive",
-    "route_images_state_skipped": "Saltata fino a domani: oggi ha rifiutato",
+    "route_images_state_skipped": "Saltata fino a domani: oggi ha risposto 429, 400 o 415",
     "route_images_state_paused": "Istantanee in pausa dopo errori ripetuti",
     "route_images_state_no_vision": "Su questo robot manca la camera o il codificatore",
     "route_images_state_offline": "Offline: ora non esce nessuna istantanea",
@@ -1772,7 +1774,7 @@ IT: dict[str, str] = {
     "route_images_state_route_unavailable": "Route non disponibile (chiave, budget o rete)",
     "route_images_rank": (
         "Priorità {n} di {total}: le immagini della stanza vanno alla prima route di questa "
-        "lista che oggi non ha rifiutato"
+        "lista disponibile e che oggi non ha rifiutato"
     ),
     "live_surroundings": "Ambiente",
     "live_surr_state_on": "Istantanee attive",
@@ -1781,7 +1783,7 @@ IT: dict[str, str] = {
     "live_surr_state_no_vision": "Nessuna camera",
     "live_surr_state_offline": "Offline",
     "live_surr_state_route_unavailable": "Route non disponibile",
-    "live_surr_state_daily_limit": "Limite di oggi raggiunto",
+    "live_surr_state_daily_limit": "Tetto di oggi raggiunto o ogni route immagini ha rifiutato",
     "live_surr_routes": "Route immagini",
     "live_surr_route_ready": "pronta",
     "live_surr_route_skipped": "saltata fino a domani ({code})",
@@ -1798,8 +1800,10 @@ IT: dict[str, str] = {
     "live_surr_outcome_describing": "in attesa della descrizione",
     "live_surr_outcome_described": "descritta",
     "live_surr_outcome_failed": "non riuscita",
-    "live_surr_outcome_unsupported": "il modello ha rifiutato l'immagine",
-    "live_surr_outcome_daily_limit": "limite di oggi raggiunto",
+    "live_surr_outcome_unsupported": "la route ha rifiutato l'immagine (HTTP 400 o 415)",
+    "live_surr_outcome_daily_limit": (
+        "limite di oggi: tetto giornaliero raggiunto o la route ha risposto 429"
+    ),
     "live_surr_outcome_offline": "offline",
     "live_surr_outcome_route_unavailable": "route non disponibile",
     "live_surr_detail_timeout": "tempo scaduto",
