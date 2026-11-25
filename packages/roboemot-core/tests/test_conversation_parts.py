@@ -209,14 +209,6 @@ def scene(entries, **kw):
     )
 
 
-def test_a_described_entry_reads_label_colon_text():
-    out = scene(
-        [entry("o1", "object", category="laptop"), entry("o2", "object", category="cup")],
-        descriptions={"o1": "silver, with stickers"},
-    )
-    assert out == "a laptop: silver, with stickers, a cup"
-
-
 def test_room_line_is_last_and_has_its_own_cap():
     out = scene(
         [entry("o1", "object", category="cup")],
@@ -233,17 +225,14 @@ def test_no_room_line_without_room_text():
     assert scene([entry("o1", "object", category="cup")], room="  ", room_max_chars=40) == "a cup"
 
 
-def test_scene_source_adds_the_target_description_and_the_room():
+def test_scene_source_adds_the_room_and_no_description_of_the_target():
     from types import SimpleNamespace
 
     from roboemot.conversation.sources import scene_source
 
     world = SimpleNamespace(entries=[entry("o1", "object", category="laptop")])
     selector = SimpleNamespace(target=SimpleNamespace(entry_id="o1"))
-    surroundings = SimpleNamespace(
-        description=lambda token: "silver" if token == "o1" else None,
-        room=lambda now: "a study",
-    )
+    surroundings = SimpleNamespace(room=lambda now: "a study")
     scene = scene_source(
         selector,
         world,
@@ -254,6 +243,6 @@ def test_scene_source_adds_the_target_description_and_the_room():
         surroundings=lambda: surroundings,
         room_cap=lambda: 40,
     )
-    assert scene(200) == "a laptop: silver; Room: a study"
+    assert scene(200) == "a laptop; Room: a study"
     plain = scene_source(selector, world, None, lambda: 5.0, lambda: 60, clock=lambda: NOW)
     assert plain(200) == "a laptop"

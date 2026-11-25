@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -276,33 +276,6 @@ def room_quiet(host: Any, now: float) -> bool:
         return False
     listener = host.voice_listener
     return listener is None or not listener.voice_active()
-
-
-HOLD_SOURCE = "snapshot_hold"  # the motion source of the surroundings head hold
-
-
-class SnapshotHold:
-    """The head hold of a surroundings snapshot (SPEC 8, Surroundings snapshots; owner
-    2026-11-25): while ``until`` (the hold's end) is set and not past, the gaze ``dofs`` stay at
-    the pose they had when the hold began, fed at ``EXPRESSION`` so gaze, breathing and sweeps
-    (``IDLE``) yield and reflexes and safety still win; the command expires at ``until`` on its
-    own. When the hold ends the source is cleared once and the gaze takes the head back."""
-
-    def __init__(self) -> None:
-        self._pose: dict[str, float] | None = None
-
-    def tick(self, now: float, until: float | None, loop: Any, dofs: Iterable[str]) -> bool:
-        """One step; True while the hold runs."""
-        if until is None or now >= until:
-            if self._pose is not None:
-                loop.clear(HOLD_SOURCE)
-                self._pose = None
-            return False
-        if self._pose is None:
-            pose = loop.pose()
-            self._pose = {n: pose[n] for n in dofs if n in pose}
-        loop.feed(Command(HOLD_SOURCE, Priority.EXPRESSION, dict(self._pose), now, expires=until))
-        return True
 
 
 def robot_resting(host: Any, asleep: Callable[[], bool]) -> bool:

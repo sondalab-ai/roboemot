@@ -15,7 +15,6 @@ from roboemot.vision import CIRCADIAN, CONVERSATION, LOAD
 from .assembly import Pipeline
 from .host import RuntimeHost
 from .ticks import (
-    SnapshotHold,
     attention_tick,
     circadian_vision_scale,
     company,
@@ -88,7 +87,6 @@ def _tick_until_stopped(
     stop_event: threading.Event,
 ) -> None:
     fx_for, fx = None, None
-    hold = SnapshotHold()  # the surroundings head hold (SPEC 8)
     pacer = TickPacer(time.monotonic())
     while not stop_event.is_set():
         now = time.monotonic()
@@ -129,8 +127,6 @@ def _tick_until_stopped(
             ),
             live.dance.calm_switch_hold_s if calm else 0.0,
         )
-        snap = host.surroundings
-        hold.tick(now, snap.hold_until() if snap is not None else None, p.loop, p.gaze.names())
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
                 now, p.conv_speaker()

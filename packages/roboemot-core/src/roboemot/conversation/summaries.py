@@ -79,14 +79,12 @@ def scene_summary(
     name_of: Callable[[Entry], str | None],
     max_chars: int,
     value_max_chars: int,
-    descriptions: Mapping[str, str] | None = None,
     room: str | None = None,
     room_max_chars: int = 0,
 ) -> str | None:
     """Entities in view by attention priority until ``max_chars``: the attention target first,
     then people, animals and objects, the more confident first. An entity that would cross the
-    cap is left out whole (the summary is never cut mid-name). An entity with a surroundings
-    description (``descriptions``, by entry id) reads ``label: text``. The room description
+    cap is left out whole (the summary is never cut mid-name). The room description
     ends the summary as ``Room: text``, cut to ``room_max_chars`` and outside ``max_chars``
     (SPEC 8, Surroundings snapshots). None when there is nothing to say."""
     fresh = [e for e in entries if now - e.last_seen <= stale_s]
@@ -94,12 +92,9 @@ def scene_summary(
     def rank(e: Entry) -> tuple[bool, int, float]:
         return (e.entry_id != target_id, KIND_ORDER.index(e.kind), -e.confidence)
 
-    described = descriptions or {}
     out = ""
     for entry in sorted(fresh, key=rank):
         piece = label(entry, name_of, value_max_chars)
-        if text := described.get(entry.entry_id):
-            piece = f"{piece}: {text}"
         joined = piece if not out else out + SEPARATOR + piece
         if len(joined) > max_chars:
             break
