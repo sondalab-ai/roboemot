@@ -122,7 +122,7 @@ class _Mark:
     """One image route's marks, bound to its base URL, model and key (``trust``): the day it
     was skipped and why (a code), the failures in a row and the end of its pause."""
 
-    trust: tuple[str, str, str]
+    trust: tuple[str, str, str] = field(repr=False)  # holds the key reference: never printed
     skipped_on: dt.date | None = None
     reason: str | None = None
     failures: int = 0
