@@ -307,3 +307,16 @@ def test_moving_a_local_lan_route_to_the_cloud_works_in_the_page_order(tmp_path)
     assert editor.change("llm_routes.box.base_url", "https://api.cloud.example/v1")["changed"]
     route = stack.effective().llm_routes[0]
     assert (route.locality, route.base_url) == ("cloud", "https://api.cloud.example/v1")
+
+
+def test_removing_a_route_through_the_api_prunes_the_image_route_order(web, stack):
+    """The Routes listing carries the stored order for "Move up" / "Move down", and a route
+    removed from the page leaves it (SPEC 8, Surroundings snapshots)."""
+    assert post(web, "/api/routes/add", {**LAN, "name": "spare"}).status == 200
+    change = [{"path": "surroundings.image_route_order", "value": ["spare", "lan"]}]
+    assert post(web, "/api/settings/batch", {"changes": change}).status == 200
+    assert web.request("GET", "/api/routes").json["image_route_order"] == ["spare", "lan"]
+    assert post(web, "/api/routes/remove", {"name": "spare"}).status == 200
+    assert web.request("GET", "/api/routes").json["image_route_order"] == ["lan"]
+    row = [{"path": "surroundings.image_route_order", "value": ["lan"]}]
+    assert post(web, "/api/settings/batch", {"changes": row}).status == 200

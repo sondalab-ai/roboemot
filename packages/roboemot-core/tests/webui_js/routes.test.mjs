@@ -884,3 +884,41 @@ test("image order: a cancelled dialog sends nothing", async () => {
   await settle();
   assert.equal(posts(page, "/api/settings/batch").length, 0);
 });
+
+test("image order: a route with images off keeps its place in the stored order after a move", async () => {
+  const page = await routesPage({
+    "GET /api/routes": {
+      routes: [
+        chatRow("Claude", { images: true, images_state: "on", images_rank: 2, images_count: 2 }),
+        chatRow("Gemini", { images_count: 2 }),
+        chatRow("gemini_pictures", { images: true, images_state: "on", images_rank: 1, images_count: 2 }),
+      ],
+      image_route_order: ["gemini_pictures", "Gemini", "Claude"],
+    },
+    "POST /api/settings/batch": { changed: true, results: [] },
+  });
+  page.document.querySelector("#route-Claude-images-up").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch")[0].body.changes,
+    [{ path: "surroundings.image_route_order", value: ["Claude", "Gemini", "gemini_pictures"] }]);
+});
+
+test("image order: a stored name of no chat route is dropped and unlisted image routes are appended", async () => {
+  const page = await routesPage({
+    "GET /api/routes": {
+      routes: [
+        chatRow("a", { images: true, images_state: "on", images_rank: 1, images_count: 3 }),
+        chatRow("b", { images: true, images_state: "on", images_rank: 2, images_count: 3 }),
+        chatRow("c", { images: true, images_state: "on", images_rank: 3, images_count: 3 }),
+      ],
+      image_route_order: ["gone", "a"],
+    },
+    "POST /api/settings/batch": { changed: true, results: [] },
+  });
+  page.document.querySelector("#route-c-images-up").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch")[0].body.changes,
+    [{ path: "surroundings.image_route_order", value: ["a", "c", "b"] }]);
+});
