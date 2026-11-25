@@ -53,4 +53,4 @@ async def test_the_describe_request_takes_the_surroundings_first_token_time():
     cfg = RoboEmotConfig(surroundings={"describe_first_token_s": 25.0})
     await describe(r, ROUTE, "room", b"jpg", "", cfg)
     assert r.first_token_s == 25.0
-    assert RoboEmotConfig().surroundings.describe_first_token_s == 20.0
+    assert RoboEmotConfig().surroundings.describe_first_token_s == 30.0

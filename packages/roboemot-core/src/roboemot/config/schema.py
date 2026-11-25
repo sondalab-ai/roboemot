@@ -6677,10 +6677,15 @@ class SurroundingsConfig(Strict):
         unit="s", ge=60, le=86400, advanced=True,
     )  # fmt: skip
     describe_max_tokens: int = param(
-        120, "Reply token cap of one description request", ge=16, le=1024, advanced=True
+        1024,
+        "Reply token cap of one description request; a model that thinks first spends part of "
+        "it on the thinking, so keep room (the text is cut to the description caps anyway)",
+        ge=16,
+        le=8192,
+        advanced=True,
     )
     describe_first_token_s: float = param(
-        20.0,
+        30.0,
         "Longest wait for the first text of a description, in place of the image route's own "
         "first_token_timeout_s: a picture and a model that thinks first take longer than a "
         "spoken turn",

@@ -237,7 +237,7 @@ from a preset**. The preset fills in every field below except the voice:
   the robot. Press **Check** first: it confirms that the key and the model work.
 - Google's docs name several Flash models; if the check fails on the model, edit it on the card.
 - The **Check** uses the route's own 3 s first-answer limit, so it may report a slow first token.
-  Snapshots wait longer (`surroundings.describe_first_token_s`, 20 s), so a slow first token
+  Snapshots wait longer (`surroundings.describe_first_token_s`, 30 s), so a slow first token
   there is not a failure of the pictures feature. An HTTP 503 means Google was busy: check again later.
 
 The same route in `app.yaml`:
