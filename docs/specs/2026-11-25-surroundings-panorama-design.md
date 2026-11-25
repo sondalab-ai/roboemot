@@ -57,7 +57,14 @@ When the head turns (owner, 2026-11-25: "1 + 2"):
 2. **Sweep.** `ScanContext` gets a field `picture_due: bool` and `ScanPolicy` stays pure. The
    policy starts a sweep with reason `picture` when the field has been true for
    `sweep_wait_s` and no sweep runs. Its normal rules apply: no sweep while engaged, alone,
-   asleep or during music. A sweep that starts while a picture is due is a photo sweep:
+   asleep or during music. The first picture that becomes due after start or switch-on (a
+   wake at boot can make it due) is the exception (owner, 2026-11-25):
+   `ScanContext.picture_first` starts its photo sweep at once, with no `sweep_wait_s` wait,
+   even while engaged or alone; asleep, music and a running sweep still hold it. One attempt
+   only, kept by `ScanPolicy`: once that photo sweep started, a picture still due
+   (`views_missing`, a failed description, no plan, a planner error) follows the normal rules;
+   a cancel by sleep gives the attempt back for the wake. A switch-off and on owes a new first
+   picture with a fresh attempt. A sweep that starts while a picture is due is a photo sweep:
    - its amplitude is exactly `surroundings.room.span_deg / 360`, whatever the energy trait says (owner, 2026-11-25);
    - its dwell is at least `surroundings.view_dwell_s`.
 3. **Views.** `ScanController` exposes the waypoint where the head dwells now: the waypoint's
