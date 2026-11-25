@@ -376,7 +376,7 @@ def test_route_row_reports_images_and_state(tmp_path):
     assert (off["images"], off["images_state"], off["images_reason"]) == (False, "off", None)
 
 
-def test_image_routes_are_ranked_in_list_order(tmp_path):
+def test_image_routes_are_ranked_in_list_order_without_an_order(tmp_path):
     first = ROUTE | {"name": "free", "images": True}
     plain = ROUTE | {"name": "text"}
     second = ROUTE | {"name": "paid", "images": True}
@@ -386,6 +386,20 @@ def test_image_routes_are_ranked_in_list_order(tmp_path):
         ("free", 1, 2),
         ("text", None, 2),
         ("paid", 2, 2),
+    ]
+
+
+def test_image_routes_are_ranked_by_the_image_route_order(tmp_path):
+    paid = ROUTE | {"name": "Claude", "images": True}
+    free = ROUTE | {"name": "gemini_pictures", "images": True}
+    cfg = RoboEmotConfig(
+        llm_routes=[paid, free],
+        surroundings={"image_route_order": ["gemini_pictures", "Claude"]},
+    )
+    rows = RouteChecker(lambda: cfg, tmp_path / "c.json").list_routes()
+    assert [(r["name"], r["images_rank"], r["images_count"]) for r in rows] == [
+        ("Claude", 2, 2),
+        ("gemini_pictures", 1, 2),
     ]
 
 

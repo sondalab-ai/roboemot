@@ -284,9 +284,18 @@ EN: dict[str, str] = {
     "route_images_state_daily_limit": "Today's snapshot limit is reached; they resume tomorrow",
     "route_images_state_route_unavailable": "Route unavailable (key, budget or reachability)",
     "route_images_rank": (
-        "Priority {n} of {total}: room pictures go to the first route in this list that is "
+        "Priority {n} of {total}: room pictures go to the first route by priority that is "
         "usable and has not refused today"
     ),
+    "route_images_up": "Move up",
+    "route_images_down": "Move down",
+    "route_images_order_title": "Image route priority: {name}",
+    "route_images_order_message": (
+        "{name} moves to priority {n} of {total}. Only the order changes: the routes, their "
+        "endpoints and models stay as they are."
+    ),
+    "route_images_order_confirm": "Move",
+    "route_images_moved": "{name} is now priority {n} of {total}.",
     "live_surroundings": "Surroundings",
     "live_surr_state_on": "Snapshots on",
     "live_surr_state_off": "Snapshots off",
@@ -1773,9 +1782,18 @@ IT: dict[str, str] = {
     "route_images_state_daily_limit": "Limite di istantanee di oggi raggiunto; riprendono domani",
     "route_images_state_route_unavailable": "Route non disponibile (chiave, budget o rete)",
     "route_images_rank": (
-        "Priorità {n} di {total}: le immagini della stanza vanno alla prima route di questa "
-        "lista disponibile e che oggi non ha rifiutato"
+        "Priorità {n} di {total}: le immagini della stanza vanno alla prima route per "
+        "priorità disponibile e che oggi non ha rifiutato"
     ),
+    "route_images_up": "Sposta su",
+    "route_images_down": "Sposta giù",
+    "route_images_order_title": "Priorità delle route per le immagini: {name}",
+    "route_images_order_message": (
+        "{name} passa a priorità {n} di {total}. Cambia solo l'ordine: le route, i loro "
+        "indirizzi e modelli restano come sono."
+    ),
+    "route_images_order_confirm": "Sposta",
+    "route_images_moved": "{name} ora ha priorità {n} di {total}.",
     "live_surroundings": "Ambiente",
     "live_surr_state_on": "Istantanee attive",
     "live_surr_state_off": "Istantanee spente",

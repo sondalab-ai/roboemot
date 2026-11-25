@@ -1,7 +1,8 @@
 """The surroundings service (SPEC 8, Surroundings snapshots; designs 2026-11-24, 2026-11-25).
 
-The feature is on while at least one route has ``images`` on; their order in ``llm_routes`` is
-their priority (``image_routes``, owner decision 2026-11-25). A room picture becomes due
+The feature is on while at least one route has ``images`` on; ``image_routes`` gives their
+priority (``surroundings.image_route_order``, then ``llm_routes`` order; owner decisions
+2026-11-25). A room picture becomes due
 (``trigger``) at a wake from sleep, at the end of a rest and after a scene change; one is owed
 at start and when the feature goes from off to on, and retried, uncounted, about every
 ``room.check_interval_s`` until it passes. Every refusal check runs first: off, ``no_vision``,

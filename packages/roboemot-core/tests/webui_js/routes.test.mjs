@@ -819,3 +819,68 @@ test("images: with several image routes each shows its priority", async () => {
   assert.equal(rank("text"), null);
   assert.equal(rank("paid").textContent, "Priority 2 of 2");
 });
+
+// ---- the image routes' priority: "Move up" / "Move down" (owner decision 2026-11-25)
+
+// The robot's case: the paid route sits before the free one in the list, with the free one first
+// by priority; a plain chat route between them has no controls.
+const rankedRows = () => [
+  chatRow("Claude", { images: true, images_state: "on", images_rank: 2, images_count: 3 }),
+  chatRow("text", { images_count: 3 }),
+  chatRow("gemini_pictures", { images: true, images_state: "on", images_rank: 1, images_count: 3 }),
+  chatRow("spare", { images: true, images_state: "on", images_rank: 3, images_count: 3 }),
+];
+
+async function movePage() {
+  return routesPage({
+    "GET /api/routes": { routes: rankedRows() },
+    "POST /api/settings/batch": { changed: true, results: [] },
+  });
+}
+
+test("image order: up is off on the first by priority, down on the last; none without images", async () => {
+  const page = await movePage();
+  const btn = (name, dir) => page.document.querySelector("#route-" + name + "-images-" + dir);
+  assert.equal(btn("gemini_pictures", "up").disabled, true);
+  assert.equal(btn("gemini_pictures", "down").disabled, false);
+  assert.equal(btn("Claude", "up").disabled, false);
+  assert.equal(btn("spare", "down").disabled, true);
+  assert.equal(btn("text", "up"), null);
+});
+
+test("image order: no controls with one image route", async () => {
+  const row = chatRow("a", { images: true, images_state: "on", images_rank: 1, images_count: 1 });
+  const page = await routesPage({ "GET /api/routes": { routes: [row] } });
+  assert.equal(page.document.querySelector("#route-a-images-up"), null);
+});
+
+test("image order: move up sends the whole order by priority with the route one place higher", async () => {
+  const page = await movePage();
+  page.document.querySelector("#route-spare-images-up").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch")[0].body, {
+    changes: [{ path: "surroundings.image_route_order", value: ["gemini_pictures", "spare", "Claude"] }],
+    pin: PIN,
+  });
+  noTrace(page, PIN);
+});
+
+test("image order: move down sends the route one place lower", async () => {
+  const page = await movePage();
+  page.document.querySelector("#route-gemini_pictures-images-down").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/batch")[0].body.changes,
+    [{ path: "surroundings.image_route_order", value: ["Claude", "gemini_pictures", "spare"] }]);
+});
+
+test("image order: a cancelled dialog sends nothing", async () => {
+  const page = await movePage();
+  page.document.querySelector("#route-Claude-images-up").click();
+  await settle();
+  page.document.querySelector("dialog").close();
+  await settle();
+  await settle();
+  assert.equal(posts(page, "/api/settings/batch").length, 0);
+});

@@ -1198,6 +1198,36 @@ def test_adding_reordering_or_removing_image_routes_keeps_the_room_and_history()
     assert rig.due()
 
 
+# ---- the image route order (owner decision 2026-11-25)
+
+
+def robot_routes(**surroundings) -> RoboEmotConfig:
+    """The robot's case: the paid route before the free one in llm_routes."""
+    return config(routes=[eye("Claude"), eye("gemini_pictures")], **surroundings)
+
+
+def test_the_picture_goes_first_to_the_route_the_order_puts_first():
+    rig = Rig(cfg=robot_routes(image_route_order=["gemini_pictures", "Claude"]))
+    rig.picture()
+    assert rig.routes() == ["gemini_pictures"]
+    assert [r["route"] for r in rig.s.state()["routes"]] == ["gemini_pictures", "Claude"]
+
+
+def test_a_reorder_keeps_the_room_the_history_and_the_marks():
+    router = FakeRouter("a kitchen", errors={"Claude": RateLimited("http_429")})
+    rig = Rig(cfg=robot_routes(), router=router)
+    rig.picture()
+    assert rig.routes() == ["Claude", "gemini_pictures"]
+    rig.apply(robot_routes(image_route_order=["gemini_pictures", "Claude"]))
+    assert rig.s.room(rig.clock.now) == "a kitchen" and len(rig.s.live()["history"]) == 1
+    assert not rig.s._want_first  # no new first picture owed
+    routes = rig.s.state()["routes"]
+    assert [(r["route"], r["skipped"]) for r in routes] == [
+        ("gemini_pictures", False),
+        ("Claude", True),  # its skip for today survives the move
+    ]
+
+
 def test_history_and_last_carry_the_route_and_the_state_holds_no_text_or_key():
     routes = [eye("free", api_key="sk-free-secret"), eye("paid", api_key="sk-paid-secret")]
     router = FakeRouter("Marcello's study", errors={"free": RateLimited("http_429")})

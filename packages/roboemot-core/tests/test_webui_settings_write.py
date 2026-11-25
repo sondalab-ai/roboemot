@@ -1504,3 +1504,33 @@ def test_the_web_ui_cannot_turn_the_reflexes_on():
     stack = ConfigStack(app={"reflexes": {"enabled": False}})
     with pytest.raises(GuardrailError):
         SettingsEditor(stack).change("reflexes.enabled", True)
+
+
+# ---- the image route order (SPEC 8, Surroundings snapshots; owner decision 2026-11-25)
+
+IMAGE_ROUTES = [
+    ROUTE | {"name": "Claude", "images": True},
+    ROUTE | {"name": "gemini_pictures", "images": True},
+]
+
+
+def test_the_image_route_order_survives_a_restart(tmp_path):
+    from roboemot.config.schema import image_routes
+
+    stack = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    order = [{"path": "surroundings.image_route_order", "value": ["gemini_pictures", "Claude"]}]
+    assert editor.change_many(order)["changed"]
+    names = [r.name for r in image_routes(stack.effective())]
+    assert names == ["gemini_pictures", "Claude"]
+    fresh = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert [r.name for r in image_routes(fresh.effective())] == ["gemini_pictures", "Claude"]
+
+
+def test_the_image_route_order_refuses_a_name_of_no_chat_route(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=IMAGE_ROUTES)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    with pytest.raises(ValidationError):
+        editor.change("surroundings.image_route_order", ["ghost", "Claude"])
+    assert stack.effective().surroundings.image_route_order == []

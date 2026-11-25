@@ -449,8 +449,9 @@ def _images_fields(
     ``off`` while the switch is off; ``skipped`` (with its reason code) while this route is
     skipped today, ``paused`` while it is paused, else the service's state (``on``,
     ``paused``, ``no_vision``, ``daily_limit``, ...). ``images_rank`` is its place among the
-    routes with images on (1 is tried first; the ``llm_routes`` order, owner decision
-    2026-11-25) and ``images_count`` their number. Codes only."""
+    routes with images on (1 is tried first; ``image_routes``, which follows
+    ``surroundings.image_route_order``, owner decisions 2026-11-25) and ``images_count`` their
+    number. Codes only."""
     if not route.images:
         return {
             "images": False,

@@ -145,6 +145,11 @@ REFERENCES: dict[str, tuple[str | None, Callable[[RoboEmotConfig], list[Any]]]] 
     "voice.openai_speech.route": ("enum", _routes("chat")),
     "voice.realtime_route.route": ("enum", _routes("realtime")),
     "attention.priority_order": ("enum_list", lambda cfg: list(ATTENTION_CATEGORIES)),
+    # every chat route, not only those with images on: a save keeps working beside a switch
+    "surroundings.image_route_order": (
+        "enum_list",
+        lambda cfg: [r.name for r in cfg.llm_routes if r.kind == "chat"],
+    ),
     "expression_map": (None, _labels),
     "speech_motion.mood_gain": (None, _labels),
 }
