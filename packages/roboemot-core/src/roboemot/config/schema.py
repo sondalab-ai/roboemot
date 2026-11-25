@@ -2217,8 +2217,10 @@ class AttentionConfig(Strict):
         advanced=True,
     )
     speaker_match_deg: float = param(
-        20.0,
-        "Angular gate to match a speaker bearing to a world entry",
+        60.0,
+        "Angular gate to match a speaker bearing to a person in view: the microphone's sound "
+        "direction is coarse, and a wider gate keeps the gaze on the person who speaks instead "
+        "of turning to the bare bearing (owner, 2026-11-25)",
         unit="deg",
         ge=0.5,
         le=90,
@@ -6335,8 +6337,7 @@ class ConversationConfig(Strict):
     )
     look_away_deg: float = param(
         40.0,
-        "look_at away: the bearing offset from the current target. It should exceed "
-        "attention.speaker_match_deg, or the gaze snaps back to the person",
+        "look_at away: the bearing offset from the current target",
         unit="deg", ge=5, le=90, advanced=True,
     )  # fmt: skip
     confirm_timeout_s: float = param(

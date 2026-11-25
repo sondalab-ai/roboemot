@@ -111,13 +111,18 @@ class SkillBridge:
         return True
 
     def _look_away(self, now: float) -> bool:
-        """A bearing to one side of the current target, beyond the speaker-match gate."""
+        """A bearing to one side of the current target that never snaps back to a person."""
         import math
 
         current = self._selector.target
         base = current.azimuth_rad if current is not None else 0.0
         off = math.radians(self._cfg().conversation.look_away_deg)
         self._selector.hint_speaker(
-            SpeakerHint(now, azimuth_rad=base + (off if base >= 0 else -off), elevation_rad=0.0)
+            SpeakerHint(
+                now,
+                azimuth_rad=base + (off if base >= 0 else -off),
+                elevation_rad=0.0,
+                snap=False,  # away means away: never matched back to the person
+            )
         )
         return True

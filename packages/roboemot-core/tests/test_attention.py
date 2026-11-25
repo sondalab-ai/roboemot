@@ -146,6 +146,26 @@ def test_speaker_bearing_matches_an_entry_or_stands_alone():
     )
 
 
+def test_a_noisy_voice_bearing_still_picks_the_face_in_view():
+    """On the robot (2026-11-25) the head turned off the person mid-conversation: a sound
+    direction 45 deg off the face turned the gaze to the bare bearing. Within the gate (60 deg)
+    the face is the speaker."""
+    assert AttentionConfig().speaker_match_deg == 60.0
+    sel = AttentionSelector(CFG)
+    p = entry("p1", az=10.0)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, azimuth_rad=55 * DEG))
+    t = sel.update(0.0, [p])
+    assert (t.entry_id, t.priority) == ("p1", "active_speaker")
+
+
+def test_a_hint_that_does_not_snap_keeps_its_bearing():
+    sel = AttentionSelector(CFG)
+    p = entry("p1", az=10.0)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, azimuth_rad=40 * DEG, snap=False))
+    t = sel.update(0.0, [p])
+    assert t.entry_id is None and t.azimuth_rad == pytest.approx(40 * DEG)
+
+
 def test_speaker_hint_needs_something_to_point_at():
     with pytest.raises(ValueError):
         SpeakerHint(stamp=0.0)
