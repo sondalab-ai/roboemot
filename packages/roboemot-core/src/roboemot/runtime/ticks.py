@@ -182,20 +182,22 @@ def scan_tick(
     the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
     sweep is dropped and idle motion carries on; the app keeps running. A sweep that ran to
-    its end publishes ``world.scan_finished`` on ``bus`` (SPEC 8, Surroundings snapshots).
+    its end publishes ``world.scan_finished`` on ``bus`` with ``{"photo": bool}`` (SPEC 8,
+    Surroundings snapshots). A photo sweep is not cancelled by engagement, so the attention
+    command stays hidden while it runs.
     """
     try:
         was_active = scan.active
         fov = math.radians(cfg.world.camera_fov_h_deg)
         cmd = scan.tick(ctx, loop.pose(), fov)
         if cmd is not None:
-            if not ctx.engaged:
+            if not ctx.engaged or scan.photo:  # a photo sweep hides attention to its end
                 loop.clear(ATTENTION_SOURCE)
             loop.feed(cmd)
         elif was_active:
             loop.clear(SCAN_SOURCE)
         if scan.take_finished_sweep() and bus is not None:
-            bus.publish(SCAN_FINISHED, None, ctx.now)
+            bus.publish(SCAN_FINISHED, {"photo": scan.last_sweep_photo}, ctx.now)
         return scan.active
     except Exception as exc:
         log.warning("scan: %s: %s", type(exc).__name__, exc)

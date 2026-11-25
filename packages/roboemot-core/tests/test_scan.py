@@ -738,3 +738,170 @@ def test_scan_tick_publishes_scan_finished_at_the_end_of_a_sweep():
         scan_tick(ctx(t), ctrl, Loop(), Cfg, bus=bus)
         t += 0.05
     assert len(got) == 1
+
+
+# ---- photo sweeps for the surroundings panorama (SPEC 5A, 8; design 2026-11-25)
+
+PIC = {"picture_wait_s": 5.0, "picture_amplitude": 0.5, "picture_dwell_s": 1.5}
+
+
+def pic_ctx(now: float, due: bool = True, **kw) -> ScanContext:
+    return ctx(now, picture_due=due, **{**PIC, **kw})
+
+
+def test_a_due_picture_starts_its_own_photo_sweep_after_the_wait():
+    p = ScanPolicy(CFG, random.Random(1))
+    t, d = first_decision(p, 0.0, picture_due=True, **PIC)
+    assert t == 5.0 and d.kind == "sweep" and d.reason == "picture" and d.photo
+
+
+def test_a_normal_sweep_becomes_a_photo_sweep_while_a_picture_is_due():
+    p = ScanPolicy(CFG, random.Random(1))
+    low = PersonaEffects(motion_amplitude_x=0.1, idle_period_x=0.5)
+    t, d = first_decision(p, 0.0, picture_due=True, effects=low, **{**PIC, "picture_wait_s": 1e9})
+    assert d.reason == "idle" and d.photo
+    assert d.amplitude == 0.5  # the span floor, whatever the energy says
+    assert d.dwell_s == 1.5  # the view dwell floor (the normal dwell is 0.5 s at pace 2)
+
+
+def test_a_sweep_without_a_due_picture_is_not_a_photo_sweep():
+    _, d = first_decision(ScanPolicy(CFG, random.Random(1)), 0.0)
+    assert not d.photo
+
+
+def test_the_picture_wait_restarts_when_the_picture_stops_being_due():
+    p = ScanPolicy(CFG, random.Random(1))
+    for t in range(4):
+        assert p.update(pic_ctx(float(t))) is None
+    assert p.update(pic_ctx(4.0, due=False)) is None
+    for t in range(5, 10):
+        assert p.update(pic_ctx(float(t))) is None
+    assert p.update(pic_ctx(10.0)).reason == "picture"
+
+
+def test_no_picture_sweep_while_engaged_alone_asleep_or_with_music():
+    for kw in ({"engaged": True}, {"alone": True}, {"circadian": "resting"}, {"music": True}):
+        p = ScanPolicy(CFG, random.Random(1))
+        assert all(p.update(pic_ctx(float(t), **kw)) is None for t in range(20))
+
+
+def test_after_a_photo_sweep_the_picture_waits_again():
+    p = ScanPolicy(CFG, random.Random(1))
+    t, d = first_decision(p, 0.0, picture_due=True, **PIC)
+    p.finished()  # the sweep ended with a view missing: the picture is still due
+    assert p.update(pic_ctx(t + 1.0)) is None
+    t2, d2 = first_decision(p, t + 1.0, picture_due=True, **PIC)
+    assert d2.reason == "picture" and t2 - (t + 1.0) == 5.0
+
+
+def photo_ctrl() -> ScanController:
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    return ctrl
+
+
+def start_photo(ctrl: ScanController, pose: dict) -> float:
+    t = 0.0
+    while not ctrl.active:
+        cmd = ctrl.tick(pic_ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        t += 0.05
+    return t
+
+
+def test_a_photo_sweep_feeds_at_expression_and_is_not_cancelled_by_engagement():
+    ctrl = photo_ctrl()
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    t = start_photo(ctrl, pose)
+    cmds = []
+    for kw in ({"engaged": True}, {"alone": True}, {"music": True}, {"object_target": "cup"}):
+        cmd = ctrl.tick(pic_ctx(t, due=False, **kw), pose, 1.0)
+        assert cmd is not None and ctrl.active
+        pose.update(cmd.targets)
+        cmds.append(cmd)
+        t += 0.05
+    assert all(c.priority == Priority.EXPRESSION for c in cmds)
+    while ctrl.active:  # it runs to its end while engaged
+        cmd = ctrl.tick(pic_ctx(t, due=False, engaged=True), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        t += 0.05
+    assert ctrl.take_finished_sweep() and ctrl.last_sweep_photo
+
+
+def test_sleep_rest_and_quiet_hours_cancel_a_photo_sweep():
+    for kw in ({"circadian": "resting"}, {"quiet_hours": True}):
+        ctrl = photo_ctrl()
+        pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+        t = start_photo(ctrl, pose)
+        assert ctrl.tick(pic_ctx(t, **kw), pose, 1.0) is None and not ctrl.active
+        assert not ctrl.take_finished_sweep()
+
+
+def test_view_is_the_dwelt_coverage_waypoint_and_never_the_home_return():
+    ctrl = photo_ctrl()
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    t = start_photo(ctrl, pose)
+    assert ctrl.views_planned() == 2
+    seen = []
+    while ctrl.active:
+        cmd = ctrl.tick(pic_ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        seen.append(ctrl.view())
+        t += 0.05
+    views = [v for v in seen if v is not None]
+    assert {v for v in views} == {(0, 0.3), (1, -0.3)}
+    assert seen[0] is None  # travelling to the first waypoint
+    last = max(i for i, v in enumerate(seen) if v is not None)
+    assert last < len(seen) - 1  # the glide home is not a view
+    assert ctrl.view() is None
+
+
+def test_view_is_none_during_a_normal_sweep():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    out = []
+    t = 0.0
+    while t < 120.0:
+        cmd = ctrl.tick(ctx(t), pose, 1.0)
+        if cmd is not None:
+            pose.update(cmd.targets)
+        out.append(ctrl.view())
+        t += 0.05
+    assert all(v is None for v in out) and ctrl.views_planned() == 0
+
+
+def test_scan_tick_hides_attention_during_a_photo_sweep_and_reports_photo():
+    from roboemot.runtime.ticks import scan_tick
+
+    class Loop:
+        cleared: list[str] = []
+
+        def pose(self):
+            return {"head.yaw": 0.0, "body_yaw": 0.0}
+
+        def feed(self, cmd):
+            pass
+
+        def clear(self, source):
+            self.cleared.append(source)
+
+    class Cfg:
+        class world:
+            camera_fov_h_deg = 57.0
+
+    bus, got, loop = Bus(), [], Loop()
+    bus.subscribe("world.scan_finished", got.append)
+    ctrl = photo_ctrl()
+    t = 0.0
+    while not ctrl.active:
+        scan_tick(pic_ctx(t), ctrl, loop, Cfg, bus=bus)
+        t += 0.05
+    loop.cleared.clear()
+    scan_tick(pic_ctx(t, engaged=True), ctrl, loop, Cfg, bus=bus)
+    assert "attention" in loop.cleared
+    while not got and t < 400.0:
+        scan_tick(pic_ctx(t, engaged=True), ctrl, loop, Cfg, bus=bus)
+        t += 0.05
+    assert [m.payload for m in got] == [{"photo": True}]
