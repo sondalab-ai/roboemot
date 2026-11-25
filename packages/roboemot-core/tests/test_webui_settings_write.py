@@ -1534,3 +1534,29 @@ def test_the_image_route_order_refuses_a_name_of_no_chat_route(tmp_path):
     with pytest.raises(ValidationError):
         editor.change("surroundings.image_route_order", ["ghost", "Claude"])
     assert stack.effective().surroundings.image_route_order == []
+
+
+def test_the_order_of_routes_added_from_the_page_survives_a_restart(tmp_path):
+    """The robot's path: both routes added on the runtime layer (the paid one first), Sees
+    images turned on with a batch, then the order saved; a restart replays all of it."""
+    from roboemot.config.schema import image_routes
+
+    def fresh_stack():
+        return make_stack(tmp_path, llm_routes=[ROUTE])
+
+    stack = fresh_stack()
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    for name in ("Claude", "gemini_pictures"):
+        editor.add_route({**ROUTE, "name": name})
+    editor.change_many(
+        [
+            {"path": "llm_routes.Claude.images", "value": True},
+            {"path": "llm_routes.gemini_pictures.images", "value": True},
+        ]
+    )
+    assert [r.name for r in image_routes(stack.effective())] == ["Claude", "gemini_pictures"]
+    order = ["gemini_pictures", "Claude"]
+    editor.change_many([{"path": "surroundings.image_route_order", "value": order}])
+    restarted = fresh_stack()
+    SettingsEditor(restarted, store=tmp_path / FILE).restore()
+    assert [r.name for r in image_routes(restarted.effective())] == order
