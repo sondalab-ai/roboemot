@@ -79,6 +79,8 @@ class Server:
             return httpx.Response(503, json={"error": {"message": "down"}})
         if host == "novision.local":
             return httpx.Response(400, json={"error": {"message": "image input not supported"}})
+        if host == "limited.local":
+            return httpx.Response(429, json={"error": {"message": "quota exceeded"}})
         if host == "unsupported.local":
             return httpx.Response(415, json={"error": {"message": "unsupported media"}})
         if host == "nousage.local":
@@ -760,3 +762,13 @@ async def test_describe_image_waits_its_own_first_token_time_not_the_routes():
     )
     with pytest.raises(TimeoutError):
         await r.describe_image(eye, "Describe it.", JPEG, 64, first_token_s=0.2)
+
+
+async def test_a_429_raises_rate_limited():
+    from roboemot.llm.router import RateLimited
+
+    srv = Server()
+    r = router(srv, [route("eye", "limited.local")])
+    with pytest.raises(RateLimited) as caught:
+        await r.describe_image(route("eye", "limited.local"), "x", JPEG, 64, first_token_s=3.0)
+    assert caught.value.code == "http_429" and len(srv.requests) == 1

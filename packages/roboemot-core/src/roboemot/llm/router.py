@@ -105,6 +105,16 @@ class ImagesUnsupported(RuntimeError):
         self.code = code
 
 
+class RateLimited(RuntimeError):
+    """The provider answered HTTP 429 to a describe request: its request limit is reached
+    (SPEC 8, Surroundings snapshots). ``code`` is ``http_429``."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+RATE_LIMITED = 429
 IMAGE_REFUSED = (400, 415)  # the statuses that mean "no image input" on a describe request
 IMAGE_DATA_URL = "data:image/jpeg;base64,"
 
@@ -403,7 +413,8 @@ class Router:
         ``max_tokens`` as given, ``first_token_s`` in place of the route's
         ``first_token_timeout_s``; the joined reply text. No fallback and no retry. Raises
         ``Offline`` while offline, ``NoRouteAvailable`` when the route's key is unavailable, it
-        is unreachable or its budget is spent, ``ImagesUnsupported`` on HTTP 400 or 415; other
+        is unreachable or its budget is spent, ``RateLimited`` on HTTP 429, ``ImagesUnsupported``
+        on HTTP 400 or 415; other
         errors propagate. The budget is charged as for any request, image bytes excluded."""
         if route.kind != "chat":
             raise ValueError(f"route {route.name} is a {route.kind} route, not a chat route")
@@ -428,6 +439,8 @@ class Router:
                 if isinstance(ev, TextDelta):
                     parts.append(ev.text)
         except APIStatusError as exc:
+            if exc.status_code == RATE_LIMITED:
+                raise RateLimited(f"http_{exc.status_code}") from None
             if exc.status_code in IMAGE_REFUSED:
                 raise ImagesUnsupported(f"http_{exc.status_code}") from None
             raise

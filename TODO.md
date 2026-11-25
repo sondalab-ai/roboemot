@@ -258,3 +258,13 @@ later decision needs no new measure.
       individuals) learns from embeddings only, with placeholder names. Idea: the robot may ask
       what the thing is, and a model tool links the answer to the shown track's registry record
       (name, or category correction), so the robot recognises and names it next time.
+
+## Surroundings snapshots (SPEC 8)
+
+- [ ] A fallback image route on the home network (owner, 2026-11-25). When the cloud image
+      route hits its daily cap (`surroundings.max_per_day`) or answers HTTP 429, describe the
+      snapshots with a second, LAN route that has a vision model (LM Studio or Ollama with
+      Qwen-VL or LLaVA on the owner's computer), so pictures stay on the home network. Needs: a
+      second image switch (a "fallback" role beside "Sees images"), the approval binding of
+      `image_violations` for it, and the detector names as the last step when that machine is
+      off. Today the robot falls back to the detector names only.

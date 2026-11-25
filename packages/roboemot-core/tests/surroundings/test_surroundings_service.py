@@ -3,6 +3,7 @@ Surroundings snapshots; design 2026-11-24)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import math
 
@@ -61,6 +62,7 @@ class Rig:
         self.gate_reason = gate
         self.speeds: dict[str, float] = speed or {}
         self.events: list[tuple] = []
+        self.day = dt.date(2026, 11, 25)
         self.s = Surroundings(
             lambda: self.cfg,
             lambda: self.router,
@@ -70,6 +72,7 @@ class Rig:
             frame_spec=SPEC,
             clock=self.clock,
             encode=lambda image, quality: b"\xff\xd8" + image.tobytes()[:64],  # no cv2 in CI
+            today=lambda: self.day,
         )
         self.s.events = lambda kind, reason, **f: self.events.append((kind, reason, f))
 
@@ -423,3 +426,55 @@ def test_no_hold_with_hold_s_zero_or_after_the_attempt_ends():
     rig.s.request("room")
     rig.settle()  # the attempt picked its frame and closed
     assert not rig.s.holding(rig.clock.now)
+
+
+# ---- the daily cap (owner, 2026-11-25: Google's free tier allows ~20 requests a day)
+
+
+def describe_room(rig) -> None:
+    rig.clock.now += rig.cfg.surroundings.room.min_interval_s
+    rig.s.request("room")
+    rig.settle()
+    rig.s.step()
+
+
+def test_the_daily_cap_stops_snapshots_until_the_next_day():
+    rig = Rig(cfg=config(max_per_day=2, room={"max_per_day": 10}))
+    rig.s._want_first = False
+    describe_room(rig)
+    describe_room(rig)
+    assert len(rig.router.calls) == 2
+    assert rig.s.request("shown", "e1", "cup") == "daily_limit"
+    assert rig.s.state()["state"] == "daily_limit"
+    rig.day = rig.day + dt.timedelta(days=1)
+    assert rig.s.request("shown", "e1", "cup") is None
+    assert rig.s.state()["state"] == "on"
+
+
+def test_room_snapshots_have_their_own_smaller_cap():
+    rig = Rig(cfg=config(max_per_day=10, room={"max_per_day": 1}))
+    rig.s._want_first = False
+    describe_room(rig)
+    rig.clock.now += rig.cfg.surroundings.room.min_interval_s
+    assert rig.s.request("room") == "daily_limit"
+    assert rig.s.request("shown", "e1", "cup") is None  # shown things keep their share
+
+
+def test_zero_means_no_cap():
+    rig = Rig(cfg=config(max_per_day=0, room={"max_per_day": 0}))
+    rig.s._want_first = False
+    for _ in range(3):
+        describe_room(rig)
+    assert len(rig.router.calls) == 3
+
+
+def test_a_429_stops_snapshots_until_the_next_day():
+    from roboemot.llm.router import RateLimited
+
+    rig = Rig(router=FakeRouter(error=RateLimited("http_429")))
+    rig.s._want_first = False
+    describe_room(rig)
+    assert "daily_limit" in rig.reasons()
+    assert rig.s.request("shown", "e1", "cup") == "daily_limit"
+    rig.day = rig.day + dt.timedelta(days=1)
+    assert rig.s.request("shown", "e1", "cup") is None
