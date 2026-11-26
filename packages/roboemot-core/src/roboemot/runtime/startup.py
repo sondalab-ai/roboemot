@@ -157,7 +157,7 @@ def start_voice_output(
     output = host.speech_output = build_speech(p.cfg, speaker, lambda: p.hub.router, p.bus)
     cleanup.callback(output.close)
     night = night_volume(host, stack, p)
-    output.night_db = night.extra_db
+    output.night_db, output.night_state = night.extra_db, night.state_db
     output.start()
     soothe = host.soothe_runner = SootheRunner(
         p.cfg.soothe,

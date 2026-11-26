@@ -31,11 +31,12 @@ class NightVolume:
         hot reload takes effect on the next sound."""
         return self.quiet() and self.config().circadian.quiet_hours_volume_db is not None
 
-    def extra_db(self, *, state_applied: bool) -> float:
+    def extra_db(self, *, state_db: float | None) -> float:
         """The gain in dB the speech output adds to a sound now: 0.0 outside the night level;
-        the night level less the state offset for a sound that already carries it
-        (``state_applied``), never above 0.0; the whole night level for one that does not."""
+        the night level less ``state_db``, the state offset the sound carries (captured when it
+        was queued), never above 0.0; the whole night level for a sound that carries none
+        (``None``: the radio)."""
         night = self.config().circadian.quiet_hours_volume_db
         if night is None or not self.quiet():
             return 0.0
-        return min(0.0, night - self.state_db()) if state_applied else night
+        return night if state_db is None else min(0.0, night - state_db)

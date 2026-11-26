@@ -115,8 +115,13 @@ from .tts import NO_VOICE, AudioChunk, TTSBackend, TTSError
 log = logging.getLogger(__name__)
 
 
-def _no_night(*, state_applied: bool) -> float:
+def _no_night(*, state_db: float | None) -> float:
     """The default night stage: no gain (SPEC 7A; the runtime sets ``SpeechOutput.night_db``)."""
+    return 0.0
+
+
+def _no_state() -> float:
+    """The default state offset to capture on a job: none (the runtime sets ``night_state``)."""
     return 0.0
 
 
@@ -200,6 +205,7 @@ class _RawJob:
     rate_hz: int
     yields: bool = False  # a cue's sound: an answer queued behind it cuts it (SPEC 8)
     day: bool = False  # queued at day volume (an announcement): no night gain (SPEC 7A)
+    state_db: float = 0.0  # the circadian state offset when it was queued (night stage)
 
 
 @dataclass
@@ -214,6 +220,7 @@ class _Job:
     question: bool = False  # this piece's own text ends in a question mark
     continued: bool = False  # the rest of a sentence the splitter cut
     day: bool = False  # queued at day volume (an announcement): no night gain (SPEC 7A)
+    state_db: float = 0.0  # the circadian state offset when it was queued (night stage)
 
 
 class StreamFeed:
@@ -376,8 +383,11 @@ class SpeechOutput:
         # stream jobs by id (``mark_question``, ``stream_progress``), the last PLAYED_WINDOW
         self._streams: collections.OrderedDict[int, _StreamJob] = collections.OrderedDict()
         # the night stage (SPEC 7A): the gain in dB to add now, set by the runtime
-        # (``NightVolume.extra_db``); a job queued while ``day_volume`` is true skips it
+        # (``NightVolume.extra_db``); a job queued while ``day_volume`` is true skips it.
+        # ``night_state`` gives the circadian state offset now, captured on each job when it is
+        # queued (``NightVolume.state_db``), the one its source applied
         self.night_db: Callable[..., float] = _no_night
+        self.night_state: Callable[[], float] = _no_state
         self.day_volume = False
 
     @property
@@ -533,6 +543,7 @@ class SpeechOutput:
                 ends_with_question(text),
                 continued,
                 self.day_volume,
+                self.night_state(),
             )
             self._jobs.append(job)
             cut = self._yield_cues()
@@ -581,6 +592,7 @@ class SpeechOutput:
                 self._epoch,
                 self.clock(),
                 day=self.day_volume,
+                state_db=self.night_state(),
                 feed=chunks,
                 gain=db_to_gain(volume_db),
                 prebuffer_s=cfg.voice.realtime_route.prebuffer_ms / MS_PER_S,
@@ -686,7 +698,15 @@ class SpeechOutput:
         with self._lock:
             if self._closed or len(self._jobs) >= self.config.voice.queue_max_sentences:
                 return None
-            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz, yields, self.day_volume)
+            job = _RawJob(
+                next(self._ids),
+                self._epoch,
+                louder,
+                rate_hz,
+                yields,
+                self.day_volume,
+                self.night_state(),
+            )
             self._jobs.append(job)
         self._poke()
         return job.id
@@ -715,7 +735,7 @@ class SpeechOutput:
             # refuses an aside behind speech it holds), so it never lands behind the answer
             self._aside_until = math.inf
             if not self.day_volume:
-                louder = self._night(louder, state_applied=True)
+                louder = self._night(louder, state_db=self.night_state())
         sink = self.sink
         assert isinstance(sink, AsideSink)
         try:
@@ -761,7 +781,7 @@ class SpeechOutput:
                 self._media["refused"] += 1
                 return 0.0
             if not self.day_volume:
-                louder = self._night(louder, state_applied=False)
+                louder = self._night(louder, state_db=None)
             try:
                 until = sink.push_media(louder, rate_hz)
             except Exception as exc:  # a sink bug costs the piece, never the output
@@ -996,7 +1016,7 @@ class SpeechOutput:
             "aside": aside,
             "cue_sounds_cut": cue_sounds_cut,
             "media": media,
-            "night_db": self.night_db(state_applied=False),
+            "night_db": self.night_db(state_db=None),
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
@@ -1068,7 +1088,7 @@ class SpeechOutput:
             duck = None if self._sink_ducks else self._duck
             played = samples if duck is None else duck.apply(samples, rate_hz, start)
             if not job.day:
-                played = self._night(played, state_applied=True)
+                played = self._night(played, state_db=job.state_db)
             self.sink.push_audio_sample(played, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
@@ -1103,11 +1123,11 @@ class SpeechOutput:
                     self._ended.popitem(last=False)
             return True
 
-    def _night(self, samples: np.ndarray, *, state_applied: bool) -> np.ndarray:
+    def _night(self, samples: np.ndarray, *, state_db: float | None) -> np.ndarray:
         """``samples`` with the night gain of the moment (SPEC 7A): unchanged outside the
-        quiet hours, so the day output stays bit-identical. ``state_applied`` says whether the
-        sound already carries the circadian state's volume (all but the radio)."""
-        db = self.night_db(state_applied=state_applied)
+        quiet hours, so the day output stays bit-identical. ``state_db`` is the circadian state
+        offset the sound carries, captured when it was queued (None: the radio, which has none)."""
+        db = self.night_db(state_db=state_db)
         if db == 0.0:
             return samples
         return np.clip(samples * np.float32(db_to_gain(db)), -1.0, 1.0)

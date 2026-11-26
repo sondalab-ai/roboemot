@@ -450,6 +450,15 @@ def test_realtime_instructions_whisper_at_night(rigs):
         assert instructions(srv, 1).endswith(WHISPER)
 
 
+def test_an_announcement_is_not_whispered(rigs):
+    """An announcement plays at day volume (owner decision 2026-11-26): no whisper for it."""
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        rig.worker.night = lambda: True
+        assert rig.worker.event_turn("[event] A timer is due: pasta.", "it").result(10.0)
+        assert WHISPER not in instructions(srv, 0)
+
+
 def test_an_empty_whisper_text_adds_nothing(rigs):
     with TurnServer() as srv:
         rig = rigs(srv, app={"circadian": {"quiet_hours_instructions": ""}})

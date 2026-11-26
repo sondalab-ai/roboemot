@@ -43,7 +43,7 @@ Inside the quiet hours (`circadian.quiet_hours`, default 22:30 to 07:00) every s
 - New config fields (SPEC 11A, no magic numbers), in `circadian`:
   - `quiet_hours_volume_db`: the night level, default -18 dB (range -40 to 0; null: no night stage). Placeholder until measured on the robot.
   - `quiet_hours_instructions`: delivery text added to realtime instructions inside the quiet hours, default "whisper, very softly".
-- Inside the quiet hours the total night attenuation is the night level, whatever the state: the sources keep applying the state's `volume_db`, and the night stage adds only the difference (`quiet_hours_volume_db` minus the state offset now, never above 0). The radio never carries the state offset, so it gets the full night level. Mood offsets still apply, within `voice.limits`.
+- Inside the quiet hours the total night attenuation is the night level, whatever the state: the sources keep applying the state's `volume_db`, and the night stage adds only the difference (`quiet_hours_volume_db` minus the state offset captured when the sound was queued, never above 0). The radio never carries the state offset, so it gets the full night level. Mood offsets still apply, within `voice.limits`.
 - The night stage sits after `voice.limits`, so it is not floored at -12 dB.
 - Outside the quiet hours, or with `circadian.enabled` false, nothing changes.
 - An announcement job carries a flag (for example `day_volume=True`) set by `tools/announce.py` for its speech and its cue; the night stage skips it. The person's reply after the announcement whispers again.

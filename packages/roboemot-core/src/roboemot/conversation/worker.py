@@ -1232,7 +1232,8 @@ class ConversationWorker:
         with self._lock:
             missing = [t for t in self._turns if not t or t[0].get("rt", (None,))[0] != generation]
         mood = delivery.instructions if cfg.voice.realtime_route.mood_instructions else ""
-        whisper = cfg.circadian.quiet_hours_instructions if self.night() else ""
+        # an announcement plays at day volume, so it is not whispered either (SPEC 7A)
+        whisper = cfg.circadian.quiet_hours_instructions if self.night() and not turn.event else ""
         return "\n".join(p for p in (system, replay_block(missing), mood, whisper) if p)
 
     async def _realtime_turn(self, turn: _Turn) -> bool:
