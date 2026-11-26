@@ -63,6 +63,13 @@ push starts to play, so the speaker's echo reference records the audio as it rea
 speech timeline gets the samples *before* the gain: the speaking motion follows the sentence as
 spoken, not the duck, so a duck neither stops nor shrinks it. ``stop`` clears the duck.
 
+Night stage (SPEC 7A, quiet hours): every push to the sink (a sentence, a stream, a raw sound,
+an aside sound, media) gets the gain ``night_db`` gives at that moment, read push by push, so a
+reply that crosses the window's start drops at its next piece. The runtime sets ``night_db`` to
+``NightVolume.extra_db``; by default it is 0 dB and the output is bit-identical. A job queued while
+``day_volume`` is true (an announcement a person set) skips it, even when it plays after the flag
+went false. Like the duck, the speech timeline gets the samples before the night gain.
+
 ``stream`` plays audio that arrives already synthesized, in pieces, from another thread (the
 realtime speech route's reply, SPEC 8, Realtime speech route): a :class:`StreamFeed` the caller
 fills. The stream job sits in the same queue, under the same epoch, and pushes through the same
@@ -106,6 +113,12 @@ from .prosody import Delivery, compose_delivery
 from .tts import NO_VOICE, AudioChunk, TTSBackend, TTSError
 
 log = logging.getLogger(__name__)
+
+
+def _no_night(*, state_applied: bool) -> float:
+    """The default night stage: no gain (SPEC 7A; the runtime sets ``SpeechOutput.night_db``)."""
+    return 0.0
+
 
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 20
@@ -186,6 +199,7 @@ class _RawJob:
     samples: np.ndarray
     rate_hz: int
     yields: bool = False  # a cue's sound: an answer queued behind it cuts it (SPEC 8)
+    day: bool = False  # queued at day volume (an announcement): no night gain (SPEC 7A)
 
 
 @dataclass
@@ -199,6 +213,7 @@ class _Job:
     said_at: float
     question: bool = False  # this piece's own text ends in a question mark
     continued: bool = False  # the rest of a sentence the splitter cut
+    day: bool = False  # queued at day volume (an announcement): no night gain (SPEC 7A)
 
 
 class StreamFeed:
@@ -360,6 +375,10 @@ class SpeechOutput:
         self._last_speech: int | None = None  # job id of the last speech push
         # stream jobs by id (``mark_question``, ``stream_progress``), the last PLAYED_WINDOW
         self._streams: collections.OrderedDict[int, _StreamJob] = collections.OrderedDict()
+        # the night stage (SPEC 7A): the gain in dB to add now, set by the runtime
+        # (``NightVolume.extra_db``); a job queued while ``day_volume`` is true skips it
+        self.night_db: Callable[..., float] = _no_night
+        self.day_volume = False
 
     @property
     def duck(self) -> DuckGain | None:
@@ -513,6 +532,7 @@ class SpeechOutput:
                 self.clock(),
                 ends_with_question(text),
                 continued,
+                self.day_volume,
             )
             self._jobs.append(job)
             cut = self._yield_cues()
@@ -560,6 +580,7 @@ class SpeechOutput:
                 delivery,
                 self._epoch,
                 self.clock(),
+                day=self.day_volume,
                 feed=chunks,
                 gain=db_to_gain(volume_db),
                 prebuffer_s=cfg.voice.realtime_route.prebuffer_ms / MS_PER_S,
@@ -665,7 +686,7 @@ class SpeechOutput:
         with self._lock:
             if self._closed or len(self._jobs) >= self.config.voice.queue_max_sentences:
                 return None
-            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz, yields)
+            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz, yields, self.day_volume)
             self._jobs.append(job)
         self._poke()
         return job.id
@@ -693,6 +714,8 @@ class SpeechOutput:
             # until the push is in, any answer pushed meanwhile asks the sink to cut it (a sink
             # refuses an aside behind speech it holds), so it never lands behind the answer
             self._aside_until = math.inf
+            if not self.day_volume:
+                louder = self._night(louder, state_applied=True)
         sink = self.sink
         assert isinstance(sink, AsideSink)
         try:
@@ -737,6 +760,8 @@ class SpeechOutput:
             if self._media_refused():
                 self._media["refused"] += 1
                 return 0.0
+            if not self.day_volume:
+                louder = self._night(louder, state_applied=False)
             try:
                 until = sink.push_media(louder, rate_hz)
             except Exception as exc:  # a sink bug costs the piece, never the output
@@ -971,6 +996,7 @@ class SpeechOutput:
             "aside": aside,
             "cue_sounds_cut": cue_sounds_cut,
             "media": media,
+            "night_db": self.night_db(state_applied=False),
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
@@ -1041,6 +1067,8 @@ class SpeechOutput:
                 self._duck_utterance = job.utterance
             duck = None if self._sink_ducks else self._duck
             played = samples if duck is None else duck.apply(samples, rate_hz, start)
+            if not job.day:
+                played = self._night(played, state_applied=True)
             self.sink.push_audio_sample(played, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
@@ -1074,6 +1102,15 @@ class SpeechOutput:
                 while len(self._ended) > PLAYED_WINDOW:
                     self._ended.popitem(last=False)
             return True
+
+    def _night(self, samples: np.ndarray, *, state_applied: bool) -> np.ndarray:
+        """``samples`` with the night gain of the moment (SPEC 7A): unchanged outside the
+        quiet hours, so the day output stays bit-identical. ``state_applied`` says whether the
+        sound already carries the circadian state's volume (all but the radio)."""
+        db = self.night_db(state_applied=state_applied)
+        if db == 0.0:
+            return samples
+        return np.clip(samples * np.float32(db_to_gain(db)), -1.0, 1.0)
 
     async def _play_raw(self, job: _RawJob) -> None:
         """Wait until the audio already in the sink has played (cancellable, so a stop or a
