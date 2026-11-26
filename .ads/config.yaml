@@ -1,0 +1,47 @@
+version: 1
+trunk: main
+checks:
+  test_runner: "python -m pytest {paths}"
+  test_paths: ["**/test_*.py", "**/*_test.py"]
+  test_support_paths: ["**/conftest.py", "**/tests/fixtures/**"]
+  by_risk:
+    trivial: [test]
+  commands:
+    test: "python -m pytest"
+risk_rules:
+  - paths: [
+      "**/go.mod", "**/go.sum", "vendor/**", "**/package.json", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock",
+      "**/pyproject.toml", "**/poetry.lock", "**/requirements*.txt", "**/setup.cfg", "**/setup.py", "**/tox.ini", "**/pytest.ini",
+      "**/Cargo.toml", "**/Cargo.lock", "**/Gemfile", "**/Gemfile.lock", "**/pom.xml", "**/build.gradle", "**/build.gradle.kts",
+      "**/settings.gradle", "**/settings.gradle.kts",
+      ".github/**", ".gitea/**", ".forgejo/**", ".gitlab-ci.yml", ".gitlab-ci.yaml", ".gitlab/**", ".circleci/**", "**/Jenkinsfile", "**/Jenkinsfile.*", ".travis.yml", "azure-pipelines.yml", "azure-pipelines.yaml", "**/azure-pipelines.yml", "**/azure-pipelines.yaml", "azure-pipelines/**", ".azure-pipelines/**", "bitbucket-pipelines.yml", ".buildkite/**", ".drone.yml", ".drone.star", ".woodpecker.yml", ".woodpecker.yaml", ".woodpecker/**", "cloudbuild.yaml", "cloudbuild.yml", "**/cloudbuild.yaml", "**/cloudbuild.yml", ".cirrus.yml", ".semaphore/**", "appveyor.yml", ".appveyor.yml", "codemagic.yaml", "bitrise.yml", ".teamcity/**", "buildspec.yml", "**/buildspec.yml", ".tekton/**",
+      "**/Makefile", "**/*.mk", "**/Dockerfile", "**/CMakeLists.txt", "**/BUILD", "**/BUILD.bazel", "**/WORKSPACE", "**/MODULE.bazel",
+      ".goreleaser.yml", ".goreleaser.yaml",
+      "**/auth/**", "**/crypto/**", "**/migrations/**",
+      ".claude/**", ".githooks/**", ".husky/**", "**/.gitattributes", ".gitmodules", "CLAUDE.md", "**/CLAUDE.md", "AGENTS.md",
+      "**/AGENTS.md", ".mcp.json", "**/.mcp.json"]
+    risk: high
+review:
+  max_diff_lines: {trivial: 20, low: 200, medium: 400}
+# Budgets per risk class are built in and count tokens of every kind, cache
+# reads included; usd is 0, no dollar limit. To change one, for example:
+# budgets: {low: {tokens: 6000000, usd: 1}}
+# Memory is on: the agents that assess and review read the team notes in
+# .ads/memory/, and the team adds what it learns from each fix. To turn it off:
+# memory: {roles: []}
+sandbox:
+  driver: none
+  env_allow: []
+  # Checks get the host PATH and a temporary HOME. When a tool there is a
+  # shim under your home (ads doctor warns), list the directories, e.g.:
+  # path: [/opt/homebrew/bin, /usr/bin, /bin]
+adapters:
+  claude-opus: {kind: claude, model: claude-opus-5-5}
+  claude-sonnet: {kind: claude, model: claude-sonnet-5-5}
+roles:
+  test_author: claude-sonnet
+  implementer: claude-opus
+  reviewer: claude-sonnet
+  arbiter: claude-sonnet
+  assessor: claude-sonnet
+  sweeper: claude-sonnet
