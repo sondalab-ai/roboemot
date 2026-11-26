@@ -803,6 +803,19 @@ class CircadianConfig(Strict):
     )
     location: dict[str, float] | None = param(None, "Optional {lat, lon} for clock-only mode")
     quiet_hours: tuple[str, str] = param(("22:30", "07:00"), "Window in which resting is forced")
+    quiet_hours_volume_db: float | None = param(
+        -18.0,
+        "Total volume of every sound in the quiet hours, announcements excepted (SPEC 7A); "
+        "null: no night level",
+        unit="dB",
+        ge=-40,
+        le=0,
+    )
+    quiet_hours_instructions: str = param(
+        "whisper, very softly",
+        "Delivery text the realtime voice gets in the quiet hours (SPEC 7A, 8); empty: none",
+        advanced=True,
+    )
     timezone: str | None = param(
         None,
         "IANA timezone of the robot's wall clock for quiet hours and the rhythm (Europe/Rome); "

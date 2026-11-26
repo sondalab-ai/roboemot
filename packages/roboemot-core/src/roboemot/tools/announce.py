@@ -272,6 +272,15 @@ class Announcer:
             return self._announce_item(item)
         finally:
             self._busy = False
+            self._day_volume(False)
+
+    def _day_volume(self, on: bool) -> None:
+        """Queue the announcement's audio at day volume (``on``), past the quiet hours' night
+        level (SPEC 7A, owner decision 2026-11-26): a person set it. Reset when the announcement
+        ends or raises, so the reply after it whispers again."""
+        output = self.host.speech_output
+        if output is not None:
+            output.day_volume = on
 
     def _announce_item(self, item: Item) -> tuple[float, float] | None:
         """``_announce`` while it is marked busy."""
@@ -291,6 +300,7 @@ class Announcer:
         if expression is not None:
             expression.request(NOD)
         self._spoke = True
+        self._day_volume(True)
         answered = self._result(self.worker.event_turn(event_text(item), language))
         if answered is None:
             return None

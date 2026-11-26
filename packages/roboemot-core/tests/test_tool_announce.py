@@ -136,6 +136,7 @@ def host_for(clock: Clock, *, speaking_until=0.0, voice_active=False, circadian=
     output = SimpleNamespace(
         speaking_at=lambda now: False,
         timeline=SimpleNamespace(sentence_at=lambda now: None),
+        day_volume=False,
     )
     listener = SimpleNamespace(voice_active=lambda: voice_active, opened=[])
     listener.open_follow_up = lambda: listener.opened.append(clock())
@@ -318,6 +319,50 @@ def test_quiet_hours_rest_is_lifted_before_the_nod(tmp_path):
 
 
 # ------------------------------------------------------------------ fallback and repeat
+
+
+def day_volume_seen(rig) -> list[tuple[str, bool]]:
+    """Record ``speech_output.day_volume`` at each speaking call of the announcement."""
+    seen: list[tuple[str, bool]] = []
+    output, worker, cues = rig.host.speech_output, rig.worker, rig.host.cues
+    turn, line, play = worker.event_turn, worker.local_line, cues.play
+
+    def event_turn(text, language):
+        seen.append(("turn", output.day_volume))
+        return turn(text, language)
+
+    def local_line(text, language):
+        seen.append(("line", output.day_volume))
+        return line(text, language)
+
+    def cue(kind, reason="", **detail):
+        seen.append(("cue", output.day_volume))
+        return play(kind, reason, **detail)
+
+    worker.event_turn, worker.local_line, cues.play = event_turn, local_line, cue
+    return seen
+
+
+def test_announcement_plays_at_day_volume(tmp_path):
+    """SPEC 7A (owner decision 2026-11-26): an announcement a person set skips the night level;
+    the reply after it whispers again."""
+    rig = Rig(tmp_path, worker_answers=(False,))
+    seen = day_volume_seen(rig)
+    assert rig.announcer.handle(rig.timer().id)
+    assert seen == [("turn", True), ("line", True), ("cue", True)]
+    assert rig.host.speech_output.day_volume is False
+
+
+def test_day_volume_reset_when_announcement_raises(tmp_path):
+    rig = Rig(tmp_path)
+    day_volume_seen(rig)
+
+    def broken(text, language):
+        raise RuntimeError("route down")
+
+    rig.worker.event_turn = broken
+    rig.announcer.handle(rig.timer().id)
+    assert rig.host.speech_output.day_volume is False
 
 
 def test_fallback_sentence_and_cue_when_route_fails(tmp_path):

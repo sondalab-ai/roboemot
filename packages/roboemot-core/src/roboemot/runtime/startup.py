@@ -59,6 +59,7 @@ from .assembly import Pipeline
 from .clips import VoiceClips
 from .expressor import Expressor
 from .host import RuntimeHost
+from .night import NightVolume
 from .radio_stop import stop_and_nod
 from .ticks import conversation_idle, media_on, robot_resting
 from .webui import WebAdmin, start_webui
@@ -131,6 +132,18 @@ def effects_now(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> Any:
     return p.circ.model.effects() if host.circadian else stack.effective().circadian.states["awake"]
 
 
+def night_volume(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> NightVolume:
+    """The quiet hours' night level (SPEC 7A): the window from the circadian runner (none while
+    the rhythm is off or before it starts), the state offset from ``effects_now``, the level from
+    the live config."""
+
+    def quiet() -> bool:
+        runner = host.circadian_runner
+        return runner is not None and runner.quiet_now()
+
+    return NightVolume(stack.effective, quiet, lambda: effects_now(host, stack, p).volume_db)
+
+
 def start_voice_output(
     host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
 ) -> None:
@@ -143,6 +156,8 @@ def start_voice_output(
     # Closed before the speaker (callbacks run last in, first out).
     output = host.speech_output = build_speech(p.cfg, speaker, lambda: p.hub.router, p.bus)
     cleanup.callback(output.close)
+    night = night_volume(host, stack, p)
+    output.night_db, output.night_state = night.extra_db, night.state_db
     output.start()
     soothe = host.soothe_runner = SootheRunner(
         p.cfg.soothe,
@@ -213,6 +228,7 @@ def start_voice_output(
         phase=host.phase,
         transcript=host.transcript,
         realtime=realtime,
+        night=night.active,
         cues=cues,
         emit=p.runner.on_event,  # the tone tool's speech.tone events, as the fast path's
         skill_packs=skill_packs,

@@ -432,3 +432,37 @@ def test_a_missing_or_empty_rule_file_fails_loud(monkeypatch, tmp_path, content)
             realtime_instructions(cfg, RegisterParams())
     finally:
         prompt_module._prompt_files.cache_clear()  # the shipped files again for later tests
+
+
+# ------------------------------------------------------------------ the quiet hours
+
+WHISPER = RoboEmotConfig().circadian.quiet_hours_instructions
+
+
+def test_realtime_instructions_whisper_at_night(rigs):
+    """SPEC 7A, 8: inside the quiet hours the turn asks the realtime voice to whisper."""
+    with TurnServer(["reply", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn("ciao robot")
+        assert WHISPER not in instructions(srv, 0)
+        rig.worker.night = lambda: True
+        rig.turn("ciao robot")
+        assert instructions(srv, 1).endswith(WHISPER)
+
+
+def test_an_announcement_is_not_whispered(rigs):
+    """An announcement plays at day volume (owner decision 2026-11-26): no whisper for it."""
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        rig.worker.night = lambda: True
+        assert rig.worker.event_turn("[event] A timer is due: pasta.", "it").result(10.0)
+        assert WHISPER not in instructions(srv, 0)
+
+
+def test_an_empty_whisper_text_adds_nothing(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, app={"circadian": {"quiet_hours_instructions": ""}})
+        rig.worker.night = lambda: True
+        rig.turn("ciao robot")
+        assert WHISPER not in instructions(srv, 0)
+        assert not instructions(srv, 0).endswith("\n")
