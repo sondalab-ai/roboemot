@@ -382,8 +382,12 @@ class ConversationWorker:
         cues: CueSink | None = None,
         emit: Callable[[str, float, dict[str, Any]], None] | None = None,
         skill_packs: SkillPackSession | None = None,
+        night: Callable[[], bool] = lambda: False,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
+        # whether the quiet hours' night level applies now: realtime turns then ask the voice to
+        # whisper (``circadian.quiet_hours_instructions``, SPEC 7A, 8)
+        self.night = night
         # appraisal events to the affect runner, the fast path's path (the tone tool, SPEC 7)
         self._emit = emit if emit is not None else lambda event, now, payload: None
         self.cues: CueSink = cues if cues is not None else NoCues()  # SPEC 8, Non-verbal cues
@@ -1228,7 +1232,8 @@ class ConversationWorker:
         with self._lock:
             missing = [t for t in self._turns if not t or t[0].get("rt", (None,))[0] != generation]
         mood = delivery.instructions if cfg.voice.realtime_route.mood_instructions else ""
-        return "\n".join(p for p in (system, replay_block(missing), mood) if p)
+        whisper = cfg.circadian.quiet_hours_instructions if self.night() else ""
+        return "\n".join(p for p in (system, replay_block(missing), mood, whisper) if p)
 
     async def _realtime_turn(self, turn: _Turn) -> bool:
         """Answer through the realtime route; False when nothing played and the session was

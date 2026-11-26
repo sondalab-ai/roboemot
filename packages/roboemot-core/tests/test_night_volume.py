@@ -46,6 +46,24 @@ def test_null_disables():
     assert nv.extra_db(state_applied=False) == 0.0
 
 
+def test_runtime_wiring_follows_the_runner_and_the_state():
+    """``startup.night_volume``: no runner (rhythm off), no night level; with one, the runner's
+    window and the model's state offset."""
+    from types import SimpleNamespace
+
+    from roboemot.config import ConfigStack
+    from roboemot.runtime.startup import night_volume
+
+    stack = ConfigStack()
+    effects = SimpleNamespace(volume_db=-6.0)
+    p = SimpleNamespace(circ=SimpleNamespace(model=SimpleNamespace(effects=lambda: effects)))
+    host = SimpleNamespace(circadian_runner=None, circadian=True)
+    nv = night_volume(host, stack, p)
+    assert not nv.active() and nv.extra_db(state_applied=True) == 0.0
+    host.circadian_runner = SimpleNamespace(quiet_now=lambda: True)
+    assert nv.active() and nv.extra_db(state_applied=True) == -12.0
+
+
 def test_reads_live_config():
     box = [cfg_with(-18.0)]
     nv = NightVolume(lambda: box[0], quiet=lambda: True, state_db=lambda: 0.0)
